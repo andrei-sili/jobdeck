@@ -68,8 +68,12 @@ def _find_legacy_db() -> Path | None:
     return None
 
 
-def bootstrap() -> None:
-    """Prepare the data dir, import legacy data once, migrate, back up."""
+def bootstrap() -> str | None:
+    """Prepare the data dir, import legacy data once, migrate, back up.
+
+    Returns the backup system's data-loss warning, if any, so the UI can
+    surface it at startup.
+    """
     config.ensure_data_dirs()
     if not config.DB_PATH.exists():
         legacy = _find_legacy_db()
@@ -87,7 +91,7 @@ def bootstrap() -> None:
                 src.close()
     with db() as con:
         migrations.migrate(con)
-    backup.run_startup_backup()
+    return backup.run_startup_backup()
 
 
 # --------------------------------------------------------------------------
