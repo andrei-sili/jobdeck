@@ -1,0 +1,31 @@
+# Secrets and credentials — never commit
+.env
+.env.*
+!.env.example
+token.json
+client_secret*.json
+
+# Personal data (lives in ~/.local/share/jobdeck/, never in the repo)
+*.db
+*.db-wal
+*.db-shm
+profile.md
+output/
+backups/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Test fixtures containing real personal correspondence
+tests/fixtures/replies/private/

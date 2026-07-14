@@ -1,0 +1,63 @@
+[project]
+name = "jobdeck"
+version = "0.1.0"
+description = "Open-source job application cockpit: discover jobs, draft tailored applications with AI, send with one-click approval, and track replies automatically."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Andrei Sili" }]
+requires-python = ">=3.12"
+keywords = ["jobs", "job-search", "applications", "automation", "germany", "bewerbung"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Office/Business",
+]
+dependencies = [
+    "nicegui>=3.14",
+    "apscheduler>=3.11,<4",
+    "httpx>=0.27",
+    "anthropic>=0.40",
+    "google-api-python-client>=2.150",
+    "google-auth-oauthlib>=1.2",
+    "google-auth-httplib2>=0.2",
+    "pypdf>=5.0",
+    "python-dotenv>=1.0",
+]
+
+[project.urls]
+Repository = "https://github.com/andrei-sili/jobdeck"
+Issues = "https://github.com/andrei-sili/jobdeck/issues"
+
+[project.scripts]
+jobdeck = "jobdeck.__main__:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jobdeck"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
