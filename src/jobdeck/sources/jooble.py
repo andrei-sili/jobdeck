@@ -44,7 +44,10 @@ class JoobleSource:
             resp.raise_for_status()
             payload = resp.json()
         except (httpx.HTTPError, ValueError) as ex:
-            raise SourceUnavailable(self.name, str(ex)) from ex
+            # The key is part of the URL by Jooble's design — keep it out of
+            # error messages, which end up in logs and the UI.
+            detail = str(ex).replace(api_key, "***")
+            raise SourceUnavailable(self.name, detail) from ex
 
         postings: list[JobPosting] = []
         for item in payload.get("jobs", []) or []:

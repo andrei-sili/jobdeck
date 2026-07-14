@@ -20,6 +20,7 @@ DB_PATH = DATA_DIR / "jobdeck.db"
 BACKUP_DIR = DATA_DIR / "backups"
 OUTPUT_DIR = DATA_DIR / "output"
 ENV_PATH = DATA_DIR / ".env"
+SECRETS_PATH = DATA_DIR / "secrets.env"  # user-managed; takes precedence over .env
 TOKEN_PATH = DATA_DIR / "token.json"
 CLIENT_SECRET_PATH = DATA_DIR / "client_secret.json"
 PROFILE_PATH = DATA_DIR / "profile.md"
@@ -32,7 +33,13 @@ def ensure_data_dirs() -> None:
 
 
 def load_env() -> None:
-    """Load secrets from the data-dir .env (repo-root .env works too, for dev)."""
+    """Load secrets from the data dir (repo-root .env works too, for dev).
+
+    secrets.env is loaded first and therefore wins: it is meant to be
+    created and edited exclusively by the user, so credentials never pass
+    through any tooling that watches the regular .env file.
+    """
+    load_dotenv(SECRETS_PATH)
     load_dotenv(ENV_PATH)
     load_dotenv()  # fallback: .env in the working directory
 
