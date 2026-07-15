@@ -3,7 +3,7 @@
 from nicegui import run, ui
 
 from jobdeck import backup, config, db
-from jobdeck.services import polling
+from jobdeck.services import polling, scoring
 from jobdeck.ui.helpers import open_in_system
 from jobdeck.ui.layout import frame
 
@@ -13,6 +13,10 @@ def _get_settings():
         return {
             "follow_up_days": db.get_setting(con, "follow_up_days", "14"),
             "daily_send_cap": db.get_setting(con, "daily_send_cap", "15"),
+            "llm_calls": db.get_setting(con, "llm_calls", "0"),
+            "llm_input_tokens": db.get_setting(con, "llm_input_tokens", "0"),
+            "llm_output_tokens": db.get_setting(con, "llm_output_tokens", "0"),
+            "llm_cost_usd": db.get_setting(con, "llm_cost_usd", "0"),
         }
 
 
@@ -67,6 +71,19 @@ async def settings_page():
             ui.button("Save", on_click=save)
 
         with ui.card().classes("w-full"):
+            ui.label("LLM usage").classes("font-bold")
+            ui.label(
+                f"{settings['llm_calls']} calls · "
+                f"{settings['llm_input_tokens']} in / "
+                f"{settings['llm_output_tokens']} out tokens · "
+                f"${float(settings['llm_cost_usd']):.4f}"
+            ).classes("text-sm")
+            ui.label(
+                f"Model: {config.anthropic_model()} (set ANTHROPIC_MODEL to change). "
+                f"Match scoring needs {config.PROFILE_PATH} — see profile.example.md."
+            ).classes("text-xs text-gray-500")
+
+        with ui.card().classes("w-full"):
             ui.label("Maintenance").classes("font-bold")
             with ui.row().classes("gap-2"):
                 async def backup_now():
@@ -80,7 +97,18 @@ async def settings_page():
                     counters = await polling.poll_all_profiles(force=True)
                     ui.notify(f"Done: {counters['new']} new jobs", type="positive")
 
+                async def score_now():
+                    ui.notify("Scoring new jobs…")
+                    counters = await scoring.score_new_jobs()
+                    ui.notify(
+                        f"Done: {counters['scored']} scored, "
+                        f"{counters['failed']} failed",
+                        type="positive" if not counters["failed"] else "warning",
+                    )
+
                 ui.button("Backup now", icon="save", on_click=backup_now) \
                     .props("outline")
                 ui.button("Poll all profiles now", icon="refresh", on_click=poll_now) \
+                    .props("outline")
+                ui.button("Score new jobs now", icon="grade", on_click=score_now) \
                     .props("outline")

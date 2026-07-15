@@ -12,6 +12,7 @@ def data_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "jobdeck.db")
     monkeypatch.setattr(config, "BACKUP_DIR", tmp_path / "backups")
     monkeypatch.setattr(config, "OUTPUT_DIR", tmp_path / "output")
+    monkeypatch.setattr(config, "PROFILE_PATH", tmp_path / "profile.md")
     config.ensure_data_dirs()
     return tmp_path
 
