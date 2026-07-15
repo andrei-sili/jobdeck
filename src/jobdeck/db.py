@@ -389,6 +389,22 @@ def set_job_score(
     )
 
 
+def list_unscored_jobs(
+    con: sqlite3.Connection, limit: int = 20, exclude_ids: set[int] | None = None
+) -> list[sqlite3.Row]:
+    """New postings that have not been match-scored yet, oldest first.
+
+    exclude_ids skips postings the caller has given up on (retry cap), so
+    they cannot starve the batch."""
+    excluded = sorted(exclude_ids or ())
+    extra = f" AND id NOT IN ({','.join('?' * len(excluded))})" if excluded else ""
+    return con.execute(
+        "SELECT * FROM jobs WHERE status='new' AND match_score IS NULL"
+        + extra + " ORDER BY id LIMIT ?",
+        (*excluded, limit),
+    ).fetchall()
+
+
 def count_jobs_by_status(con: sqlite3.Connection) -> dict[str, int]:
     rows = con.execute("SELECT status, COUNT(*) AS n FROM jobs GROUP BY status")
     return {row["status"]: row["n"] for row in rows}
@@ -448,3 +464,17 @@ def set_setting(con: sqlite3.Connection, key: str, value: str) -> None:
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         (key, value),
     )
+
+
+def record_llm_usage(
+    con: sqlite3.Connection, input_tokens: int, output_tokens: int, cost_usd: float
+) -> None:
+    """Accumulate LLM metering counters (settings values are strings)."""
+    calls = int(get_setting(con, "llm_calls", "0")) + 1
+    tokens_in = int(get_setting(con, "llm_input_tokens", "0")) + input_tokens
+    tokens_out = int(get_setting(con, "llm_output_tokens", "0")) + output_tokens
+    cost = float(get_setting(con, "llm_cost_usd", "0")) + cost_usd
+    set_setting(con, "llm_calls", str(calls))
+    set_setting(con, "llm_input_tokens", str(tokens_in))
+    set_setting(con, "llm_output_tokens", str(tokens_out))
+    set_setting(con, "llm_cost_usd", f"{cost:.6f}")

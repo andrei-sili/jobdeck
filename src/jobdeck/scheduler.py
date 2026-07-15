@@ -8,7 +8,7 @@ import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from jobdeck.services import polling
+from jobdeck.services import polling, scoring
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +26,14 @@ def create_scheduler() -> AsyncIOScheduler:
         "interval",
         minutes=5,  # cheap due-check; per-profile intervals decide real work
         id="poll_profiles",
+        coalesce=True,
+        max_instances=1,
+    )
+    scheduler.add_job(
+        scoring.score_new_jobs,
+        "interval",
+        minutes=10,  # no-op while unconfigured or when nothing is unscored
+        id="score_jobs",
         coalesce=True,
         max_instances=1,
     )
