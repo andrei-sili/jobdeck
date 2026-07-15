@@ -885,7 +885,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anthropic", specifier = ">=0.40" },
+    { name = "anthropic", specifier = ">=0.116" },
     { name = "apscheduler", specifier = ">=3.11,<4" },
     { name = "google-api-python-client", specifier = ">=2.150" },
     { name = "google-auth-httplib2", specifier = ">=0.2" },
