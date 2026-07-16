@@ -157,6 +157,55 @@ def test_list_jobs_sorts_by_score_then_newest(con):
     assert [r["id"] for r in rows] == [high_new, high_old, low, unscored]
 
 
+def test_set_job_contacts_fills_only_empty_columns(con):
+    job_id = _add_job(con)  # source already provides contact_email
+    db.set_job_contacts(con, job_id, {
+        "ansprechpartner": " Frau Muster ",
+        "contact_email": "extracted@other.de",   # must NOT clobber source data
+        "contact_phone": "+49 241 123456",
+        "refnr": "REF-2026-42",
+        "bogus_column": "ignored",
+        "contact_strasse": "   ",                # whitespace-only → skipped
+    })
+    job = db.get_job(con, job_id)
+    assert job["ansprechpartner"] == "Frau Muster"
+    assert job["contact_email"] == "hr@neuefirma.de"  # source data wins
+    assert job["contact_phone"] == "+49 241 123456"
+    assert job["refnr"] == "REF-2026-42"
+    assert job["contact_strasse"] == ""
+    assert job["contact_source"] == "posting"
+
+    # a second extraction never overwrites what is already there
+    db.set_job_contacts(con, job_id, {"ansprechpartner": "Herr Anders"})
+    assert db.get_job(con, job_id)["ansprechpartner"] == "Frau Muster"
+
+    # nothing to fill → no contact_source stamp
+    empty_job = _add_job(con, external_id="REF-EMPTY")
+    db.set_job_contacts(con, empty_job, {"ansprechpartner": ""})
+    assert db.get_job(con, empty_job)["contact_source"] == ""
+
+
+def test_upsert_draft_keeps_one_row_per_job(con):
+    job_id = _add_job(con)
+    draft_id = db.upsert_draft(con, job_id, {
+        "status": "ready", "recipient": "hr@neuefirma.de",
+        "betreff": "Bewerbung als Python Entwickler – Max Muster",
+        "email_body": "Sehr geehrte Damen und Herren, ...",
+        "anschreiben_body": "Absatz 1\n\nAbsatz 2", "llm_model": "claude-haiku-4-5",
+    })
+    row = db.get_draft(con, draft_id)
+    assert row["status"] == "ready"
+    assert row["betreff"].startswith("Bewerbung als")
+
+    # re-draft updates the same row instead of stacking a second one
+    again = db.upsert_draft(con, job_id, {"status": "ready", "betreff": "Neu"})
+    assert again == draft_id
+    assert con.execute("SELECT COUNT(*) FROM drafts").fetchone()[0] == 1
+    assert db.get_draft_by_job(con, job_id)["betreff"] == "Neu"
+
+    assert db.get_draft_by_job(con, 99999) is None
+
+
 def test_delete_bewerbung_clears_references(con):
     job_id = _add_job(con)
     bewerbung_id = db.apply_job(con, job_id, kanal="E-Mail")

@@ -7,7 +7,7 @@ legacy `bewerbungen` table keeps its exact shape so the historical data
 
 import sqlite3
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Legacy table, exactly as the previous tracker created it.
 BEWERBUNGEN_SQL = """
@@ -65,6 +65,12 @@ CREATE TABLE IF NOT EXISTS jobs (
     match_reason  TEXT NOT NULL DEFAULT '',
     duplicate_of  INTEGER REFERENCES bewerbungen(id),
     bewerbung_id  INTEGER REFERENCES bewerbungen(id),
+    ansprechpartner  TEXT NOT NULL DEFAULT '',
+    contact_phone    TEXT NOT NULL DEFAULT '',
+    contact_strasse  TEXT NOT NULL DEFAULT '',
+    contact_plz_ort  TEXT NOT NULL DEFAULT '',
+    contact_source   TEXT NOT NULL DEFAULT '',
+    refnr            TEXT NOT NULL DEFAULT '',
     UNIQUE (source, external_id)
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
@@ -147,6 +153,18 @@ def _ensure_search_profile_columns(con: sqlite3.Connection) -> None:
             con.execute(f"ALTER TABLE search_profiles ADD COLUMN {col} {ddl}")
 
 
+def _ensure_job_contact_columns(con: sqlite3.Connection) -> None:
+    """Contact/reference columns added in schema v3 (additive only).
+
+    Filled by the extraction that rides the scoring call; the cascade slice
+    (web enrichment) will reuse them with other contact_source values."""
+    existing = [row[1] for row in con.execute("PRAGMA table_info(jobs)")]
+    for col in ("ansprechpartner", "contact_phone", "contact_strasse",
+                "contact_plz_ort", "contact_source", "refnr"):
+        if col not in existing:
+            con.execute(f"ALTER TABLE jobs ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+
+
 def migrate(con: sqlite3.Connection) -> None:
     """Bring the database to the current schema. Safe to run repeatedly."""
     version = con.execute("PRAGMA user_version").fetchone()[0]
@@ -154,6 +172,7 @@ def migrate(con: sqlite3.Connection) -> None:
     _ensure_bewerbungen_columns(con)
     con.executescript(NEW_TABLES_SQL)
     _ensure_search_profile_columns(con)
+    _ensure_job_contact_columns(con)
     if version < 2:
         # v2 reserves match_score 0 for hard-criteria violations and hides
         # such rows by default. Under v1 semantics 0 just meant "very bad

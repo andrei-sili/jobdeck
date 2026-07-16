@@ -152,6 +152,43 @@ def test_migrate_remaps_v1_zero_scores_to_the_new_floor(tmp_path):
     con.close()
 
 
+def test_migrate_adds_contact_columns_to_pre_v3_jobs(tmp_path):
+    """A pre-v3 jobs table gains the contact/refnr columns with defaults."""
+    path = tmp_path / "v2.db"
+    con = sqlite3.connect(path)
+    con.row_factory = sqlite3.Row
+    con.execute(
+        """
+        CREATE TABLE jobs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            source      TEXT NOT NULL,
+            external_id TEXT NOT NULL,
+            fetched_at  TEXT NOT NULL,
+            status      TEXT NOT NULL DEFAULT 'new',
+            match_score INTEGER,
+            UNIQUE (source, external_id)
+        )
+        """
+    )
+    con.execute(
+        "INSERT INTO jobs (source, external_id, fetched_at) VALUES (?, ?, ?)",
+        ("stub", "j1", "2026-07-01T10:00:00"),
+    )
+    con.execute("PRAGMA user_version = 2")
+    con.commit()
+
+    migrations.migrate(con)
+
+    row = con.execute("SELECT * FROM jobs").fetchone()
+    for col in ("ansprechpartner", "contact_phone", "contact_strasse",
+                "contact_plz_ort", "contact_source", "refnr"):
+        assert row[col] == ""
+    assert (con.execute("PRAGMA user_version").fetchone()[0]
+            == migrations.SCHEMA_VERSION)
+    migrations.migrate(con)  # idempotent with the new columns present
+    con.close()
+
+
 def test_bootstrap_imports_legacy_db(data_dir, monkeypatch):
     legacy_path = data_dir / "old_bewerbungen.db"
     make_legacy_db(legacy_path, LEGACY_ROWS)

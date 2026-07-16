@@ -432,6 +432,32 @@ def set_job_score(
     )
 
 
+def set_job_contacts(con: sqlite3.Connection, job_id: int, contacts: dict) -> None:
+    """Fill contact/reference columns from posting extraction.
+
+    Only empty columns are filled — data the source API already delivered
+    (e.g. arbeitsagentur contact_email) always wins over extraction.
+    contact_source records 'posting' once anything was filled this way."""
+    allowed = ("ansprechpartner", "contact_email", "contact_phone",
+               "contact_strasse", "contact_plz_ort", "refnr")
+    job = get_job(con, job_id)
+    if job is None:
+        return
+    updates = {
+        col: value.strip()
+        for col, value in contacts.items()
+        if col in allowed and value and value.strip() and not (job[col] or "").strip()
+    }
+    if not updates:
+        return
+    if not (job["contact_source"] or "").strip():
+        updates["contact_source"] = "posting"
+    assignments = ", ".join(f"{col}=?" for col in updates)  # closed allowlist
+    con.execute(
+        f"UPDATE jobs SET {assignments} WHERE id=?", (*updates.values(), job_id)
+    )
+
+
 def list_unscored_jobs(
     con: sqlite3.Connection, limit: int = 20, exclude_ids: set[int] | None = None
 ) -> list[sqlite3.Row]:
@@ -451,6 +477,54 @@ def list_unscored_jobs(
 def count_jobs_by_status(con: sqlite3.Connection) -> dict[str, int]:
     rows = con.execute("SELECT status, COUNT(*) AS n FROM jobs GROUP BY status")
     return {row["status"]: row["n"] for row in rows}
+
+
+# --------------------------------------------------------------------------
+# Drafts (one per job — re-drafting replaces the previous attempt)
+# --------------------------------------------------------------------------
+def get_draft(con: sqlite3.Connection, draft_id: int) -> sqlite3.Row | None:
+    return con.execute("SELECT * FROM drafts WHERE id=?", (draft_id,)).fetchone()
+
+
+def get_draft_by_job(con: sqlite3.Connection, job_id: int) -> sqlite3.Row | None:
+    return con.execute(
+        "SELECT * FROM drafts WHERE job_id=? ORDER BY id DESC LIMIT 1", (job_id,)
+    ).fetchone()
+
+
+def upsert_draft(con: sqlite3.Connection, job_id: int, values: dict) -> int:
+    """Insert or replace the job's draft. Returns the draft id."""
+    fields = {
+        "status": values.get("status", "generating"),
+        "recipient": values.get("recipient", ""),
+        "betreff": values.get("betreff", ""),
+        "email_body": values.get("email_body", ""),
+        "anschreiben_body": values.get("anschreiben_body", ""),
+        "llm_model": values.get("llm_model", ""),
+        "error": values.get("error", ""),
+    }
+    existing = get_draft_by_job(con, job_id)
+    if existing is None:
+        cur = con.execute(
+            """
+            INSERT INTO drafts
+                (job_id, status, recipient, betreff, email_body,
+                 anschreiben_body, llm_model, error, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (job_id, *fields.values(), _now(), _now()),
+        )
+        return cur.lastrowid
+    con.execute(
+        """
+        UPDATE drafts SET
+            status=?, recipient=?, betreff=?, email_body=?,
+            anschreiben_body=?, llm_model=?, error=?, updated_at=?
+        WHERE id=?
+        """,
+        (*fields.values(), _now(), existing["id"]),
+    )
+    return existing["id"]
 
 
 # --------------------------------------------------------------------------
