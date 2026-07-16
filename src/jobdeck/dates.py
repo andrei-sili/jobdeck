@@ -20,16 +20,19 @@ MONATE_DE = [
 
 
 def heute_de() -> str:
-    """Today in German letter format: '04. Juni 2026'."""
+    """Today in German letter format: '4. Juni 2026'.
+
+    DIN 5008: in the written-month form the day carries NO leading zero
+    (only the purely numeric 04.06.2026 form does)."""
     h = datetime.date.today()
-    return f"{h.day:02d}. {MONATE_DE[h.month]} {h.year}"
+    return f"{h.day}. {MONATE_DE[h.month]} {h.year}"
 
 
 def iso_to_de(iso_str: str) -> str:
-    """Convert '2026-06-08' -> '08. Juni 2026'; today's date if invalid."""
+    """Convert '2026-06-08' -> '8. Juni 2026'; today's date if invalid."""
     try:
         d = datetime.date.fromisoformat((iso_str or "").strip())
-        return f"{d.day:02d}. {MONATE_DE[d.month]} {d.year}"
+        return f"{d.day}. {MONATE_DE[d.month]} {d.year}"
     except (ValueError, AttributeError):
         return heute_de()
 

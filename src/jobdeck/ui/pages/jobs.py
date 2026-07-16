@@ -1,5 +1,7 @@
 """Job inbox: discovered postings with per-job actions."""
 
+import pathlib
+
 from nicegui import run, ui
 
 from jobdeck import db
@@ -137,10 +139,12 @@ async def jobs_page():
                             return
                         size_mb = result["size_bytes"] / 1024 / 1024
                         pdf_label.set_text(f"Mappe: {result['pdf_path']}")
+                        anlagen = (" · Anlagen: " + ", ".join(result["anlagen"])
+                                   if result["anlagen"] else " · no Anlagen")
                         ui.notify(
                             f"Mappe ready: {result['pages']} pages, "
-                            f"{size_mb:.1f} MB ✓",
-                            type="positive",
+                            f"{size_mb:.1f} MB{anlagen} ✓",
+                            type="positive", multi_line=True,
                         )
                         if result["warning"]:
                             ui.notify(result["warning"], type="warning",
@@ -148,10 +152,13 @@ async def jobs_page():
 
                     def open_pdf():
                         path = (pdf_label.text or "").removeprefix("Mappe: ")
-                        if path:
-                            open_in_system(path)
-                        else:
+                        if not path:
                             ui.notify("create the Mappe first", type="warning")
+                        elif not pathlib.Path(path).exists():
+                            ui.notify("the Mappe file is gone — create it "
+                                      "again", type="warning")
+                        else:
+                            open_in_system(path)
 
                     ui.button("Create PDF", icon="picture_as_pdf",
                               on_click=make_pdf).props("outline")

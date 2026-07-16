@@ -69,11 +69,13 @@ async def test_mappe_renders_merges_and_persists(con, data_dir):
 
     out = pathlib.Path(result["pdf_path"])
     assert out.name == "Bewerbung_Erika_Muster_Mueller_Soehne_GmbH.pdf"
-    assert out.parent == pathlib.Path(config.OUTPUT_DIR)
+    # per-job folder: clean recipient-facing filename, no cross-job overwrite
+    assert out.parent == pathlib.Path(config.OUTPUT_DIR) / f"job_{job_id}"
     assert out.exists() and out.read_bytes()[:5] == b"%PDF-"
     # letter (1 page) + Anlagen (2 + 1) — merged in filename order
     assert result["pages"] == 4
     assert result["warning"] == ""
+    assert result["anlagen"] == ["01_zeugnis.pdf", "02_zertifikat.pdf"]
     assert db.get_draft_by_job(con, job_id)["pdf_path"] == str(out)
     # the draft's other fields survive the pdf_path update
     assert db.get_draft_by_job(con, job_id)["anschreiben_body"].startswith("Sehr")
@@ -109,6 +111,11 @@ async def test_mappe_gates_fail_with_readable_errors(con, data_dir):
     db.set_setting(con, "applicant_name", "Erika Muster")
     con.commit()
     result = await mappe.create_mappe(job_id)
+    assert not result["ok"] and "Ort" in result["error"]
+
+    db.set_setting(con, "applicant_ort", "Musterstadt")
+    con.commit()
+    result = await mappe.create_mappe(job_id)
     assert not result["ok"] and "template path" in result["error"]
 
     db.set_setting(con, "template_path", str(data_dir / "missing.html"))
@@ -132,3 +139,78 @@ async def test_mappe_size_warning(con, data_dir, monkeypatch):
     result = await mappe.create_mappe(job_id)
     assert result["ok"]
     assert "5 MB" in result["warning"]
+
+
+async def test_two_postings_at_same_company_never_collide(con, data_dir):
+    job_a = _setup(con, data_dir, with_anlagen=False)
+    job_b = db.insert_job_if_new(con, {
+        "source": "arbeitsagentur", "external_id": "REF-88",
+        "title": "Java Entwickler", "company": "Müller & Söhne GmbH",
+        "description": "desc",
+    })
+    db.upsert_draft(con, job_b, {
+        "status": "ready", "anschreiben_body": "Anrede,\n\nText B.",
+    })
+    con.commit()
+
+    result_a = await mappe.create_mappe(job_a)
+    result_b = await mappe.create_mappe(job_b)
+    assert result_a["ok"] and result_b["ok"]
+    assert result_a["pdf_path"] != result_b["pdf_path"]  # same clean filename…
+    assert (pathlib.Path(result_a["pdf_path"]).name
+            == pathlib.Path(result_b["pdf_path"]).name)
+    assert pathlib.Path(result_a["pdf_path"]).exists()  # …neither overwritten
+    assert pathlib.Path(result_b["pdf_path"]).exists()
+
+
+async def test_mappe_discards_result_when_draft_changed_mid_render(
+    con, data_dir, monkeypatch
+):
+    """TOCTOU guard: a Re-draft during the Chrome render must not get the
+    OLD letter's PDF stamped onto the NEW draft."""
+    job_id = _setup(con, data_dir, with_anlagen=False)
+
+    real_render = pdf.html_to_pdf
+
+    def render_and_redraft(html_text, out_pdf):
+        real_render(html_text, out_pdf)
+        with db.db() as c:  # a concurrent Re-draft finishes mid-build
+            db.upsert_draft(c, job_id, {"anschreiben_body": "NEUER TEXT"})
+
+    monkeypatch.setattr(pdf, "html_to_pdf", render_and_redraft)
+    result = await mappe.create_mappe(job_id)
+    assert not result["ok"] and "changed while the Mappe was rendering" in result["error"]
+    assert db.get_draft_by_job(con, job_id)["pdf_path"] == ""
+    # the stale file was discarded, not left to be opened later
+    out_dir = pathlib.Path(config.OUTPUT_DIR) / f"job_{job_id}"
+    assert not any(out_dir.glob("*.pdf"))
+
+
+async def test_letter_values_use_nameless_betreff_and_german_date(
+    con, data_dir, monkeypatch
+):
+    job_id = _setup(con, data_dir, with_anlagen=False)
+    captured = {}
+    real_render = mappe.templates.render_letter
+
+    def capture(template_html, values):
+        captured.update(values)
+        return real_render(template_html, values)
+
+    monkeypatch.setattr(mappe.templates, "render_letter", capture)
+    assert (await mappe.create_mappe(job_id))["ok"]
+    # letter Betreff: title + Refnr, WITHOUT the applicant name
+    assert captured["betreff"] == "Bewerbung als Python Entwickler (m/w/d), K-17"
+    assert "Erika" not in captured["betreff"]
+    from jobdeck.dates import heute_de
+    assert captured["datum"] == heute_de()
+    assert captured["ort"] == "Musterstadt"
+
+
+async def test_non_latin_applicant_name_keeps_filename_wellformed(con, data_dir):
+    job_id = _setup(con, data_dir, with_anlagen=False,
+                    applicant_name="Ольга Иванова")
+    result = await mappe.create_mappe(job_id)
+    assert result["ok"], result["error"]
+    name = pathlib.Path(result["pdf_path"]).name
+    assert name == "Bewerbung_Mueller_Soehne_GmbH.pdf"  # no double underscore

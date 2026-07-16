@@ -57,21 +57,27 @@ def html_to_pdf(html_text: str, out_pdf: pathlib.Path) -> None:
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
     out_pdf.unlink(missing_ok=True)  # so we know THIS run produced the file
     workdir = tempfile.mkdtemp(prefix="jobdeck_chrome_")
-    html_path = pathlib.Path(workdir) / "mappe.html"
-    html_path.write_text(html_text, encoding="utf-8")
-    cmd = [
-        chrome, "--headless=new", "--no-sandbox", "--disable-gpu",
-        f"--user-data-dir={workdir}/profile",
-        "--no-first-run", "--no-default-browser-check",
-        "--disable-extensions", "--disable-background-networking",
-        "--no-pdf-header-footer",
-        "--virtual-time-budget=5000",  # fonts are embedded — no network waits
-        f"--print-to-pdf={out_pdf}",
-        html_path.as_uri(),
-    ]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=RENDER_TIMEOUT_S)
+        html_path = pathlib.Path(workdir) / "mappe.html"
+        html_path.write_text(html_text, encoding="utf-8")
+        cmd = [
+            chrome, "--headless=new", "--no-sandbox", "--disable-gpu",
+            f"--user-data-dir={workdir}/profile",
+            "--no-first-run", "--no-default-browser-check",
+            "--disable-extensions", "--disable-background-networking",
+            "--no-pdf-header-footer",
+            "--virtual-time-budget=5000",  # fonts are embedded — no network waits
+            f"--print-to-pdf={out_pdf}",
+            html_path.as_uri(),
+        ]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=RENDER_TIMEOUT_S)
+        except subprocess.TimeoutExpired as exc:
+            raise PdfError(
+                f"Chrome did not finish rendering within {RENDER_TIMEOUT_S}s "
+                f"— close other Chrome instances and retry"
+            ) from exc
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
     if not out_pdf.exists():
@@ -82,7 +88,10 @@ def html_to_pdf(html_text: str, out_pdf: pathlib.Path) -> None:
 
 
 def merge_pdfs(parts: list[pathlib.Path], out_pdf: pathlib.Path) -> None:
-    """Concatenate PDFs in order into out_pdf. Unreadable parts fail loudly."""
+    """Concatenate PDFs in order into out_pdf. Unreadable parts fail loudly.
+
+    Writes to a sibling temp file and renames atomically, so a mid-write
+    failure never leaves a torn PDF at a path something already links to."""
     writer = PdfWriter()
     for part in parts:
         try:
@@ -90,8 +99,13 @@ def merge_pdfs(parts: list[pathlib.Path], out_pdf: pathlib.Path) -> None:
         except Exception as exc:
             raise PdfError(f"cannot merge {part.name}: {exc}") from exc
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
-    with out_pdf.open("wb") as fh:
-        writer.write(fh)
+    tmp_pdf = out_pdf.with_suffix(".pdf.part")
+    try:
+        with tmp_pdf.open("wb") as fh:
+            writer.write(fh)
+        tmp_pdf.replace(out_pdf)
+    finally:
+        tmp_pdf.unlink(missing_ok=True)
 
 
 def page_count(pdf_path: pathlib.Path) -> int:

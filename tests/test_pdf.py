@@ -32,11 +32,42 @@ def test_html_to_pdf_renders_with_real_chrome(tmp_path):
 
 
 def test_merge_pdfs_concatenates_in_order(tmp_path):
-    a = _blank_pdf(tmp_path / "a.pdf", pages=2)
-    b = _blank_pdf(tmp_path / "b.pdf", pages=3)
+    from pypdf import PdfReader
+
+    a = _blank_pdf(tmp_path / "a.pdf", pages=2)          # A4 pages
+    b = tmp_path / "b.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=100, height=100)          # distinctive size
+    with b.open("wb") as fh:
+        writer.write(fh)
+
     out = tmp_path / "merged.pdf"
     pdf.merge_pdfs([a, b], out)
-    assert pdf.page_count(out) == 5
+    reader = PdfReader(str(out))
+    assert len(reader.pages) == 3
+    # order pinned by page dimensions: A4, A4, then the tiny page LAST
+    widths = [round(float(p.mediabox.width)) for p in reader.pages]
+    assert widths == [595, 595, 100]
+    assert not out.with_suffix(".pdf.part").exists()  # atomic write cleaned up
+
+
+def test_html_to_pdf_timeout_and_missing_chrome_raise_pdf_errors(
+    tmp_path, monkeypatch
+):
+    import subprocess as sp
+
+    monkeypatch.setattr(pdf, "find_chrome", lambda: None)
+    with pytest.raises(pdf.PdfError, match="not found"):
+        pdf.html_to_pdf("<p>x</p>", tmp_path / "a.pdf")
+
+    monkeypatch.setattr(pdf, "find_chrome", lambda: "/usr/bin/true")
+
+    def timing_out(*args, **kwargs):
+        raise sp.TimeoutExpired(cmd="chrome", timeout=1)
+
+    monkeypatch.setattr(pdf.subprocess, "run", timing_out)
+    with pytest.raises(pdf.PdfError, match="did not finish"):
+        pdf.html_to_pdf("<p>x</p>", tmp_path / "b.pdf")
 
 
 def test_merge_pdfs_fails_loudly_on_broken_part(tmp_path):
