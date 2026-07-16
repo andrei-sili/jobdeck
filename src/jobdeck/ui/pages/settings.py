@@ -19,6 +19,7 @@ def _get_settings():
             "applicant_name": db.get_setting(con, "applicant_name", ""),
             "applicant_ort": db.get_setting(con, "applicant_ort", ""),
             "template_path": db.get_setting(con, "template_path", ""),
+            "anlagen_dir": db.get_setting(con, "anlagen_dir", ""),
             "llm_calls": db.get_setting(con, "llm_calls", "0"),
             "llm_input_tokens": db.get_setting(con, "llm_input_tokens", "0"),
             "llm_output_tokens": db.get_setting(con, "llm_output_tokens", "0"),
@@ -95,6 +96,14 @@ async def settings_page():
                 "Letter template path (HTML file with {{TOKEN}} placeholders)",
                 value=settings["template_path"],
             ).classes("w-full")
+            anlagen_dir = ui.input(
+                "Anlagen folder (PDFs merged into the Mappe)",
+                value=settings["anlagen_dir"],
+            ).classes("w-full")
+            ui.label(
+                "Anlagen are appended in filename order — prefix them "
+                "01_, 02_, … to control the sequence."
+            ).classes("text-xs text-gray-500")
 
             async def save_application():
                 await run.io_bound(_set_setting, "applicant_name",
@@ -103,6 +112,8 @@ async def settings_page():
                                    applicant_ort.value.strip())
                 await run.io_bound(_set_setting, "template_path",
                                    template_path.value.strip())
+                await run.io_bound(_set_setting, "anlagen_dir",
+                                   anlagen_dir.value.strip())
                 ui.notify("Saved", type="positive")
 
             ui.button("Save", on_click=save_application)
