@@ -70,7 +70,8 @@ async def profiles_page():
 
                 with ui.expansion("Match criteria (AI scoring)").classes("w-full"):
                     hard_tags = ui.textarea(
-                        "Hard requirements — one per line, e.g. #backend",
+                        "Hard requirements — one per line or comma-separated, "
+                        "e.g. #backend",
                         value=data.get("hard_tags", ""),
                     ).classes("w-full").props("dense")
                     ui.label(

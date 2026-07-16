@@ -1,5 +1,7 @@
 """Settings: paths, credentials status, tunables, maintenance actions."""
 
+import asyncio
+
 from nicegui import run, ui
 
 from jobdeck import backup, config, db
@@ -78,9 +80,16 @@ async def settings_page():
 
         with ui.card().classes("w-full"):
             ui.label("AI").classes("font-bold")
+            # Serializes rapid switch flips: without it two io_bound writes
+            # can commit out of order and leave the DB at ON while the
+            # switch shows OFF — the one state the kill switch must not lie
+            # about.
+            toggle_write_lock = asyncio.Lock()
 
             async def toggle_ai(e):
-                await run.io_bound(_set_setting, "ai_enabled", "1" if e.value else "0")
+                async with toggle_write_lock:
+                    await run.io_bound(_set_setting, "ai_enabled",
+                                       "1" if e.value else "0")
                 ui.notify("AI enabled — new jobs will be match-scored"
                           if e.value else "AI disabled — no LLM spend",
                           type="positive" if e.value else "info")
