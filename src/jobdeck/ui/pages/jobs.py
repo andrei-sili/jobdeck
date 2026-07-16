@@ -3,6 +3,7 @@
 from nicegui import run, ui
 
 from jobdeck import db
+from jobdeck.services import drafting
 from jobdeck.ui.layout import frame
 
 FILTERS = ["new", "portal", "duplicate", "skipped", "applied", "all"]
@@ -33,6 +34,12 @@ def _set_status(job_id: int, status: str):
 def _confirm_applied(job_id: int, kanal: str):
     with db.db() as con:
         return db.apply_job(con, job_id, kanal=kanal)
+
+
+def _load_draft(job_id: int):
+    with db.db() as con:
+        row = db.get_draft_by_job(con, job_id)
+        return dict(row) if row is not None else None
 
 
 @ui.page("/jobs")
@@ -88,10 +95,8 @@ async def jobs_page():
                               on_click=lambda url=job["url"]: ui.navigate.to(url, new_tab=True)) \
                         .props("outline")
                     if job["status"] == "new":
-                        ui.button("Draft application", icon="edit_note") \
-                            .props("outline") \
-                            .tooltip("AI drafting arrives in Phase 2") \
-                            .disable()
+                        ui.button("Draft application", icon="edit_note",
+                                  on_click=lambda j=job: draft(j)).props("outline")
                         ui.button("Apply via portal", icon="language",
                                   on_click=lambda j=job: mark_portal(j)).props("outline")
                         ui.button("Skip", icon="close",
@@ -100,6 +105,48 @@ async def jobs_page():
                         ui.button("I applied — record it", icon="check",
                                   on_click=lambda j=job: confirm_applied(j)) \
                             .props("color=positive")
+
+        def show_draft(draft_row: dict, job: dict):
+            with ui.dialog() as dialog, ui.card().classes("w-[720px] max-w-full"):
+                ui.label(f"Draft — {job['title']}").classes("font-bold")
+                recipient = draft_row["recipient"] or \
+                    "no application e-mail found (portal or manual contact)"
+                ui.label(f"To: {recipient}").classes("text-sm text-gray-600")
+                ui.input("Betreff", value=draft_row["betreff"]) \
+                    .classes("w-full").props("readonly")
+                ui.textarea("E-Mail", value=draft_row["email_body"]) \
+                    .classes("w-full").props("readonly autogrow")
+                ui.textarea("Anschreiben", value=draft_row["anschreiben_body"]) \
+                    .classes("w-full").props("readonly autogrow")
+                ui.label(
+                    f"Model: {draft_row['llm_model']} · editing and sending "
+                    f"arrive with the review queue"
+                ).classes("text-xs text-gray-500")
+                with ui.row().classes("w-full justify-end gap-2"):
+                    ui.button("Re-draft", icon="refresh",
+                              on_click=lambda: redraft(dialog, job)) \
+                        .props("outline")
+                    ui.button("Close", on_click=dialog.close).props("flat")
+            dialog.open()
+
+        async def redraft(dialog, job: dict):
+            dialog.close()
+            await draft(job, force=True)
+
+        async def draft(job: dict, force: bool = False):
+            # a finished draft costs nothing to show again — regenerate only
+            # on explicit request
+            if not force:
+                existing = await run.io_bound(_load_draft, job["id"])
+                if existing is not None and existing["status"] == "ready":
+                    show_draft(existing, job)
+                    return
+            ui.notify("Drafting application…")
+            result = await drafting.draft_for_job(job["id"])
+            if not result["ok"]:
+                ui.notify(result["error"], type="warning", multi_line=True)
+                return
+            show_draft(result["draft"], job)
 
         async def mark_portal(job: dict):
             await run.io_bound(_set_status, job["id"], "portal")
