@@ -605,6 +605,23 @@ def count_outbound_today(con: sqlite3.Connection) -> int:
     ).fetchone()[0]
 
 
+def next_approved_autosend_job(con: sqlite3.Connection) -> int | None:
+    """Oldest approved draft whose search profile opted into auto-send.
+
+    Requires the profile to be active too: deactivating a profile pauses
+    everything about that search, including automatic transmission."""
+    row = con.execute(
+        """
+        SELECT d.job_id FROM drafts d
+        JOIN jobs j ON j.id = d.job_id
+        JOIN search_profiles p ON p.id = j.profile_id
+        WHERE d.status='approved' AND p.auto_send=1 AND p.active=1
+        ORDER BY d.id LIMIT 1
+        """
+    ).fetchone()
+    return row["job_id"] if row is not None else None
+
+
 def count_outbound_for_draft(con: sqlite3.Connection, draft_id: int) -> int:
     """Real (non-test) sends already recorded for this draft."""
     return con.execute(

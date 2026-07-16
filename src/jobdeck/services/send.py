@@ -298,6 +298,13 @@ def unapprove(job_id: int) -> dict:
     return _transition(job_id, "ready", ("approved",))
 
 
+def demote_failed_autosend(job_id: int, error: str) -> dict:
+    """A failed auto-send returns the draft to human attention instead of
+    retrying unattended — back to ready with the reason recorded."""
+    return _transition(job_id, "ready", ("approved",),
+                       error_note=f"auto-send failed: {error}")
+
+
 def discard(job_id: int) -> dict:
     return _transition(job_id, "discarded", ("ready", "approved", "failed"))
 
