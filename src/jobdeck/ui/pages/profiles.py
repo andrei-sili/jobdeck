@@ -68,6 +68,35 @@ async def profiles_page():
                 ).classes("w-full")
                 active = ui.switch("Active", value=bool(data.get("active", 1)))
 
+                with ui.expansion("Match criteria (AI scoring)").classes("w-full"):
+                    hard_tags = ui.textarea(
+                        "Hard requirements — one per line, e.g. #backend",
+                        value=data.get("hard_tags", ""),
+                    ).classes("w-full").props("dense")
+                    ui.label(
+                        "A posting that clearly violates one gets score 0 and "
+                        "is hidden behind the inbox's mismatch toggle — never "
+                        "deleted."
+                    ).classes("text-xs text-gray-500")
+                    soft_prefs = ui.textarea(
+                        "Weighted preferences — e.g. Gehalt 45000 @80%",
+                        value=data.get("soft_preferences", ""),
+                    ).classes("w-full").props("dense")
+                    ui.label(
+                        "Preferences shift the score by their weight; a "
+                        "posting that doesn't mention them stays neutral."
+                    ).classes("text-xs text-gray-500")
+                    ui.label("Strictness for adjacent tech").classes(
+                        "text-sm mt-2"
+                    )
+                    strictness = ui.slider(
+                        min=0, max=100, value=data.get("strictness", 50),
+                    ).props("label")
+                    ui.label(
+                        "0 = adjacent stacks barely penalized · 100 = only "
+                        "the exact stack scores high."
+                    ).classes("text-xs text-gray-500")
+
                 async def save():
                     if not name.value.strip() or not keywords.value.strip():
                         ui.notify("Name and keywords are required", type="warning")
@@ -81,6 +110,10 @@ async def profiles_page():
                         "active": active.value,
                         "auto_send": data.get("auto_send", 0),
                         "poll_interval_min": int(interval.value or 60),
+                        "hard_tags": hard_tags.value.strip(),
+                        "soft_preferences": soft_prefs.value.strip(),
+                        "strictness": int(strictness.value
+                                          if strictness.value is not None else 50),
                     }
                     await run.io_bound(_save_profile, data.get("id"), values)
                     dialog.close()
@@ -128,6 +161,22 @@ async def profiles_page():
                                     f"{', '.join(json.loads(p['sources']))} · "
                                     f"every {p['poll_interval_min']} min"
                                 ).classes("text-sm text-gray-600")
+                                criteria = []
+                                if p["hard_tags"]:
+                                    criteria.append(
+                                        "hard: " + " ".join(p["hard_tags"].split())
+                                    )
+                                if p["soft_preferences"]:
+                                    criteria.append(
+                                        "prefs: "
+                                        + " ".join(p["soft_preferences"].split())
+                                    )
+                                if p["strictness"] != 50:
+                                    criteria.append(f"strictness {p['strictness']}")
+                                if criteria:
+                                    ui.label(" · ".join(criteria)).classes(
+                                        "text-xs text-gray-500"
+                                    )
                                 if p["last_polled_at"]:
                                     ui.label(f"Last poll: {p['last_polled_at'][:16]}") \
                                         .classes("text-xs text-gray-400")
