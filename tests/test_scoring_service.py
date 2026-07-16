@@ -49,7 +49,7 @@ async def test_scores_unscored_new_jobs(con, profile_file, ai_on, monkeypatch):
 
     monkeypatch.setattr(
         "jobdeck.ai.scoring.score_job",
-        lambda job, profile_text, criteria=None: (66, "Guter Fit.", _usage()),
+        lambda job, profile_text, criteria=None: (66, "Guter Fit.", {}, _usage()),
     )
 
     counters = await scoring.score_new_jobs()
@@ -74,7 +74,7 @@ async def test_second_run_has_nothing_left_to_score(con, profile_file, ai_on, mo
     con.commit()
     monkeypatch.setattr(
         "jobdeck.ai.scoring.score_job",
-        lambda job, profile_text, criteria=None: (50, "Ok.", _usage()),
+        lambda job, profile_text, criteria=None: (50, "Ok.", {}, _usage()),
     )
 
     assert (await scoring.score_new_jobs())["scored"] == 1
@@ -130,7 +130,7 @@ async def test_one_failure_does_not_block_the_rest(con, profile_file, ai_on, mon
     def fake_score(job, profile_text, criteria=None):
         if job["external_id"] == "bad":
             raise llm.LLMError("boom")
-        return (80, "Passt.", _usage())
+        return (80, "Passt.", {}, _usage())
 
     monkeypatch.setattr("jobdeck.ai.scoring.score_job", fake_score)
 
@@ -148,7 +148,7 @@ async def test_batch_limit_caps_llm_calls_per_run(con, profile_file, ai_on, monk
     con.commit()
     monkeypatch.setattr(
         "jobdeck.ai.scoring.score_job",
-        lambda job, profile_text, criteria=None: (50, "Ok.", _usage()),
+        lambda job, profile_text, criteria=None: (50, "Ok.", {}, _usage()),
     )
 
     assert (await scoring.score_new_jobs(limit=2))["scored"] == 2
@@ -170,7 +170,7 @@ async def test_concurrent_runs_never_double_score(con, profile_file, ai_on, monk
     def slow_score(job, profile_text, criteria=None):
         calls.append(job["id"])
         time.sleep(0.02)  # widen the overlap window
-        return (60, "Ok.", _usage())
+        return (60, "Ok.", {}, _usage())
 
     monkeypatch.setattr("jobdeck.ai.scoring.score_job", slow_score)
 
@@ -198,6 +198,30 @@ async def test_failed_calls_are_still_metered(con, profile_file, ai_on, monkeypa
     assert float(db.get_setting(con, "llm_cost_usd")) == pytest.approx(0.003)
 
 
+async def test_extracted_contacts_are_persisted(con, profile_file, ai_on, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    _insert_job(con, "j1")
+    con.commit()
+
+    monkeypatch.setattr(
+        "jobdeck.ai.scoring.score_job",
+        lambda job, profile_text, criteria=None: (
+            70, "Passt gut.",
+            {"ansprechpartner": "Frau Weber", "contact_email": "jobs@firma.de",
+             "refnr": "K-2026-17"},
+            _usage(),
+        ),
+    )
+
+    assert (await scoring.score_new_jobs())["scored"] == 1
+    job = db.list_jobs(con)[0]
+    assert job["match_score"] == 70
+    assert job["ansprechpartner"] == "Frau Weber"
+    assert job["contact_email"] == "jobs@firma.de"
+    assert job["refnr"] == "K-2026-17"
+    assert job["contact_source"] == "posting"
+
+
 async def test_kill_switch_stops_an_in_flight_batch(
     con, profile_file, ai_on, monkeypatch
 ):
@@ -213,7 +237,7 @@ async def test_kill_switch_stops_an_in_flight_batch(
         calls.append(job["id"])
         with db.db() as c:  # the Settings switch writes from another thread
             db.set_setting(c, "ai_enabled", "0")
-        return (60, "Ok.", _usage())
+        return (60, "Ok.", {}, _usage())
 
     monkeypatch.setattr("jobdeck.ai.scoring.score_job", flip_off_after_first)
 
@@ -243,7 +267,7 @@ async def test_profile_criteria_reach_the_scoring_call(
 
     def fake_score(job, profile_text, criteria=None):
         received[job["external_id"]] = criteria
-        return (60, "Ok.", _usage())
+        return (60, "Ok.", {}, _usage())
 
     monkeypatch.setattr("jobdeck.ai.scoring.score_job", fake_score)
 
@@ -268,7 +292,7 @@ async def test_retry_cap_gives_up_and_stops_starving_the_batch(
         if job["external_id"] == "always-bad":
             attempts.append(job["id"])
             raise llm.LLMError("boom")
-        return (70, "Ok.", _usage())
+        return (70, "Ok.", {}, _usage())
 
     monkeypatch.setattr("jobdeck.ai.scoring.score_job", fake_score)
 

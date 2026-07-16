@@ -133,10 +133,29 @@ def test_score_job_parses_clamps_and_strips(monkeypatch):
         )
 
     monkeypatch.setattr(llm, "complete", fake_complete)
-    score, reason, usage = scoring.score_job(_job(), "profile text")
+    score, reason, contacts, usage = scoring.score_job(_job(), "profile text")
     assert score == 100
     assert reason == "Sehr guter Fit."
+    assert contacts == {}  # nothing extracted → nothing to persist
     assert usage.input_tokens == 1
+
+
+def test_score_job_returns_only_nonempty_contacts(monkeypatch):
+    def fake_complete(**kwargs):
+        return llm.LLMResult(
+            text='{"score": 70, "reason": "Passt.",'
+                 ' "ansprechpartner": " Frau Weber ", "contact_email": "",'
+                 ' "contact_phone": "", "contact_strasse": "Weg 1",'
+                 ' "contact_plz_ort": "52062 Aachen", "refnr": "K-17"}',
+            model="m", input_tokens=1, output_tokens=1, cost_usd=0.0,
+        )
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    _, _, contacts, _ = scoring.score_job(_job(), "profile text")
+    assert contacts == {
+        "ansprechpartner": "Frau Weber", "contact_strasse": "Weg 1",
+        "contact_plz_ort": "52062 Aachen", "refnr": "K-17",
+    }
 
 
 def test_score_job_rejects_unparseable_response(monkeypatch):

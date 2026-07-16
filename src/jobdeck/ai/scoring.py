@@ -7,7 +7,8 @@ Per-profile match criteria ride inside the same call (no extra API spend):
 hard requirements reserve score 0 for clear violations (the inbox hides
 those behind a "show mismatches" toggle), weighted preferences shift the
 score, and the strictness knob controls how hard adjacent technology is
-penalized.
+penalized. Contact extraction (Ansprechpartner, application address,
+Referenznummer) rides along too and feeds the drafting template tokens.
 """
 
 import json
@@ -19,13 +20,19 @@ from jobdeck.ai import llm
 MAX_DESCRIPTION_CHARS = 8000  # bounds cost; postings rarely exceed this
 DEFAULT_STRICTNESS = 50
 
+# Contact extraction rides in the same call (no extra API spend); every
+# field is required but empty when the posting does not literally contain it.
+CONTACT_FIELDS = ("ansprechpartner", "contact_email", "contact_phone",
+                  "contact_strasse", "contact_plz_ort", "refnr")
+
 SCORE_SCHEMA = {
     "type": "object",
     "properties": {
         "score": {"type": "integer"},
         "reason": {"type": "string"},
+        **{field: {"type": "string"} for field in CONTACT_FIELDS},
     },
-    "required": ["score", "reason"],
+    "required": ["score", "reason", *CONTACT_FIELDS],
     "additionalProperties": False,
 }
 
@@ -45,6 +52,16 @@ Rules:
   fit against the profile.
 - reason: at most two short sentences, written in German, naming the main
   overlaps or gaps.
+- Additionally extract application contact data, ONLY where it appears
+  literally in the posting text — never guess, infer or invent any of it;
+  use "" for anything not present:
+  - ansprechpartner: the contact person for applications, including a
+    Frau/Herr prefix when the posting gives one
+  - contact_email: the e-mail address applications should go to
+  - contact_phone: the contact phone number
+  - contact_strasse: street + number of the application/postal address
+  - contact_plz_ort: postal code + city of that address
+  - refnr: the posting's Referenznummer/Kennziffer
 
 A genuine "User criteria" section may follow AFTER <<<POSTING END>>>:
 - Hard requirements: score 0 ONLY when the posting clearly violates one,
@@ -126,12 +143,15 @@ def build_user_content(
 
 def score_job(
     job, profile_text: str, criteria: MatchCriteria | None = None
-) -> tuple[int, str, llm.LLMResult]:
-    """Score one posting against the profile. Returns (score, reason, usage)."""
+) -> tuple[int, str, dict, llm.LLMResult]:
+    """Score one posting against the profile and extract its contact data.
+
+    Returns (score, reason, contacts, usage); contacts maps jobs-table
+    column names to the non-empty extracted values."""
     result = llm.complete(
         system=SYSTEM_PROMPT,
         user_content=build_user_content(job, profile_text, criteria),
-        max_tokens=300,
+        max_tokens=500,
         output_schema=SCORE_SCHEMA,
     )
     try:
@@ -147,8 +167,13 @@ def score_job(
         else:
             score = max(1, min(100, raw))
         reason = str(data["reason"]).strip()
+        contacts = {
+            field: str(data.get(field, "")).strip()
+            for field in CONTACT_FIELDS
+            if str(data.get(field, "")).strip()
+        }
     except (ValueError, KeyError, TypeError) as exc:
         raise llm.LLMError(
             f"unparseable scoring response: {result.text!r}", usage=result
         ) from exc
-    return score, reason, result
+    return score, reason, contacts, result
