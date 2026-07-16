@@ -492,19 +492,19 @@ def get_draft_by_job(con: sqlite3.Connection, job_id: int) -> sqlite3.Row | None
     ).fetchone()
 
 
+_DRAFT_FIELDS = ("status", "recipient", "betreff", "email_body",
+                 "anschreiben_body", "llm_model", "error")
+
+
 def upsert_draft(con: sqlite3.Connection, job_id: int, values: dict) -> int:
-    """Insert or replace the job's draft. Returns the draft id."""
-    fields = {
-        "status": values.get("status", "generating"),
-        "recipient": values.get("recipient", ""),
-        "betreff": values.get("betreff", ""),
-        "email_body": values.get("email_body", ""),
-        "anschreiben_body": values.get("anschreiben_body", ""),
-        "llm_model": values.get("llm_model", ""),
-        "error": values.get("error", ""),
-    }
+    """Insert or update the job's single draft row. Returns the draft id.
+
+    Updates touch only the keys present in `values`, so a status-only
+    transition (claim, failure) never wipes previously drafted text."""
     existing = get_draft_by_job(con, job_id)
     if existing is None:
+        fields = {field: values.get(field, "") for field in _DRAFT_FIELDS}
+        fields["status"] = values.get("status", "generating")
         cur = con.execute(
             """
             INSERT INTO drafts
@@ -512,17 +512,15 @@ def upsert_draft(con: sqlite3.Connection, job_id: int, values: dict) -> int:
                  anschreiben_body, llm_model, error, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (job_id, *fields.values(), _now(), _now()),
+            (job_id, *(fields[f] for f in _DRAFT_FIELDS), _now(), _now()),
         )
         return cur.lastrowid
+    updates = {field: values[field] for field in _DRAFT_FIELDS if field in values}
+    columns = [*updates, "updated_at"]  # closed allowlist + timestamp
+    assignments = ", ".join(f"{column}=?" for column in columns)
     con.execute(
-        """
-        UPDATE drafts SET
-            status=?, recipient=?, betreff=?, email_body=?,
-            anschreiben_body=?, llm_model=?, error=?, updated_at=?
-        WHERE id=?
-        """,
-        (*fields.values(), _now(), existing["id"]),
+        f"UPDATE drafts SET {assignments} WHERE id=?",
+        (*updates.values(), _now(), existing["id"]),
     )
     return existing["id"]
 
@@ -589,15 +587,28 @@ def ai_enabled(con: sqlite3.Connection) -> bool:
     return get_setting(con, "ai_enabled", "0") == "1"
 
 
+def _bump_int_setting(con: sqlite3.Connection, key: str, delta: int) -> None:
+    con.execute(
+        "INSERT INTO app_settings (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = "
+        "CAST(CAST(value AS INTEGER) + CAST(excluded.value AS INTEGER) AS TEXT)",
+        (key, str(int(delta))),
+    )
+
+
 def record_llm_usage(
     con: sqlite3.Connection, input_tokens: int, output_tokens: int, cost_usd: float
 ) -> None:
-    """Accumulate LLM metering counters (settings values are strings)."""
-    calls = int(get_setting(con, "llm_calls", "0")) + 1
-    tokens_in = int(get_setting(con, "llm_input_tokens", "0")) + input_tokens
-    tokens_out = int(get_setting(con, "llm_output_tokens", "0")) + output_tokens
-    cost = float(get_setting(con, "llm_cost_usd", "0")) + cost_usd
-    set_setting(con, "llm_calls", str(calls))
-    set_setting(con, "llm_input_tokens", str(tokens_in))
-    set_setting(con, "llm_output_tokens", str(tokens_out))
-    set_setting(con, "llm_cost_usd", f"{cost:.6f}")
+    """Accumulate LLM metering counters (settings values are strings).
+
+    The arithmetic happens in SQL so concurrent writers (a scoring batch
+    and a drafting click) cannot lose updates to a read-modify-write race."""
+    _bump_int_setting(con, "llm_calls", 1)
+    _bump_int_setting(con, "llm_input_tokens", input_tokens)
+    _bump_int_setting(con, "llm_output_tokens", output_tokens)
+    con.execute(
+        "INSERT INTO app_settings (key, value) VALUES (?, printf('%.6f', ?)) "
+        "ON CONFLICT(key) DO UPDATE SET value = "
+        "printf('%.6f', CAST(value AS REAL) + CAST(excluded.value AS REAL))",
+        ("llm_cost_usd", float(cost_usd)),
+    )

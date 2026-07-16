@@ -39,26 +39,32 @@ def body_paragraphs_html(body_text: str) -> str:
     )
 
 
+_TOKEN_RE = re.compile(
+    r"\{\{(" + "|".join((*SIMPLE_TOKENS, "ANSCHREIBEN_BODY")) + r")\}\}(<br>)?"
+)
+
+
 def render_letter(template_html: str, values: dict) -> str:
     """Fill the token contract. `values` keys are lowercase token names
-    (firma, ansprechpartner, ..., betreff, anschreiben_body)."""
+    (firma, ansprechpartner, ..., betreff, anschreiben_body).
+
+    Substitution is a single pass over the template: a substituted value
+    that itself contains token-shaped text stays literal instead of being
+    re-substituted (values are posting/LLM-derived and untrusted)."""
     if "{{ANSCHREIBEN_BODY}}" not in template_html:
         raise TemplateError(
             "template has no {{ANSCHREIBEN_BODY}} token — re-run the "
             "tokenization step on it"
         )
-    rendered = template_html
-    for token in SIMPLE_TOKENS:
+    body_html = body_paragraphs_html(str(values.get("anschreiben_body", "") or ""))
+
+    def fill(match: re.Match) -> str:
+        token, br = match.group(1), match.group(2) or ""
+        if token == "ANSCHREIBEN_BODY":
+            return body_html + br
         value = html.escape(str(values.get(token.lower(), "") or "").strip())
         # An empty value also removes one <br> right after the token, so
         # empty address lines collapse instead of leaving gaps.
-        rendered = re.sub(
-            r"\{\{" + token + r"\}\}(<br>)?",
-            lambda m, v=value: v + (m.group(1) or "") if v else "",
-            rendered,
-        )
-    rendered = rendered.replace(
-        "{{ANSCHREIBEN_BODY}}",
-        body_paragraphs_html(str(values.get("anschreiben_body", "") or "")),
-    )
-    return rendered
+        return value + br if value else ""
+
+    return _TOKEN_RE.sub(fill, template_html)

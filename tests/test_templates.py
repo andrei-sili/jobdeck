@@ -65,6 +65,14 @@ def test_single_newlines_become_line_breaks_within_a_paragraph():
     assert "Zeile 1<br>Zeile 2" in out
 
 
+def test_token_shaped_values_stay_literal():
+    """A posting/LLM-derived value containing {{TOKEN}} text must not be
+    re-substituted — single-pass rendering."""
+    out = templates.render_letter(TEMPLATE, _values(firma="{{DATUM}} GmbH"))
+    assert "{{DATUM}} GmbH" in out            # stays literal
+    assert out.count("16.07.2026") == 1       # only the real date slot filled
+
+
 def test_missing_body_token_is_an_error():
     with pytest.raises(templates.TemplateError):
         templates.render_letter("<p>{{BETREFF}}</p>", _values())

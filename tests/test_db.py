@@ -184,6 +184,12 @@ def test_set_job_contacts_fills_only_empty_columns(con):
     db.set_job_contacts(con, empty_job, {"ansprechpartner": ""})
     assert db.get_job(con, empty_job)["contact_source"] == ""
 
+    # an existing source stamp (e.g. future web enrichment) is never rewritten
+    preset = _add_job(con, external_id="REF-PRESET")
+    con.execute("UPDATE jobs SET contact_source='web' WHERE id=?", (preset,))
+    db.set_job_contacts(con, preset, {"ansprechpartner": "Frau Neu"})
+    assert db.get_job(con, preset)["contact_source"] == "web"
+
 
 def test_upsert_draft_keeps_one_row_per_job(con):
     job_id = _add_job(con)
