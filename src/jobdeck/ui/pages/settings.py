@@ -1,5 +1,7 @@
 """Settings: paths, credentials status, tunables, maintenance actions."""
 
+import asyncio
+
 from nicegui import run, ui
 
 from jobdeck import backup, config, db
@@ -13,6 +15,7 @@ def _get_settings():
         return {
             "follow_up_days": db.get_setting(con, "follow_up_days", "14"),
             "daily_send_cap": db.get_setting(con, "daily_send_cap", "15"),
+            "ai_enabled": db.ai_enabled(con),
             "llm_calls": db.get_setting(con, "llm_calls", "0"),
             "llm_input_tokens": db.get_setting(con, "llm_input_tokens", "0"),
             "llm_output_tokens": db.get_setting(con, "llm_output_tokens", "0"),
@@ -23,6 +26,11 @@ def _get_settings():
 def _set_setting(key, value):
     with db.db() as con:
         db.set_setting(con, key, value)
+
+
+def _ai_enabled():
+    with db.db() as con:
+        return db.ai_enabled(con)
 
 
 @ui.page("/settings")
@@ -71,7 +79,27 @@ async def settings_page():
             ui.button("Save", on_click=save)
 
         with ui.card().classes("w-full"):
-            ui.label("LLM usage").classes("font-bold")
+            ui.label("AI").classes("font-bold")
+            # Serializes rapid switch flips: without it two io_bound writes
+            # can commit out of order and leave the DB at ON while the
+            # switch shows OFF — the one state the kill switch must not lie
+            # about.
+            toggle_write_lock = asyncio.Lock()
+
+            async def toggle_ai(e):
+                async with toggle_write_lock:
+                    await run.io_bound(_set_setting, "ai_enabled",
+                                       "1" if e.value else "0")
+                ui.notify("AI enabled — new jobs will be match-scored"
+                          if e.value else "AI disabled — no LLM spend",
+                          type="positive" if e.value else "info")
+
+            ui.switch("Enable AI features (match scoring)",
+                      value=settings["ai_enabled"], on_change=toggle_ai)
+            ui.label(
+                "Master switch for all LLM spend. While off, nothing is sent "
+                "to the API — scheduled and manual scoring both skip."
+            ).classes("text-xs text-gray-500")
             ui.label(
                 f"{settings['llm_calls']} calls · "
                 f"{settings['llm_input_tokens']} in / "
@@ -98,6 +126,10 @@ async def settings_page():
                     ui.notify(f"Done: {counters['new']} new jobs", type="positive")
 
                 async def score_now():
+                    if not await run.io_bound(_ai_enabled):
+                        ui.notify("AI is disabled — flip the switch in the AI "
+                                  "card first", type="warning")
+                        return
                     ui.notify("Scoring new jobs…")
                     counters = await scoring.score_new_jobs()
                     ui.notify(

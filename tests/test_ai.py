@@ -160,3 +160,72 @@ def test_build_user_content_includes_job_and_truncates(monkeypatch):
     assert "(remote)" in content
     # truncated to exactly the cap — neither dropped nor passed through whole
     assert content.count("x") == scoring.MAX_DESCRIPTION_CHARS
+    assert "User criteria" not in content  # no criteria → prompt unchanged
+    # the untrusted posting is fenced so it cannot impersonate app sections
+    assert content.index("<<<POSTING START>>>") < content.index("x" * 10)
+    assert content.rstrip().endswith("<<<POSTING END>>>")
+
+
+# -- match criteria ------------------------------------------------------------
+def test_criteria_from_profile_parses_tags_and_defaults():
+    row = {"hard_tags": "#backend, #münchen\n #remote ",
+           "soft_preferences": " Gehalt 45000 @80% ", "strictness": 70}
+    criteria = scoring.criteria_from_profile(row)
+    assert criteria.hard_tags == ("#backend", "#münchen", "#remote")
+    assert criteria.soft_preferences == "Gehalt 45000 @80%"
+    assert criteria.strictness == 70
+
+    # nothing beyond defaults → None, so the prompt stays byte-identical
+    assert scoring.criteria_from_profile(
+        {"hard_tags": "", "soft_preferences": "", "strictness": 50}
+    ) is None
+    assert scoring.criteria_from_profile(None) is None
+    # a non-default strictness alone is a reason to send the section
+    assert scoring.criteria_from_profile(
+        {"hard_tags": "", "soft_preferences": "", "strictness": 90}
+    ).strictness == 90
+    # defensive: a NULL strictness (hand-edited DB) falls back to the default
+    assert scoring.criteria_from_profile(
+        {"hard_tags": "#a", "soft_preferences": "", "strictness": None}
+    ).strictness == scoring.DEFAULT_STRICTNESS
+
+
+def test_build_user_content_appends_criteria_section():
+    criteria = scoring.MatchCriteria(
+        hard_tags=("#backend",), soft_preferences="Gehalt 45000 @80%",
+        strictness=70,
+    )
+    content = scoring.build_user_content(_job(), "my profile", criteria)
+    section = content.split("## User criteria")[1]
+    assert "- #backend" in section
+    assert "Gehalt 45000 @80%" in section
+    assert "Strictness: 70/100" in section
+    # the genuine criteria live outside the untrusted-posting fence
+    assert content.index("<<<POSTING END>>>") < content.index("## User criteria")
+
+
+def test_score_zero_is_reserved_for_hard_tag_violations(monkeypatch):
+    def complete_returning(score_value):
+        def fake_complete(**kwargs):
+            return llm.LLMResult(
+                text=f'{{"score": {score_value}, "reason": "Kein Fit."}}',
+                model="m", input_tokens=1, output_tokens=1, cost_usd=0.0,
+            )
+        return fake_complete
+
+    hard = scoring.MatchCriteria(hard_tags=("#backend",))
+
+    monkeypatch.setattr(llm, "complete", complete_returning(0))
+    # without hard tags a model-returned 0 must not hide the posting
+    assert scoring.score_job(_job(), "profile")[0] == 1
+    assert scoring.score_job(
+        _job(), "profile", scoring.MatchCriteria(strictness=90)
+    )[0] == 1
+    # with hard tags, a literal 0 is the agreed mismatch signal
+    assert scoring.score_job(_job(), "profile", hard)[0] == 0
+
+    # out-of-range noise must never synthesize the reserved 0 sentinel:
+    # the schema cannot forbid negatives, so the clamp maps them to 1
+    monkeypatch.setattr(llm, "complete", complete_returning(-5))
+    assert scoring.score_job(_job(), "profile", hard)[0] == 1
+    assert scoring.score_job(_job(), "profile")[0] == 1

@@ -9,10 +9,20 @@ FILTERS = ["new", "portal", "duplicate", "skipped", "applied", "all"]
 PAGE_LIMIT = 100
 
 
-def _load_jobs(status: str):
+def _load_jobs(status: str, show_mismatches: bool):
+    """Inbox rows plus how many score-0 mismatches the filter is hiding.
+
+    The mismatch view lists ONLY the hidden pile: mixing mismatches into the
+    normal list would leave them unreachable once better-scored rows fill
+    PAGE_LIMIT (score 0 sorts last)."""
     with db.db() as con:
-        rows = db.list_jobs(con, None if status == "all" else status, limit=PAGE_LIMIT)
-        return [dict(r) for r in rows]
+        status_arg = None if status == "all" else status
+        rows = db.list_jobs(
+            con, status_arg, limit=PAGE_LIMIT,
+            mismatches="only" if show_mismatches else "exclude",
+        )
+        hidden = 0 if show_mismatches else db.count_mismatches(con, status_arg)
+        return [dict(r) for r in rows], hidden
 
 
 def _set_status(job_id: int, status: str):
@@ -29,15 +39,27 @@ def _confirm_applied(job_id: int, kanal: str):
 async def jobs_page():
     with frame("Job inbox"):
         status_filter = {"value": "new"}
+        show_mismatches = {"value": False}
+        refresh_gen = {"n": 0}  # rapid filter/switch flips: last request wins
         container = ui.column().classes("w-full gap-2")
 
         async def refresh():
+            refresh_gen["n"] += 1
+            gen = refresh_gen["n"]
+            jobs, hidden = await run.io_bound(
+                _load_jobs, status_filter["value"], show_mismatches["value"]
+            )
+            if gen != refresh_gen["n"]:
+                return  # superseded — a newer refresh already owns the view
             container.clear()
-            jobs = await run.io_bound(_load_jobs, status_filter["value"])
+            hidden_label.set_text(f"{hidden} mismatches hidden" if hidden else "")
             with container:
                 if not jobs:
-                    ui.label("Nothing here. Run a search profile to discover jobs.") \
-                        .classes("text-gray-500")
+                    empty = ("No mismatches — nothing is hidden."
+                             if show_mismatches["value"]
+                             else "Nothing here. Run a search profile to "
+                                  "discover jobs.")
+                    ui.label(empty).classes("text-gray-500")
                 for job in jobs:
                     render_job(job)
 
@@ -49,6 +71,11 @@ async def jobs_page():
             with ui.expansion(head).classes("w-full border rounded"):
                 ui.label(f"Source: {job['source']} · found {job['fetched_at'][:16]} · "
                          f"status: {job['status']}").classes("text-xs text-gray-500")
+                if job["match_reason"]:
+                    mismatch = job["match_score"] == 0
+                    ui.label(f"Match: {job['match_reason']}").classes(
+                        "text-sm text-red-700" if mismatch else "text-sm text-gray-600"
+                    )
                 if job["contact_email"]:
                     ui.label(f"Contact: {job['contact_email']}").classes("text-sm")
                 if job["duplicate_of"]:
@@ -97,9 +124,20 @@ async def jobs_page():
                 value="new",
                 on_change=lambda e: set_filter(e.value),
             )
+            ui.switch(
+                "Show mismatches",
+                value=False,
+                on_change=lambda e: set_mismatches(e.value),
+            ).tooltip("Show the hidden pile: postings scored 0 for violating "
+                      "a hard requirement — hidden, never deleted")
+            hidden_label = ui.label().classes("text-xs text-gray-500")
 
         async def set_filter(value: str):
             status_filter["value"] = value
+            await refresh()
+
+        async def set_mismatches(value: bool):
+            show_mismatches["value"] = value
             await refresh()
 
         await refresh()

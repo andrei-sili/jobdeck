@@ -33,7 +33,14 @@ def profile_file(data_dir):
     return config.PROFILE_PATH
 
 
-async def test_scores_unscored_new_jobs(con, profile_file, monkeypatch):
+@pytest.fixture()
+def ai_on(con):
+    """The master AI toggle defaults to off — scoring tests opt in."""
+    db.set_setting(con, "ai_enabled", "1")
+    con.commit()
+
+
+async def test_scores_unscored_new_jobs(con, profile_file, ai_on, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     _insert_job(con, "j1")
     _insert_job(con, "j2")
@@ -42,7 +49,7 @@ async def test_scores_unscored_new_jobs(con, profile_file, monkeypatch):
 
     monkeypatch.setattr(
         "jobdeck.ai.scoring.score_job",
-        lambda job, profile_text: (66, "Guter Fit.", _usage()),
+        lambda job, profile_text, criteria=None: (66, "Guter Fit.", _usage()),
     )
 
     counters = await scoring.score_new_jobs()
@@ -61,46 +68,66 @@ async def test_scores_unscored_new_jobs(con, profile_file, monkeypatch):
     assert float(db.get_setting(con, "llm_cost_usd")) == pytest.approx(0.002)
 
 
-async def test_second_run_has_nothing_left_to_score(con, profile_file, monkeypatch):
+async def test_second_run_has_nothing_left_to_score(con, profile_file, ai_on, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     _insert_job(con, "j1")
     con.commit()
     monkeypatch.setattr(
         "jobdeck.ai.scoring.score_job",
-        lambda job, profile_text: (50, "Ok.", _usage()),
+        lambda job, profile_text, criteria=None: (50, "Ok.", _usage()),
     )
 
     assert (await scoring.score_new_jobs())["scored"] == 1
     assert (await scoring.score_new_jobs())["scored"] == 0
 
 
-async def test_skips_without_api_key(con, profile_file, monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    _insert_job(con)
-    con.commit()
-
-    counters = await scoring.score_new_jobs()
-    assert counters == {"scored": 0, "failed": 0}
-    assert db.list_jobs(con)[0]["match_score"] is None
-
-
-async def test_skips_without_profile(con, monkeypatch):
+async def test_skips_when_ai_disabled(con, profile_file, monkeypatch):
+    """The master toggle (default off) blocks every LLM call, key or no key."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     _insert_job(con)
     con.commit()
 
+    monkeypatch.setattr("jobdeck.ai.scoring.score_job", _must_not_be_called)
+
+    counters = await scoring.score_new_jobs()
+    assert counters == {"scored": 0, "failed": 0}
+    assert db.list_jobs(con)[0]["match_score"] is None
+    assert db.get_setting(con, "llm_calls", "0") == "0"
+
+
+def _must_not_be_called(job, profile_text, criteria=None):
+    raise AssertionError("LLM called although a skip gate should have fired")
+
+
+async def test_skips_without_api_key(con, profile_file, ai_on, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr("jobdeck.ai.scoring.score_job", _must_not_be_called)
+    _insert_job(con)
+    con.commit()
+
     counters = await scoring.score_new_jobs()
     assert counters == {"scored": 0, "failed": 0}
     assert db.list_jobs(con)[0]["match_score"] is None
 
 
-async def test_one_failure_does_not_block_the_rest(con, profile_file, monkeypatch):
+async def test_skips_without_profile(con, ai_on, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr("jobdeck.ai.scoring.score_job", _must_not_be_called)
+    _insert_job(con)
+    con.commit()
+
+    counters = await scoring.score_new_jobs()
+    assert counters == {"scored": 0, "failed": 0}
+    assert db.list_jobs(con)[0]["match_score"] is None
+
+
+async def test_one_failure_does_not_block_the_rest(con, profile_file, ai_on, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     _insert_job(con, "bad")
     _insert_job(con, "good")
     con.commit()
 
-    def fake_score(job, profile_text):
+    def fake_score(job, profile_text, criteria=None):
         if job["external_id"] == "bad":
             raise llm.LLMError("boom")
         return (80, "Passt.", _usage())
@@ -114,14 +141,14 @@ async def test_one_failure_does_not_block_the_rest(con, profile_file, monkeypatc
     assert jobs["bad"]["match_score"] is None
 
 
-async def test_batch_limit_caps_llm_calls_per_run(con, profile_file, monkeypatch):
+async def test_batch_limit_caps_llm_calls_per_run(con, profile_file, ai_on, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     for i in range(3):
         _insert_job(con, f"j{i}")
     con.commit()
     monkeypatch.setattr(
         "jobdeck.ai.scoring.score_job",
-        lambda job, profile_text: (50, "Ok.", _usage()),
+        lambda job, profile_text, criteria=None: (50, "Ok.", _usage()),
     )
 
     assert (await scoring.score_new_jobs(limit=2))["scored"] == 2
@@ -129,7 +156,7 @@ async def test_batch_limit_caps_llm_calls_per_run(con, profile_file, monkeypatch
     assert (await scoring.score_new_jobs(limit=2))["scored"] == 1
 
 
-async def test_concurrent_runs_never_double_score(con, profile_file, monkeypatch):
+async def test_concurrent_runs_never_double_score(con, profile_file, ai_on, monkeypatch):
     import asyncio
     import time
 
@@ -140,7 +167,7 @@ async def test_concurrent_runs_never_double_score(con, profile_file, monkeypatch
 
     calls = []
 
-    def slow_score(job, profile_text):
+    def slow_score(job, profile_text, criteria=None):
         calls.append(job["id"])
         time.sleep(0.02)  # widen the overlap window
         return (60, "Ok.", _usage())
@@ -154,12 +181,12 @@ async def test_concurrent_runs_never_double_score(con, profile_file, monkeypatch
     assert db.get_setting(con, "llm_calls") == "4"
 
 
-async def test_failed_calls_are_still_metered(con, profile_file, monkeypatch):
+async def test_failed_calls_are_still_metered(con, profile_file, ai_on, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     _insert_job(con, "bad")
     con.commit()
 
-    def fake_score(job, profile_text):
+    def fake_score(job, profile_text, criteria=None):
         raise llm.LLMError("unparseable", usage=_usage(cost=0.003))
 
     monkeypatch.setattr("jobdeck.ai.scoring.score_job", fake_score)
@@ -171,8 +198,65 @@ async def test_failed_calls_are_still_metered(con, profile_file, monkeypatch):
     assert float(db.get_setting(con, "llm_cost_usd")) == pytest.approx(0.003)
 
 
+async def test_kill_switch_stops_an_in_flight_batch(
+    con, profile_file, ai_on, monkeypatch
+):
+    """Flipping AI off mid-batch must stop before the next paid call."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    for i in range(3):
+        _insert_job(con, f"j{i}")
+    con.commit()
+
+    calls = []
+
+    def flip_off_after_first(job, profile_text, criteria=None):
+        calls.append(job["id"])
+        with db.db() as c:  # the Settings switch writes from another thread
+            db.set_setting(c, "ai_enabled", "0")
+        return (60, "Ok.", _usage())
+
+    monkeypatch.setattr("jobdeck.ai.scoring.score_job", flip_off_after_first)
+
+    counters = await scoring.score_new_jobs()
+    assert counters == {"scored": 1, "failed": 0}
+    assert len(calls) == 1  # jobs 2 and 3 were never sent to the API
+    assert db.get_setting(con, "llm_calls") == "1"
+
+
+async def test_profile_criteria_reach_the_scoring_call(
+    con, profile_file, ai_on, monkeypatch
+):
+    from jobdeck.ai import scoring as ai_scoring
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    strict = db.add_profile(
+        con, {"name": "Strict", "keywords": "Python",
+              "hard_tags": "#backend, #remote", "strictness": 80},
+    )
+    plain = db.add_profile(con, {"name": "Plain", "keywords": "Python"})
+    _insert_job(con, "with-criteria", profile_id=strict)
+    _insert_job(con, "plain-profile", profile_id=plain)
+    _insert_job(con, "orphan")  # discovered profile is gone → profile_id None
+    con.commit()
+
+    received = {}
+
+    def fake_score(job, profile_text, criteria=None):
+        received[job["external_id"]] = criteria
+        return (60, "Ok.", _usage())
+
+    monkeypatch.setattr("jobdeck.ai.scoring.score_job", fake_score)
+
+    assert (await scoring.score_new_jobs())["scored"] == 3
+    assert received["with-criteria"] == ai_scoring.MatchCriteria(
+        hard_tags=("#backend", "#remote"), strictness=80
+    )
+    assert received["plain-profile"] is None  # defaults → prompt unchanged
+    assert received["orphan"] is None
+
+
 async def test_retry_cap_gives_up_and_stops_starving_the_batch(
-    con, profile_file, monkeypatch
+    con, profile_file, ai_on, monkeypatch
 ):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     _insert_job(con, "always-bad")  # oldest — would head every batch forever
@@ -180,7 +264,7 @@ async def test_retry_cap_gives_up_and_stops_starving_the_batch(
 
     attempts = []
 
-    def fake_score(job, profile_text):
+    def fake_score(job, profile_text, criteria=None):
         if job["external_id"] == "always-bad":
             attempts.append(job["id"])
             raise llm.LLMError("boom")
