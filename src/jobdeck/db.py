@@ -250,13 +250,19 @@ def list_profiles(con: sqlite3.Connection, active_only: bool = False) -> list[sq
     return con.execute(sql + " ORDER BY id").fetchall()
 
 
+def get_profile(con: sqlite3.Connection, profile_id: int) -> sqlite3.Row | None:
+    return con.execute(
+        "SELECT * FROM search_profiles WHERE id=?", (profile_id,)
+    ).fetchone()
+
+
 def add_profile(con: sqlite3.Connection, values: dict) -> int:
     cur = con.execute(
         """
         INSERT INTO search_profiles
             (name, keywords, location, radius_km, sources, active, auto_send,
-             poll_interval_min, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             poll_interval_min, hard_tags, soft_preferences, strictness, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             values["name"],
@@ -267,6 +273,9 @@ def add_profile(con: sqlite3.Connection, values: dict) -> int:
             int(values.get("active", 1)),
             int(values.get("auto_send", 0)),
             values.get("poll_interval_min", 60),
+            values.get("hard_tags", ""),
+            values.get("soft_preferences", ""),
+            int(values.get("strictness", 50)),
             _now(),
         ),
     )
@@ -278,7 +287,8 @@ def update_profile(con: sqlite3.Connection, profile_id: int, values: dict) -> No
         """
         UPDATE search_profiles SET
             name=?, keywords=?, location=?, radius_km=?, sources=?,
-            active=?, auto_send=?, poll_interval_min=?
+            active=?, auto_send=?, poll_interval_min=?,
+            hard_tags=?, soft_preferences=?, strictness=?
         WHERE id=?
         """,
         (
@@ -290,6 +300,9 @@ def update_profile(con: sqlite3.Connection, profile_id: int, values: dict) -> No
             int(values.get("active", 1)),
             int(values.get("auto_send", 0)),
             values.get("poll_interval_min", 60),
+            values.get("hard_tags", ""),
+            values.get("soft_preferences", ""),
+            int(values.get("strictness", 50)),
             profile_id,
         ),
     )
@@ -345,20 +358,40 @@ def insert_job_if_new(con: sqlite3.Connection, values: dict) -> int | None:
         return None  # UNIQUE(source, external_id) — already known
 
 
+# Score 0 is reserved for hard-criteria violations (see ai/scoring.py); the
+# inbox hides those rows by default but they are never deleted.
+MISMATCH_SQL = "match_score=0"
+
+
 def list_jobs(
-    con: sqlite3.Connection, status: str | None = None, limit: int = 500
+    con: sqlite3.Connection,
+    status: str | None = None,
+    limit: int = 500,
+    include_mismatches: bool = True,
 ) -> list[sqlite3.Row]:
+    where, params = [], []
     if status:
-        return con.execute(
-            """
-            SELECT * FROM jobs WHERE status=?
-            ORDER BY match_score DESC NULLS LAST, id DESC LIMIT ?
-            """,
-            (status, limit),
-        ).fetchall()
+        where.append("status=?")
+        params.append(status)
+    if not include_mismatches:
+        # NULL-safe: unscored postings (match_score IS NULL) must stay visible.
+        where.append("(match_score IS NULL OR match_score<>0)")
+    where_sql = f" WHERE {' AND '.join(where)}" if where else ""
+    order = "match_score DESC NULLS LAST, id DESC" if status else "id DESC"
     return con.execute(
-        "SELECT * FROM jobs ORDER BY id DESC LIMIT ?", (limit,)
+        f"SELECT * FROM jobs{where_sql} ORDER BY {order} LIMIT ?",
+        (*params, limit),
     ).fetchall()
+
+
+def count_mismatches(con: sqlite3.Connection, status: str | None = None) -> int:
+    """How many postings the mismatch filter would hide for this inbox view."""
+    sql = f"SELECT COUNT(*) FROM jobs WHERE {MISMATCH_SQL}"
+    params: tuple = ()
+    if status:
+        sql += " AND status=?"
+        params = (status,)
+    return con.execute(sql, params).fetchone()[0]
 
 
 def get_job(con: sqlite3.Connection, job_id: int) -> sqlite3.Row | None:

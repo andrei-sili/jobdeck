@@ -77,6 +77,46 @@ def test_migrate_is_idempotent(tmp_path):
     con.close()
 
 
+def test_migrate_adds_criteria_columns_to_v1_search_profiles(tmp_path):
+    """A schema-v1 database (before match criteria) gains the new columns."""
+    path = tmp_path / "v1.db"
+    con = sqlite3.connect(path)
+    con.row_factory = sqlite3.Row
+    con.execute(
+        """
+        CREATE TABLE search_profiles (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            name              TEXT NOT NULL,
+            keywords          TEXT NOT NULL,
+            location          TEXT NOT NULL DEFAULT '',
+            radius_km         INTEGER NOT NULL DEFAULT 0,
+            sources           TEXT NOT NULL DEFAULT '[]',
+            active            INTEGER NOT NULL DEFAULT 1,
+            auto_send         INTEGER NOT NULL DEFAULT 0,
+            poll_interval_min INTEGER NOT NULL DEFAULT 60,
+            last_polled_at    TEXT,
+            last_poll_error   TEXT,
+            created_at        TEXT NOT NULL
+        )
+        """
+    )
+    con.execute(
+        "INSERT INTO search_profiles (name, keywords, created_at) VALUES (?, ?, ?)",
+        ("Python DE", "Python", "2026-07-01T10:00:00"),
+    )
+    con.commit()
+
+    migrations.migrate(con)
+
+    row = con.execute("SELECT * FROM search_profiles").fetchone()
+    assert row["hard_tags"] == ""
+    assert row["soft_preferences"] == ""
+    assert row["strictness"] == 50
+    assert row["keywords"] == "Python"  # existing data untouched
+    migrations.migrate(con)  # idempotent with the new columns present
+    con.close()
+
+
 def test_bootstrap_imports_legacy_db(data_dir, monkeypatch):
     legacy_path = data_dir / "old_bewerbungen.db"
     make_legacy_db(legacy_path, LEGACY_ROWS)

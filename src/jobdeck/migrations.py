@@ -7,7 +7,7 @@ legacy `bewerbungen` table keeps its exact shape so the historical data
 
 import sqlite3
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Legacy table, exactly as the previous tracker created it.
 BEWERBUNGEN_SQL = """
@@ -40,7 +40,10 @@ CREATE TABLE IF NOT EXISTS search_profiles (
     poll_interval_min INTEGER NOT NULL DEFAULT 60,
     last_polled_at    TEXT,
     last_poll_error   TEXT,
-    created_at        TEXT NOT NULL
+    created_at        TEXT NOT NULL,
+    hard_tags         TEXT NOT NULL DEFAULT '',
+    soft_preferences  TEXT NOT NULL DEFAULT '',
+    strictness        INTEGER NOT NULL DEFAULT 50
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
@@ -132,10 +135,23 @@ def _ensure_bewerbungen_columns(con: sqlite3.Connection) -> None:
             con.execute(f"ALTER TABLE bewerbungen ADD COLUMN {col} TEXT")
 
 
+def _ensure_search_profile_columns(con: sqlite3.Connection) -> None:
+    """Match-criteria columns added in schema v2 (additive only)."""
+    existing = [row[1] for row in con.execute("PRAGMA table_info(search_profiles)")]
+    for col, ddl in (
+        ("hard_tags", "TEXT NOT NULL DEFAULT ''"),
+        ("soft_preferences", "TEXT NOT NULL DEFAULT ''"),
+        ("strictness", "INTEGER NOT NULL DEFAULT 50"),
+    ):
+        if col not in existing:
+            con.execute(f"ALTER TABLE search_profiles ADD COLUMN {col} {ddl}")
+
+
 def migrate(con: sqlite3.Connection) -> None:
     """Bring the database to the current schema. Safe to run repeatedly."""
     con.execute(BEWERBUNGEN_SQL)
     _ensure_bewerbungen_columns(con)
     con.executescript(NEW_TABLES_SQL)
+    _ensure_search_profile_columns(con)
     con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     con.commit()
