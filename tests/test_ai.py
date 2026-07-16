@@ -161,6 +161,9 @@ def test_build_user_content_includes_job_and_truncates(monkeypatch):
     # truncated to exactly the cap — neither dropped nor passed through whole
     assert content.count("x") == scoring.MAX_DESCRIPTION_CHARS
     assert "User criteria" not in content  # no criteria → prompt unchanged
+    # the untrusted posting is fenced so it cannot impersonate app sections
+    assert content.index("<<<POSTING START>>>") < content.index("x" * 10)
+    assert content.rstrip().endswith("<<<POSTING END>>>")
 
 
 # -- match criteria ------------------------------------------------------------
@@ -181,6 +184,10 @@ def test_criteria_from_profile_parses_tags_and_defaults():
     assert scoring.criteria_from_profile(
         {"hard_tags": "", "soft_preferences": "", "strictness": 90}
     ).strictness == 90
+    # defensive: a NULL strictness (hand-edited DB) falls back to the default
+    assert scoring.criteria_from_profile(
+        {"hard_tags": "#a", "soft_preferences": "", "strictness": None}
+    ).strictness == scoring.DEFAULT_STRICTNESS
 
 
 def test_build_user_content_appends_criteria_section():
@@ -193,27 +200,32 @@ def test_build_user_content_appends_criteria_section():
     assert "- #backend" in section
     assert "Gehalt 45000 @80%" in section
     assert "Strictness: 70/100" in section
+    # the genuine criteria live outside the untrusted-posting fence
+    assert content.index("<<<POSTING END>>>") < content.index("## User criteria")
 
 
 def test_score_zero_is_reserved_for_hard_tag_violations(monkeypatch):
-    def fake_complete(**kwargs):
-        return llm.LLMResult(
-            text='{"score": 0, "reason": "Kein Fit."}',
-            model="m", input_tokens=1, output_tokens=1, cost_usd=0.0,
-        )
+    def complete_returning(score_value):
+        def fake_complete(**kwargs):
+            return llm.LLMResult(
+                text=f'{{"score": {score_value}, "reason": "Kein Fit."}}',
+                model="m", input_tokens=1, output_tokens=1, cost_usd=0.0,
+            )
+        return fake_complete
 
-    monkeypatch.setattr(llm, "complete", fake_complete)
+    hard = scoring.MatchCriteria(hard_tags=("#backend",))
 
+    monkeypatch.setattr(llm, "complete", complete_returning(0))
     # without hard tags a model-returned 0 must not hide the posting
-    score, _, _ = scoring.score_job(_job(), "profile text")
-    assert score == 1
-    score, _, _ = scoring.score_job(
-        _job(), "profile text", scoring.MatchCriteria(strictness=90)
-    )
-    assert score == 1
+    assert scoring.score_job(_job(), "profile")[0] == 1
+    assert scoring.score_job(
+        _job(), "profile", scoring.MatchCriteria(strictness=90)
+    )[0] == 1
+    # with hard tags, a literal 0 is the agreed mismatch signal
+    assert scoring.score_job(_job(), "profile", hard)[0] == 0
 
-    # with hard tags, 0 is the agreed mismatch signal and passes through
-    score, _, _ = scoring.score_job(
-        _job(), "profile text", scoring.MatchCriteria(hard_tags=("#backend",))
-    )
-    assert score == 0
+    # out-of-range noise must never synthesize the reserved 0 sentinel:
+    # the schema cannot forbid negatives, so the clamp maps them to 1
+    monkeypatch.setattr(llm, "complete", complete_returning(-5))
+    assert scoring.score_job(_job(), "profile", hard)[0] == 1
+    assert scoring.score_job(_job(), "profile")[0] == 1
