@@ -53,6 +53,13 @@ JOB_STATUS = ["new", "duplicate", "skipped", "portal", "drafted", "applied"]
 # Lifecycle of an AI-generated application draft
 DRAFT_STATUS = ["generating", "ready", "failed", "approved", "sending", "sent", "discarded"]
 
+# email_log.direction values. Test sends (real sending OFF) get their own
+# direction: they must never look like a real application in the audit log,
+# but still count toward the daily cap — the account's reputation does not
+# care who the recipient was.
+EMAIL_OUTBOUND = "outbound"
+EMAIL_OUTBOUND_TEST = "outbound_test"
+
 # Reply classifications produced by the inbox pipeline
 CLASSIFICATIONS = ["eingang", "absage", "einladung", "sonstige"]
 
