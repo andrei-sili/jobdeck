@@ -4,8 +4,8 @@ from jobdeck.dates import days_since, de_to_iso, heute_de, iso_to_de
 
 
 def test_iso_to_de_valid():
-    assert iso_to_de("2026-06-08") == "08. Juni 2026"
-    assert iso_to_de("2026-03-01") == "01. März 2026"
+    assert iso_to_de("2026-06-08") == "8. Juni 2026"
+    assert iso_to_de("2026-03-01") == "1. März 2026"
 
 
 def test_iso_to_de_invalid_falls_back_to_today():

@@ -1,9 +1,12 @@
 """Job inbox: discovered postings with per-job actions."""
 
+import pathlib
+
 from nicegui import run, ui
 
 from jobdeck import db
-from jobdeck.services import drafting
+from jobdeck.services import drafting, mappe
+from jobdeck.ui.helpers import open_in_system
 from jobdeck.ui.layout import frame
 
 FILTERS = ["new", "portal", "duplicate", "skipped", "applied", "all"]
@@ -122,7 +125,45 @@ async def jobs_page():
                     f"Model: {draft_row['llm_model']} · editing and sending "
                     f"arrive with the review queue"
                 ).classes("text-xs text-gray-500")
+                pdf_label = ui.label(
+                    f"Mappe: {draft_row['pdf_path']}" if draft_row["pdf_path"]
+                    else ""
+                ).classes("text-xs text-gray-600")
                 with ui.row().classes("w-full justify-end gap-2"):
+                    async def make_pdf():
+                        ui.notify("Creating Bewerbungsmappe…")
+                        result = await mappe.create_mappe(job["id"])
+                        if not result["ok"]:
+                            ui.notify(result["error"], type="warning",
+                                      multi_line=True)
+                            return
+                        size_mb = result["size_bytes"] / 1024 / 1024
+                        pdf_label.set_text(f"Mappe: {result['pdf_path']}")
+                        anlagen = (" · Anlagen: " + ", ".join(result["anlagen"])
+                                   if result["anlagen"] else " · no Anlagen")
+                        ui.notify(
+                            f"Mappe ready: {result['pages']} pages, "
+                            f"{size_mb:.1f} MB{anlagen} ✓",
+                            type="positive", multi_line=True,
+                        )
+                        if result["warning"]:
+                            ui.notify(result["warning"], type="warning",
+                                      multi_line=True)
+
+                    def open_pdf():
+                        path = (pdf_label.text or "").removeprefix("Mappe: ")
+                        if not path:
+                            ui.notify("create the Mappe first", type="warning")
+                        elif not pathlib.Path(path).exists():
+                            ui.notify("the Mappe file is gone — create it "
+                                      "again", type="warning")
+                        else:
+                            open_in_system(path)
+
+                    ui.button("Create PDF", icon="picture_as_pdf",
+                              on_click=make_pdf).props("outline")
+                    ui.button("Open PDF", icon="open_in_new",
+                              on_click=open_pdf).props("outline")
                     ui.button("Re-draft", icon="refresh",
                               on_click=lambda: redraft(dialog, job)) \
                         .props("outline")

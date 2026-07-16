@@ -55,7 +55,9 @@ def _claim(job_id: int) -> bool:
             if age_min < CLAIM_TIMEOUT_MIN:
                 return False
             log.warning("reclaiming abandoned draft for job %s", job_id)
-        db.upsert_draft(con, job_id, {"status": "generating"})
+        # A regenerated draft invalidates any previously built Mappe — the
+        # PDF on disk still holds the OLD Anschreiben.
+        db.upsert_draft(con, job_id, {"status": "generating", "pdf_path": ""})
         return True
 
 

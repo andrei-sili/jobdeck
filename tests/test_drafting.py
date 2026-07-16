@@ -220,6 +220,27 @@ async def test_failed_draft_is_recorded_and_metered(
     assert db.get_draft_by_job(con, job_id)["status"] == "ready"
 
 
+async def test_redraft_clears_stale_pdf_path(
+    con, ai_on, applicant, profile_file, monkeypatch
+):
+    """A regenerated draft must not keep pointing at the OLD letter's PDF."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    job_id = _insert_job(con)
+    con.commit()
+    monkeypatch.setattr(
+        "jobdeck.ai.drafting.draft_application",
+        lambda job, profile_text, refnr="", applicant_name="":
+            ("Anrede,\n\nText.", "Mail.", _usage()),
+    )
+    assert (await drafting.draft_for_job(job_id))["ok"]
+    db.upsert_draft(con, job_id, {"pdf_path": "/old/mappe.pdf"})
+    con.commit()
+
+    result = await drafting.draft_for_job(job_id)  # re-draft
+    assert result["ok"]
+    assert result["draft"]["pdf_path"] == ""
+
+
 async def test_generating_claim_blocks_double_spend(
     con, ai_on, applicant, profile_file, monkeypatch
 ):
