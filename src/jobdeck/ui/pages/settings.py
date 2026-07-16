@@ -16,6 +16,9 @@ def _get_settings():
             "follow_up_days": db.get_setting(con, "follow_up_days", "14"),
             "daily_send_cap": db.get_setting(con, "daily_send_cap", "15"),
             "ai_enabled": db.ai_enabled(con),
+            "applicant_name": db.get_setting(con, "applicant_name", ""),
+            "applicant_ort": db.get_setting(con, "applicant_ort", ""),
+            "template_path": db.get_setting(con, "template_path", ""),
             "llm_calls": db.get_setting(con, "llm_calls", "0"),
             "llm_input_tokens": db.get_setting(con, "llm_input_tokens", "0"),
             "llm_output_tokens": db.get_setting(con, "llm_output_tokens", "0"),
@@ -77,6 +80,32 @@ async def settings_page():
                 ui.notify("Saved", type="positive")
 
             ui.button("Save", on_click=save)
+
+        with ui.card().classes("w-full"):
+            ui.label("Application").classes("font-bold")
+            applicant_name = ui.input(
+                "Applicant name (used in the Betreff and e-mail signature)",
+                value=settings["applicant_name"],
+            ).classes("w-96")
+            applicant_ort = ui.input(
+                "City for the letter head (Ort)",
+                value=settings["applicant_ort"],
+            ).classes("w-96")
+            template_path = ui.input(
+                "Letter template path (HTML file with {{TOKEN}} placeholders)",
+                value=settings["template_path"],
+            ).classes("w-full")
+
+            async def save_application():
+                await run.io_bound(_set_setting, "applicant_name",
+                                   applicant_name.value.strip())
+                await run.io_bound(_set_setting, "applicant_ort",
+                                   applicant_ort.value.strip())
+                await run.io_bound(_set_setting, "template_path",
+                                   template_path.value.strip())
+                ui.notify("Saved", type="positive")
+
+            ui.button("Save", on_click=save_application)
 
         with ui.card().classes("w-full"):
             ui.label("AI").classes("font-bold")

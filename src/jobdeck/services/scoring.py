@@ -43,9 +43,12 @@ def _profiles_by_id():
         return {row["id"]: dict(row) for row in db.list_profiles(con)}
 
 
-def _persist_score(job_id: int, score: int, reason: str, usage: llm.LLMResult) -> None:
+def _persist_score(
+    job_id: int, score: int, reason: str, contacts: dict, usage: llm.LLMResult
+) -> None:
     with db.db() as con:
         db.set_job_score(con, job_id, score, reason)
+        db.set_job_contacts(con, job_id, contacts)
         db.record_llm_usage(con, usage.input_tokens, usage.output_tokens, usage.cost_usd)
 
 
@@ -86,7 +89,7 @@ async def score_new_jobs(limit: int = BATCH_LIMIT) -> dict[str, int]:
                 profiles.get(job["profile_id"])
             )
             try:
-                score, reason, usage = await asyncio.to_thread(
+                score, reason, contacts, usage = await asyncio.to_thread(
                     ai_scoring.score_job, job, profile_text, criteria
                 )
             except llm.LLMNotConfigured:
@@ -105,7 +108,9 @@ async def score_new_jobs(limit: int = BATCH_LIMIT) -> dict[str, int]:
                     log.warning("scoring job %s failed: %s", job["id"], exc)
                 continue
             _attempts.pop(job["id"], None)
-            await asyncio.to_thread(_persist_score, job["id"], score, reason, usage)
+            await asyncio.to_thread(
+                _persist_score, job["id"], score, reason, contacts, usage
+            )
             counters["scored"] += 1
 
     if counters["scored"] or counters["failed"]:

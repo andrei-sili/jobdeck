@@ -432,6 +432,32 @@ def set_job_score(
     )
 
 
+def set_job_contacts(con: sqlite3.Connection, job_id: int, contacts: dict) -> None:
+    """Fill contact/reference columns from posting extraction.
+
+    Only empty columns are filled — data the source API already delivered
+    (e.g. arbeitsagentur contact_email) always wins over extraction.
+    contact_source records 'posting' once anything was filled this way."""
+    allowed = ("ansprechpartner", "contact_email", "contact_phone",
+               "contact_strasse", "contact_plz_ort", "refnr")
+    job = get_job(con, job_id)
+    if job is None:
+        return
+    updates = {
+        col: value.strip()
+        for col, value in contacts.items()
+        if col in allowed and value and value.strip() and not (job[col] or "").strip()
+    }
+    if not updates:
+        return
+    if not (job["contact_source"] or "").strip():
+        updates["contact_source"] = "posting"
+    assignments = ", ".join(f"{col}=?" for col in updates)  # closed allowlist
+    con.execute(
+        f"UPDATE jobs SET {assignments} WHERE id=?", (*updates.values(), job_id)
+    )
+
+
 def list_unscored_jobs(
     con: sqlite3.Connection, limit: int = 20, exclude_ids: set[int] | None = None
 ) -> list[sqlite3.Row]:
@@ -451,6 +477,52 @@ def list_unscored_jobs(
 def count_jobs_by_status(con: sqlite3.Connection) -> dict[str, int]:
     rows = con.execute("SELECT status, COUNT(*) AS n FROM jobs GROUP BY status")
     return {row["status"]: row["n"] for row in rows}
+
+
+# --------------------------------------------------------------------------
+# Drafts (one per job — re-drafting replaces the previous attempt)
+# --------------------------------------------------------------------------
+def get_draft(con: sqlite3.Connection, draft_id: int) -> sqlite3.Row | None:
+    return con.execute("SELECT * FROM drafts WHERE id=?", (draft_id,)).fetchone()
+
+
+def get_draft_by_job(con: sqlite3.Connection, job_id: int) -> sqlite3.Row | None:
+    return con.execute(
+        "SELECT * FROM drafts WHERE job_id=? ORDER BY id DESC LIMIT 1", (job_id,)
+    ).fetchone()
+
+
+_DRAFT_FIELDS = ("status", "recipient", "betreff", "email_body",
+                 "anschreiben_body", "llm_model", "error")
+
+
+def upsert_draft(con: sqlite3.Connection, job_id: int, values: dict) -> int:
+    """Insert or update the job's single draft row. Returns the draft id.
+
+    Updates touch only the keys present in `values`, so a status-only
+    transition (claim, failure) never wipes previously drafted text."""
+    existing = get_draft_by_job(con, job_id)
+    if existing is None:
+        fields = {field: values.get(field, "") for field in _DRAFT_FIELDS}
+        fields["status"] = values.get("status", "generating")
+        cur = con.execute(
+            """
+            INSERT INTO drafts
+                (job_id, status, recipient, betreff, email_body,
+                 anschreiben_body, llm_model, error, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (job_id, *(fields[f] for f in _DRAFT_FIELDS), _now(), _now()),
+        )
+        return cur.lastrowid
+    updates = {field: values[field] for field in _DRAFT_FIELDS if field in values}
+    columns = [*updates, "updated_at"]  # closed allowlist + timestamp
+    assignments = ", ".join(f"{column}=?" for column in columns)
+    con.execute(
+        f"UPDATE drafts SET {assignments} WHERE id=?",
+        (*updates.values(), _now(), existing["id"]),
+    )
+    return existing["id"]
 
 
 # --------------------------------------------------------------------------
@@ -515,15 +587,28 @@ def ai_enabled(con: sqlite3.Connection) -> bool:
     return get_setting(con, "ai_enabled", "0") == "1"
 
 
+def _bump_int_setting(con: sqlite3.Connection, key: str, delta: int) -> None:
+    con.execute(
+        "INSERT INTO app_settings (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = "
+        "CAST(CAST(value AS INTEGER) + CAST(excluded.value AS INTEGER) AS TEXT)",
+        (key, str(int(delta))),
+    )
+
+
 def record_llm_usage(
     con: sqlite3.Connection, input_tokens: int, output_tokens: int, cost_usd: float
 ) -> None:
-    """Accumulate LLM metering counters (settings values are strings)."""
-    calls = int(get_setting(con, "llm_calls", "0")) + 1
-    tokens_in = int(get_setting(con, "llm_input_tokens", "0")) + input_tokens
-    tokens_out = int(get_setting(con, "llm_output_tokens", "0")) + output_tokens
-    cost = float(get_setting(con, "llm_cost_usd", "0")) + cost_usd
-    set_setting(con, "llm_calls", str(calls))
-    set_setting(con, "llm_input_tokens", str(tokens_in))
-    set_setting(con, "llm_output_tokens", str(tokens_out))
-    set_setting(con, "llm_cost_usd", f"{cost:.6f}")
+    """Accumulate LLM metering counters (settings values are strings).
+
+    The arithmetic happens in SQL so concurrent writers (a scoring batch
+    and a drafting click) cannot lose updates to a read-modify-write race."""
+    _bump_int_setting(con, "llm_calls", 1)
+    _bump_int_setting(con, "llm_input_tokens", input_tokens)
+    _bump_int_setting(con, "llm_output_tokens", output_tokens)
+    con.execute(
+        "INSERT INTO app_settings (key, value) VALUES (?, printf('%.6f', ?)) "
+        "ON CONFLICT(key) DO UPDATE SET value = "
+        "printf('%.6f', CAST(value AS REAL) + CAST(excluded.value AS REAL))",
+        ("llm_cost_usd", float(cost_usd)),
+    )
