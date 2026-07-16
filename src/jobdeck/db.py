@@ -499,6 +499,12 @@ def set_setting(con: sqlite3.Connection, key: str, value: str) -> None:
     )
 
 
+def ai_enabled(con: sqlite3.Connection) -> bool:
+    """Master switch for all LLM spend. Off by default — the user opts in
+    from Settings; every service that calls the LLM must check this first."""
+    return get_setting(con, "ai_enabled", "0") == "1"
+
+
 def record_llm_usage(
     con: sqlite3.Connection, input_tokens: int, output_tokens: int, cost_usd: float
 ) -> None:

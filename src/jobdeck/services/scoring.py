@@ -3,8 +3,8 @@
 Runs on the scheduler alongside polling: picks unscored 'new' postings, asks
 the LLM for a 0-100 fit against the user's profile and stores score + reason
 (the inbox already sorts by score). Skips quietly — with a log hint — while
-no API key or profile.md exists; a failing posting is logged and does not
-block the rest of the batch.
+the AI toggle is off (the default) or no API key or profile.md exists; a
+failing posting is logged and does not block the rest of the batch.
 
 Cost guards: a module-level lock makes runs single-flight (the settings-page
 button would otherwise overlap the scheduled run and pay for the same jobs
@@ -28,6 +28,11 @@ _lock = asyncio.Lock()
 _attempts: dict[int, int] = {}  # job id -> failed scoring attempts
 
 
+def _ai_enabled() -> bool:
+    with db.db() as con:
+        return db.ai_enabled(con)
+
+
 def _unscored_jobs(limit: int, exclude_ids: set[int]):
     with db.db() as con:
         return db.list_unscored_jobs(con, limit, exclude_ids=exclude_ids)
@@ -47,6 +52,9 @@ def _persist_usage(usage: llm.LLMResult) -> None:
 async def score_new_jobs(limit: int = BATCH_LIMIT) -> dict[str, int]:
     """Score up to `limit` unscored new jobs. Returns outcome counters."""
     counters = {"scored": 0, "failed": 0}
+    if not await asyncio.to_thread(_ai_enabled):
+        log.info("scoring skipped: AI is disabled in Settings")
+        return counters
     if not config.anthropic_api_key():
         log.info("scoring skipped: ANTHROPIC_API_KEY not set")
         return counters
