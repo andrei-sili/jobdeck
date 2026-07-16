@@ -87,10 +87,7 @@ async def test_skips_when_ai_disabled(con, profile_file, monkeypatch):
     _insert_job(con)
     con.commit()
 
-    def must_not_be_called(job, profile_text, criteria=None):
-        raise AssertionError("LLM called although AI is disabled")
-
-    monkeypatch.setattr("jobdeck.ai.scoring.score_job", must_not_be_called)
+    monkeypatch.setattr("jobdeck.ai.scoring.score_job", _must_not_be_called)
 
     counters = await scoring.score_new_jobs()
     assert counters == {"scored": 0, "failed": 0}
@@ -98,8 +95,13 @@ async def test_skips_when_ai_disabled(con, profile_file, monkeypatch):
     assert db.get_setting(con, "llm_calls", "0") == "0"
 
 
+def _must_not_be_called(job, profile_text, criteria=None):
+    raise AssertionError("LLM called although a skip gate should have fired")
+
+
 async def test_skips_without_api_key(con, profile_file, ai_on, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr("jobdeck.ai.scoring.score_job", _must_not_be_called)
     _insert_job(con)
     con.commit()
 
@@ -110,6 +112,7 @@ async def test_skips_without_api_key(con, profile_file, ai_on, monkeypatch):
 
 async def test_skips_without_profile(con, ai_on, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr("jobdeck.ai.scoring.score_job", _must_not_be_called)
     _insert_job(con)
     con.commit()
 
@@ -193,6 +196,31 @@ async def test_failed_calls_are_still_metered(con, profile_file, ai_on, monkeypa
     assert db.list_jobs(con)[0]["match_score"] is None
     assert db.get_setting(con, "llm_calls") == "1"
     assert float(db.get_setting(con, "llm_cost_usd")) == pytest.approx(0.003)
+
+
+async def test_kill_switch_stops_an_in_flight_batch(
+    con, profile_file, ai_on, monkeypatch
+):
+    """Flipping AI off mid-batch must stop before the next paid call."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    for i in range(3):
+        _insert_job(con, f"j{i}")
+    con.commit()
+
+    calls = []
+
+    def flip_off_after_first(job, profile_text, criteria=None):
+        calls.append(job["id"])
+        with db.db() as c:  # the Settings switch writes from another thread
+            db.set_setting(c, "ai_enabled", "0")
+        return (60, "Ok.", _usage())
+
+    monkeypatch.setattr("jobdeck.ai.scoring.score_job", flip_off_after_first)
+
+    counters = await scoring.score_new_jobs()
+    assert counters == {"scored": 1, "failed": 0}
+    assert len(calls) == 1  # jobs 2 and 3 were never sent to the API
+    assert db.get_setting(con, "llm_calls") == "1"
 
 
 async def test_profile_criteria_reach_the_scoring_call(

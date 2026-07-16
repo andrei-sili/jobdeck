@@ -71,8 +71,16 @@ async def score_new_jobs(limit: int = BATCH_LIMIT) -> dict[str, int]:
     async with _lock:  # manual runs and the scheduled job never overlap
         given_up = {job_id for job_id, n in _attempts.items() if n >= MAX_ATTEMPTS}
         jobs = await asyncio.to_thread(_unscored_jobs, limit, given_up)
+        # One criteria snapshot per batch: a mid-batch profile edit applies
+        # from the next run — deliberate, keeps a batch internally consistent.
         profiles = await asyncio.to_thread(_profiles_by_id) if jobs else {}
         for job in jobs:
+            # Re-check the kill switch before every paid call: flipping it
+            # off mid-batch (or while queued behind the lock) must stop the
+            # spend now, not after up to BATCH_LIMIT more calls.
+            if not await asyncio.to_thread(_ai_enabled):
+                log.info("scoring stopped: AI was disabled mid-run")
+                break
             # deleted profile (profile_id NULL) → generic scoring, no criteria
             criteria = ai_scoring.criteria_from_profile(
                 profiles.get(job["profile_id"])
