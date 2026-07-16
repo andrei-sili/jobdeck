@@ -41,8 +41,13 @@ def _get_job(job_id: int):
 
 
 def _claim(job_id: int) -> bool:
-    """Mark the job's draft as 'generating'; False if already claimed."""
+    """Mark the job's draft as 'generating'; False if already claimed.
+
+    BEGIN IMMEDIATE makes the check-then-write atomic across connections:
+    a concurrent second claim blocks on the write lock, then sees the
+    first claim's 'generating' row and backs off — no double spend."""
     with db.db() as con:
+        con.execute("BEGIN IMMEDIATE")
         existing = db.get_draft_by_job(con, job_id)
         if existing is not None and existing["status"] == "generating":
             started = datetime.datetime.fromisoformat(existing["updated_at"])
@@ -95,9 +100,10 @@ async def draft_for_job(job_id: int) -> dict:
     if not await asyncio.to_thread(_claim, job_id):
         return _error("a draft for this posting is already being generated")
 
+    refnr = resolve_refnr(job)
     try:
         anschreiben, email_body, usage = await asyncio.to_thread(
-            ai_drafting.draft_application, job, profile_text
+            ai_drafting.draft_application, job, profile_text, refnr, applicant_name
         )
     except llm.LLMNotConfigured as exc:
         await asyncio.to_thread(
@@ -110,10 +116,15 @@ async def draft_for_job(job_id: int) -> dict:
         )
         log.warning("drafting job %s failed: %s", job_id, exc)
         return _error(f"drafting failed: {exc}")
+    except Exception as exc:
+        # Unexpected failure: release the claim so the user can retry
+        # immediately, then surface the error — never swallow it.
+        await asyncio.to_thread(
+            _finish, job_id, {"status": "failed", "error": f"unexpected: {exc}"}, None
+        )
+        raise
 
-    betreff = ai_drafting.build_betreff(
-        job["title"], resolve_refnr(job), applicant_name
-    )
+    betreff = ai_drafting.build_betreff(job["title"], refnr, applicant_name)
     draft = await asyncio.to_thread(
         _finish,
         job_id,

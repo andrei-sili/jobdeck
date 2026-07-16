@@ -42,13 +42,22 @@ def _job(**over):
 
 def test_build_user_content_fences_posting_and_names_contact():
     job = _job(description="x" * (ai_drafting.MAX_DESCRIPTION_CHARS + 100))
-    content = ai_drafting.build_user_content(job, "my profile")
+    content = ai_drafting.build_user_content(
+        job, "my profile", refnr="K-17", applicant_name="Erika Muster"
+    )
     assert "my profile" in content
-    assert "Referenznummer: K-17" in content
+    assert "Name: Erika Muster" in content
+    assert "Referenznummer: K-17" in content  # the resolved one, as in the Betreff
     assert "Ansprechpartner: Frau Weber" in content
     assert content.count("x") == ai_drafting.MAX_DESCRIPTION_CHARS
     assert content.index("<<<POSTING START>>>") < content.index("x" * 10)
     assert content.rstrip().endswith("<<<POSTING END>>>")
+
+
+def test_build_betreff_collapses_smuggled_whitespace():
+    # posting-derived title must not inject newlines into a subject line
+    assert ai_drafting.build_betreff("Dev\nX-Evil: 1", "K\n1", "Max\tMuster") \
+        == "Bewerbung als Dev X-Evil: 1, K 1 – Max Muster"
 
 
 def test_draft_application_parses_and_strips(monkeypatch):
@@ -117,7 +126,7 @@ def profile_file(data_dir):
     config.PROFILE_PATH.write_text("Python developer, 3 years", encoding="utf-8")
 
 
-def _must_not_be_called(job, profile_text):
+def _must_not_be_called(job, profile_text, refnr="", applicant_name=""):
     raise AssertionError("LLM called although a gate should have fired")
 
 
@@ -160,7 +169,8 @@ async def test_successful_draft_is_persisted_and_metered(
 
     monkeypatch.setattr(
         "jobdeck.ai.drafting.draft_application",
-        lambda job, profile_text: ("Sehr geehrte Frau Weber,\n\nAbsatz.",
+        lambda job, profile_text, refnr="", applicant_name="":
+            ("Sehr geehrte Frau Weber,\n\nAbsatz.",
                                    "Guten Tag,\n\nanbei meine Bewerbung.\n\n"
                                    "Mit freundlichen Grüßen\nMax Muster",
                                    _usage()),
@@ -187,7 +197,7 @@ async def test_failed_draft_is_recorded_and_metered(
     job_id = _insert_job(con)
     con.commit()
 
-    def failing(job, profile_text):
+    def failing(job, profile_text, refnr="", applicant_name=""):
         raise llm.LLMError("unparseable", usage=_usage(cost=0.003))
 
     monkeypatch.setattr("jobdeck.ai.drafting.draft_application", failing)
@@ -202,7 +212,8 @@ async def test_failed_draft_is_recorded_and_metered(
     # a failed draft is re-claimable immediately — the user may retry
     monkeypatch.setattr(
         "jobdeck.ai.drafting.draft_application",
-        lambda job, profile_text: ("Anrede,\n\nText.", "Mail.", _usage()),
+        lambda job, profile_text, refnr="", applicant_name="":
+            ("Anrede,\n\nText.", "Mail.", _usage()),
     )
     result = await drafting.draft_for_job(job_id)
     assert result["ok"]
@@ -224,6 +235,43 @@ async def test_generating_claim_blocks_double_spend(
     assert db.get_setting(con, "llm_calls", "0") == "0"
 
 
+async def test_llm_not_configured_releases_claim_without_metering(
+    con, ai_on, applicant, profile_file, monkeypatch
+):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    job_id = _insert_job(con)
+    con.commit()
+
+    def not_configured(job, profile_text, refnr="", applicant_name=""):
+        raise llm.LLMNotConfigured("ANTHROPIC_API_KEY is not set")
+
+    monkeypatch.setattr("jobdeck.ai.drafting.draft_application", not_configured)
+    result = await drafting.draft_for_job(job_id)
+    assert not result["ok"] and "ANTHROPIC_API_KEY" in result["error"]
+    assert db.get_draft_by_job(con, job_id)["status"] == "failed"
+    assert db.get_setting(con, "llm_calls", "0") == "0"  # nothing was billed
+
+
+async def test_recent_claim_still_blocks_just_under_the_timeout(
+    con, ai_on, applicant, profile_file, monkeypatch
+):
+    import datetime
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    job_id = _insert_job(con)
+    con.commit()
+    db.upsert_draft(con, job_id, {"status": "generating"})
+    recent = (datetime.datetime.now()
+              - datetime.timedelta(minutes=drafting.CLAIM_TIMEOUT_MIN - 1)
+              ).isoformat(timespec="seconds")
+    con.execute("UPDATE drafts SET updated_at=?", (recent,))
+    con.commit()
+
+    monkeypatch.setattr("jobdeck.ai.drafting.draft_application", _must_not_be_called)
+    result = await drafting.draft_for_job(job_id)
+    assert not result["ok"] and "already being generated" in result["error"]
+
+
 async def test_abandoned_claim_is_reclaimed(
     con, ai_on, applicant, profile_file, monkeypatch
 ):
@@ -231,13 +279,14 @@ async def test_abandoned_claim_is_reclaimed(
     job_id = _insert_job(con)
     con.commit()
     db.upsert_draft(con, job_id, {"status": "generating"})
-    stale = "2026-07-16T00:00:00"  # far older than CLAIM_TIMEOUT_MIN
+    stale = "2020-01-01T00:00:00"  # far older than CLAIM_TIMEOUT_MIN
     con.execute("UPDATE drafts SET updated_at=?", (stale,))
     con.commit()
 
     monkeypatch.setattr(
         "jobdeck.ai.drafting.draft_application",
-        lambda job, profile_text: ("Anrede,\n\nText.", "Mail.", _usage()),
+        lambda job, profile_text, refnr="", applicant_name="":
+            ("Anrede,\n\nText.", "Mail.", _usage()),
     )
     result = await drafting.draft_for_job(job_id)
     assert result["ok"]
