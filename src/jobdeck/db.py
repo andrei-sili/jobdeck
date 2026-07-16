@@ -367,15 +367,20 @@ def list_jobs(
     con: sqlite3.Connection,
     status: str | None = None,
     limit: int = 500,
-    include_mismatches: bool = True,
+    mismatches: str = "include",
 ) -> list[sqlite3.Row]:
+    """List postings. mismatches: 'include' (default), 'exclude' (hide the
+    score-0 rows, NULL-safe so unscored postings stay visible) or 'only'
+    (just the hidden pile — keeps mismatches reachable regardless of how
+    many better-scored rows fill the page limit)."""
     where, params = [], []
     if status:
         where.append("status=?")
         params.append(status)
-    if not include_mismatches:
-        # NULL-safe: unscored postings (match_score IS NULL) must stay visible.
+    if mismatches == "exclude":
         where.append("(match_score IS NULL OR match_score<>0)")
+    elif mismatches == "only":
+        where.append(MISMATCH_SQL)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     order = "match_score DESC NULLS LAST, id DESC" if status else "id DESC"
     return con.execute(

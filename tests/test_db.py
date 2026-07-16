@@ -123,20 +123,38 @@ def test_list_jobs_hides_and_counts_mismatches(con):
     db.set_job_score(con, ok, 70, "Passt.")
     db.set_job_score(con, mismatch, 0, "Verstößt gegen #backend.")
 
-    visible = db.list_jobs(con, status="new", include_mismatches=False)
+    visible = db.list_jobs(con, status="new", mismatches="exclude")
     assert [r["id"] for r in visible] == [ok, unscored]  # NULL score stays visible
 
     everything = db.list_jobs(con, status="new")
     assert {r["id"] for r in everything} == {ok, mismatch, unscored}
 
+    # the hidden pile stays reachable even when better rows fill the limit
+    assert [r["id"] for r in db.list_jobs(con, status="new", limit=1,
+                                          mismatches="only")] == [mismatch]
+
     assert db.count_mismatches(con, status="new") == 1
     assert db.count_mismatches(con, status="applied") == 0
     assert db.count_mismatches(con) == 1
 
-    # the all-statuses view filters too
-    assert mismatch not in [
-        r["id"] for r in db.list_jobs(con, include_mismatches=False)
-    ]
+    # the all-statuses view filters too (id DESC, exact rows)
+    assert [r["id"] for r in db.list_jobs(con, mismatches="exclude")] \
+        == [unscored, ok]
+
+
+def test_list_jobs_sorts_by_score_then_newest(con):
+    """'Score sorts' is the core product rule — pin direction and tiebreak."""
+    low = _add_job(con, external_id="low")
+    high_old = _add_job(con, external_id="high-old")
+    high_new = _add_job(con, external_id="high-new")
+    unscored = _add_job(con, external_id="unscored")
+    db.set_job_score(con, low, 30, "Teilweise.")
+    db.set_job_score(con, high_old, 90, "Sehr gut.")
+    db.set_job_score(con, high_new, 90, "Sehr gut.")
+
+    rows = db.list_jobs(con, status="new")
+    # best score first, newer id wins the tie, unscored (NULL) last
+    assert [r["id"] for r in rows] == [high_new, high_old, low, unscored]
 
 
 def test_delete_bewerbung_clears_references(con):

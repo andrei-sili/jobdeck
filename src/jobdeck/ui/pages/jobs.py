@@ -9,15 +9,19 @@ FILTERS = ["new", "portal", "duplicate", "skipped", "applied", "all"]
 PAGE_LIMIT = 100
 
 
-def _load_jobs(status: str, include_mismatches: bool):
-    """Inbox rows plus how many score-0 mismatches the filter is hiding."""
+def _load_jobs(status: str, show_mismatches: bool):
+    """Inbox rows plus how many score-0 mismatches the filter is hiding.
+
+    The mismatch view lists ONLY the hidden pile: mixing mismatches into the
+    normal list would leave them unreachable once better-scored rows fill
+    PAGE_LIMIT (score 0 sorts last)."""
     with db.db() as con:
         status_arg = None if status == "all" else status
         rows = db.list_jobs(
             con, status_arg, limit=PAGE_LIMIT,
-            include_mismatches=include_mismatches,
+            mismatches="only" if show_mismatches else "exclude",
         )
-        hidden = 0 if include_mismatches else db.count_mismatches(con, status_arg)
+        hidden = 0 if show_mismatches else db.count_mismatches(con, status_arg)
         return [dict(r) for r in rows], hidden
 
 
@@ -36,18 +40,26 @@ async def jobs_page():
     with frame("Job inbox"):
         status_filter = {"value": "new"}
         show_mismatches = {"value": False}
+        refresh_gen = {"n": 0}  # rapid filter/switch flips: last request wins
         container = ui.column().classes("w-full gap-2")
 
         async def refresh():
-            container.clear()
+            refresh_gen["n"] += 1
+            gen = refresh_gen["n"]
             jobs, hidden = await run.io_bound(
                 _load_jobs, status_filter["value"], show_mismatches["value"]
             )
+            if gen != refresh_gen["n"]:
+                return  # superseded — a newer refresh already owns the view
+            container.clear()
             hidden_label.set_text(f"{hidden} mismatches hidden" if hidden else "")
             with container:
                 if not jobs:
-                    ui.label("Nothing here. Run a search profile to discover jobs.") \
-                        .classes("text-gray-500")
+                    empty = ("No mismatches — nothing is hidden."
+                             if show_mismatches["value"]
+                             else "Nothing here. Run a search profile to "
+                                  "discover jobs.")
+                    ui.label(empty).classes("text-gray-500")
                 for job in jobs:
                     render_job(job)
 
@@ -116,8 +128,8 @@ async def jobs_page():
                 "Show mismatches",
                 value=False,
                 on_change=lambda e: set_mismatches(e.value),
-            ).tooltip("Postings that violate a hard requirement (score 0) — "
-                      "hidden, never deleted")
+            ).tooltip("Show the hidden pile: postings scored 0 for violating "
+                      "a hard requirement — hidden, never deleted")
             hidden_label = ui.label().classes("text-xs text-gray-500")
 
         async def set_filter(value: str):
