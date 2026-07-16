@@ -113,7 +113,42 @@ def test_migrate_adds_criteria_columns_to_v1_search_profiles(tmp_path):
     assert row["soft_preferences"] == ""
     assert row["strictness"] == 50
     assert row["keywords"] == "Python"  # existing data untouched
+    assert (con.execute("PRAGMA user_version").fetchone()[0]
+            == migrations.SCHEMA_VERSION)
     migrations.migrate(con)  # idempotent with the new columns present
+    con.close()
+
+
+def test_migrate_remaps_v1_zero_scores_to_the_new_floor(tmp_path):
+    """v1 stored 0 = 'very bad fit'; v2 reserves 0 for hard violations."""
+    path = tmp_path / "v1.db"
+    con = sqlite3.connect(path)
+    con.row_factory = sqlite3.Row
+    migrations.migrate(con)  # full current schema, then rewind the stamp
+    con.execute("PRAGMA user_version = 1")
+    con.executemany(
+        """
+        INSERT INTO jobs (source, external_id, fetched_at, match_score)
+        VALUES (?, ?, '2026-07-01T10:00:00', ?)
+        """,
+        [("stub", "old-zero", 0), ("stub", "old-fifty", 50),
+         ("stub", "unscored", None)],
+    )
+    con.commit()
+
+    migrations.migrate(con)
+
+    scores = {r["external_id"]: r["match_score"]
+              for r in con.execute("SELECT external_id, match_score FROM jobs")}
+    assert scores == {"old-zero": 1, "old-fifty": 50, "unscored": None}
+
+    # a v2 zero is a genuine violation signal and must survive re-migration
+    con.execute("UPDATE jobs SET match_score=0 WHERE external_id='old-zero'")
+    con.commit()
+    migrations.migrate(con)
+    assert con.execute(
+        "SELECT match_score FROM jobs WHERE external_id='old-zero'"
+    ).fetchone()[0] == 0
     con.close()
 
 

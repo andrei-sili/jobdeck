@@ -149,9 +149,16 @@ def _ensure_search_profile_columns(con: sqlite3.Connection) -> None:
 
 def migrate(con: sqlite3.Connection) -> None:
     """Bring the database to the current schema. Safe to run repeatedly."""
+    version = con.execute("PRAGMA user_version").fetchone()[0]
     con.execute(BEWERBUNGEN_SQL)
     _ensure_bewerbungen_columns(con)
     con.executescript(NEW_TABLES_SQL)
     _ensure_search_profile_columns(con)
+    if version < 2:
+        # v2 reserves match_score 0 for hard-criteria violations and hides
+        # such rows by default. Under v1 semantics 0 just meant "very bad
+        # fit", so remap pre-existing 0s to the new floor of 1 — otherwise
+        # they would be silently hidden and mislabeled after the upgrade.
+        con.execute("UPDATE jobs SET match_score=1 WHERE match_score=0")
     con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     con.commit()
