@@ -11,6 +11,8 @@ def data_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "BACKUP_DIR", tmp_path / "backups")
     monkeypatch.setattr(config, "OUTPUT_DIR", tmp_path / "output")
     monkeypatch.setattr(config, "PROFILE_PATH", tmp_path / "profile.md")
+    monkeypatch.setattr(config, "TOKEN_PATH", tmp_path / "token.json")
+    monkeypatch.setattr(config, "CLIENT_SECRET_PATH", tmp_path / "client_secret.json")
     config.ensure_data_dirs()
     return tmp_path
 
