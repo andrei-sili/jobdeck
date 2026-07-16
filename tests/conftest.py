@@ -1,8 +1,6 @@
-import sqlite3
-
 import pytest
 
-from jobdeck import config, migrations
+from jobdeck import config, db, migrations
 
 
 @pytest.fixture()
@@ -19,9 +17,13 @@ def data_dir(tmp_path, monkeypatch):
 
 @pytest.fixture()
 def con(data_dir):
-    """Migrated in-file test database with row access by name."""
-    con = sqlite3.connect(config.DB_PATH)
-    con.row_factory = sqlite3.Row
+    """Migrated test database, WAL from the start like production.
+
+    Must go through db.connect(): a plain sqlite3.connect would leave the
+    file in delete journal mode, and the service's first concurrent
+    connections would then race on the delete→WAL conversion — an
+    exclusive-lock operation that fails fast ("database is locked")."""
+    con = db.connect()
     migrations.migrate(con)
     yield con
     con.close()

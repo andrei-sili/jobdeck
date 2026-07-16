@@ -23,8 +23,13 @@ def _now() -> str:
 def connect(db_path: Path | None = None) -> sqlite3.Connection:
     con = sqlite3.connect(db_path or config.DB_PATH)
     con.row_factory = sqlite3.Row
-    con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA busy_timeout=5000")
+    # No-op on an already-WAL database. The one-time delete→WAL conversion
+    # needs an exclusive lock and fails fast under concurrency (the busy
+    # handler is not consulted for it), so it must happen uncontended:
+    # bootstrap migrates single-threaded at startup, and test fixtures
+    # create their database through this function for the same reason.
+    con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA foreign_keys=ON")
     return con
 
