@@ -2,13 +2,22 @@
 
 The score only sorts the job inbox — it never filters anything out (the user
 applies broadly). The reason is a short German note shown next to the score.
+
+Per-profile match criteria ride inside the same call (no extra API spend):
+hard requirements reserve score 0 for clear violations (the inbox hides
+those behind a "show mismatches" toggle), weighted preferences shift the
+score, and the strictness knob controls how hard adjacent technology is
+penalized.
 """
 
 import json
+import re
+from dataclasses import dataclass
 
 from jobdeck.ai import llm
 
 MAX_DESCRIPTION_CHARS = 8000  # bounds cost; postings rarely exceed this
+DEFAULT_STRICTNESS = 50
 
 SCORE_SCHEMA = {
     "type": "object",
@@ -32,13 +41,65 @@ Rules:
   fit against the profile.
 - reason: at most two short sentences, written in German, naming the main
   overlaps or gaps.
+
+A "User criteria" section may follow the posting:
+- Hard requirements: score 0 ONLY when the posting clearly violates one,
+  and name the violated requirement in reason. A posting that simply does
+  not mention a requirement is NOT a violation. Score 0 is reserved for
+  exactly this case — otherwise the minimum score is 1.
+- Weighted preferences: shift the score in proportion to the given weight.
+  Information missing from the posting is neutral, never a penalty.
+- Strictness N/100: how hard to penalize postings whose technology stack is
+  adjacent to, but not exactly, the profile's (0 = barely penalize adjacent
+  stacks, 100 = only a near-exact stack may score high).
 """
 
 
-def build_user_content(job, profile_text: str) -> str:
+@dataclass(frozen=True)
+class MatchCriteria:
+    """User-defined per-profile criteria, embedded in the scoring prompt."""
+
+    hard_tags: tuple[str, ...] = ()
+    soft_preferences: str = ""
+    strictness: int = DEFAULT_STRICTNESS
+
+
+def criteria_from_profile(profile_row) -> MatchCriteria | None:
+    """Criteria from a search_profiles row; None when the profile defines
+    nothing beyond the defaults (the prompt stays exactly as without them)."""
+    if profile_row is None:
+        return None
+    hard_tags = tuple(
+        tag.strip()
+        for tag in re.split(r"[,\n]", profile_row["hard_tags"] or "")
+        if tag.strip()
+    )
+    soft = (profile_row["soft_preferences"] or "").strip()
+    strictness = profile_row["strictness"]
+    strictness = DEFAULT_STRICTNESS if strictness is None else int(strictness)
+    if not hard_tags and not soft and strictness == DEFAULT_STRICTNESS:
+        return None
+    return MatchCriteria(hard_tags, soft, strictness)
+
+
+def _criteria_section(criteria: MatchCriteria) -> str:
+    lines = ["## User criteria"]
+    if criteria.hard_tags:
+        lines.append("Hard requirements (score 0 only on a clear violation):")
+        lines += [f"- {tag}" for tag in criteria.hard_tags]
+    if criteria.soft_preferences:
+        lines.append("Weighted preferences (missing information is neutral):")
+        lines.append(criteria.soft_preferences)
+    lines.append(f"Strictness: {criteria.strictness}/100")
+    return "\n".join(lines)
+
+
+def build_user_content(
+    job, profile_text: str, criteria: MatchCriteria | None = None
+) -> str:
     description = (job["description"] or "")[:MAX_DESCRIPTION_CHARS]
     remote = " (remote)" if job["remote"] else ""
-    return (
+    content = (
         f"## Candidate profile\n{profile_text}\n\n"
         f"## Job posting\n"
         f"Title: {job['title']}\n"
@@ -46,19 +107,28 @@ def build_user_content(job, profile_text: str) -> str:
         f"Location: {job['location'] or 'n/a'}{remote}\n\n"
         f"{description or '(no description available)'}"
     )
+    if criteria is not None:
+        content += f"\n\n{_criteria_section(criteria)}"
+    return content
 
 
-def score_job(job, profile_text: str) -> tuple[int, str, llm.LLMResult]:
+def score_job(
+    job, profile_text: str, criteria: MatchCriteria | None = None
+) -> tuple[int, str, llm.LLMResult]:
     """Score one posting against the profile. Returns (score, reason, usage)."""
     result = llm.complete(
         system=SYSTEM_PROMPT,
-        user_content=build_user_content(job, profile_text),
+        user_content=build_user_content(job, profile_text, criteria),
         max_tokens=300,
         output_schema=SCORE_SCHEMA,
     )
     try:
         data = json.loads(result.text)
-        score = max(0, min(100, int(data["score"])))
+        # Score 0 means "hard requirement violated" downstream (the inbox
+        # hides it) — without hard tags that meaning cannot apply, so 1 is
+        # the effective floor no matter what the model returned.
+        floor = 0 if (criteria is not None and criteria.hard_tags) else 1
+        score = max(floor, min(100, int(data["score"])))
         reason = str(data["reason"]).strip()
     except (ValueError, KeyError, TypeError) as exc:
         raise llm.LLMError(

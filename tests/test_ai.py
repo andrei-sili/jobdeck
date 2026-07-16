@@ -160,3 +160,60 @@ def test_build_user_content_includes_job_and_truncates(monkeypatch):
     assert "(remote)" in content
     # truncated to exactly the cap — neither dropped nor passed through whole
     assert content.count("x") == scoring.MAX_DESCRIPTION_CHARS
+    assert "User criteria" not in content  # no criteria → prompt unchanged
+
+
+# -- match criteria ------------------------------------------------------------
+def test_criteria_from_profile_parses_tags_and_defaults():
+    row = {"hard_tags": "#backend, #münchen\n #remote ",
+           "soft_preferences": " Gehalt 45000 @80% ", "strictness": 70}
+    criteria = scoring.criteria_from_profile(row)
+    assert criteria.hard_tags == ("#backend", "#münchen", "#remote")
+    assert criteria.soft_preferences == "Gehalt 45000 @80%"
+    assert criteria.strictness == 70
+
+    # nothing beyond defaults → None, so the prompt stays byte-identical
+    assert scoring.criteria_from_profile(
+        {"hard_tags": "", "soft_preferences": "", "strictness": 50}
+    ) is None
+    assert scoring.criteria_from_profile(None) is None
+    # a non-default strictness alone is a reason to send the section
+    assert scoring.criteria_from_profile(
+        {"hard_tags": "", "soft_preferences": "", "strictness": 90}
+    ).strictness == 90
+
+
+def test_build_user_content_appends_criteria_section():
+    criteria = scoring.MatchCriteria(
+        hard_tags=("#backend",), soft_preferences="Gehalt 45000 @80%",
+        strictness=70,
+    )
+    content = scoring.build_user_content(_job(), "my profile", criteria)
+    section = content.split("## User criteria")[1]
+    assert "- #backend" in section
+    assert "Gehalt 45000 @80%" in section
+    assert "Strictness: 70/100" in section
+
+
+def test_score_zero_is_reserved_for_hard_tag_violations(monkeypatch):
+    def fake_complete(**kwargs):
+        return llm.LLMResult(
+            text='{"score": 0, "reason": "Kein Fit."}',
+            model="m", input_tokens=1, output_tokens=1, cost_usd=0.0,
+        )
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+
+    # without hard tags a model-returned 0 must not hide the posting
+    score, _, _ = scoring.score_job(_job(), "profile text")
+    assert score == 1
+    score, _, _ = scoring.score_job(
+        _job(), "profile text", scoring.MatchCriteria(strictness=90)
+    )
+    assert score == 1
+
+    # with hard tags, 0 is the agreed mismatch signal and passes through
+    score, _, _ = scoring.score_job(
+        _job(), "profile text", scoring.MatchCriteria(hard_tags=("#backend",))
+    )
+    assert score == 0

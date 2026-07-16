@@ -38,6 +38,11 @@ def _unscored_jobs(limit: int, exclude_ids: set[int]):
         return db.list_unscored_jobs(con, limit, exclude_ids=exclude_ids)
 
 
+def _profiles_by_id():
+    with db.db() as con:
+        return {row["id"]: dict(row) for row in db.list_profiles(con)}
+
+
 def _persist_score(job_id: int, score: int, reason: str, usage: llm.LLMResult) -> None:
     with db.db() as con:
         db.set_job_score(con, job_id, score, reason)
@@ -66,10 +71,15 @@ async def score_new_jobs(limit: int = BATCH_LIMIT) -> dict[str, int]:
     async with _lock:  # manual runs and the scheduled job never overlap
         given_up = {job_id for job_id, n in _attempts.items() if n >= MAX_ATTEMPTS}
         jobs = await asyncio.to_thread(_unscored_jobs, limit, given_up)
+        profiles = await asyncio.to_thread(_profiles_by_id) if jobs else {}
         for job in jobs:
+            # deleted profile (profile_id NULL) → generic scoring, no criteria
+            criteria = ai_scoring.criteria_from_profile(
+                profiles.get(job["profile_id"])
+            )
             try:
                 score, reason, usage = await asyncio.to_thread(
-                    ai_scoring.score_job, job, profile_text
+                    ai_scoring.score_job, job, profile_text, criteria
                 )
             except llm.LLMNotConfigured:
                 break

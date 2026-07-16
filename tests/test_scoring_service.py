@@ -49,7 +49,7 @@ async def test_scores_unscored_new_jobs(con, profile_file, ai_on, monkeypatch):
 
     monkeypatch.setattr(
         "jobdeck.ai.scoring.score_job",
-        lambda job, profile_text: (66, "Guter Fit.", _usage()),
+        lambda job, profile_text, criteria=None: (66, "Guter Fit.", _usage()),
     )
 
     counters = await scoring.score_new_jobs()
@@ -74,7 +74,7 @@ async def test_second_run_has_nothing_left_to_score(con, profile_file, ai_on, mo
     con.commit()
     monkeypatch.setattr(
         "jobdeck.ai.scoring.score_job",
-        lambda job, profile_text: (50, "Ok.", _usage()),
+        lambda job, profile_text, criteria=None: (50, "Ok.", _usage()),
     )
 
     assert (await scoring.score_new_jobs())["scored"] == 1
@@ -87,7 +87,7 @@ async def test_skips_when_ai_disabled(con, profile_file, monkeypatch):
     _insert_job(con)
     con.commit()
 
-    def must_not_be_called(job, profile_text):
+    def must_not_be_called(job, profile_text, criteria=None):
         raise AssertionError("LLM called although AI is disabled")
 
     monkeypatch.setattr("jobdeck.ai.scoring.score_job", must_not_be_called)
@@ -124,7 +124,7 @@ async def test_one_failure_does_not_block_the_rest(con, profile_file, ai_on, mon
     _insert_job(con, "good")
     con.commit()
 
-    def fake_score(job, profile_text):
+    def fake_score(job, profile_text, criteria=None):
         if job["external_id"] == "bad":
             raise llm.LLMError("boom")
         return (80, "Passt.", _usage())
@@ -145,7 +145,7 @@ async def test_batch_limit_caps_llm_calls_per_run(con, profile_file, ai_on, monk
     con.commit()
     monkeypatch.setattr(
         "jobdeck.ai.scoring.score_job",
-        lambda job, profile_text: (50, "Ok.", _usage()),
+        lambda job, profile_text, criteria=None: (50, "Ok.", _usage()),
     )
 
     assert (await scoring.score_new_jobs(limit=2))["scored"] == 2
@@ -164,7 +164,7 @@ async def test_concurrent_runs_never_double_score(con, profile_file, ai_on, monk
 
     calls = []
 
-    def slow_score(job, profile_text):
+    def slow_score(job, profile_text, criteria=None):
         calls.append(job["id"])
         time.sleep(0.02)  # widen the overlap window
         return (60, "Ok.", _usage())
@@ -183,7 +183,7 @@ async def test_failed_calls_are_still_metered(con, profile_file, ai_on, monkeypa
     _insert_job(con, "bad")
     con.commit()
 
-    def fake_score(job, profile_text):
+    def fake_score(job, profile_text, criteria=None):
         raise llm.LLMError("unparseable", usage=_usage(cost=0.003))
 
     monkeypatch.setattr("jobdeck.ai.scoring.score_job", fake_score)
@@ -195,6 +195,38 @@ async def test_failed_calls_are_still_metered(con, profile_file, ai_on, monkeypa
     assert float(db.get_setting(con, "llm_cost_usd")) == pytest.approx(0.003)
 
 
+async def test_profile_criteria_reach_the_scoring_call(
+    con, profile_file, ai_on, monkeypatch
+):
+    from jobdeck.ai import scoring as ai_scoring
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    strict = db.add_profile(
+        con, {"name": "Strict", "keywords": "Python",
+              "hard_tags": "#backend, #remote", "strictness": 80},
+    )
+    plain = db.add_profile(con, {"name": "Plain", "keywords": "Python"})
+    _insert_job(con, "with-criteria", profile_id=strict)
+    _insert_job(con, "plain-profile", profile_id=plain)
+    _insert_job(con, "orphan")  # discovered profile is gone → profile_id None
+    con.commit()
+
+    received = {}
+
+    def fake_score(job, profile_text, criteria=None):
+        received[job["external_id"]] = criteria
+        return (60, "Ok.", _usage())
+
+    monkeypatch.setattr("jobdeck.ai.scoring.score_job", fake_score)
+
+    assert (await scoring.score_new_jobs())["scored"] == 3
+    assert received["with-criteria"] == ai_scoring.MatchCriteria(
+        hard_tags=("#backend", "#remote"), strictness=80
+    )
+    assert received["plain-profile"] is None  # defaults → prompt unchanged
+    assert received["orphan"] is None
+
+
 async def test_retry_cap_gives_up_and_stops_starving_the_batch(
     con, profile_file, ai_on, monkeypatch
 ):
@@ -204,7 +236,7 @@ async def test_retry_cap_gives_up_and_stops_starving_the_batch(
 
     attempts = []
 
-    def fake_score(job, profile_text):
+    def fake_score(job, profile_text, criteria=None):
         if job["external_id"] == "always-bad":
             attempts.append(job["id"])
             raise llm.LLMError("boom")
