@@ -122,8 +122,8 @@ async def jobs_page():
                 ui.textarea("Anschreiben", value=draft_row["anschreiben_body"]) \
                     .classes("w-full").props("readonly autogrow")
                 ui.label(
-                    f"Model: {draft_row['llm_model']} · editing and sending "
-                    f"arrive with the review queue"
+                    f"Model: {draft_row['llm_model']} · edit and send from "
+                    f"the Review queue"
                 ).classes("text-xs text-gray-500")
                 pdf_label = ui.label(
                     f"Mappe: {draft_row['pdf_path']}" if draft_row["pdf_path"]
@@ -166,6 +166,9 @@ async def jobs_page():
                               on_click=open_pdf).props("outline")
                     ui.button("Re-draft", icon="refresh",
                               on_click=lambda: redraft(dialog, job)) \
+                        .props("outline")
+                    ui.button("Review queue", icon="outbox",
+                              on_click=lambda: ui.navigate.to("/queue")) \
                         .props("outline")
                     ui.button("Close", on_click=dialog.close).props("flat")
             dialog.open()
