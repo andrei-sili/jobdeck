@@ -17,7 +17,9 @@ from jobdeck.ui.layout import frame
 
 FILTERS = ["open", "sent", "discarded"]
 FILTER_STATUSES = {
-    "open": ["ready", "approved", "sending"],
+    # 'failed' belongs here too: its only other surface is the Job inbox's
+    # Draft button, which disappears once the job leaves status 'new'.
+    "open": ["ready", "approved", "sending", "failed"],
     "sent": ["sent"],
     "discarded": ["discarded"],
 }
@@ -26,6 +28,7 @@ EMPTY_TEXT = {
     "sent": "Nothing sent yet.",
     "discarded": "No discarded drafts.",
 }
+EDITABLE_STATUS = ("ready", "approved")
 
 
 def _load_drafts(filter_value: str):
@@ -45,11 +48,29 @@ def _send_status():
 
 
 def _save_draft(job_id: int, values: dict, clear_pdf: bool):
+    """Persist editor changes. Returns (draft, error).
+
+    A dialog can stay open indefinitely while auto-send moves the draft
+    on: writing then would silently rewrite the record of what actually
+    went out, so an editable status is re-checked inside the write."""
     with db.db() as con:
+        con.execute("BEGIN IMMEDIATE")
+        current = db.get_draft_by_job(con, job_id)
+        if current is None:
+            return None, "the draft is gone — refresh the queue"
+        if current["status"] not in EDITABLE_STATUS:
+            return dict(current), (
+                f"this draft is no longer editable (status: "
+                f"{current['status']}) — your changes were not saved"
+            )
         if clear_pdf:
             values = {**values, "pdf_path": ""}
+        if current["status"] == "approved":
+            # Approval is content-specific: auto-send must never transmit
+            # text the user changed after approving it.
+            values = {**values, "status": "ready"}
         db.upsert_draft(con, job_id, values)
-        return dict(db.get_draft_by_job(con, job_id))
+        return dict(db.get_draft_by_job(con, job_id)), ""
 
 
 @ui.page("/queue")
@@ -127,6 +148,13 @@ async def queue_page():
                             ui.button("Return to ready", icon="undo",
                                       on_click=lambda r=row: unapprove(r)) \
                                 .props("outline")
+                        ui.button("Discard", icon="delete",
+                                  on_click=lambda r=row: discard(r)) \
+                            .props("outline color=grey")
+                    if row["status"] == "failed":
+                        ui.label("Drafting failed — re-draft it from the Job "
+                                 "inbox, or discard it.") \
+                            .classes("text-sm text-amber-700")
                         ui.button("Discard", icon="delete",
                                   on_click=lambda r=row: discard(r)) \
                             .props("outline color=grey")
@@ -237,30 +265,42 @@ async def queue_page():
                     }
                     if all(current[k] == v for k, v in values.items()):
                         return True
-                    # The Mappe PDF embeds the letter text: editing the
-                    # Anschreiben invalidates a previously built PDF.
-                    clear_pdf = bool(
+                    # The Mappe PDF renders both the letter text and the
+                    # Betreff: editing either invalidates a built PDF.
+                    clear_pdf = bool(current["pdf_path"] and (
                         values["anschreiben_body"] != current["anschreiben_body"]
-                        and current["pdf_path"]
-                    )
-                    updated = await run.io_bound(
+                        or values["betreff"] != current["betreff"]
+                    ))
+                    was_approved = current["status"] == "approved"
+                    updated, error = await run.io_bound(
                         _save_draft, job_id, values, clear_pdf
                     )
-                    current.update(updated)
+                    if updated is not None:
+                        current.update(updated)
+                    if error:
+                        ui.notify(error, type="warning", multi_line=True)
+                        await refresh()
+                        return False
                     if clear_pdf:
-                        pdf_label.set_text("No Mappe PDF yet — the letter "
+                        pdf_label.set_text("No Mappe PDF yet — the text "
                                            "changed; create it again.")
-                        ui.notify("Letter changed — create the PDF again",
+                        ui.notify("Text changed — create the PDF again",
                                   type="warning")
+                    if was_approved:
+                        ui.notify("Edited — the draft went back to ready; "
+                                  "approve it again for auto-send",
+                                  type="warning", multi_line=True)
                     return True
 
                 async def save_only():
-                    await save()
+                    if not await save():
+                        return
                     ui.notify("Saved", type="positive")
                     await refresh()
 
                 async def make_pdf():
-                    await save()
+                    if not await save():
+                        return
                     ui.notify("Creating Bewerbungsmappe…")
                     result = await mappe.create_mappe(job_id)
                     if not result["ok"]:
@@ -287,7 +327,8 @@ async def queue_page():
                         open_in_system(path)
 
                 async def send_now():
-                    await save()
+                    if not await save():
+                        return
                     status = await run.io_bound(_send_status)
                     final, test_mode, error = send.resolve_recipient(
                         current["recipient"], {
@@ -348,7 +389,8 @@ async def queue_page():
                     await refresh()
 
                 async def approve_from_editor():
-                    await save()
+                    if not await save():
+                        return
                     result = await run.io_bound(send.approve, job_id)
                     if not result["ok"]:
                         ui.notify(result["error"], type="warning",

@@ -17,6 +17,24 @@ def test_build_betreff_full_and_partial():
     assert ai_drafting.build_betreff(" Dev ") == "Bewerbung als Dev"
 
 
+def test_letter_betreff_drops_only_the_name_suffix():
+    assert ai_drafting.letter_betreff(
+        "Bewerbung als Python Entwickler (m/w/d), K-17 – Max Muster", "Max Muster"
+    ) == "Bewerbung als Python Entwickler (m/w/d), K-17"
+    # a user-corrected subject survives verbatim
+    assert ai_drafting.letter_betreff("Bewerbung als Dev, K-99 – Max Muster",
+                                      "Max Muster") == "Bewerbung als Dev, K-99"
+    # no name configured, or a subject that never carried it
+    assert ai_drafting.letter_betreff("Bewerbung als Dev", "") \
+        == "Bewerbung als Dev"
+    assert ai_drafting.letter_betreff("Bewerbung als Dev", "Max Muster") \
+        == "Bewerbung als Dev"
+    # the name must only be stripped as the trailing suffix
+    assert ai_drafting.letter_betreff("Bewerbung als Max Muster Nachfolge",
+                                      "Max Muster") \
+        == "Bewerbung als Max Muster Nachfolge"
+
+
 def test_resolve_refnr_prefers_extraction_then_arbeitsagentur_id():
     assert drafting.resolve_refnr(
         {"refnr": "K-9", "source": "arbeitsagentur", "external_id": "10001-X"}
