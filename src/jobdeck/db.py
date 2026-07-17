@@ -477,6 +477,25 @@ def list_unscored_jobs(
     ).fetchall()
 
 
+def reset_job_scores(con: sqlite3.Connection, job_ids: list[int]) -> int:
+    """Clear the match score of specific postings so the next batch re-scores
+    them. Returns how many rows were cleared.
+
+    Scores are immutable by design — a posting is paid for once. This is the
+    deliberate exception: when the match CRITERIA change, the old verdict was
+    answering a different question and has to be re-asked. Only postings that
+    are still 'new' qualify; a scored-and-acted-on posting keeps its history."""
+    if not job_ids:
+        return 0
+    placeholders = ",".join("?" * len(job_ids))  # ids bound, never interpolated
+    cur = con.execute(
+        f"UPDATE jobs SET match_score=NULL, match_reason='' "
+        f"WHERE status='new' AND id IN ({placeholders})",
+        job_ids,
+    )
+    return cur.rowcount
+
+
 def count_jobs_by_status(con: sqlite3.Connection) -> dict[str, int]:
     rows = con.execute("SELECT status, COUNT(*) AS n FROM jobs GROUP BY status")
     return {row["status"]: row["n"] for row in rows}
