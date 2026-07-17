@@ -189,6 +189,40 @@ def test_migrate_adds_contact_columns_to_pre_v3_jobs(tmp_path):
     con.close()
 
 
+def test_migrate_adds_sending_test_to_pre_v4_drafts(tmp_path):
+    """A pre-v4 drafts table gains sending_test defaulting to 0 — an
+    existing draft must never look like an in-flight test send."""
+    path = tmp_path / "v3.db"
+    con = sqlite3.connect(path)
+    con.row_factory = sqlite3.Row
+    con.execute(
+        """
+        CREATE TABLE drafts (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id     INTEGER NOT NULL,
+            status     TEXT NOT NULL DEFAULT 'generating',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    con.execute(
+        "INSERT INTO drafts (job_id, status, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?)",
+        (1, "ready", "2026-07-01T10:00:00", "2026-07-01T10:00:00"),
+    )
+    con.execute("PRAGMA user_version = 3")
+    con.commit()
+
+    migrations.migrate(con)
+
+    assert con.execute("SELECT * FROM drafts").fetchone()["sending_test"] == 0
+    assert (con.execute("PRAGMA user_version").fetchone()[0]
+            == migrations.SCHEMA_VERSION)
+    migrations.migrate(con)  # idempotent with the new column present
+    con.close()
+
+
 def test_bootstrap_imports_legacy_db(data_dir, monkeypatch):
     legacy_path = data_dir / "old_bewerbungen.db"
     make_legacy_db(legacy_path, LEGACY_ROWS)

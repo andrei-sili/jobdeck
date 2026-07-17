@@ -8,6 +8,7 @@ NAV_ITEMS = [
     ("Dashboard", "/", "dashboard"),
     ("Search profiles", "/profiles", "manage_search"),
     ("Job inbox", "/jobs", "inbox"),
+    ("Review queue", "/queue", "outbox"),
     ("Applications", "/applications", "folder_shared"),
     ("Settings", "/settings", "settings"),
 ]

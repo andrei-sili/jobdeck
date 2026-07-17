@@ -67,6 +67,12 @@ async def profiles_page():
                     value=data.get("poll_interval_min", 60), min=15, max=1440,
                 ).classes("w-full")
                 active = ui.switch("Active", value=bool(data.get("active", 1)))
+                auto_send = ui.switch(
+                    "Auto-send approved drafts",
+                    value=bool(data.get("auto_send", 0)),
+                ).tooltip("Only drafts you approved in the Review queue are "
+                          "sent — paced, in business hours, under the daily "
+                          "cap. Default off.")
 
                 with ui.expansion("Match criteria (AI scoring)").classes("w-full"):
                     hard_tags = ui.textarea(
@@ -109,7 +115,7 @@ async def profiles_page():
                         "radius_km": int(radius.value or 0),
                         "sources": [s for s, box in boxes.items() if box.value],
                         "active": active.value,
-                        "auto_send": data.get("auto_send", 0),
+                        "auto_send": int(auto_send.value),
                         "poll_interval_min": int(interval.value or 60),
                         "hard_tags": hard_tags.value.strip(),
                         "soft_preferences": soft_prefs.value.strip(),

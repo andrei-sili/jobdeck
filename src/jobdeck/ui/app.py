@@ -13,6 +13,7 @@ from jobdeck.ui.pages import (  # noqa: F401
     dashboard,
     jobs,
     profiles,
+    queue,
     settings,
 )
 

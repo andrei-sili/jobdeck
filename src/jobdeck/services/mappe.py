@@ -26,6 +26,11 @@ log = logging.getLogger(__name__)
 
 _lock = asyncio.Lock()  # double-clicks must not race Chrome on one output file
 
+# A Mappe may be (re)built for a draft the user is still working on — an
+# approved draft included: editing its letter clears the PDF, and it must
+# be possible to get one back without un-approving first.
+EDITABLE_STATUS = ("ready", "approved")
+
 
 def _error(message: str) -> dict:
     return {"ok": False, "error": message, "pdf_path": "", "warning": "",
@@ -45,9 +50,12 @@ def _build_mappe(job_id: int) -> dict:
         }
     if job is None:
         return _error("posting not found")
-    if draft is None or draft["status"] != "ready":
+    if draft is None or draft["status"] not in EDITABLE_STATUS:
         return _error("draft the application first — the Mappe needs the "
                       "finished Anschreiben")
+    if not draft["anschreiben_body"].strip():
+        return _error("the draft has no Anschreiben — the letter page would "
+                      "be an empty skeleton; re-draft it")
     if not settings["applicant_name"]:
         return _error("set your applicant name in Settings first")
     if not settings["applicant_ort"]:
@@ -67,8 +75,12 @@ def _build_mappe(job_id: int) -> dict:
         "plz_ort": job["contact_plz_ort"],
         "ort": settings["applicant_ort"],
         "datum": heute_de(),
-        # letter subject omits the applicant name — it already heads the letter
-        "betreff": ai_drafting.build_betreff(job["title"], resolve_refnr(job)),
+        # Follows the (possibly user-corrected) e-mail subject, so the letter
+        # and the e-mail never cite a different Stellenbezeichnung or Refnr.
+        "betreff": (ai_drafting.letter_betreff(draft["betreff"],
+                                               settings["applicant_name"])
+                    or ai_drafting.build_betreff(job["title"],
+                                                 resolve_refnr(job))),
         "anschreiben_body": draft["anschreiben_body"],
     }
     try:
@@ -103,11 +115,12 @@ def _build_mappe(job_id: int) -> dict:
 
     with db.db() as con:
         current = db.get_draft_by_job(con, job_id)
-        # updated_at has second resolution — also compare the letter text
-        # itself, which is the invariant the PDF must match.
-        if (current is None or current["status"] != "ready"
+        # updated_at has second resolution — also compare the text the PDF
+        # actually rendered, which is the invariant it must match.
+        if (current is None or current["status"] not in EDITABLE_STATUS
                 or current["updated_at"] != draft_revision
-                or current["anschreiben_body"] != draft["anschreiben_body"]):
+                or current["anschreiben_body"] != draft["anschreiben_body"]
+                or current["betreff"] != draft["betreff"]):
             # The draft was regenerated while Chrome rendered — this PDF
             # holds the OLD text and must not be linked to the new draft.
             out_path.unlink(missing_ok=True)

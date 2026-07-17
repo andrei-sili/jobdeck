@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from jobdeck import backup, config, migrations
-from jobdeck.constants import STATUS_RANK
+from jobdeck.constants import EMAIL_OUTBOUND, EMAIL_OUTBOUND_TEST, STATUS_RANK
 from jobdeck.dedupe import find_duplicate_bewerbung
 
 
@@ -167,6 +167,9 @@ def delete_bewerbung(con: sqlite3.Connection, row_id: int) -> None:
     con.execute("DELETE FROM status_history WHERE bewerbung_id=?", (row_id,))
     con.execute(
         "UPDATE email_log SET bewerbung_id=NULL WHERE bewerbung_id=?", (row_id,)
+    )
+    con.execute(
+        "UPDATE drafts SET bewerbung_id=NULL WHERE bewerbung_id=?", (row_id,)
     )
     con.execute("UPDATE jobs SET bewerbung_id=NULL WHERE bewerbung_id=?", (row_id,))
     con.execute(
@@ -524,6 +527,140 @@ def upsert_draft(con: sqlite3.Connection, job_id: int, values: dict) -> int:
         (*updates.values(), _now(), existing["id"]),
     )
     return existing["id"]
+
+
+def claim_for_send(
+    con: sqlite3.Connection, draft_id: int, test_mode: bool
+) -> None:
+    """Take the send claim, recording which mode it was taken in.
+
+    sending_test is deliberately outside the upsert_draft allowlist: only
+    the claim may set it, and only from the mode it resolved atomically."""
+    con.execute(
+        "UPDATE drafts SET status='sending', sending_test=?, updated_at=? "
+        "WHERE id=?",
+        (int(test_mode), _now(), draft_id),
+    )
+
+
+def record_send(
+    con: sqlite3.Connection,
+    draft_id: int,
+    gmail_message_id: str,
+    gmail_thread_id: str,
+    bewerbung_id: int | None,
+) -> None:
+    """Mark a draft as sent and link it to Gmail and the application row.
+
+    Dedicated writer: the gmail/bewerbung columns are deliberately NOT in
+    the upsert_draft allowlist — nothing else may ever set 'sent'."""
+    con.execute(
+        "UPDATE drafts SET status='sent', gmail_message_id=?, gmail_thread_id=?,"
+        " bewerbung_id=?, error='', updated_at=? WHERE id=?",
+        (gmail_message_id, gmail_thread_id, bewerbung_id, _now(), draft_id),
+    )
+
+
+def list_drafts_with_jobs(
+    con: sqlite3.Connection, statuses: list[str]
+) -> list[sqlite3.Row]:
+    """Review-queue rows: drafts in the given statuses with their postings."""
+    placeholders = ",".join("?" * len(statuses))
+    return con.execute(
+        f"""
+        SELECT d.*, j.title AS job_title, j.company AS job_company,
+               j.url AS job_url, j.match_score AS job_score,
+               j.location AS job_location, j.status AS job_status,
+               j.contact_email AS job_contact_email
+        FROM drafts d JOIN jobs j ON j.id = d.job_id
+        WHERE d.status IN ({placeholders})
+        ORDER BY d.updated_at DESC, d.id DESC
+        """,
+        statuses,
+    ).fetchall()
+
+
+# --------------------------------------------------------------------------
+# E-mail log (audit trail of every message the app sent or ingested)
+# --------------------------------------------------------------------------
+def add_email_log(con: sqlite3.Connection, values: dict) -> int:
+    cur = con.execute(
+        """
+        INSERT INTO email_log
+            (direction, gmail_message_id, gmail_thread_id, from_addr, to_addr,
+             subject, snippet, internal_date, draft_id, bewerbung_id,
+             matched_by, classification, classified_by, needs_review, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            values["direction"],
+            values.get("gmail_message_id") or None,  # UNIQUE: '' would collide
+            values.get("gmail_thread_id", ""),
+            values.get("from_addr", ""),
+            values.get("to_addr", ""),
+            values.get("subject", ""),
+            values.get("snippet", ""),
+            values.get("internal_date", ""),
+            values.get("draft_id"),
+            values.get("bewerbung_id"),
+            values.get("matched_by", ""),
+            values.get("classification", ""),
+            values.get("classified_by", ""),
+            int(values.get("needs_review", 0)),
+            _now(),
+        ),
+    )
+    return cur.lastrowid
+
+
+def count_outbound_today(con: sqlite3.Connection) -> int:
+    """Sends since local midnight — the daily-cap meter (test sends count)."""
+    today = datetime.date.today().isoformat()
+    return con.execute(
+        "SELECT COUNT(*) FROM email_log WHERE direction LIKE ? AND created_at LIKE ?",
+        (f"{EMAIL_OUTBOUND}%", f"{today}%"),
+    ).fetchone()[0]
+
+
+def next_approved_autosend_job(
+    con: sqlite3.Connection, exclude_test_sent: bool = False
+) -> int | None:
+    """Oldest approved draft whose search profile opted into auto-send.
+
+    Requires the profile to be active too: deactivating a profile pauses
+    everything about that search, including automatic transmission.
+
+    exclude_test_sent skips drafts already rehearsed to the test inbox. A
+    test send deliberately leaves the draft approved (it consumes nothing),
+    so without this the worker would re-pick the same draft every window
+    and burn the daily cap on one posting instead of draining the queue.
+    Real sends need no such filter: they end at status 'sent'."""
+    skip_rehearsed = (
+        "AND NOT EXISTS (SELECT 1 FROM email_log e "
+        "WHERE e.draft_id = d.id AND e.direction = ?) "
+        if exclude_test_sent else ""
+    )
+    params = (EMAIL_OUTBOUND_TEST,) if exclude_test_sent else ()
+    row = con.execute(
+        f"""
+        SELECT d.job_id FROM drafts d
+        JOIN jobs j ON j.id = d.job_id
+        JOIN search_profiles p ON p.id = j.profile_id
+        WHERE d.status='approved' AND p.auto_send=1 AND p.active=1
+        {skip_rehearsed}
+        ORDER BY d.id LIMIT 1
+        """,
+        params,
+    ).fetchone()
+    return row["job_id"] if row is not None else None
+
+
+def count_outbound_for_draft(con: sqlite3.Connection, draft_id: int) -> int:
+    """Real (non-test) sends already recorded for this draft."""
+    return con.execute(
+        "SELECT COUNT(*) FROM email_log WHERE draft_id=? AND direction=?",
+        (draft_id, EMAIL_OUTBOUND),
+    ).fetchone()[0]
 
 
 # --------------------------------------------------------------------------

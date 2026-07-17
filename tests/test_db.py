@@ -218,3 +218,18 @@ def test_delete_bewerbung_clears_references(con):
     db.delete_bewerbung(con, bewerbung_id)
     assert db.get_bewerbung(con, bewerbung_id) is None
     assert db.get_job(con, job_id)["bewerbung_id"] is None
+
+
+def test_delete_bewerbung_clears_the_link_a_send_wrote(con):
+    """record_send is the first writer of drafts.bewerbung_id — without
+    clearing it, deleting any sent application hits the FK constraint."""
+    job_id = _add_job(con)
+    draft_id = db.upsert_draft(con, job_id, {"status": "ready"})
+    bewerbung_id = db.apply_job(con, job_id, kanal="E-Mail")
+    db.record_send(con, draft_id, "m-1", "t-1", bewerbung_id)
+    assert db.get_draft(con, draft_id)["bewerbung_id"] == bewerbung_id
+
+    db.delete_bewerbung(con, bewerbung_id)
+    assert db.get_bewerbung(con, bewerbung_id) is None
+    assert db.get_draft(con, draft_id)["bewerbung_id"] is None
+    assert db.get_draft(con, draft_id)["status"] == "sent"  # history survives

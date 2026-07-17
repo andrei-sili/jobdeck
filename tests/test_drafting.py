@@ -17,6 +17,24 @@ def test_build_betreff_full_and_partial():
     assert ai_drafting.build_betreff(" Dev ") == "Bewerbung als Dev"
 
 
+def test_letter_betreff_drops_only_the_name_suffix():
+    assert ai_drafting.letter_betreff(
+        "Bewerbung als Python Entwickler (m/w/d), K-17 – Max Muster", "Max Muster"
+    ) == "Bewerbung als Python Entwickler (m/w/d), K-17"
+    # a user-corrected subject survives verbatim
+    assert ai_drafting.letter_betreff("Bewerbung als Dev, K-99 – Max Muster",
+                                      "Max Muster") == "Bewerbung als Dev, K-99"
+    # no name configured, or a subject that never carried it
+    assert ai_drafting.letter_betreff("Bewerbung als Dev", "") \
+        == "Bewerbung als Dev"
+    assert ai_drafting.letter_betreff("Bewerbung als Dev", "Max Muster") \
+        == "Bewerbung als Dev"
+    # the name must only be stripped as the trailing suffix
+    assert ai_drafting.letter_betreff("Bewerbung als Max Muster Nachfolge",
+                                      "Max Muster") \
+        == "Bewerbung als Max Muster Nachfolge"
+
+
 def test_resolve_refnr_prefers_extraction_then_arbeitsagentur_id():
     assert drafting.resolve_refnr(
         {"refnr": "K-9", "source": "arbeitsagentur", "external_id": "10001-X"}
@@ -291,6 +309,64 @@ async def test_recent_claim_still_blocks_just_under_the_timeout(
     monkeypatch.setattr("jobdeck.ai.drafting.draft_application", _must_not_be_called)
     result = await drafting.draft_for_job(job_id)
     assert not result["ok"] and "already being generated" in result["error"]
+
+
+@pytest.mark.parametrize("status,hint", [
+    ("approved", "return it to ready"),
+    ("sending", "resolve it"),
+    ("sent", "already sent"),
+])
+async def test_send_path_drafts_are_never_regenerated(
+    con, ai_on, applicant, profile_file, monkeypatch, status, hint
+):
+    """A draft committed to the send path must survive a Draft click.
+
+    Stealing a 'sending' claim would destroy the stuck-send evidence the
+    review queue needs and open a double-send to the company."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    job_id = _insert_job(con)
+    con.commit()
+    db.upsert_draft(con, job_id, {
+        "status": status, "anschreiben_body": "Sehr geehrte Damen und Herren,",
+        "pdf_path": "/tmp/mappe.pdf",
+    })
+    stale = "2020-01-01T00:00:00"  # older than CLAIM_TIMEOUT_MIN: age must not matter
+    con.execute("UPDATE drafts SET updated_at=?", (stale,))
+    con.commit()
+
+    monkeypatch.setattr("jobdeck.ai.drafting.draft_application", _must_not_be_called)
+    result = await drafting.draft_for_job(job_id)
+    assert not result["ok"] and hint in result["error"]
+
+    draft = db.get_draft_by_job(con, job_id)
+    assert draft["status"] == status  # untouched
+    assert draft["pdf_path"] == "/tmp/mappe.pdf"  # not wiped
+    assert draft["anschreiben_body"] == "Sehr geehrte Damen und Herren,"
+    assert db.get_setting(con, "llm_calls", "0") == "0"
+
+
+async def test_finish_discards_result_when_claim_was_taken_away(
+    con, ai_on, applicant, profile_file, monkeypatch
+):
+    """A draft resolved/discarded mid-generation must not be overwritten."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    job_id = _insert_job(con)
+    con.commit()
+
+    def steal_then_draft(job, profile_text, refnr="", applicant_name=""):
+        # simulates a human resolving the draft while the LLM call runs
+        with db.db() as other:
+            db.upsert_draft(other, job_id, {"status": "discarded"})
+        return ("Anrede,\n\nText.", "Mail.", _usage())
+
+    monkeypatch.setattr("jobdeck.ai.drafting.draft_application", steal_then_draft)
+    result = await drafting.draft_for_job(job_id)
+    assert not result["ok"] and "changed while" in result["error"]
+
+    draft = db.get_draft_by_job(con, job_id)
+    assert draft["status"] == "discarded"  # the newer state wins
+    assert draft["email_body"] == ""
+    assert db.get_setting(con, "llm_calls") == "1"  # the call was still billed
 
 
 async def test_abandoned_claim_is_reclaimed(

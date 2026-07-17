@@ -38,7 +38,9 @@ def _setup(con, data_dir, with_anlagen=True, **setting_overrides):
     })
     db.upsert_draft(con, job_id, {
         "status": "ready", "recipient": "jobs@mueller.de",
-        "betreff": "egal", "email_body": "Mail.",
+        # exactly what the drafting service stores: the e-mail variant
+        "betreff": "Bewerbung als Python Entwickler (m/w/d), K-17 – Erika Muster",
+        "email_body": "Mail.",
         "anschreiben_body": "Sehr geehrte Frau Weber,\n\nAbsatz eins.\n\nAbsatz zwei.",
     })
     template_file = data_dir / "template.html"
@@ -205,6 +207,50 @@ async def test_letter_values_use_nameless_betreff_and_german_date(
     from jobdeck.dates import heute_de
     assert captured["datum"] == heute_de()
     assert captured["ort"] == "Musterstadt"
+
+
+async def test_letter_betreff_follows_a_user_corrected_subject(
+    con, data_dir, monkeypatch
+):
+    """The user fixes a wrong Refnr in the queue: the letter must cite the
+    corrected one too — HR matches e-mail subject against the letter."""
+    job_id = _setup(con, data_dir, with_anlagen=False)
+    db.upsert_draft(con, job_id, {
+        "betreff": "Bewerbung als Python Entwickler (m/w/d), K-99 – Erika Muster",
+    })
+    con.commit()
+    captured = {}
+    real_render = mappe.templates.render_letter
+
+    def capture(template_html, values):
+        captured.update(values)
+        return real_render(template_html, values)
+
+    monkeypatch.setattr(mappe.templates, "render_letter", capture)
+    assert (await mappe.create_mappe(job_id))["ok"]
+    assert captured["betreff"] == "Bewerbung als Python Entwickler (m/w/d), K-99"
+    assert "K-17" not in captured["betreff"]  # not rebuilt from the posting
+
+
+async def test_mappe_can_be_rebuilt_for_an_approved_draft(con, data_dir):
+    """Editing an approved draft's letter clears the PDF — getting one back
+    must not require un-approving first."""
+    job_id = _setup(con, data_dir, with_anlagen=False)
+    db.upsert_draft(con, job_id, {"status": "approved"})
+    con.commit()
+
+    result = await mappe.create_mappe(job_id)
+    assert result["ok"], result["error"]
+    assert db.get_draft_by_job(con, job_id)["pdf_path"] == result["pdf_path"]
+
+
+async def test_mappe_refuses_an_empty_anschreiben(con, data_dir):
+    job_id = _setup(con, data_dir, with_anlagen=False)
+    db.upsert_draft(con, job_id, {"anschreiben_body": "   "})
+    con.commit()
+
+    result = await mappe.create_mappe(job_id)
+    assert not result["ok"] and "no Anschreiben" in result["error"]
 
 
 async def test_non_latin_applicant_name_keeps_filename_wellformed(con, data_dir):

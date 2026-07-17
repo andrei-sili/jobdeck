@@ -82,6 +82,21 @@ def build_betreff(title: str, refnr: str = "", applicant_name: str = "") -> str:
     return betreff
 
 
+def letter_betreff(email_betreff: str, applicant_name: str = "") -> str:
+    """The letter's subject line, derived from the e-mail's.
+
+    German convention expects both to cite the same Stellenbezeichnung and
+    Refnr — HR matches on them — so the letter must follow the subject the
+    user actually approved (they may have corrected a wrong Refnr) rather
+    than be rebuilt from the posting. Only the name suffix is dropped: the
+    letter head already carries it."""
+    betreff = _clean(email_betreff)
+    name = _clean(applicant_name)
+    if name:
+        betreff = betreff.removesuffix(f" – {name}")
+    return betreff.strip()
+
+
 def build_user_content(
     job, profile_text: str, refnr: str = "", applicant_name: str = ""
 ) -> str:

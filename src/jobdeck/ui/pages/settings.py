@@ -4,7 +4,7 @@ import asyncio
 
 from nicegui import run, ui
 
-from jobdeck import backup, config, db
+from jobdeck import backup, config, db, gmail
 from jobdeck.services import polling, scoring
 from jobdeck.ui.helpers import open_in_system
 from jobdeck.ui.layout import frame
@@ -20,6 +20,10 @@ def _get_settings():
             "applicant_ort": db.get_setting(con, "applicant_ort", ""),
             "template_path": db.get_setting(con, "template_path", ""),
             "anlagen_dir": db.get_setting(con, "anlagen_dir", ""),
+            "real_send_enabled": db.get_setting(con, "real_send_enabled", "0"),
+            "test_recipient": db.get_setting(con, "test_recipient", ""),
+            "gmail_address": db.get_setting(con, "gmail_address", ""),
+            "sent_today": db.count_outbound_today(con),
             "llm_calls": db.get_setting(con, "llm_calls", "0"),
             "llm_input_tokens": db.get_setting(con, "llm_input_tokens", "0"),
             "llm_output_tokens": db.get_setting(con, "llm_output_tokens", "0"),
@@ -30,6 +34,11 @@ def _get_settings():
 def _set_setting(key, value):
     with db.db() as con:
         db.set_setting(con, key, value)
+
+
+def _get_setting(key, default=""):
+    with db.db() as con:
+        return db.get_setting(con, key, default)
 
 
 def _ai_enabled():
@@ -60,6 +69,46 @@ async def settings_page():
                 with ui.row().classes("items-center gap-1"):
                     ui.icon(icon).classes(color)
                     ui.label(label).classes("text-sm")
+            gmail_label = ui.label(
+                f"Gmail connected as {settings['gmail_address']}"
+                if settings["gmail_address"] and config.TOKEN_PATH.exists()
+                else ""
+            ).classes("text-sm text-gray-600")
+
+            async def connect_gmail():
+                # Pre-check the common first-run case so the notification
+                # cannot promise a consent window that never opens.
+                if not config.CLIENT_SECRET_PATH.exists():
+                    ui.notify(f"no OAuth client file at "
+                              f"{config.CLIENT_SECRET_PATH} — create a "
+                              f"Desktop-app OAuth client in Google Cloud and "
+                              f"save its JSON there",
+                              type="warning", multi_line=True)
+                    return
+                ui.notify("Complete the Google consent in the browser window "
+                          "that just opened…")
+                try:
+                    address = await run.io_bound(gmail.connect)
+                except gmail.GmailError as exc:
+                    ui.notify(str(exc), type="warning", multi_line=True)
+                    return
+                await run.io_bound(_set_setting, "gmail_address", address)
+                gmail_label.set_text(f"Gmail connected as {address}"
+                                     if address else "Gmail connected")
+                ui.notify("Gmail connected ✓", type="positive")
+
+            async def disconnect_gmail():
+                await run.io_bound(gmail.disconnect)
+                await run.io_bound(_set_setting, "gmail_address", "")
+                gmail_label.set_text("")
+                ui.notify("Gmail disconnected — the authorization was revoked "
+                          "at Google and removed locally", type="info")
+
+            with ui.row().classes("items-center gap-2"):
+                ui.button("Connect Gmail", icon="link",
+                          on_click=connect_gmail).props("outline dense")
+                ui.button("Disconnect", icon="link_off",
+                          on_click=disconnect_gmail).props("outline dense")
             ui.label(
                 f"Keys are read from {config.ENV_PATH} (see .env.example in the repo)."
             ).classes("text-xs text-gray-500")
@@ -69,7 +118,7 @@ async def settings_page():
             follow_up = ui.number("Follow-up reminder after (days)",
                                   value=int(settings["follow_up_days"]),
                                   min=1, max=365).classes("w-64")
-            cap = ui.number("Daily send cap (Phase 2)",
+            cap = ui.number("Daily send cap (all sends count, test included)",
                             value=int(settings["daily_send_cap"]),
                             min=1, max=100).classes("w-64")
 
@@ -117,6 +166,72 @@ async def settings_page():
                 ui.notify("Saved", type="positive")
 
             ui.button("Save", on_click=save_application)
+
+        with ui.card().classes("w-full"):
+            ui.label("Sending").classes("font-bold")
+            test_recipient = ui.input(
+                "Test recipient (every send goes here while real sending is OFF)",
+                value=settings["test_recipient"],
+            ).classes("w-96")
+
+            async def save_test_recipient():
+                value = test_recipient.value.strip()
+                if value and not gmail.is_plausible_address(value):
+                    ui.notify("that does not look like an e-mail address",
+                              type="warning")
+                    return
+                await run.io_bound(_set_setting, "test_recipient", value)
+                ui.notify("Saved", type="positive")
+
+            ui.button("Save", on_click=save_test_recipient)
+
+            # Same discipline as the AI kill switch: serialized writes, and
+            # the dangerous direction (OFF→ON) needs an explicit confirm.
+            real_write_lock = asyncio.Lock()
+
+            async def confirm_real() -> bool:
+                with ui.dialog() as confirm, ui.card():
+                    ui.label("Enable REAL sending?").classes("font-bold")
+                    ui.label("E-mails will go to the actual companies, not "
+                             "the test recipient.").classes("text-sm")
+                    with ui.row().classes("justify-end gap-2 w-full"):
+                        ui.button("Cancel",
+                                  on_click=lambda: confirm.submit(False)) \
+                            .props("flat")
+                        ui.button("Enable real sending",
+                                  on_click=lambda: confirm.submit(True)) \
+                            .props("color=negative")
+                confirm.open()
+                return bool(await confirm)
+
+            async def toggle_real(e):
+                stored = await run.io_bound(_get_setting,
+                                            "real_send_enabled", "0")
+                target = "1" if e.value else "0"
+                if target == stored:
+                    return  # programmatic echo of a reverted switch
+                if e.value and not await confirm_real():
+                    real_switch.set_value(False)
+                    return
+                async with real_write_lock:
+                    await run.io_bound(_set_setting, "real_send_enabled",
+                                       target)
+                ui.notify("REAL sending is ON — every send goes to the "
+                          "company now" if e.value
+                          else "Back to test mode — sends go to the test "
+                          "recipient",
+                          type="warning" if e.value else "positive")
+
+            real_switch = ui.switch(
+                "Enable REAL sending (e-mails go to companies)",
+                value=settings["real_send_enabled"] == "1",
+                on_change=toggle_real,
+            )
+            ui.label(
+                f"{settings['sent_today']} sent today · daily cap: "
+                f"{settings['daily_send_cap']} (Tunables). While real "
+                f"sending is off, nothing can reach a company."
+            ).classes("text-xs text-gray-500")
 
         with ui.card().classes("w-full"):
             ui.label("AI").classes("font-bold")
