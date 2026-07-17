@@ -119,13 +119,13 @@ def test_is_plausible_address(addr, ok):
 
 # -- credentials ---------------------------------------------------------------
 def _token_payload(**over):
-    # Deliberately unlike Google's real token shapes (ya29. / 1//): a public
-    # repo must not train its own secret scan to ignore those prefixes.
+    # Deliberately unlike Google's real token prefixes: a public repo must
+    # not train its own secret scan to ignore the shapes it exists to catch.
     payload = {
         "token": "test-access-token",
         "refresh_token": "test-refresh-token",
         "client_id": "id.apps.googleusercontent.com",
-        "client_secret": "secret",
+        "client_secret": "test-client-secret",
         "token_uri": "https://oauth2.googleapis.com/token",
         "scopes": gmail.SCOPES,
         "expiry": "2099-01-01T00:00:00Z",
