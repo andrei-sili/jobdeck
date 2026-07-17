@@ -159,6 +159,11 @@ def test_clean_title_strips_board_noise_but_keeps_the_role():
         == "Backend Developer (m/w/d)"
     assert ai_drafting.clean_title("Neu: Python Entwickler in Teilzeit") \
         == "Python Entwickler"
+    # all-noise input collapses to empty (the service then falls back to the
+    # raw title); None/empty are safe
+    assert ai_drafting.clean_title("Ab sofort: Vollzeit") == ""
+    assert ai_drafting.clean_title("") == ""
+    assert ai_drafting.clean_title(None) == ""
 
 
 def test_build_betreff_cleans_board_noise_from_the_title():
@@ -177,7 +182,7 @@ def test_draft_application_parses_and_strips(monkeypatch):
             text='{"analysis": "internal reasoning",'
                  ' "stellenbezeichnung": " Backend Developer (m/w/d) ",'
                  ' "anschreiben_body": " Sehr geehrte Frau Weber,\\n\\nAbsatz. ",'
-                 ' "email_body": " Guten Tag,\\n\\nanbei meine Bewerbung. "}',
+                 ' "email_body": " Guten Tag,\\n\\nMit freundlichen Grüßen\\nMax "}',
             model="m", input_tokens=5, output_tokens=5, cost_usd=0.0,
         )
 
@@ -186,7 +191,7 @@ def test_draft_application_parses_and_strips(monkeypatch):
         _job(), "profil"
     )
     assert anschreiben.startswith("Sehr geehrte Frau Weber,")
-    assert email_body.endswith("anbei meine Bewerbung.")
+    assert email_body.endswith("Mit freundlichen Grüßen\nMax")  # stripped
     assert stellenbezeichnung == "Backend Developer (m/w/d)"  # stripped
     assert usage.input_tokens == 5
     # drafting runs on the stronger drafting model, not the scoring default
@@ -199,7 +204,10 @@ def test_draft_application_parses_and_strips(monkeypatch):
     '{"anschreiben_body": "", "email_body": "x"}',   # empty text is unusable
 ])
 def test_draft_application_rejects_unusable_response(monkeypatch, text):
+    calls = []
+
     def fake_complete(**kwargs):
+        calls.append(1)
         return llm.LLMResult(
             text=text, model="m", input_tokens=1, output_tokens=1, cost_usd=0.001,
         )
@@ -207,14 +215,18 @@ def test_draft_application_rejects_unusable_response(monkeypatch, text):
     monkeypatch.setattr(llm, "complete", fake_complete)
     with pytest.raises(llm.LLMError) as excinfo:
         ai_drafting.draft_application(_job(), "profil")
-    assert excinfo.value.usage is not None  # billed call stays meterable
+    # every attempt is retried up to the cap and metered in full
+    assert len(calls) == ai_drafting.DRAFT_ATTEMPTS
+    assert excinfo.value.usage is not None
+    assert excinfo.value.usage.cost_usd == pytest.approx(0.001 * ai_drafting.DRAFT_ATTEMPTS)
 
 
 def test_draft_application_retries_a_truncated_attempt_and_meters_all(monkeypatch):
     """Sonnet occasionally truncates; a retry lands, and every billed attempt
     (the failed one included) is metered so the cost is not under-reported."""
     good = ('{"analysis": "x", "stellenbezeichnung": "Dev",'
-            ' "anschreiben_body": "Anrede,\\n\\nText.", "email_body": "Mail."}')
+            ' "anschreiben_body": "Anrede,\\n\\nText.",'
+            ' "email_body": "Guten Tag,\\n\\nMit freundlichen Grüßen\\nX"}')
     calls = []
 
     def fake_complete(**kwargs):
@@ -235,6 +247,52 @@ def test_draft_application_retries_a_truncated_attempt_and_meters_all(monkeypatc
     # both attempts metered — the truncated one was billed too
     assert usage.output_tokens == 8000 + 300
     assert usage.cost_usd == pytest.approx(0.12 + 0.006)
+
+
+def test_draft_application_exhausts_retries_on_repeated_truncation(monkeypatch):
+    """Every attempt truncating (llm.complete raises) fails closed after the
+    cap, with usage summing all billed attempts — a stuck loop never ships a
+    half-written draft and never under-reports cost."""
+    calls = []
+
+    def fake_complete(**kwargs):
+        calls.append(1)
+        raise llm.LLMError(
+            "response truncated at max_tokens=5000",
+            usage=llm.LLMResult(text="", model="m", input_tokens=50,
+                                output_tokens=5000, cost_usd=0.08),
+        )
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    with pytest.raises(llm.LLMError) as excinfo:
+        ai_drafting.draft_application(_job(), "profil")
+    assert len(calls) == ai_drafting.DRAFT_ATTEMPTS
+    assert "after" in str(excinfo.value)  # "failed after N attempts"
+    assert excinfo.value.usage.output_tokens == 5000 * ai_drafting.DRAFT_ATTEMPTS
+    assert excinfo.value.usage.cost_usd == pytest.approx(0.08 * ai_drafting.DRAFT_ATTEMPTS)
+
+
+def test_draft_application_retries_an_email_without_a_closing(monkeypatch):
+    """A garbled/cut-off e-mail (valid JSON but no 'Mit freundlichen Grüßen')
+    is rejected and retried, not returned — Sonnet's other degeneration mode."""
+    calls = []
+    bad = ('{"analysis": "x", "stellenbezeichnung": "Dev",'
+           ' "anschreiben_body": "Anrede,\\n\\nText.",'
+           ' "email_body": "Guten Tag,\\n\\nanbei meine Bewerbung ("}')  # cut off
+    good = ('{"analysis": "x", "stellenbezeichnung": "Dev",'
+            ' "anschreiben_body": "Anrede,\\n\\nText.",'
+            ' "email_body": "Guten Tag,\\n\\nMit freundlichen Grüßen\\nX"}')
+
+    def fake_complete(**kwargs):
+        calls.append(1)
+        text = bad if len(calls) == 1 else good
+        return llm.LLMResult(text=text, model="m", input_tokens=10,
+                             output_tokens=100, cost_usd=0.005)
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    _, email_body, _, _ = ai_drafting.draft_application(_job(), "profil")
+    assert "Grüßen" in email_body
+    assert len(calls) == 2  # the incomplete e-mail was retried
 
 
 # -- drafting service ----------------------------------------------------------
@@ -376,6 +434,26 @@ async def test_no_signature_configured_leaves_the_email_untouched(
 
     result = await drafting.draft_for_job(job_id)
     assert result["draft"]["email_body"] == "Guten Tag,\n\nMit freundlichen Grüßen\nMax"
+
+
+async def test_empty_stellenbezeichnung_falls_back_to_the_cleaned_job_title(
+    con, ai_on, applicant, profile_file, monkeypatch
+):
+    """No Stellenbezeichnung from the LLM → Betreff built from the raw job
+    title (board noise cleaned), never an empty 'Bewerbung als '."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    job_id = _insert_job(con, title="Ab sofort: Python Dev (m/w/d)Vollzeit")
+    db.set_job_contacts(con, job_id, {"refnr": "K-9"})
+    con.commit()
+    monkeypatch.setattr(
+        "jobdeck.ai.drafting.draft_application",
+        lambda job, profile_text, refnr="", applicant_name="":
+            ("Anrede,\n\nText.", "Mail.", "", _usage()),  # empty stellenbezeichnung
+    )
+    result = await drafting.draft_for_job(job_id)
+    assert result["ok"], result["error"]
+    assert result["draft"]["betreff"] == \
+        "Bewerbung als Python Dev (m/w/d), K-9 – Max Muster"
 
 
 async def test_failed_draft_is_recorded_and_metered(

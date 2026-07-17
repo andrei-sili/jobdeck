@@ -123,9 +123,12 @@ Rules:
   Herren,". Then 3-4 paragraphs separated by blank lines, built around your
   analysis: open on why this role at this company fits; then match the
   candidate's actual skills to the posting's stated requirements, LEADING
-  with the competences the posting weights most — foreground them even when
-  the profile lists them as secondary, and never hedge or understate a skill
-  the candidate genuinely has — while keeping each claim tied to the single
+  with the competences the posting weights most — foregrounding changes the
+  ORDER you present skills in, never their proficiency: present each skill at
+  exactly the level the profile states (a Grundkenntnis stays basic, a skill
+  marked "in Vertiefung" is named so), neither upgrading a basic one to sound
+  expert nor hedging one the profile presents as solid — while keeping each
+  claim tied to the single
   project or role the profile attaches it to (never blend two projects'
   stacks into one sentence); then one concrete strength drawn from a specific
   profile entry (a real project result, a certificate, the career-change
@@ -311,6 +314,12 @@ def draft_application(
             continue
         if not anschreiben or not email_body:
             last_error = "drafting returned empty text"
+            continue
+        if "grüßen" not in email_body.lower():
+            # Sonnet also degenerates into garbled/cut-off (but still valid
+            # JSON) drafts; a complete e-mail always signs off "Mit
+            # freundlichen Grüßen", so its absence flags a bad sample — retry.
+            last_error = "drafting produced an incomplete e-mail (no closing)"
             continue
         return anschreiben, email_body, stellenbezeichnung, _combined_usage(
             result.model, billed

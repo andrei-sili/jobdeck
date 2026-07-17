@@ -24,7 +24,12 @@ class StubClient:
     def __init__(self, response):
         self._response = response
         self.kwargs = None
+        self.options = None
         self.messages = SimpleNamespace(create=self._create)
+
+    def with_options(self, **opts):
+        self.options = opts
+        return self
 
     def _create(self, **kwargs):
         self.kwargs = kwargs
@@ -47,6 +52,7 @@ def _job(**over):
 def test_pricing_matches_by_prefix_and_defaults_to_zero():
     assert llm.pricing("claude-haiku-4-5") == (1.00, 5.00)
     assert llm.pricing("claude-haiku-4-5-20251001") == (1.00, 5.00)
+    assert llm.pricing("claude-sonnet-5") == (3.00, 15.00)  # drafting default
     assert llm.pricing("some-unknown-model") == (0.0, 0.0)
 
 
@@ -78,6 +84,15 @@ def test_complete_without_schema_sends_no_output_config(monkeypatch):
     monkeypatch.setattr(llm, "client", lambda: stub)
     llm.complete(system="s", user_content="u")
     assert "output_config" not in stub.kwargs
+
+
+def test_complete_applies_model_and_timeout_overrides(monkeypatch):
+    # the per-call overrides that let drafting run on Sonnet past the 60s bound
+    stub = StubClient(_response("{}"))
+    monkeypatch.setattr(llm, "client", lambda: stub)
+    llm.complete(system="s", user_content="u", model="claude-sonnet-5", timeout=240.0)
+    assert stub.options == {"timeout": 240.0}  # per-call timeout applied
+    assert stub.kwargs["model"] == "claude-sonnet-5"  # model override forwarded
 
 
 def test_complete_raises_on_refusal_but_keeps_usage(monkeypatch):
