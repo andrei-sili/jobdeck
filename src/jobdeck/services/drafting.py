@@ -141,7 +141,7 @@ async def draft_for_job(job_id: int) -> dict:
 
     refnr = resolve_refnr(job)
     try:
-        anschreiben, email_body, usage = await asyncio.to_thread(
+        anschreiben, email_body, stellenbezeichnung, usage = await asyncio.to_thread(
             ai_drafting.draft_application, job, profile_text, refnr, applicant_name
         )
     except llm.LLMNotConfigured as exc:
@@ -163,7 +163,11 @@ async def draft_for_job(job_id: int) -> dict:
         )
         raise
 
-    betreff = ai_drafting.build_betreff(job["title"], refnr, applicant_name)
+    # The LLM's clean Stellenbezeichnung feeds the Betreff (falling back to the
+    # raw title); build_betreff injects the verified Refnr + name.
+    betreff = ai_drafting.build_betreff(
+        stellenbezeichnung or job["title"], refnr, applicant_name
+    )
     signature = await asyncio.to_thread(_email_signature)
     draft = await asyncio.to_thread(
         _finish,

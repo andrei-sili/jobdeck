@@ -85,6 +85,35 @@ def test_resolve_refnr_prefers_extraction_then_arbeitsagentur_id():
     ) == ""
 
 
+# -- drafting prompt -----------------------------------------------------------
+def test_system_prompt_keeps_the_attribution_fidelity_contract():
+    """Deletion tripwire, NOT a behavioural proof — a stub cannot exercise
+    the model, so a real letter's fidelity is checked by the live smoke.
+
+    The fix for the misattribution class (a true skill welded onto the
+    wrong project — "Django in zwei Praktika", Alembic under the Java
+    project) lives entirely in these prompt rules, so guard them against a
+    silent drop in a future rewrite: the binding rule, its skill-level
+    escape hatch, the count-inflation guard, and the posting-wall clause
+    (no candidate facts come from the untrusted posting) must all survive."""
+    prompt = " ".join(ai_drafting.SYSTEM_PROMPT.lower().split())  # wrap-robust
+    assert "attribution fidelity" in prompt
+    assert "skill level" in prompt  # the escape hatch for an unbound skill
+    assert "from one project into a sentence about another" in prompt
+    assert "one occurrence into" in prompt  # the count-inflation guard
+    assert "never supplies new facts about the candidate" in prompt
+
+
+def test_system_prompt_analyses_first_and_positions_for_the_role():
+    """The Sonnet rewrite must keep the analysis-first + role-positioning +
+    clean-Stellenbezeichnung + flawless-German contract, not only the
+    attribution guards — a silent drop of any of these is the regression."""
+    prompt = " ".join(ai_drafting.SYSTEM_PROMPT.lower().split())
+    assert "analysis" in prompt and "stellenbezeichnung" in prompt
+    assert "leading with the competences the posting weights most" in prompt
+    assert "flawless german" in prompt  # the anti-typo instruction
+
+
 # -- drafting module -----------------------------------------------------------
 def _job(**over):
     values = dict(
@@ -116,27 +145,90 @@ def test_build_betreff_collapses_smuggled_whitespace():
         == "Bewerbung als Dev X-Evil: 1, K 1 – Max Muster"
 
 
+def test_clean_title_strips_board_noise_but_keeps_the_role():
+    # the exact Stretta-style title that leaked junk into a real Betreff
+    assert ai_drafting.clean_title(
+        "Ab sofort: Fullstack-Entwickler Python/Django mit Frontend-Fokus "
+        "(m/w/d)Vollzeit"
+    ) == "Fullstack-Entwickler Python/Django mit Frontend-Fokus (m/w/d)"
+    # a clean title (and its (m/w/d) marker) is left untouched
+    assert ai_drafting.clean_title("Full-Stack Entwickler m/w/d") \
+        == "Full-Stack Entwickler m/w/d"
+    # employment-type token dropped whether glued or spaced
+    assert ai_drafting.clean_title("Backend Developer (m/w/d) Vollzeit") \
+        == "Backend Developer (m/w/d)"
+    assert ai_drafting.clean_title("Neu: Python Entwickler in Teilzeit") \
+        == "Python Entwickler"
+    # all-noise input collapses to empty (the service then falls back to the
+    # raw title); None/empty are safe
+    assert ai_drafting.clean_title("Ab sofort: Vollzeit") == ""
+    assert ai_drafting.clean_title("") == ""
+    assert ai_drafting.clean_title(None) == ""
+
+
+def test_build_betreff_cleans_board_noise_from_the_title():
+    # even the raw-title fallback path yields a clean subject line
+    assert ai_drafting.build_betreff(
+        "Ab sofort: Fullstack-Entwickler (m/w/d)Vollzeit", "K-9", "Max Muster"
+    ) == "Bewerbung als Fullstack-Entwickler (m/w/d), K-9 – Max Muster"
+
+
+def _draft_text(analysis="notes", stellenbezeichnung="Dev",
+                anschreiben_body="Anrede,\n\nText.",
+                email_body="Guten Tag,\n\nMit freundlichen Grüßen\nX"):
+    """A marker-delimited drafting response — the plain-text shape Sonnet
+    returns. Drafting uses NO JSON schema: constrained decoding degraded the
+    long German prose fields, so sections are delimited by markers instead."""
+    return (
+        f"===ANALYSIS===\n{analysis}\n"
+        f"===STELLENBEZEICHNUNG===\n{stellenbezeichnung}\n"
+        f"===ANSCHREIBEN_BODY===\n{anschreiben_body}\n"
+        f"===EMAIL_BODY===\n{email_body}\n"
+        f"===END==="
+    )
+
+
 def test_draft_application_parses_and_strips(monkeypatch):
+    captured = {}
+
     def fake_complete(**kwargs):
+        captured.update(kwargs)
+        # surrounding whitespace on every section proves the parser strips it
         return llm.LLMResult(
-            text='{"anschreiben_body": " Sehr geehrte Frau Weber,\\n\\nAbsatz. ",'
-                 ' "email_body": " Guten Tag,\\n\\nanbei meine Bewerbung. "}',
+            text=_draft_text(
+                analysis="internal reasoning",
+                stellenbezeichnung=" Backend Developer (m/w/d) ",
+                anschreiben_body=" Sehr geehrte Frau Weber,\n\nAbsatz. ",
+                email_body=" Guten Tag,\n\nMit freundlichen Grüßen\nMax ",
+            ),
             model="m", input_tokens=5, output_tokens=5, cost_usd=0.0,
         )
 
     monkeypatch.setattr(llm, "complete", fake_complete)
-    anschreiben, email_body, usage = ai_drafting.draft_application(_job(), "profil")
+    anschreiben, email_body, stellenbezeichnung, usage = ai_drafting.draft_application(
+        _job(), "profil"
+    )
     assert anschreiben.startswith("Sehr geehrte Frau Weber,")
-    assert email_body.endswith("anbei meine Bewerbung.")
+    assert email_body.endswith("Mit freundlichen Grüßen\nMax")  # stripped
+    assert stellenbezeichnung == "Backend Developer (m/w/d)"  # stripped
     assert usage.input_tokens == 5
+    # drafting runs on the stronger drafting model, not the scoring default
+    assert captured["model"] == config.anthropic_drafting_model()
+    assert captured["timeout"] == ai_drafting.DRAFT_TIMEOUT_S
+    # drafting must NOT constrain decoding with a JSON schema (the whole point
+    # of the plain-text format) — guard against a structured-output regression
+    assert "output_schema" not in captured and "output_config" not in captured
 
 
 @pytest.mark.parametrize("text", [
-    "not json",
-    '{"anschreiben_body": "", "email_body": "x"}',   # empty text is unusable
+    "no section markers here at all",                    # unparseable
+    _draft_text(anschreiben_body="", email_body="x"),    # parses, but empty body
 ])
 def test_draft_application_rejects_unusable_response(monkeypatch, text):
+    calls = []
+
     def fake_complete(**kwargs):
+        calls.append(1)
         return llm.LLMResult(
             text=text, model="m", input_tokens=1, output_tokens=1, cost_usd=0.001,
         )
@@ -144,7 +236,167 @@ def test_draft_application_rejects_unusable_response(monkeypatch, text):
     monkeypatch.setattr(llm, "complete", fake_complete)
     with pytest.raises(llm.LLMError) as excinfo:
         ai_drafting.draft_application(_job(), "profil")
-    assert excinfo.value.usage is not None  # billed call stays meterable
+    # every attempt is retried up to the cap and metered in full
+    assert len(calls) == ai_drafting.DRAFT_ATTEMPTS
+    assert excinfo.value.usage is not None
+    assert excinfo.value.usage.cost_usd == pytest.approx(0.001 * ai_drafting.DRAFT_ATTEMPTS)
+
+
+def test_draft_application_retries_a_truncated_attempt_and_meters_all(monkeypatch):
+    """Sonnet occasionally truncates; a retry lands, and every billed attempt
+    (the failed one included) is metered so the cost is not under-reported."""
+    good = _draft_text()  # a clean, parseable draft that signs off properly
+    calls = []
+
+    def fake_complete(**kwargs):
+        calls.append(1)
+        if len(calls) == 1:  # first attempt truncates (fails closed, still billed)
+            raise llm.LLMError(
+                "response truncated at max_tokens=8000",
+                usage=llm.LLMResult(text="", model="m", input_tokens=100,
+                                    output_tokens=8000, cost_usd=0.12),
+            )
+        return llm.LLMResult(text=good, model="m", input_tokens=100,
+                             output_tokens=300, cost_usd=0.006)
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    anschreiben, _, stellen, usage = ai_drafting.draft_application(_job(), "profil")
+    assert anschreiben.startswith("Anrede,") and stellen == "Dev"
+    assert len(calls) == 2  # one truncated attempt, then a good one
+    # both attempts metered — the truncated one was billed too
+    assert usage.output_tokens == 8000 + 300
+    assert usage.cost_usd == pytest.approx(0.12 + 0.006)
+
+
+def test_draft_application_exhausts_retries_on_repeated_truncation(monkeypatch):
+    """Every attempt truncating (llm.complete raises) fails closed after the
+    cap, with usage summing all billed attempts — a stuck loop never ships a
+    half-written draft and never under-reports cost."""
+    calls = []
+
+    def fake_complete(**kwargs):
+        calls.append(1)
+        raise llm.LLMError(
+            "response truncated at max_tokens=5000",
+            usage=llm.LLMResult(text="", model="m", input_tokens=50,
+                                output_tokens=5000, cost_usd=0.08),
+        )
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    with pytest.raises(llm.LLMError) as excinfo:
+        ai_drafting.draft_application(_job(), "profil")
+    assert len(calls) == ai_drafting.DRAFT_ATTEMPTS
+    assert "after" in str(excinfo.value)  # "failed after N attempts"
+    assert excinfo.value.usage.output_tokens == 5000 * ai_drafting.DRAFT_ATTEMPTS
+    assert excinfo.value.usage.cost_usd == pytest.approx(0.08 * ai_drafting.DRAFT_ATTEMPTS)
+
+
+def test_draft_application_retries_an_email_without_a_closing(monkeypatch):
+    """A garbled/cut-off e-mail (parseable sections but no 'Mit freundlichen
+    Grüßen') is rejected and retried — Sonnet's other degeneration mode."""
+    calls = []
+    bad = _draft_text(email_body="Guten Tag,\n\nanbei meine Bewerbung (")  # cut off
+    good = _draft_text()  # complete, signs off with "Mit freundlichen Grüßen"
+
+    def fake_complete(**kwargs):
+        calls.append(1)
+        text = bad if len(calls) == 1 else good
+        return llm.LLMResult(text=text, model="m", input_tokens=10,
+                             output_tokens=100, cost_usd=0.005)
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    _, email_body, _, _ = ai_drafting.draft_application(_job(), "profil")
+    assert "Grüßen" in email_body
+    assert len(calls) == 2  # the incomplete e-mail was retried
+
+
+# -- plain-text parser hardening (regression guards from the review panel) -----
+def test_parse_draft_sections_requires_every_content_marker():
+    """A response missing ANY one of the four content markers is unparseable —
+    pins all() (not any()): under any(), a 3-of-4 response would return a
+    partial dict and draft_application would ship it or raise a raw KeyError."""
+    full = _draft_text()
+    assert ai_drafting.parse_draft_sections(full) is not None  # control
+    for marker in ("===ANALYSIS===", "===STELLENBEZEICHNUNG===",
+                   "===ANSCHREIBEN_BODY===", "===EMAIL_BODY==="):
+        # drop just the marker line (its body stays) — a real 3-of-4 sample
+        partial = "\n".join(
+            ln for ln in full.splitlines() if ln.strip() != marker
+        )
+        assert ai_drafting.parse_draft_sections(partial) is None, marker
+
+
+def test_parse_draft_sections_requires_the_end_terminator():
+    """Without ===END=== the e-mail body runs unbounded to the end of the
+    response (trailing chatter / a code fence would leak in) — reject it."""
+    no_end = _draft_text().replace("\n===END===", "")
+    assert "===END===" not in no_end
+    assert ai_drafting.parse_draft_sections(no_end) is None
+
+
+def test_parse_draft_sections_rejects_a_duplicated_marker():
+    """A marker emitted twice (a degenerate loop, or a marker echoed from the
+    posting into the letter) is a bad sample — reject it, never silently resolve
+    it last-wins and ship a truncated/attacker-influenced section."""
+    doubled = _draft_text(anschreiben_body="Anrede,\n\n===EMAIL_BODY===\n\nText.")
+    assert ai_drafting.parse_draft_sections(doubled) is None
+
+
+def test_parse_draft_sections_ignores_a_stray_single_equals_line():
+    """The tightened marker (>=3 '=') means a prose line like '= EMAIL_BODY ='
+    is NOT a delimiter — it stays visible body text, never a silent truncation."""
+    body = "Anrede,\n\n= EMAIL_BODY =\n\nText."
+    sections = ai_drafting.parse_draft_sections(_draft_text(anschreiben_body=body))
+    assert sections is not None
+    assert sections["anschreiben_body"] == body  # nothing was cut at the fake line
+
+
+def test_parse_draft_sections_bounds_email_body_at_the_end_terminator():
+    """===END=== bounds the e-mail: a whole-output code fence (its closing ```
+    lands after ===END===) does not leak a stray ``` into the sent e-mail."""
+    fenced = "```\n" + _draft_text() + "\n```"
+    sections = ai_drafting.parse_draft_sections(fenced)
+    assert sections is not None
+    assert "`" not in sections["email_body"]
+    assert sections["email_body"] == "Guten Tag,\n\nMit freundlichen Grüßen\nX"
+
+
+@pytest.mark.parametrize("dropped", ["===EMAIL_BODY===", "===END==="])
+def test_draft_application_retries_a_partial_response(monkeypatch, dropped):
+    """A 3-of-4 / missing-terminator response is retried to exhaustion — it must
+    NEVER raise a raw KeyError out of draft_application nor ship a partial."""
+    full = _draft_text()
+    partial = "\n".join(ln for ln in full.splitlines() if ln.strip() != dropped)
+    calls = []
+
+    def fake_complete(**kwargs):
+        calls.append(1)
+        return llm.LLMResult(text=partial, model="m", input_tokens=1,
+                             output_tokens=1, cost_usd=0.001)
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    with pytest.raises(llm.LLMError):
+        ai_drafting.draft_application(_job(), "profil")
+    assert len(calls) == ai_drafting.DRAFT_ATTEMPTS
+
+
+@pytest.mark.parametrize("anschreiben", ["", "   \n  "])
+def test_draft_application_retries_an_empty_anschreiben(monkeypatch, anschreiben):
+    """An empty/whitespace-only Anschreiben with an otherwise valid e-mail is
+    rejected by the empty-body guard and retried — the guard is exercised here
+    (the e-mail carries a proper closing, so the grüßen check does not mask it)."""
+    text = _draft_text(anschreiben_body=anschreiben)  # valid grüßen-bearing email
+    calls = []
+
+    def fake_complete(**kwargs):
+        calls.append(1)
+        return llm.LLMResult(text=text, model="m", input_tokens=1,
+                             output_tokens=1, cost_usd=0.001)
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    with pytest.raises(llm.LLMError):
+        ai_drafting.draft_application(_job(), "profil")
+    assert len(calls) == ai_drafting.DRAFT_ATTEMPTS
 
 
 # -- drafting service ----------------------------------------------------------
@@ -227,16 +479,18 @@ async def test_successful_draft_is_persisted_and_metered(
         "jobdeck.ai.drafting.draft_application",
         lambda job, profile_text, refnr="", applicant_name="":
             ("Sehr geehrte Frau Weber,\n\nAbsatz.",
-                                   "Guten Tag,\n\nanbei meine Bewerbung.\n\n"
-                                   "Mit freundlichen Grüßen\nMax Muster",
-                                   _usage()),
+             "Guten Tag,\n\nanbei meine Bewerbung.\n\n"
+             "Mit freundlichen Grüßen\nMax Muster",
+             "Backend Developer", _usage()),
     )
 
     result = await drafting.draft_for_job(job_id)
     assert result["ok"], result["error"]
     draft = result["draft"]
     assert draft["status"] == "ready"
-    assert draft["betreff"] == "Bewerbung als Python Dev, K-17 – Max Muster"
+    # the Betreff is built from the LLM's clean Stellenbezeichnung (not the raw
+    # job title "Python Dev"); the Refnr + name are code-supplied
+    assert draft["betreff"] == "Bewerbung als Backend Developer, K-17 – Max Muster"
     assert draft["recipient"] == "hr@firma.de"
     assert draft["anschreiben_body"].startswith("Sehr geehrte Frau Weber,")
     assert draft["llm_model"] == "claude-haiku-4-5"
@@ -260,7 +514,7 @@ async def test_drafted_email_carries_the_configured_signature(
         "jobdeck.ai.drafting.draft_application",
         lambda job, profile_text, refnr="", applicant_name="":
             ("Anrede,\n\nText.", "Guten Tag,\n\nanbei meine Bewerbung.\n\n"
-                                 "Mit freundlichen Grüßen\nMax Muster", _usage()),
+                                 "Mit freundlichen Grüßen\nMax Muster", "", _usage()),
     )
 
     result = await drafting.draft_for_job(job_id)
@@ -279,11 +533,31 @@ async def test_no_signature_configured_leaves_the_email_untouched(
         "jobdeck.ai.drafting.draft_application",
         lambda job, profile_text, refnr="", applicant_name="":
             ("Anrede,\n\nText.", "Guten Tag,\n\nMit freundlichen Grüßen\nMax",
-             _usage()),
+             "", _usage()),
     )
 
     result = await drafting.draft_for_job(job_id)
     assert result["draft"]["email_body"] == "Guten Tag,\n\nMit freundlichen Grüßen\nMax"
+
+
+async def test_empty_stellenbezeichnung_falls_back_to_the_cleaned_job_title(
+    con, ai_on, applicant, profile_file, monkeypatch
+):
+    """No Stellenbezeichnung from the LLM → Betreff built from the raw job
+    title (board noise cleaned), never an empty 'Bewerbung als '."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    job_id = _insert_job(con, title="Ab sofort: Python Dev (m/w/d)Vollzeit")
+    db.set_job_contacts(con, job_id, {"refnr": "K-9"})
+    con.commit()
+    monkeypatch.setattr(
+        "jobdeck.ai.drafting.draft_application",
+        lambda job, profile_text, refnr="", applicant_name="":
+            ("Anrede,\n\nText.", "Mail.", "", _usage()),  # empty stellenbezeichnung
+    )
+    result = await drafting.draft_for_job(job_id)
+    assert result["ok"], result["error"]
+    assert result["draft"]["betreff"] == \
+        "Bewerbung als Python Dev (m/w/d), K-9 – Max Muster"
 
 
 async def test_failed_draft_is_recorded_and_metered(
@@ -309,7 +583,7 @@ async def test_failed_draft_is_recorded_and_metered(
     monkeypatch.setattr(
         "jobdeck.ai.drafting.draft_application",
         lambda job, profile_text, refnr="", applicant_name="":
-            ("Anrede,\n\nText.", "Mail.", _usage()),
+            ("Anrede,\n\nText.", "Mail.", "", _usage()),
     )
     result = await drafting.draft_for_job(job_id)
     assert result["ok"]
@@ -326,7 +600,7 @@ async def test_redraft_clears_stale_pdf_path(
     monkeypatch.setattr(
         "jobdeck.ai.drafting.draft_application",
         lambda job, profile_text, refnr="", applicant_name="":
-            ("Anrede,\n\nText.", "Mail.", _usage()),
+            ("Anrede,\n\nText.", "Mail.", "", _usage()),
     )
     assert (await drafting.draft_for_job(job_id))["ok"]
     db.upsert_draft(con, job_id, {"pdf_path": "/old/mappe.pdf"})
@@ -435,7 +709,7 @@ async def test_finish_discards_result_when_claim_was_taken_away(
         # simulates a human resolving the draft while the LLM call runs
         with db.db() as other:
             db.upsert_draft(other, job_id, {"status": "discarded"})
-        return ("Anrede,\n\nText.", "Mail.", _usage())
+        return ("Anrede,\n\nText.", "Mail.", "", _usage())
 
     monkeypatch.setattr("jobdeck.ai.drafting.draft_application", steal_then_draft)
     result = await drafting.draft_for_job(job_id)
@@ -461,7 +735,7 @@ async def test_abandoned_claim_is_reclaimed(
     monkeypatch.setattr(
         "jobdeck.ai.drafting.draft_application",
         lambda job, profile_text, refnr="", applicant_name="":
-            ("Anrede,\n\nText.", "Mail.", _usage()),
+            ("Anrede,\n\nText.", "Mail.", "", _usage()),
     )
     result = await drafting.draft_for_job(job_id)
     assert result["ok"]
