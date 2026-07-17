@@ -104,6 +104,16 @@ def test_system_prompt_keeps_the_attribution_fidelity_contract():
     assert "never supplies new facts about the candidate" in prompt
 
 
+def test_system_prompt_analyses_first_and_positions_for_the_role():
+    """The Sonnet rewrite must keep the analysis-first + role-positioning +
+    clean-Stellenbezeichnung + flawless-German contract, not only the
+    attribution guards — a silent drop of any of these is the regression."""
+    prompt = " ".join(ai_drafting.SYSTEM_PROMPT.lower().split())
+    assert "analysis" in prompt and "stellenbezeichnung" in prompt
+    assert "leading with the competences the posting weights most" in prompt
+    assert "flawless german" in prompt  # the anti-typo instruction
+
+
 # -- drafting module -----------------------------------------------------------
 def _job(**over):
     values = dict(
@@ -135,19 +145,53 @@ def test_build_betreff_collapses_smuggled_whitespace():
         == "Bewerbung als Dev X-Evil: 1, K 1 – Max Muster"
 
 
+def test_clean_title_strips_board_noise_but_keeps_the_role():
+    # the exact Stretta-style title that leaked junk into a real Betreff
+    assert ai_drafting.clean_title(
+        "Ab sofort: Fullstack-Entwickler Python/Django mit Frontend-Fokus "
+        "(m/w/d)Vollzeit"
+    ) == "Fullstack-Entwickler Python/Django mit Frontend-Fokus (m/w/d)"
+    # a clean title (and its (m/w/d) marker) is left untouched
+    assert ai_drafting.clean_title("Full-Stack Entwickler m/w/d") \
+        == "Full-Stack Entwickler m/w/d"
+    # employment-type token dropped whether glued or spaced
+    assert ai_drafting.clean_title("Backend Developer (m/w/d) Vollzeit") \
+        == "Backend Developer (m/w/d)"
+    assert ai_drafting.clean_title("Neu: Python Entwickler in Teilzeit") \
+        == "Python Entwickler"
+
+
+def test_build_betreff_cleans_board_noise_from_the_title():
+    # even the raw-title fallback path yields a clean subject line
+    assert ai_drafting.build_betreff(
+        "Ab sofort: Fullstack-Entwickler (m/w/d)Vollzeit", "K-9", "Max Muster"
+    ) == "Bewerbung als Fullstack-Entwickler (m/w/d), K-9 – Max Muster"
+
+
 def test_draft_application_parses_and_strips(monkeypatch):
+    captured = {}
+
     def fake_complete(**kwargs):
+        captured.update(kwargs)
         return llm.LLMResult(
-            text='{"anschreiben_body": " Sehr geehrte Frau Weber,\\n\\nAbsatz. ",'
+            text='{"analysis": "internal reasoning",'
+                 ' "stellenbezeichnung": " Backend Developer (m/w/d) ",'
+                 ' "anschreiben_body": " Sehr geehrte Frau Weber,\\n\\nAbsatz. ",'
                  ' "email_body": " Guten Tag,\\n\\nanbei meine Bewerbung. "}',
             model="m", input_tokens=5, output_tokens=5, cost_usd=0.0,
         )
 
     monkeypatch.setattr(llm, "complete", fake_complete)
-    anschreiben, email_body, usage = ai_drafting.draft_application(_job(), "profil")
+    anschreiben, email_body, stellenbezeichnung, usage = ai_drafting.draft_application(
+        _job(), "profil"
+    )
     assert anschreiben.startswith("Sehr geehrte Frau Weber,")
     assert email_body.endswith("anbei meine Bewerbung.")
+    assert stellenbezeichnung == "Backend Developer (m/w/d)"  # stripped
     assert usage.input_tokens == 5
+    # drafting runs on the stronger drafting model, not the scoring default
+    assert captured["model"] == config.anthropic_drafting_model()
+    assert captured["timeout"] == ai_drafting.DRAFT_TIMEOUT_S
 
 
 @pytest.mark.parametrize("text", [
@@ -246,16 +290,18 @@ async def test_successful_draft_is_persisted_and_metered(
         "jobdeck.ai.drafting.draft_application",
         lambda job, profile_text, refnr="", applicant_name="":
             ("Sehr geehrte Frau Weber,\n\nAbsatz.",
-                                   "Guten Tag,\n\nanbei meine Bewerbung.\n\n"
-                                   "Mit freundlichen Grüßen\nMax Muster",
-                                   _usage()),
+             "Guten Tag,\n\nanbei meine Bewerbung.\n\n"
+             "Mit freundlichen Grüßen\nMax Muster",
+             "Backend Developer", _usage()),
     )
 
     result = await drafting.draft_for_job(job_id)
     assert result["ok"], result["error"]
     draft = result["draft"]
     assert draft["status"] == "ready"
-    assert draft["betreff"] == "Bewerbung als Python Dev, K-17 – Max Muster"
+    # the Betreff is built from the LLM's clean Stellenbezeichnung (not the raw
+    # job title "Python Dev"); the Refnr + name are code-supplied
+    assert draft["betreff"] == "Bewerbung als Backend Developer, K-17 – Max Muster"
     assert draft["recipient"] == "hr@firma.de"
     assert draft["anschreiben_body"].startswith("Sehr geehrte Frau Weber,")
     assert draft["llm_model"] == "claude-haiku-4-5"
@@ -279,7 +325,7 @@ async def test_drafted_email_carries_the_configured_signature(
         "jobdeck.ai.drafting.draft_application",
         lambda job, profile_text, refnr="", applicant_name="":
             ("Anrede,\n\nText.", "Guten Tag,\n\nanbei meine Bewerbung.\n\n"
-                                 "Mit freundlichen Grüßen\nMax Muster", _usage()),
+                                 "Mit freundlichen Grüßen\nMax Muster", "", _usage()),
     )
 
     result = await drafting.draft_for_job(job_id)
@@ -298,7 +344,7 @@ async def test_no_signature_configured_leaves_the_email_untouched(
         "jobdeck.ai.drafting.draft_application",
         lambda job, profile_text, refnr="", applicant_name="":
             ("Anrede,\n\nText.", "Guten Tag,\n\nMit freundlichen Grüßen\nMax",
-             _usage()),
+             "", _usage()),
     )
 
     result = await drafting.draft_for_job(job_id)
@@ -328,7 +374,7 @@ async def test_failed_draft_is_recorded_and_metered(
     monkeypatch.setattr(
         "jobdeck.ai.drafting.draft_application",
         lambda job, profile_text, refnr="", applicant_name="":
-            ("Anrede,\n\nText.", "Mail.", _usage()),
+            ("Anrede,\n\nText.", "Mail.", "", _usage()),
     )
     result = await drafting.draft_for_job(job_id)
     assert result["ok"]
@@ -345,7 +391,7 @@ async def test_redraft_clears_stale_pdf_path(
     monkeypatch.setattr(
         "jobdeck.ai.drafting.draft_application",
         lambda job, profile_text, refnr="", applicant_name="":
-            ("Anrede,\n\nText.", "Mail.", _usage()),
+            ("Anrede,\n\nText.", "Mail.", "", _usage()),
     )
     assert (await drafting.draft_for_job(job_id))["ok"]
     db.upsert_draft(con, job_id, {"pdf_path": "/old/mappe.pdf"})
@@ -454,7 +500,7 @@ async def test_finish_discards_result_when_claim_was_taken_away(
         # simulates a human resolving the draft while the LLM call runs
         with db.db() as other:
             db.upsert_draft(other, job_id, {"status": "discarded"})
-        return ("Anrede,\n\nText.", "Mail.", _usage())
+        return ("Anrede,\n\nText.", "Mail.", "", _usage())
 
     monkeypatch.setattr("jobdeck.ai.drafting.draft_application", steal_then_draft)
     result = await drafting.draft_for_job(job_id)
@@ -480,7 +526,7 @@ async def test_abandoned_claim_is_reclaimed(
     monkeypatch.setattr(
         "jobdeck.ai.drafting.draft_application",
         lambda job, profile_text, refnr="", applicant_name="":
-            ("Anrede,\n\nText.", "Mail.", _usage()),
+            ("Anrede,\n\nText.", "Mail.", "", _usage()),
     )
     result = await drafting.draft_for_job(job_id)
     assert result["ok"]
