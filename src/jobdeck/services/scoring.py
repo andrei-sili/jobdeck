@@ -43,6 +43,12 @@ def _profiles_by_id():
         return {row["id"]: dict(row) for row in db.list_profiles(con)}
 
 
+def _global_hard_tags() -> str:
+    """Requirements that hold for every search, whatever the profile."""
+    with db.db() as con:
+        return db.get_setting(con, "global_hard_tags", "")
+
+
 def _persist_score(
     job_id: int, score: int, reason: str, contacts: dict, usage: llm.LLMResult
 ) -> None:
@@ -77,6 +83,7 @@ async def score_new_jobs(limit: int = BATCH_LIMIT) -> dict[str, int]:
         # One criteria snapshot per batch: a mid-batch profile edit applies
         # from the next run — deliberate, keeps a batch internally consistent.
         profiles = await asyncio.to_thread(_profiles_by_id) if jobs else {}
+        global_tags = await asyncio.to_thread(_global_hard_tags) if jobs else ""
         for job in jobs:
             # Re-check the kill switch before every paid call: flipping it
             # off mid-batch (or while queued behind the lock) must stop the
@@ -86,7 +93,7 @@ async def score_new_jobs(limit: int = BATCH_LIMIT) -> dict[str, int]:
                 break
             # deleted profile (profile_id NULL) → generic scoring, no criteria
             criteria = ai_scoring.criteria_from_profile(
-                profiles.get(job["profile_id"])
+                profiles.get(job["profile_id"]), global_tags
             )
             try:
                 score, reason, contacts, usage = await asyncio.to_thread(
