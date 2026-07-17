@@ -88,16 +88,29 @@ class MatchCriteria:
     strictness: int = DEFAULT_STRICTNESS
 
 
-def criteria_from_profile(profile_row) -> MatchCriteria | None:
-    """Criteria from a search_profiles row; None when the profile defines
-    nothing beyond the defaults (the prompt stays exactly as without them)."""
+def split_tags(raw: str) -> tuple[str, ...]:
+    """Hard requirements are one per line or comma-separated."""
+    return tuple(
+        tag.strip() for tag in re.split(r"[,\n]", raw or "") if tag.strip()
+    )
+
+
+def criteria_from_profile(
+    profile_row, global_hard_tags: str = ""
+) -> MatchCriteria | None:
+    """Criteria from a search_profiles row; None when nothing beyond the
+    defaults is defined (the prompt stays exactly as without them).
+
+    `global_hard_tags` are requirements that hold for EVERY search — they are
+    prepended, and a profile's own tags extend them. Combined here in code on
+    purpose: the scoring prompt keeps one narrow contract (profile = facts,
+    posting = untrusted data, criteria = rules), and teaching the model to
+    hunt for rules in free prose would blunt exactly the defence that keeps a
+    posting from smuggling in its own criteria."""
     if profile_row is None:
         return None
-    hard_tags = tuple(
-        tag.strip()
-        for tag in re.split(r"[,\n]", profile_row["hard_tags"] or "")
-        if tag.strip()
-    )
+    hard_tags = split_tags(global_hard_tags) + split_tags(profile_row["hard_tags"])
+    hard_tags = tuple(dict.fromkeys(hard_tags))  # a repeated rule states once
     soft = (profile_row["soft_preferences"] or "").strip()
     strictness = profile_row["strictness"]
     strictness = DEFAULT_STRICTNESS if strictness is None else int(strictness)

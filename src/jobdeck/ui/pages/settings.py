@@ -21,6 +21,7 @@ def _get_settings():
             "template_path": db.get_setting(con, "template_path", ""),
             "anlagen_dir": db.get_setting(con, "anlagen_dir", ""),
             "email_signature": db.get_setting(con, "email_signature", ""),
+            "global_hard_tags": db.get_setting(con, "global_hard_tags", ""),
             "real_send_enabled": db.get_setting(con, "real_send_enabled", "0"),
             "test_recipient": db.get_setting(con, "test_recipient", ""),
             "gmail_address": db.get_setting(con, "gmail_address", ""),
@@ -268,6 +269,25 @@ async def settings_page():
                 "Master switch for all LLM spend. While off, nothing is sent "
                 "to the API — scheduled and manual scoring both skip."
             ).classes("text-xs text-gray-500")
+            global_tags = ui.textarea(
+                "Hard requirements for EVERY search (one per line)",
+                value=settings["global_hard_tags"],
+            ).classes("w-full").props("autogrow")
+            ui.label(
+                "A posting that clearly violates one scores 0 and is hidden "
+                "behind the inbox's mismatch toggle — never deleted. Each "
+                "search profile can add its own on top. Rules written in "
+                "profile.md are NOT enforced here: that file states facts "
+                "about you, this states what a posting must satisfy."
+            ).classes("text-xs text-gray-500")
+
+            async def save_global_tags():
+                await run.io_bound(_set_setting, "global_hard_tags",
+                                   (global_tags.value or "").strip())
+                ui.notify("Saved — applies to the next scoring run",
+                          type="positive")
+
+            ui.button("Save", on_click=save_global_tags).props("outline")
             ui.label(
                 f"{settings['llm_calls']} calls · "
                 f"{settings['llm_input_tokens']} in / "

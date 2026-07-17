@@ -195,6 +195,41 @@ def test_posting_cannot_forge_a_fence_exit():
 
 
 # -- match criteria ------------------------------------------------------------
+def test_global_hard_tags_apply_to_every_profile():
+    """A rule that holds for every search lives in ONE place; a profile's own
+    tags extend it instead of restating it."""
+    row = {"hard_tags": "#münchen", "soft_preferences": "", "strictness": 50}
+    criteria = scoring.criteria_from_profile(row, "Festanstellung\nKein Praktikum")
+    assert criteria.hard_tags == ("Festanstellung", "Kein Praktikum", "#münchen")
+
+    # global-only: a profile that defines nothing still gets the global rules
+    bare = {"hard_tags": "", "soft_preferences": "", "strictness": 50}
+    assert scoring.criteria_from_profile(bare, "Festanstellung").hard_tags \
+        == ("Festanstellung",)
+
+    # no global, no profile tags, nothing else → prompt stays untouched
+    assert scoring.criteria_from_profile(bare, "") is None
+    assert scoring.criteria_from_profile(bare) is None
+
+
+def test_global_hard_tags_are_not_stated_twice():
+    """The same rule in both places must reach the prompt once."""
+    row = {"hard_tags": "Festanstellung\n#backend", "soft_preferences": "",
+           "strictness": 50}
+    criteria = scoring.criteria_from_profile(row, "Festanstellung")
+    assert criteria.hard_tags == ("Festanstellung", "#backend")
+
+
+def test_global_hard_tags_reach_the_prompt_section():
+    row = {"hard_tags": "", "soft_preferences": "", "strictness": 50}
+    section = scoring._criteria_section(
+        scoring.criteria_from_profile(row, "Festanstellung — kein Ausbildungsplatz")
+    )
+    assert "Hard requirements" in section
+    assert "score 0 ONLY if the posting clearly violates one" in section
+    assert "- Festanstellung — kein Ausbildungsplatz" in section
+
+
 def test_criteria_from_profile_parses_tags_and_defaults():
     row = {"hard_tags": "#backend, #münchen\n #remote ",
            "soft_preferences": " Gehalt 45000 @80% ", "strictness": 70}
