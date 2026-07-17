@@ -89,12 +89,11 @@ async def settings_page():
                 ui.notify("Gmail connected ✓", type="positive")
 
             async def disconnect_gmail():
-                await run.io_bound(
-                    lambda: config.TOKEN_PATH.unlink(missing_ok=True))
+                await run.io_bound(gmail.disconnect)
                 await run.io_bound(_set_setting, "gmail_address", "")
                 gmail_label.set_text("")
-                ui.notify("Gmail disconnected — the saved authorization was "
-                          "removed", type="info")
+                ui.notify("Gmail disconnected — the authorization was revoked "
+                          "at Google and removed locally", type="info")
 
             with ui.row().classes("items-center gap-2"):
                 ui.button("Connect Gmail", icon="link",

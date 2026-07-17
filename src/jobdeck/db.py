@@ -168,6 +168,9 @@ def delete_bewerbung(con: sqlite3.Connection, row_id: int) -> None:
     con.execute(
         "UPDATE email_log SET bewerbung_id=NULL WHERE bewerbung_id=?", (row_id,)
     )
+    con.execute(
+        "UPDATE drafts SET bewerbung_id=NULL WHERE bewerbung_id=?", (row_id,)
+    )
     con.execute("UPDATE jobs SET bewerbung_id=NULL WHERE bewerbung_id=?", (row_id,))
     con.execute(
         "UPDATE jobs SET duplicate_of=NULL WHERE duplicate_of=?", (row_id,)

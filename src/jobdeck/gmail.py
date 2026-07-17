@@ -21,6 +21,7 @@ import html
 import logging
 import os
 import re
+import threading
 from email.headerregistry import Address
 from email.message import EmailMessage
 from pathlib import Path
@@ -46,6 +47,13 @@ SCOPES = [
     SEND_SCOPE,
 ]
 USERINFO_ENDPOINT = "https://openidconnect.googleapis.com/v1/userinfo"
+REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke"
+
+# token.json is written from send workers (refresh) and removed from the UI
+# (Disconnect); serialize so a refresh can never resurrect a disconnected
+# authorization, and two consent flows can never interleave their writes.
+_token_lock = threading.Lock()
+_connect_lock = threading.Lock()
 
 # Bounds a hung request; a stuck send would otherwise hold the send lock.
 REQUEST_TIMEOUT_S = 60.0
@@ -80,17 +88,74 @@ def is_connected() -> bool:
     return config.TOKEN_PATH.exists()
 
 
+def normalize_address(addr: str) -> str:
+    """The wire form of an address: ASCII, with an IDNA-encoded domain.
+
+    German postings do carry umlaut domains, but RFC 2047 encoded-words are
+    illegal inside an addr-spec — IDNA is the only correct encoding, and
+    without it the To header goes out malformed. Raises ValueError when the
+    address cannot be represented on the wire."""
+    addr = " ".join(addr.split())
+    local, _, domain = addr.rpartition("@")
+    if not local.isascii():
+        raise ValueError("non-ASCII local part is not supported")
+    if not domain.isascii():
+        try:
+            domain = domain.encode("idna").decode("ascii")
+        except UnicodeError as exc:
+            raise ValueError(f"invalid domain: {exc}") from exc
+    return f"{local}@{domain}"
+
+
 def is_plausible_address(addr: str) -> bool:
     """Just enough validation to refuse garbage recipients before a send."""
-    return bool(_ADDR_RE.match(addr.strip()))
+    if not _ADDR_RE.match(addr.strip()):
+        return False
+    try:
+        normalize_address(addr)
+    except ValueError:
+        return False
+    return True
 
 
-def _save_token(creds: Credentials) -> None:
-    """Persist the authorization with owner-only permissions."""
-    fd = os.open(config.TOKEN_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(creds.to_json())
-    os.chmod(config.TOKEN_PATH, 0o600)  # pre-existing file keeps 0600 too
+def _save_token(creds: Credentials, only_if_exists: bool = False) -> None:
+    """Persist the authorization with owner-only permissions.
+
+    only_if_exists guards the refresh path: if the user disconnected while
+    the refresh was in flight, writing would resurrect an authorization
+    they believe is gone."""
+    with _token_lock:
+        if only_if_exists and not config.TOKEN_PATH.exists():
+            log.info("Gmail was disconnected during a token refresh — "
+                     "not restoring the token file")
+            return
+        fd = os.open(config.TOKEN_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                     0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(creds.to_json())
+        os.chmod(config.TOKEN_PATH, 0o600)  # pre-existing file keeps 0600 too
+
+
+def disconnect() -> None:
+    """Revoke the authorization at Google, then remove it locally.
+
+    Revoking first means a copy of token.json (a backup, a disk image)
+    cannot mint access tokens after the user severed the connection.
+    Best effort: a network failure must not block the local removal."""
+    token = ""
+    try:
+        creds = Credentials.from_authorized_user_file(str(config.TOKEN_PATH))
+        token = creds.refresh_token or creds.token or ""
+    except (OSError, ValueError) as exc:
+        log.info("no readable Gmail token to revoke: %s", exc)
+    if token:
+        try:
+            httpx.post(REVOKE_ENDPOINT, data={"token": token}, timeout=30)
+        except httpx.HTTPError as exc:
+            log.warning("could not revoke the Gmail authorization at Google "
+                        "(removing it locally anyway): %s", exc)
+    with _token_lock:
+        config.TOKEN_PATH.unlink(missing_ok=True)
 
 
 def load_credentials() -> Credentials:
@@ -126,7 +191,7 @@ def load_credentials() -> Credentials:
                 "the Gmail authorization was revoked (this happens after a "
                 "Google password change) — reconnect in Settings"
             ) from exc
-        _save_token(creds)
+        _save_token(creds, only_if_exists=True)
         return creds
     raise GmailNotConnected("the saved Gmail authorization expired — reconnect in Settings")
 
@@ -146,22 +211,30 @@ def connect() -> str:
             f"no OAuth client file at {config.CLIENT_SECRET_PATH} — create a "
             f"Desktop-app OAuth client in Google Cloud and save its JSON there"
         )
-    flow = InstalledAppFlow.from_client_secrets_file(
-        str(config.CLIENT_SECRET_PATH), SCOPES
-    )
+    if not _connect_lock.acquire(blocking=False):
+        raise GmailError("a Gmail connection is already in progress — finish "
+                         "it in the browser window that is already open")
     try:
-        creds = flow.run_local_server(
-            port=0,
-            open_browser=True,
-            timeout_seconds=CONSENT_TIMEOUT_S,
-            success_message="JobDeck is connected to Gmail — you can close this tab.",
+        flow = InstalledAppFlow.from_client_secrets_file(
+            str(config.CLIENT_SECRET_PATH), SCOPES
         )
-    except GmailError:
-        raise
-    except Exception as exc:  # oauthlib/socket errors, abandoned consent
-        raise GmailError(f"Gmail authorization did not complete: {exc}") from exc
-    _save_token(creds)
-    return fetch_address(creds)
+        try:
+            creds = flow.run_local_server(
+                port=0,
+                open_browser=True,
+                timeout_seconds=CONSENT_TIMEOUT_S,
+                success_message="JobDeck is connected to Gmail — you can "
+                                "close this tab.",
+            )
+        except GmailError:
+            raise
+        except Exception as exc:  # oauthlib/socket errors, abandoned consent
+            raise GmailError(
+                f"Gmail authorization did not complete: {exc}") from exc
+        _save_token(creds)
+        return fetch_address(creds)
+    finally:
+        _connect_lock.release()
 
 
 def fetch_address(creds: Credentials) -> str:
@@ -217,7 +290,7 @@ def build_mime(
     never smuggle line breaks into the header block.
     """
     message = EmailMessage()
-    message["To"] = " ".join(to.split())
+    message["To"] = normalize_address(to)
     message["Subject"] = " ".join(subject.split())
     if from_addr:
         message["From"] = Address(

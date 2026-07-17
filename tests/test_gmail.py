@@ -120,9 +120,11 @@ def test_is_plausible_address(addr, ok):
 
 # -- credentials ---------------------------------------------------------------
 def _token_payload(**over):
+    # Deliberately unlike Google's real token shapes (ya29. / 1//): a public
+    # repo must not train its own secret scan to ignore those prefixes.
     payload = {
-        "token": "ya29.test",
-        "refresh_token": "1//refresh",
+        "token": "test-access-token",
+        "refresh_token": "test-refresh-token",
         "client_id": "id.apps.googleusercontent.com",
         "client_secret": "secret",
         "token_uri": "https://oauth2.googleapis.com/token",
@@ -160,7 +162,7 @@ def test_load_credentials_missing_send_scope_raises(data_dir):
 def test_load_credentials_valid_token_needs_no_refresh(data_dir):
     config.TOKEN_PATH.write_text(json.dumps(_token_payload()), encoding="utf-8")
     creds = gmail.load_credentials()
-    assert creds.token == "ya29.test"
+    assert creds.token == "test-access-token"
 
 
 def test_load_credentials_revoked_refresh_removes_dead_token(data_dir, monkeypatch):
@@ -190,6 +192,99 @@ def test_save_token_is_owner_only(data_dir):
 def test_connect_without_client_secret_raises(data_dir):
     with pytest.raises(gmail.GmailNotConnected, match="OAuth client file"):
         gmail.connect()
+
+
+def test_successful_refresh_is_persisted(data_dir, monkeypatch):
+    payload = _token_payload(expiry="2020-01-01T00:00:00Z")
+    config.TOKEN_PATH.write_text(json.dumps(payload), encoding="utf-8")
+
+    def refresh(self, request):
+        self.token = "refreshed-access-token"
+        self.expiry = None  # google-auth treats None as "never expires"
+
+    monkeypatch.setattr("google.oauth2.credentials.Credentials.refresh", refresh)
+    creds = gmail.load_credentials()
+    assert creds.token == "refreshed-access-token"
+    # the next send must not have to refresh again
+    assert json.loads(config.TOKEN_PATH.read_text())["token"] \
+        == "refreshed-access-token"
+
+
+def test_refresh_does_not_resurrect_a_disconnected_token(data_dir, monkeypatch):
+    """Disconnect during an in-flight refresh must win — otherwise the app
+    keeps sending on an authorization the user believes is severed."""
+    payload = _token_payload(expiry="2020-01-01T00:00:00Z")
+    config.TOKEN_PATH.write_text(json.dumps(payload), encoding="utf-8")
+
+    def refresh(self, request):
+        self.token = "refreshed-access-token"
+        self.expiry = None
+        config.TOKEN_PATH.unlink()  # the user clicks Disconnect right now
+
+    monkeypatch.setattr("google.oauth2.credentials.Credentials.refresh", refresh)
+    gmail.load_credentials()
+    assert not config.TOKEN_PATH.exists()
+    assert gmail.is_connected() is False
+
+
+def test_disconnect_revokes_at_google_then_removes_the_token(
+    data_dir, monkeypatch
+):
+    config.TOKEN_PATH.write_text(json.dumps(_token_payload()), encoding="utf-8")
+    posted = {}
+
+    def fake_post(url, data, timeout):
+        posted["url"] = url
+        posted["token"] = data["token"]
+        return SimpleNamespace(status_code=200)
+
+    monkeypatch.setattr(gmail.httpx, "post", fake_post)
+    gmail.disconnect()
+    assert posted["url"] == gmail.REVOKE_ENDPOINT
+    assert posted["token"] == "test-refresh-token"  # revoking it kills access
+    assert not config.TOKEN_PATH.exists()
+
+
+def test_disconnect_removes_the_token_even_if_revoking_fails(
+    data_dir, monkeypatch
+):
+    import httpx
+
+    config.TOKEN_PATH.write_text(json.dumps(_token_payload()), encoding="utf-8")
+
+    def failing_post(url, data, timeout):
+        raise httpx.ConnectError("offline")
+
+    monkeypatch.setattr(gmail.httpx, "post", failing_post)
+    gmail.disconnect()
+    assert not config.TOKEN_PATH.exists()
+
+
+def test_disconnect_without_a_token_is_a_noop(data_dir):
+    gmail.disconnect()
+    assert not config.TOKEN_PATH.exists()
+
+
+# -- address normalisation -----------------------------------------------------
+def test_normalize_address_idna_encodes_umlaut_domains():
+    assert gmail.normalize_address("bewerbung@müller.de") \
+        == "bewerbung@xn--mller-kva.de"
+    assert gmail.normalize_address("hr@firma.de") == "hr@firma.de"
+
+
+def test_umlaut_domain_yields_a_valid_ascii_to_header(tmp_path):
+    message = _mime(to="bewerbung@müller.de")
+    assert message["To"] == "bewerbung@xn--mller-kva.de"
+    # encoded-words are illegal inside an addr-spec: the To line must be plain
+    to_line = next(line for line in message.as_bytes().split(b"\n")
+                   if line.startswith(b"To:"))
+    assert to_line == b"To: bewerbung@xn--mller-kva.de"
+
+
+def test_normalize_address_rejects_a_non_ascii_local_part():
+    with pytest.raises(ValueError, match="local part"):
+        gmail.normalize_address("bewerbungü@firma.de")
+    assert gmail.is_plausible_address("bewerbungü@firma.de") is False
 
 
 # -- sending -------------------------------------------------------------------
