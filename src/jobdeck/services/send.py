@@ -116,8 +116,10 @@ def _claim(job_id: int, snapshot: dict, expect: dict | None) -> tuple[str, str, 
 
     The sending mode is resolved HERE, not from the caller's earlier read:
     a real→test flip landing between the gates and the send must not put a
-    message in a company's inbox. The resolved mode is persisted so a claim
-    left stuck can never be mistaken for a real application."""
+    message in a company's inbox, and a test→real flip must not slip past
+    the duplicate-company gate. Everything the mode decides therefore lives
+    inside this transaction. The resolved mode is persisted so a claim left
+    stuck can never be mistaken for a real application."""
     with db.db() as con:
         con.execute("BEGIN IMMEDIATE")
         current = db.get_draft_by_job(con, job_id)
@@ -140,9 +142,16 @@ def _claim(job_id: int, snapshot: dict, expect: dict | None) -> tuple[str, str, 
         if not gmail.is_plausible_address(recipient):
             return (f"'{recipient}' does not look like a valid e-mail address "
                     f"— fix the recipient"), "", test_mode
-        if not test_mode and db.count_outbound_for_draft(con, current["id"]):
-            return ("this draft already has a recorded send — check "
-                    "Applications"), "", test_mode
+        if not test_mode:
+            if db.count_outbound_for_draft(con, current["id"]):
+                return ("this draft already has a recorded send — check "
+                        "Applications"), "", test_mode
+            job = db.get_job(con, job_id)
+            if job is not None and find_duplicate_bewerbung(
+                con, job["company"], recipient
+            ) is not None:
+                return ("you already applied at this company — see "
+                        "Applications before sending again"), "", test_mode
         if any(current[field] != snapshot[field] for field in CONTENT_FIELDS):
             return ("the draft changed while preparing the send — review it "
                     "again"), "", test_mode

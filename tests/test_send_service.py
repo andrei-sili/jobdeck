@@ -299,6 +299,29 @@ async def test_real_send_requires_plausible_recipient(
     assert not result["ok"] and "valid e-mail address" in result["error"]
 
 
+def test_claim_applies_the_duplicate_gate_to_the_mode_it_resolved(
+    con, data_dir, tmp_path
+):
+    """A test→real flip inside the claim window must not slip past the
+    duplicate-company gate: the mode and everything it decides are one
+    atomic decision."""
+    job_id = _insert_job(con)
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path))
+    db.add_bewerbung(con, {"firma": "Firma GmbH", "email": "hr@firma.de",
+                           "status": "Gesendet"})
+    _settings(con, test_recipient=TEST_INBOX, real_send_enabled="1")
+    snapshot = dict(db.get_draft_by_job(con, job_id))
+
+    error, _, _ = send._claim(job_id, snapshot, None)
+    assert "already applied at this company" in error
+    assert db.get_draft_by_job(con, job_id)["status"] == "ready"
+
+    # the same draft is still rehearsable — a test send is not an application
+    _settings(con, real_send_enabled="0")
+    error, recipient, test_mode = send._claim(job_id, snapshot, None)
+    assert error == "" and recipient == TEST_INBOX and test_mode is True
+
+
 async def test_duplicate_company_blocks_real_send_only(
     con, gmail_connected, sent_messages, tmp_path
 ):
