@@ -85,6 +85,25 @@ def test_resolve_refnr_prefers_extraction_then_arbeitsagentur_id():
     ) == ""
 
 
+# -- drafting prompt -----------------------------------------------------------
+def test_system_prompt_keeps_the_attribution_fidelity_contract():
+    """Deletion tripwire, NOT a behavioural proof — a stub cannot exercise
+    the model, so a real letter's fidelity is checked by the live smoke.
+
+    The fix for the misattribution class (a true skill welded onto the
+    wrong project — "Django in zwei Praktika", Alembic under the Java
+    project) lives entirely in these prompt rules, so guard them against a
+    silent drop in a future rewrite: the binding rule, its skill-level
+    escape hatch, the count-inflation guard, and the posting-wall clause
+    (no candidate facts come from the untrusted posting) must all survive."""
+    prompt = " ".join(ai_drafting.SYSTEM_PROMPT.lower().split())  # wrap-robust
+    assert "attribution fidelity" in prompt
+    assert "skill level" in prompt  # the escape hatch for an unbound skill
+    assert "from one project into a sentence about another" in prompt
+    assert "one occurrence into" in prompt  # the count-inflation guard
+    assert "never supplies new facts about the candidate" in prompt
+
+
 # -- drafting module -----------------------------------------------------------
 def _job(**over):
     values = dict(
