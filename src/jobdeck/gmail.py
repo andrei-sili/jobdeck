@@ -64,6 +64,17 @@ class GmailNotConnected(GmailError):
     """No usable Gmail authorization — connect (again) from Settings."""
 
 
+class GmailRefused(GmailError):
+    """Gmail answered and rejected the message: it was definitively NOT sent."""
+
+
+class GmailUncertain(GmailError):
+    """The request may have been accepted and only the response was lost.
+
+    Callers must not treat this as a failed send — the message may already
+    be in the recipient's inbox, so retrying risks a double-send."""
+
+
 def is_connected() -> bool:
     """Cheap gate/UI check; load_credentials() is the real validation."""
     return config.TOKEN_PATH.exists()
@@ -243,7 +254,10 @@ def send_message(message: EmailMessage) -> tuple[str, str]:
             .execute()
         )
     except HttpError as exc:
-        raise GmailError(f"Gmail refused the send: {exc.reason}") from exc
+        # Gmail answered: the message was definitively not accepted.
+        raise GmailRefused(f"Gmail refused the send: {exc.reason}") from exc
     except (httplib2.HttpLib2Error, GoogleAuthError, OSError) as exc:
-        raise GmailError(f"could not reach Gmail: {exc}") from exc
+        # A timeout or reset can also hit AFTER Gmail accepted the message,
+        # with only the response lost — the send is ambiguous, not failed.
+        raise GmailUncertain(f"could not reach Gmail: {exc}") from exc
     return str(response.get("id", "")), str(response.get("threadId", ""))

@@ -95,8 +95,26 @@ async def tick() -> dict:
     if job_id is None:
         return {"sent": 0, "reason": "nothing approved for auto-send"}
 
-    result = await send.send_draft(job_id)
+    # The pick and the send are not one transaction (send_draft waits for the
+    # send lock): pin the status so an un-approval landing in that window
+    # cannot be overridden.
+    try:
+        result = await send.send_draft(job_id, expect={"status": "approved"})
+    except Exception as exc:
+        # send_draft released the claim and re-raised. Demote here too:
+        # without it the draft stays 'approved' and every tick retries it.
+        await asyncio.to_thread(
+            send.demote_failed_autosend, job_id, f"unexpected error: {exc}"
+        )
+        log.exception("auto-send for job %s raised", job_id)
+        return {"sent": 0, "reason": f"unexpected error: {exc}",
+                "job_id": job_id}
     if not result["ok"]:
+        if result.get("kind") == "global":
+            # Nothing is wrong with this draft — pause instead of draining
+            # the approved pool one innocent draft per tick.
+            log.info("auto-send paused: %s", result["error"])
+            return {"sent": 0, "reason": result["error"]}
         # Fail toward human attention, never toward unattended retries.
         await asyncio.to_thread(
             send.demote_failed_autosend, job_id, result["error"]

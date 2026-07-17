@@ -12,7 +12,15 @@ repeatedly and still be really sent later.
 Unlike drafting, a claim stuck in 'sending' is NEVER reclaimed
 automatically: a double-send to a company cannot be taken back, so only
 a human (who can check the Gmail Sent folder) may resolve it, from the
-review queue.
+review queue. The same reasoning governs ambiguous transport failures
+(GmailUncertain): the message may already have been accepted, so the
+claim stays put instead of inviting a retry.
+
+Callers pin what they believe they are sending via `expect` — the
+content and mode a human confirmed, or the status the auto-send worker
+picked. Anything that changed since means the approval no longer
+describes the message, and the send is refused rather than sending
+something the user never agreed to.
 """
 
 import asyncio
@@ -30,9 +38,17 @@ _lock = asyncio.Lock()  # one send at a time — manual clicks and auto-send ali
 
 SNIPPET_CHARS = 120
 
+# Content fields that define the message. A change to any of them makes an
+# earlier approval (or a pre-send snapshot) describe a different e-mail.
+CONTENT_FIELDS = ("updated_at", "recipient", "betreff", "email_body",
+                  "anschreiben_body", "pdf_path")
 
-def _error(message: str) -> dict:
-    return {"ok": False, "error": message, "test_mode": False,
+
+def _error(message: str, kind: str = "draft") -> dict:
+    """kind='global' marks a condition no draft is at fault for (cap, no
+    connection) — the auto-send worker must pause rather than blame the
+    draft it happened to pick."""
+    return {"ok": False, "error": message, "kind": kind, "test_mode": False,
             "recipient": "", "draft": None}
 
 
@@ -71,13 +87,32 @@ def resolve_recipient(draft_recipient: str, settings: dict) -> tuple[str, bool, 
     return (draft_recipient or "").strip(), False, ""
 
 
+def expectation_mismatch(expect: dict, draft: dict, recipient: str,
+                         test_mode: bool) -> str:
+    """What the caller pinned vs what would actually be sent now."""
+    if "status" in expect and draft["status"] != expect["status"]:
+        return (f"this draft is no longer {expect['status']} "
+                f"(now: {draft['status']}) — nothing was sent")
+    if any(field in expect and draft[field] != expect[field]
+           for field in CONTENT_FIELDS):
+        return ("the draft changed since you reviewed it — reopen it and "
+                "send again")
+    if "test_mode" in expect and test_mode != expect["test_mode"]:
+        return ("the sending mode changed since you confirmed — nothing was "
+                "sent; reopen it and confirm again")
+    if "recipient_shown" in expect and recipient != expect["recipient_shown"]:
+        return ("the recipient changed since you confirmed — nothing was "
+                "sent; reopen it and confirm again")
+    return ""
+
+
 def _claim(job_id: int, snapshot: dict, test_mode: bool) -> str:
     """Atomically move ready/approved → sending; '' on success, else the
     user-readable refusal.
 
     BEGIN IMMEDIATE makes check-then-write atomic across connections, and
     the content comparison (updated_at has second resolution) guarantees
-    the message that leaves is exactly the one the user approved."""
+    the message that leaves is exactly the one the worker read."""
     with db.db() as con:
         con.execute("BEGIN IMMEDIATE")
         current = db.get_draft_by_job(con, job_id)
@@ -92,24 +127,42 @@ def _claim(job_id: int, snapshot: dict, test_mode: bool) -> str:
             return f"the draft is not sendable (status: {current['status']})"
         if not test_mode and db.count_outbound_for_draft(con, current["id"]):
             return "this draft already has a recorded send — check Applications"
-        if any(
-            current[field] != snapshot[field]
-            for field in ("updated_at", "recipient", "betreff",
-                          "email_body", "pdf_path")
-        ):
+        if any(current[field] != snapshot[field] for field in CONTENT_FIELDS):
             return "the draft changed while preparing the send — review it again"
         db.upsert_draft(con, job_id, {"status": "sending"})
         return ""
 
 
-def _release(job_id: int, status: str, error: str = "") -> None:
+def _release(job_id: int, status: str, error: str = "") -> bool:
+    """Return our claimed draft to `status`.
+
+    False when the claim is no longer ours (a human resolved the send while
+    it was in flight) — their decision must not be overwritten."""
     with db.db() as con:
+        con.execute("BEGIN IMMEDIATE")
+        current = db.get_draft_by_job(con, job_id)
+        if current is None or current["status"] != "sending":
+            log.warning("claim for job %s was resolved elsewhere — not "
+                        "releasing it", job_id)
+            return False
         db.upsert_draft(con, job_id, {"status": status, "error": error})
+        return True
+
+
+def _mark_uncertain(job_id: int, error: str) -> None:
+    """Record why a send is ambiguous, keeping the claim for a human."""
+    with db.db() as con:
+        con.execute("BEGIN IMMEDIATE")
+        current = db.get_draft_by_job(con, job_id)
+        if current is None or current["status"] != "sending":
+            return
+        db.upsert_draft(con, job_id, {"error": error})
 
 
 def _record_test_send(draft: dict, job: dict, settings: dict, recipient: str,
                       message_id: str, thread_id: str, prev_status: str) -> None:
     with db.db() as con:
+        con.execute("BEGIN IMMEDIATE")
         db.add_email_log(con, {
             "direction": EMAIL_OUTBOUND_TEST,
             "gmail_message_id": message_id,
@@ -121,13 +174,37 @@ def _record_test_send(draft: dict, job: dict, settings: dict, recipient: str,
             "draft_id": draft["id"],
         })
         # The draft's lifecycle is untouched: a test send consumes nothing.
-        db.upsert_draft(con, job["id"], {"status": prev_status, "error": ""})
+        # Only restore the status if the claim is still ours.
+        current = db.get_draft_by_job(con, job["id"])
+        if current is not None and current["status"] == "sending":
+            db.upsert_draft(con, job["id"], {"status": prev_status, "error": ""})
 
 
 def _record_real_send(draft: dict, job: dict, settings: dict, recipient: str,
-                      message_id: str, thread_id: str) -> None:
-    """Application row + audit log + sent draft in ONE transaction."""
+                      message_id: str, thread_id: str) -> str:
+    """Application row + audit log + sent draft in ONE transaction.
+
+    The message is out and Gmail gave us its id — that truth is recorded
+    even if a human resolved the claim meanwhile, EXCEPT when they already
+    recorded the send themselves: then their row stands and we only
+    backfill the Gmail ids they could not know. Returns a note for the
+    caller when the normal path was not taken."""
     with db.db() as con:
+        con.execute("BEGIN IMMEDIATE")
+        current = db.get_draft_by_job(con, job["id"])
+        if current is not None and current["status"] == "sent":
+            con.execute(
+                "UPDATE drafts SET gmail_message_id=?, gmail_thread_id=? "
+                "WHERE id=? AND gmail_message_id=''",
+                (message_id, thread_id, draft["id"]),
+            )
+            con.execute(
+                "UPDATE email_log SET gmail_message_id=?, gmail_thread_id=? "
+                "WHERE draft_id=? AND gmail_message_id IS NULL",
+                (message_id, thread_id, draft["id"]),
+            )
+            return ("this send was already recorded manually — the existing "
+                    "application record stands")
         # add_bewerbung, not apply_job: the duplicate gate ran before the
         # claim — after a successful send the record MUST exist regardless.
         bewerbung_id = db.add_bewerbung(con, {
@@ -155,6 +232,7 @@ def _record_real_send(draft: dict, job: dict, settings: dict, recipient: str,
             "bewerbung_id": bewerbung_id,
         })
         db.record_send(con, draft["id"], message_id, thread_id, bewerbung_id)
+        return ""
 
 
 def _refreshed(job_id: int) -> dict | None:
@@ -163,7 +241,7 @@ def _refreshed(job_id: int) -> dict | None:
         return dict(row) if row is not None else None
 
 
-def _send_draft(job_id: int) -> dict:
+def _send_draft(job_id: int, expect: dict | None = None) -> dict:
     """Synchronous worker — gates, claim, Gmail call, one recording write."""
     draft, job, settings = _load_context(job_id)
     if job is None:
@@ -179,6 +257,9 @@ def _send_draft(job_id: int) -> dict:
         return _error(f"the draft is not sendable (status: {draft['status']})")
     if not draft["betreff"].strip() or not draft["email_body"].strip():
         return _error("the draft has no Betreff or e-mail text — re-draft it")
+    if not draft["anschreiben_body"].strip():
+        return _error("the draft has no Anschreiben — the letter page would "
+                      "go out empty; re-draft it")
     if not draft["pdf_path"]:
         return _error("create the Bewerbungsmappe PDF first — a German "
                       "application is sent as ONE merged PDF")
@@ -190,10 +271,15 @@ def _send_draft(job_id: int) -> dict:
         draft["recipient"], settings
     )
     if recipient_error:
-        return _error(recipient_error)
+        return _error(recipient_error, kind="global")
     if not gmail.is_plausible_address(recipient):
         return _error(f"'{recipient}' does not look like a valid e-mail "
-                      f"address — fix the recipient")
+                      f"address — fix the recipient",
+                      kind="draft" if not test_mode else "global")
+    if expect:
+        mismatch = expectation_mismatch(expect, draft, recipient, test_mode)
+        if mismatch:
+            return _error(mismatch)
     if not test_mode:
         with db.db() as con:
             dup = find_duplicate_bewerbung(con, job["company"], recipient)
@@ -204,31 +290,40 @@ def _send_draft(job_id: int) -> dict:
     if settings["sent_today"] >= cap:
         return _error(f"daily send cap reached ({settings['sent_today']}/{cap})"
                       f" — sending continues tomorrow, or raise the cap in "
-                      f"Settings")
+                      f"Settings", kind="global")
     if not gmail.is_connected():
-        return _error("Gmail is not connected — use Connect Gmail in Settings")
+        return _error("Gmail is not connected — use Connect Gmail in Settings",
+                      kind="global")
 
     prev_status = draft["status"]
     claim_error = _claim(job_id, draft, test_mode)
     if claim_error:
         return _error(claim_error)
 
-    message = gmail.build_mime(
-        to=recipient,
-        subject=draft["betreff"],
-        text_body=draft["email_body"],
-        from_name=settings["applicant_name"],
-        from_addr=settings["gmail_address"],
-        attachment=attachment,
-    )
     try:
+        message = gmail.build_mime(
+            to=recipient,
+            subject=draft["betreff"],
+            text_body=draft["email_body"],
+            from_name=settings["applicant_name"],
+            from_addr=settings["gmail_address"],
+            attachment=attachment,
+        )
         message_id, thread_id = gmail.send_message(message)
+    except gmail.GmailUncertain as exc:
+        # The message may already be in the recipient's inbox: releasing the
+        # claim would invite a second copy. Keep it for human resolution.
+        _mark_uncertain(job_id, f"send outcome unknown: {exc}")
+        log.warning("ambiguous send for job %s: %s", job_id, exc)
+        return _error(f"the send may or may not have gone out ({exc}) — check "
+                      f"the Gmail 'Sent' folder and resolve it in the queue")
     except gmail.GmailError as exc:
+        # Gmail answered (refusal) or we never had a connection: not sent.
         _release(job_id, prev_status, error=f"send failed: {exc}")
         return _error(f"send failed: {exc}")
     except Exception as exc:
-        # Unexpected failure between claim and send: release so the user can
-        # retry, then surface it — never swallow, never strand the draft.
+        # Unexpected failure before the message left (a broken attachment, a
+        # malformed From): release so the user can retry, then surface it.
         _release(job_id, prev_status, error=f"send failed unexpectedly: {exc}")
         raise
 
@@ -236,9 +331,10 @@ def _send_draft(job_id: int) -> dict:
         if test_mode:
             _record_test_send(draft, job, settings, recipient,
                               message_id, thread_id, prev_status)
+            note = ""
         else:
-            _record_real_send(draft, job, settings, recipient,
-                              message_id, thread_id)
+            note = _record_real_send(draft, job, settings, recipient,
+                                     message_id, thread_id)
     except Exception:
         # The e-mail IS out but the books don't say so. Fail loud and leave
         # the draft in 'sending' — the queue's manual resolution (a human
@@ -248,17 +344,22 @@ def _send_draft(job_id: int) -> dict:
             "resolve the draft from the review queue", message_id, job_id,
         )
         raise
-    return {"ok": True, "error": "", "test_mode": test_mode,
+    return {"ok": True, "error": note, "kind": "", "test_mode": test_mode,
             "recipient": recipient, "draft": _refreshed(job_id)}
 
 
-async def send_draft(job_id: int) -> dict:
+async def send_draft(job_id: int, expect: dict | None = None) -> dict:
     """Send one draft (Approve & Send / auto-send).
 
-    Returns {"ok", "error", "test_mode", "recipient", "draft"}; error is a
-    user-readable reason when ok is False."""
+    `expect` pins what the caller believes it is sending: any of the
+    CONTENT_FIELDS, "status", "test_mode" and "recipient_shown". A
+    mismatch refuses the send — an approval that no longer describes the
+    message is not an approval.
+
+    Returns {"ok", "error", "kind", "test_mode", "recipient", "draft"};
+    error is a user-readable reason when ok is False."""
     async with _lock:
-        return await asyncio.to_thread(_send_draft, job_id)
+        return await asyncio.to_thread(_send_draft, job_id, expect)
 
 
 # --------------------------------------------------------------------------
@@ -277,7 +378,7 @@ def _transition(job_id: int, target: str, allowed_from: tuple[str, ...],
             )
         db.upsert_draft(con, job_id, {"status": target, "error": error_note})
         row = db.get_draft_by_job(con, job_id)
-        return {"ok": True, "error": "", "test_mode": False,
+        return {"ok": True, "error": "", "kind": "", "test_mode": False,
                 "recipient": "", "draft": dict(row)}
 
 
@@ -289,6 +390,9 @@ def approve(job_id: int) -> dict:
     if draft is not None and draft["status"] == "ready":
         if not draft["betreff"].strip() or not draft["email_body"].strip():
             return _error("the draft has no Betreff or e-mail text — re-draft it")
+        if not draft["anschreiben_body"].strip():
+            return _error("the draft has no Anschreiben — the letter page "
+                          "would go out empty; re-draft it")
         if not draft["pdf_path"] or not pathlib.Path(draft["pdf_path"]).is_file():
             return _error("create the Bewerbungsmappe PDF before approving")
     return _transition(job_id, "approved", ("ready",))
@@ -360,5 +464,5 @@ def resolve_sending(job_id: int, assume_sent: bool) -> dict:
         })
         db.record_send(con, draft["id"], "", "", bewerbung_id)
         row = db.get_draft_by_job(con, job_id)
-        return {"ok": True, "error": "", "test_mode": False,
+        return {"ok": True, "error": "", "kind": "", "test_mode": False,
                 "recipient": draft["recipient"], "draft": dict(row)}

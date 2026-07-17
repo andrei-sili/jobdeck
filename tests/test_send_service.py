@@ -65,6 +65,8 @@ def _ready_draft(con, job_id, pdf_path="", **over):
         betreff="Bewerbung als Python Dev, K-17 – Max Muster",
         email_body="Guten Tag,\n\nanbei meine Bewerbung.\n\n"
                    "Mit freundlichen Grüßen\nMax Muster",
+        anschreiben_body="Sehr geehrte Frau Weber,\n\nAbsatz.\n\n"
+                         "Mit freundlichen Grüßen\nMax Muster",
         pdf_path=str(pdf_path) if pdf_path else "",
     )
     values.update(over)
@@ -365,7 +367,155 @@ def test_claim_refuses_when_draft_changed_after_snapshot(con, data_dir,
     assert db.get_draft_by_job(con, job_id)["status"] == "ready"
 
 
+# -- expectation pinning (what the human approved is what leaves) --------------
+async def test_content_edit_after_the_confirmation_refuses_the_send(
+    con, gmail_connected, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(gmail, "send_message", _must_not_send)
+    job_id = _insert_job(con)
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path))
+    _settings(con, test_recipient=TEST_INBOX)
+    shown = dict(db.get_draft_by_job(con, job_id))
+
+    # the user edits the draft in another tab after confirming
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path),
+                 recipient="someone-else@firma.de")
+
+    result = await send.send_draft(job_id, expect={
+        "updated_at": shown["updated_at"], "recipient": shown["recipient"],
+        "betreff": shown["betreff"], "email_body": shown["email_body"],
+    })
+    assert not result["ok"] and "changed since you reviewed" in result["error"]
+
+
+async def test_mode_flip_after_the_confirmation_refuses_the_send(
+    con, gmail_connected, tmp_path, monkeypatch
+):
+    """The dialog said TEST; real sending was switched on meanwhile."""
+    monkeypatch.setattr(gmail, "send_message", _must_not_send)
+    job_id = _insert_job(con)
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path))
+    _settings(con, test_recipient=TEST_INBOX, real_send_enabled="1")
+
+    result = await send.send_draft(job_id, expect={"test_mode": True})
+    assert not result["ok"] and "sending mode changed" in result["error"]
+
+    result = await send.send_draft(job_id, expect={
+        "recipient_shown": TEST_INBOX})
+    assert not result["ok"] and "recipient changed" in result["error"]
+
+
+async def test_unapproved_draft_is_not_auto_sent(
+    con, gmail_connected, tmp_path, monkeypatch
+):
+    """Auto-send picked it as approved; the user un-approved in the window."""
+    monkeypatch.setattr(gmail, "send_message", _must_not_send)
+    job_id = _insert_job(con)
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path), status="ready")
+    _settings(con, test_recipient=TEST_INBOX)
+
+    result = await send.send_draft(job_id, expect={"status": "approved"})
+    assert not result["ok"] and "no longer approved" in result["error"]
+    assert db.get_draft_by_job(con, job_id)["status"] == "ready"
+
+
+async def test_matching_expectation_sends(con, gmail_connected, sent_messages,
+                                          tmp_path):
+    job_id = _insert_job(con)
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path))
+    _settings(con, test_recipient=TEST_INBOX)
+    shown = dict(db.get_draft_by_job(con, job_id))
+
+    result = await send.send_draft(job_id, expect={
+        "updated_at": shown["updated_at"], "betreff": shown["betreff"],
+        "test_mode": True, "recipient_shown": TEST_INBOX, "status": "ready",
+    })
+    assert result["ok"], result["error"]
+    assert len(sent_messages) == 1
+
+
 # -- failure paths --------------------------------------------------------------
+async def test_uncertain_transport_failure_keeps_the_claim(
+    con, gmail_connected, tmp_path, monkeypatch
+):
+    """A lost response may mean the mail DID go out — never invite a retry."""
+    def uncertain(message):
+        raise gmail.GmailUncertain("could not reach Gmail: timed out")
+
+    monkeypatch.setattr(gmail, "send_message", uncertain)
+    job_id = _insert_job(con)
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path))
+    _settings(con, real_send_enabled="1")
+
+    result = await send.send_draft(job_id)
+    assert not result["ok"] and "may or may not have gone out" in result["error"]
+    draft = db.get_draft_by_job(con, job_id)
+    assert draft["status"] == "sending"  # stays for human resolution
+    assert "outcome unknown" in draft["error"]
+
+
+async def test_refused_send_releases_the_claim(
+    con, gmail_connected, tmp_path, monkeypatch
+):
+    """Gmail answered: definitively not sent — the user may retry freely."""
+    def refused(message):
+        raise gmail.GmailRefused("Gmail refused the send: invalidArgument")
+
+    monkeypatch.setattr(gmail, "send_message", refused)
+    job_id = _insert_job(con)
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path))
+    _settings(con, real_send_enabled="1")
+
+    result = await send.send_draft(job_id)
+    assert not result["ok"] and "invalidArgument" in result["error"]
+    assert db.get_draft_by_job(con, job_id)["status"] == "ready"
+
+
+async def test_build_failure_after_the_claim_releases_it(
+    con, gmail_connected, tmp_path, monkeypatch
+):
+    """The Mappe vanishing between the gate and the read must not strand."""
+    def broken(**kwargs):
+        raise OSError("Mappe disappeared under us")
+
+    monkeypatch.setattr(gmail, "build_mime", broken)
+    job_id = _insert_job(con)
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path), status="approved")
+    _settings(con, test_recipient=TEST_INBOX)
+
+    with pytest.raises(OSError):
+        await send.send_draft(job_id)
+    draft = db.get_draft_by_job(con, job_id)
+    assert draft["status"] == "approved"  # released, not stranded
+    assert "unexpectedly" in draft["error"]
+
+
+async def test_manual_resolution_during_a_send_is_not_double_recorded(
+    con, gmail_connected, tmp_path, monkeypatch
+):
+    """The human recorded the send while it was in flight — one record only."""
+    job_id = _insert_job(con)
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path))
+    _settings(con, real_send_enabled="1")
+
+    def resolve_mid_flight(message):
+        send.resolve_sending(job_id, assume_sent=True)
+        return ("m-real", "t-real")
+
+    monkeypatch.setattr(gmail, "send_message", resolve_mid_flight)
+
+    result = await send.send_draft(job_id)
+    assert result["ok"]
+    assert "already recorded manually" in result["error"]
+    assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 1
+    assert con.execute("SELECT COUNT(*) FROM email_log").fetchone()[0] == 1
+    # the ids the human could not know are backfilled onto their record
+    assert db.get_draft_by_job(con, job_id)["gmail_message_id"] == "m-real"
+    assert con.execute(
+        "SELECT gmail_message_id FROM email_log").fetchone()[0] == "m-real"
+
+
+
 async def test_send_failure_releases_claim_with_error(
     con, gmail_connected, tmp_path, monkeypatch
 ):

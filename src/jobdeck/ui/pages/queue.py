@@ -322,7 +322,19 @@ async def queue_page():
                     if not await confirm:
                         return
                     ui.notify("Sending…")
-                    result = await send.send_draft(job_id)
+                    # Pin what the confirmation actually showed: between the
+                    # dialog and this call another tab could have edited the
+                    # draft or flipped the sending mode.
+                    result = await send.send_draft(job_id, expect={
+                        "updated_at": current["updated_at"],
+                        "recipient": current["recipient"],
+                        "betreff": current["betreff"],
+                        "email_body": current["email_body"],
+                        "anschreiben_body": current["anschreiben_body"],
+                        "pdf_path": current["pdf_path"],
+                        "test_mode": test_mode,
+                        "recipient_shown": final,
+                    })
                     if not result["ok"]:
                         ui.notify(result["error"], type="warning",
                                   multi_line=True)

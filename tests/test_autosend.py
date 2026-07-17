@@ -52,6 +52,7 @@ def _setup_approved(con, tmp_path, auto_send=1, active=1, external_id="j1",
         "status": "approved", "recipient": "hr@firma.de",
         "betreff": "Bewerbung als Python Dev – Max Muster",
         "email_body": "Guten Tag,\n\nanbei meine Bewerbung.",
+        "anschreiben_body": "Sehr geehrte Damen und Herren,\n\nAbsatz.",
         "pdf_path": str(pdf),
     })
     con.commit()
@@ -231,6 +232,49 @@ async def test_send_failure_demotes_draft_to_ready_with_reason(
 
     # the failed draft no longer blocks the queue for others
     assert (await autosend.tick())["reason"] == "nothing approved for auto-send"
+
+
+async def test_global_failure_never_demotes_the_picked_draft(
+    con, tmp_path, business_hours, monkeypatch
+):
+    """A cap reached between pick and send is nobody's fault — pause, don't
+    drain the approved pool one innocent draft per tick."""
+    job_id, _ = _setup_approved(con, tmp_path)
+    _sendable(con)
+    db.set_setting(con, "daily_send_cap", "5")
+    con.commit()
+
+    # the cap fills after _pick passed it (a manual send landing meanwhile)
+    real_send_draft = send.send_draft
+
+    async def cap_filled(job, expect=None):
+        with db.db() as c:
+            for i in range(5):
+                db.add_email_log(c, {"direction": "outbound",
+                                     "gmail_message_id": f"m-{i}"})
+        return await real_send_draft(job, expect)
+
+    monkeypatch.setattr(send, "send_draft", cap_filled)
+    result = await autosend.tick()
+    assert result["sent"] == 0 and "cap reached" in result["reason"]
+    assert db.get_draft_by_job(con, job_id)["status"] == "approved"
+
+
+async def test_unexpected_exception_demotes_instead_of_retrying_forever(
+    con, tmp_path, business_hours, monkeypatch
+):
+    def exploding(message):
+        raise TypeError("library bug")
+
+    monkeypatch.setattr(gmail, "send_message", exploding)
+    job_id, _ = _setup_approved(con, tmp_path)
+    _sendable(con)
+
+    result = await autosend.tick()
+    assert result["sent"] == 0 and "library bug" in result["reason"]
+    draft = db.get_draft_by_job(con, job_id)
+    assert draft["status"] == "ready"  # out of the unattended pool
+    assert "unexpected error" in draft["error"]
 
 
 async def test_real_mode_autosend_records_application(
