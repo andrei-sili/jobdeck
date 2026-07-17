@@ -212,6 +212,44 @@ def test_upsert_draft_keeps_one_row_per_job(con):
     assert db.get_draft_by_job(con, 99999) is None
 
 
+def test_reset_job_scores_makes_them_re_scorable(con):
+    """When the criteria change, the old verdict answered a different
+    question — clearing it is the one sanctioned way to re-ask."""
+    a = _add_job(con, external_id="a")
+    b = _add_job(con, external_id="b")
+    c = _add_job(con, external_id="c")
+    for job_id in (a, b, c):
+        db.set_job_score(con, job_id, 85, "Perfekter Match")
+
+    assert db.list_unscored_jobs(con) == []
+    assert db.reset_job_scores(con, [a, b]) == 2
+
+    unscored = [r["id"] for r in db.list_unscored_jobs(con)]
+    assert unscored == [a, b]  # oldest first, and c keeps its verdict
+    assert db.get_job(con, a)["match_score"] is None
+    assert db.get_job(con, a)["match_reason"] == ""
+    assert db.get_job(con, c)["match_score"] == 85
+
+
+def test_reset_job_scores_spares_postings_already_acted_on(con):
+    """A posting that was applied to or skipped keeps its history — only
+    the inbox's still-open rows may be re-asked."""
+    applied = _add_job(con, external_id="applied")
+    skipped = _add_job(con, external_id="skipped")
+    for job_id in (applied, skipped):
+        db.set_job_score(con, job_id, 85, "Match")
+    db.set_job_status(con, applied, "applied")
+    db.set_job_status(con, skipped, "skipped")
+
+    assert db.reset_job_scores(con, [applied, skipped]) == 0
+    assert db.get_job(con, applied)["match_score"] == 85
+    assert db.get_job(con, skipped)["match_score"] == 85
+
+
+def test_reset_job_scores_with_no_ids_is_a_noop(con):
+    assert db.reset_job_scores(con, []) == 0
+
+
 def test_delete_bewerbung_clears_references(con):
     job_id = _add_job(con)
     bewerbung_id = db.apply_job(con, job_id, kanal="E-Mail")
