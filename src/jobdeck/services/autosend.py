@@ -67,7 +67,16 @@ def _pick(now: datetime.datetime):
             return block, None
         if not _due(con, now):
             return "waiting for the next send window", None
-        return "", db.next_approved_autosend_job(con)
+        # In test mode a send leaves the draft approved, so each draft is
+        # rehearsed once and the queue still drains — otherwise the worker
+        # would re-pick the same posting until the daily cap ran out.
+        test_mode = db.get_setting(con, "real_send_enabled", "0") != "1"
+        job_id = db.next_approved_autosend_job(con, exclude_test_sent=test_mode)
+        if (job_id is None and test_mode
+                and db.next_approved_autosend_job(con) is not None):
+            return ("every approved draft was already rehearsed to the test "
+                    "inbox — enable real sending to send them"), None
+        return "", job_id
 
 
 def _schedule_next(now: datetime.datetime) -> str:

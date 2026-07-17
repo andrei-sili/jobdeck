@@ -233,6 +233,9 @@ async def test_a_test_sent_draft_can_still_be_really_sent_later(
 async def test_test_send_of_an_approved_draft_leaves_it_approved(
     con, gmail_connected, sent_messages, tmp_path
 ):
+    """Intentional: a rehearsal consumes nothing. The auto-send picker has
+    to compensate for it — see the rehearsal tests in test_autosend.py,
+    or the worker would re-send this same draft every window."""
     job_id = _insert_job(con)
     _ready_draft(con, job_id, pdf_path=_pdf(tmp_path), status="approved")
     _settings(con, test_recipient=TEST_INBOX)
@@ -412,10 +415,11 @@ def test_claim_refuses_when_any_content_field_changed(con, data_dir, tmp_path,
     what was approved — updated_at alone has only one-second resolution."""
     job_id = _insert_job(con)
     _ready_draft(con, job_id, pdf_path=_pdf(tmp_path))
+    _settings(con, test_recipient=TEST_INBOX)
     snapshot = dict(db.get_draft_by_job(con, job_id))
     snapshot[field] = stale
 
-    error = send._claim(job_id, snapshot, test_mode=True)
+    error, _, _ = send._claim(job_id, snapshot, None)
     assert "changed while preparing" in error
     assert db.get_draft_by_job(con, job_id)["status"] == "ready"
 
@@ -425,13 +429,37 @@ def test_claim_itself_refuses_a_draft_already_claimed(con, data_dir, tmp_path):
     concurrent-send test, which fails at the pre-gate instead."""
     job_id = _insert_job(con)
     _ready_draft(con, job_id, pdf_path=_pdf(tmp_path))
+    _settings(con, test_recipient=TEST_INBOX)
     snapshot = dict(db.get_draft_by_job(con, job_id))
 
-    assert send._claim(job_id, snapshot, test_mode=True) == ""
+    error, recipient, test_mode = send._claim(job_id, snapshot, None)
+    assert error == "" and recipient == TEST_INBOX and test_mode is True
     assert db.get_draft_by_job(con, job_id)["status"] == "sending"
 
-    second = send._claim(job_id, snapshot, test_mode=True)
+    second, _, _ = send._claim(job_id, snapshot, None)
     assert "already in progress" in second
+
+
+def test_claim_resolves_the_mode_itself_and_persists_it(con, data_dir,
+                                                        tmp_path):
+    """The mode must be part of the atomic claim: a real→test flip landing
+    between the gates and the send must not reach a company."""
+    job_id = _insert_job(con)
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path))
+    _settings(con, test_recipient=TEST_INBOX, real_send_enabled="1")
+    snapshot = dict(db.get_draft_by_job(con, job_id))
+
+    error, recipient, test_mode = send._claim(job_id, snapshot, None)
+    assert error == "" and recipient == "hr@firma.de" and test_mode is False
+    assert db.get_draft_by_job(con, job_id)["sending_test"] == 0
+
+    # a test-mode claim records itself as such
+    db.upsert_draft(con, job_id, {"status": "ready"})
+    _settings(con, real_send_enabled="0")
+    snapshot = dict(db.get_draft_by_job(con, job_id))
+    error, recipient, test_mode = send._claim(job_id, snapshot, None)
+    assert error == "" and recipient == TEST_INBOX and test_mode is True
+    assert db.get_draft_by_job(con, job_id)["sending_test"] == 1
 
 
 def test_two_threads_claiming_the_same_draft_claim_it_once(con, data_dir,
@@ -442,13 +470,14 @@ def test_two_threads_claiming_the_same_draft_claim_it_once(con, data_dir,
 
     job_id = _insert_job(con)
     _ready_draft(con, job_id, pdf_path=_pdf(tmp_path))
+    _settings(con, test_recipient=TEST_INBOX)
     snapshot = dict(db.get_draft_by_job(con, job_id))
     results: list[str] = []
     start = threading.Barrier(2)
 
     def claim():
         start.wait()
-        results.append(send._claim(job_id, snapshot, test_mode=True))
+        results.append(send._claim(job_id, snapshot, None)[0])
 
     threads = [threading.Thread(target=claim) for _ in range(2)]
     for thread in threads:
@@ -723,6 +752,34 @@ def test_two_manual_resolutions_do_not_collide_on_unique_message_id(
         _ready_draft(con, job_id, pdf_path=_pdf(tmp_path), status="sending")
         assert send.resolve_sending(job_id, assume_sent=True)["ok"]
     assert con.execute("SELECT COUNT(*) FROM email_log").fetchone()[0] == 2
+
+
+async def test_a_stuck_test_send_cannot_be_recorded_as_an_application(
+    con, gmail_connected, tmp_path, monkeypatch
+):
+    """A test send IS in the Gmail Sent folder, so a user following the
+    dialog's instruction would otherwise fabricate an application to a
+    company they never contacted — and block the real one forever."""
+    job_id = _insert_job(con)
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path))
+    _settings(con, test_recipient=TEST_INBOX)
+
+    def die_after_sending(message):
+        raise gmail.GmailUncertain("could not reach Gmail: timed out")
+
+    monkeypatch.setattr(gmail, "send_message", die_after_sending)
+    assert not (await send.send_draft(job_id))["ok"]
+    draft = db.get_draft_by_job(con, job_id)
+    assert draft["status"] == "sending" and draft["sending_test"] == 1
+
+    result = send.resolve_sending(job_id, assume_sent=True)
+    assert not result["ok"] and "TEST send" in result["error"]
+    assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 0
+    assert db.get_job(con, job_id)["status"] == "new"
+
+    # the honest resolution still works
+    assert send.resolve_sending(job_id, assume_sent=False)["ok"]
+    assert db.get_draft_by_job(con, job_id)["status"] == "ready"
 
 
 def test_resolve_sending_requires_sending_status(con, data_dir, tmp_path):

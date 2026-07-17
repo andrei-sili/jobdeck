@@ -137,6 +137,47 @@ async def test_tick_sends_exactly_one_oldest_and_schedules_next(
     assert result["sent"] == 0 and "next send window" in result["reason"]
 
 
+async def test_test_mode_rehearsal_drains_the_queue_instead_of_looping(
+    con, tmp_path, business_hours, sent_messages, monkeypatch
+):
+    """A test send leaves the draft approved (it consumes nothing), so the
+    picker must skip already-rehearsed drafts — otherwise every window
+    re-sends the SAME posting until the daily cap is gone."""
+    monkeypatch.setattr(autosend.random, "uniform", lambda a, b: 0.0)
+    j1, profile = _setup_approved(con, tmp_path, external_id="j1")
+    j2, _ = _setup_approved(con, tmp_path, external_id="j2", profile=profile)
+    _sendable(con)
+
+    assert (await autosend.tick())["job_id"] == j1
+    assert (await autosend.tick())["job_id"] == j2  # NOT j1 again
+
+    result = await autosend.tick()
+    assert result["sent"] == 0
+    assert "already rehearsed" in result["reason"]
+    assert len(sent_messages) == 2
+    # both stay approved: the rehearsal consumed neither
+    assert db.get_draft_by_job(con, j1)["status"] == "approved"
+    assert db.get_draft_by_job(con, j2)["status"] == "approved"
+
+
+async def test_rehearsed_drafts_are_still_really_sent_after_the_switch(
+    con, tmp_path, business_hours, sent_messages, monkeypatch
+):
+    """The rehearsal must not consume the real send it was rehearsing."""
+    monkeypatch.setattr(autosend.random, "uniform", lambda a, b: 0.0)
+    j1, _ = _setup_approved(con, tmp_path, external_id="j1")
+    _sendable(con)
+    assert (await autosend.tick())["sent"] == 1  # rehearsal
+
+    db.set_setting(con, "real_send_enabled", "1")
+    con.commit()
+    result = await autosend.tick()
+    assert result["sent"] == 1 and result["test_mode"] is False
+    assert result["job_id"] == j1
+    assert sent_messages[-1]["To"] == "hr@firma.de"
+    assert db.get_draft_by_job(con, j1)["status"] == "sent"
+
+
 async def test_profile_without_optin_is_never_picked(
     con, tmp_path, business_hours, sent_messages
 ):

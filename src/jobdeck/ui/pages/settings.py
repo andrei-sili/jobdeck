@@ -76,6 +76,15 @@ async def settings_page():
             ).classes("text-sm text-gray-600")
 
             async def connect_gmail():
+                # Pre-check the common first-run case so the notification
+                # cannot promise a consent window that never opens.
+                if not config.CLIENT_SECRET_PATH.exists():
+                    ui.notify(f"no OAuth client file at "
+                              f"{config.CLIENT_SECRET_PATH} — create a "
+                              f"Desktop-app OAuth client in Google Cloud and "
+                              f"save its JSON there",
+                              type="warning", multi_line=True)
+                    return
                 ui.notify("Complete the Google consent in the browser window "
                           "that just opened…")
                 try:

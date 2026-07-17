@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from jobdeck import backup, config, migrations
-from jobdeck.constants import EMAIL_OUTBOUND, STATUS_RANK
+from jobdeck.constants import EMAIL_OUTBOUND, EMAIL_OUTBOUND_TEST, STATUS_RANK
 from jobdeck.dedupe import find_duplicate_bewerbung
 
 
@@ -529,6 +529,20 @@ def upsert_draft(con: sqlite3.Connection, job_id: int, values: dict) -> int:
     return existing["id"]
 
 
+def claim_for_send(
+    con: sqlite3.Connection, draft_id: int, test_mode: bool
+) -> None:
+    """Take the send claim, recording which mode it was taken in.
+
+    sending_test is deliberately outside the upsert_draft allowlist: only
+    the claim may set it, and only from the mode it resolved atomically."""
+    con.execute(
+        "UPDATE drafts SET status='sending', sending_test=?, updated_at=? "
+        "WHERE id=?",
+        (int(test_mode), _now(), draft_id),
+    )
+
+
 def record_send(
     con: sqlite3.Connection,
     draft_id: int,
@@ -608,19 +622,35 @@ def count_outbound_today(con: sqlite3.Connection) -> int:
     ).fetchone()[0]
 
 
-def next_approved_autosend_job(con: sqlite3.Connection) -> int | None:
+def next_approved_autosend_job(
+    con: sqlite3.Connection, exclude_test_sent: bool = False
+) -> int | None:
     """Oldest approved draft whose search profile opted into auto-send.
 
     Requires the profile to be active too: deactivating a profile pauses
-    everything about that search, including automatic transmission."""
+    everything about that search, including automatic transmission.
+
+    exclude_test_sent skips drafts already rehearsed to the test inbox. A
+    test send deliberately leaves the draft approved (it consumes nothing),
+    so without this the worker would re-pick the same draft every window
+    and burn the daily cap on one posting instead of draining the queue.
+    Real sends need no such filter: they end at status 'sent'."""
+    skip_rehearsed = (
+        "AND NOT EXISTS (SELECT 1 FROM email_log e "
+        "WHERE e.draft_id = d.id AND e.direction = ?) "
+        if exclude_test_sent else ""
+    )
+    params = (EMAIL_OUTBOUND_TEST,) if exclude_test_sent else ()
     row = con.execute(
-        """
+        f"""
         SELECT d.job_id FROM drafts d
         JOIN jobs j ON j.id = d.job_id
         JOIN search_profiles p ON p.id = j.profile_id
         WHERE d.status='approved' AND p.auto_send=1 AND p.active=1
+        {skip_rehearsed}
         ORDER BY d.id LIMIT 1
-        """
+        """,
+        params,
     ).fetchone()
     return row["job_id"] if row is not None else None
 

@@ -7,7 +7,7 @@ legacy `bewerbungen` table keeps its exact shape so the historical data
 
 import sqlite3
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Legacy table, exactly as the previous tracker created it.
 BEWERBUNGEN_SQL = """
@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS drafts (
     gmail_message_id TEXT NOT NULL DEFAULT '',
     gmail_thread_id  TEXT NOT NULL DEFAULT '',
     bewerbung_id     INTEGER REFERENCES bewerbungen(id),
+    sending_test     INTEGER NOT NULL DEFAULT 0,
     created_at       TEXT NOT NULL,
     updated_at       TEXT NOT NULL
 );
@@ -165,6 +166,18 @@ def _ensure_job_contact_columns(con: sqlite3.Connection) -> None:
             con.execute(f"ALTER TABLE jobs ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
 
 
+def _ensure_draft_columns(con: sqlite3.Connection) -> None:
+    """Send-tracking columns added in schema v4 (additive only).
+
+    sending_test records whether an in-flight claim is a test send, so a
+    stuck one can never be resolved into a real application record."""
+    existing = [row[1] for row in con.execute("PRAGMA table_info(drafts)")]
+    if "sending_test" not in existing:
+        con.execute(
+            "ALTER TABLE drafts ADD COLUMN sending_test INTEGER NOT NULL DEFAULT 0"
+        )
+
+
 def migrate(con: sqlite3.Connection) -> None:
     """Bring the database to the current schema. Safe to run repeatedly."""
     version = con.execute("PRAGMA user_version").fetchone()[0]
@@ -173,6 +186,7 @@ def migrate(con: sqlite3.Connection) -> None:
     con.executescript(NEW_TABLES_SQL)
     _ensure_search_profile_columns(con)
     _ensure_job_contact_columns(con)
+    _ensure_draft_columns(con)
     if version < 2:
         # v2 reserves match_score 0 for hard-criteria violations and hides
         # such rows by default. Under v1 semantics 0 just meant "very bad

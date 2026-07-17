@@ -61,7 +61,7 @@ REQUEST_TIMEOUT_S = 60.0
 # redirect arrives — give up instead of hanging forever if it never does.
 CONSENT_TIMEOUT_S = 300
 
-_ADDR_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_ADDR_RE = re.compile(r"^[^@\s.]+(\.[^@\s.]+)*@[^@\s.]+(\.[^@\s.]+)+$")
 
 
 class GmailError(RuntimeError):

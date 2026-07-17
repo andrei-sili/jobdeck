@@ -25,6 +25,9 @@ dependencies = [
     "google-api-python-client>=2.150",
     "google-auth-oauthlib>=1.2",
     "google-auth-httplib2>=0.2",
+    # imported directly: gmail.py classifies HttpLib2Error as an ambiguous
+    # send, so it must not rest on a transitive dependency
+    "httplib2>=0.22",
     "pypdf>=5.0",
     "python-dotenv>=1.0",
 ]

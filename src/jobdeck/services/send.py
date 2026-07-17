@@ -106,31 +106,52 @@ def expectation_mismatch(expect: dict, draft: dict, recipient: str,
     return ""
 
 
-def _claim(job_id: int, snapshot: dict, test_mode: bool) -> str:
-    """Atomically move ready/approved → sending; '' on success, else the
-    user-readable refusal.
+def _claim(job_id: int, snapshot: dict, expect: dict | None) -> tuple[str, str, bool]:
+    """Atomically move ready/approved → sending. Returns
+    (error, recipient, test_mode); error is a user-readable refusal.
 
     BEGIN IMMEDIATE makes check-then-write atomic across connections, and
     the content comparison (updated_at has second resolution) guarantees
-    the message that leaves is exactly the one the worker read."""
+    the message that leaves is exactly the one the worker read.
+
+    The sending mode is resolved HERE, not from the caller's earlier read:
+    a real→test flip landing between the gates and the send must not put a
+    message in a company's inbox. The resolved mode is persisted so a claim
+    left stuck can never be mistaken for a real application."""
     with db.db() as con:
         con.execute("BEGIN IMMEDIATE")
         current = db.get_draft_by_job(con, job_id)
         if current is None:
-            return "the draft disappeared — refresh the queue"
+            return "the draft disappeared — refresh the queue", "", True
         if current["status"] == "sending":
             return ("a send for this application is already in progress — "
-                    "if it is stuck, resolve it from the review queue")
+                    "if it is stuck, resolve it from the review queue"), "", True
         if current["status"] == "sent":
-            return "this application was already sent"
+            return "this application was already sent", "", True
         if current["status"] not in ("ready", "approved"):
-            return f"the draft is not sendable (status: {current['status']})"
+            return (f"the draft is not sendable (status: {current['status']})",
+                    "", True)
+        recipient, test_mode, error = resolve_recipient(current["recipient"], {
+            "real_send_enabled": db.get_setting(con, "real_send_enabled", "0"),
+            "test_recipient": db.get_setting(con, "test_recipient", "").strip(),
+        })
+        if error:
+            return error, "", True
+        if not gmail.is_plausible_address(recipient):
+            return (f"'{recipient}' does not look like a valid e-mail address "
+                    f"— fix the recipient"), "", test_mode
         if not test_mode and db.count_outbound_for_draft(con, current["id"]):
-            return "this draft already has a recorded send — check Applications"
+            return ("this draft already has a recorded send — check "
+                    "Applications"), "", test_mode
         if any(current[field] != snapshot[field] for field in CONTENT_FIELDS):
-            return "the draft changed while preparing the send — review it again"
-        db.upsert_draft(con, job_id, {"status": "sending"})
-        return ""
+            return ("the draft changed while preparing the send — review it "
+                    "again"), "", test_mode
+        if expect:
+            mismatch = expectation_mismatch(expect, current, recipient, test_mode)
+            if mismatch:
+                return mismatch, "", test_mode
+        db.claim_for_send(con, current["id"], test_mode)
+        return "", recipient, test_mode
 
 
 def _release(job_id: int, status: str, error: str = "") -> bool:
@@ -267,22 +288,22 @@ def _send_draft(job_id: int, expect: dict | None = None) -> dict:
     if not attachment.is_file():
         return _error("the Mappe file is gone — create the PDF again")
 
-    recipient, test_mode, recipient_error = resolve_recipient(
+    # Early gates: cheap, user-facing feedback. The claim below re-derives
+    # the mode and recipient authoritatively — these must never be the
+    # values a message is actually sent with.
+    preview_recipient, preview_test_mode, recipient_error = resolve_recipient(
         draft["recipient"], settings
     )
     if recipient_error:
         return _error(recipient_error, kind="global")
-    if not gmail.is_plausible_address(recipient):
-        return _error(f"'{recipient}' does not look like a valid e-mail "
-                      f"address — fix the recipient",
-                      kind="draft" if not test_mode else "global")
-    if expect:
-        mismatch = expectation_mismatch(expect, draft, recipient, test_mode)
-        if mismatch:
-            return _error(mismatch)
-    if not test_mode:
+    if not gmail.is_plausible_address(preview_recipient):
+        return _error(f"'{preview_recipient}' does not look like a valid "
+                      f"e-mail address — fix the recipient",
+                      kind="global" if preview_test_mode else "draft")
+    if not preview_test_mode:
         with db.db() as con:
-            dup = find_duplicate_bewerbung(con, job["company"], recipient)
+            dup = find_duplicate_bewerbung(con, job["company"],
+                                           preview_recipient)
         if dup is not None:
             return _error("you already applied at this company — see "
                           "Applications before sending again")
@@ -296,7 +317,7 @@ def _send_draft(job_id: int, expect: dict | None = None) -> dict:
                       kind="global")
 
     prev_status = draft["status"]
-    claim_error = _claim(job_id, draft, test_mode)
+    claim_error, recipient, test_mode = _claim(job_id, draft, expect)
     if claim_error:
         return _error(claim_error)
 
@@ -423,8 +444,12 @@ def resolve_sending(job_id: int, assume_sent: bool) -> dict:
 
     The user checks the Gmail Sent folder first: 'assume_sent' records the
     application without Gmail ids; otherwise the draft returns to ready.
-    A stuck TEST send should always be resolved as not sent — no records
-    were going to be written for it anyway."""
+
+    A stuck TEST send is refused for assume_sent: it really is in the Sent
+    folder (it went to the test inbox), so a user following the dialog's
+    instruction literally would otherwise fabricate a record of applying to
+    a company they never contacted — and that record would then block the
+    real application forever."""
     if not assume_sent:
         return _transition(
             job_id, "ready", ("sending",),
@@ -438,6 +463,12 @@ def resolve_sending(job_id: int, assume_sent: bool) -> dict:
             return _error("no draft for this posting")
         if draft["status"] != "sending":
             return _error(f"nothing to resolve (status: {draft['status']})")
+        if draft["sending_test"]:
+            return _error(
+                "this was a TEST send — it went to your test inbox, not to "
+                "the company, so it is not an application. Resolve it as "
+                "'not sent'."
+            )
         bewerbung_id = db.add_bewerbung(con, {
             "gesendet_am": datetime.date.today().isoformat(),
             "firma": job["company"],
