@@ -209,6 +209,31 @@ async def test_letter_values_use_nameless_betreff_and_german_date(
     assert captured["ort"] == "Musterstadt"
 
 
+async def test_deckblatt_role_follows_the_same_subject_as_the_letter(
+    con, data_dir, monkeypatch
+):
+    """The cover sheet must never advertise a different Stelle than the
+    Betreff on the next page."""
+    job_id = _setup(con, data_dir, with_anlagen=False)
+    db.upsert_draft(con, job_id, {
+        "betreff": "Bewerbung als Backend Entwickler (m/w/d), K-99 – Erika Muster",
+    })
+    con.commit()
+    captured = {}
+    real_render = mappe.templates.render_letter
+
+    def capture(template_html, values):
+        captured.update(values)
+        return real_render(template_html, values)
+
+    monkeypatch.setattr(mappe.templates, "render_letter", capture)
+    assert (await mappe.create_mappe(job_id))["ok"]
+    assert captured["deckblatt_rolle"] == "als Backend Entwickler (m/w/d), K-99"
+    assert captured["betreff"] == "Bewerbung als Backend Entwickler (m/w/d), K-99"
+    # one source, so the two can never name different roles
+    assert captured["betreff"].endswith(captured["deckblatt_rolle"])
+
+
 async def test_letter_betreff_follows_a_user_corrected_subject(
     con, data_dir, monkeypatch
 ):

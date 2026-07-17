@@ -81,6 +81,11 @@ def _build_mappe(job_id: int) -> dict:
                                                settings["applicant_name"])
                     or ai_drafting.build_betreff(job["title"],
                                                  resolve_refnr(job))),
+        # Derived from the same subject: a cover sheet naming a different
+        # Stelle than the letter is the classic copy-paste tell.
+        "deckblatt_rolle": ai_drafting.deckblatt_rolle(
+            draft["betreff"], settings["applicant_name"]
+        ) or f"als {job['title']}",
         "anschreiben_body": draft["anschreiben_body"],
     }
     try:

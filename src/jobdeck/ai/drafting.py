@@ -97,6 +97,15 @@ def letter_betreff(email_betreff: str, applicant_name: str = "") -> str:
     return betreff.strip()
 
 
+def deckblatt_rolle(email_betreff: str, applicant_name: str = "") -> str:
+    """The Deckblatt's role line, derived from the very subject the letter
+    carries — so page 1 can never name a different Stelle than page 2.
+
+    The cover sheet already prints "BEWERBUNG" as its heading, so only the
+    "als …" remainder belongs here."""
+    return letter_betreff(email_betreff, applicant_name).removeprefix("Bewerbung ").strip()
+
+
 def build_user_content(
     job, profile_text: str, refnr: str = "", applicant_name: str = ""
 ) -> str:

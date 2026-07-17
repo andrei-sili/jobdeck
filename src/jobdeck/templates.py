@@ -6,6 +6,7 @@ template_path setting) — never in this repository. The token contract:
 
   {{FIRMA}} {{ANSPRECHPARTNER}} {{STRASSE}} {{PLZ_ORT}}   address block
   {{ORT}}, {{DATUM}}                                       place and date
+  {{DECKBLATT_ROLLE}}                                      cover-sheet role
   {{BETREFF}}                                              letter subject
   {{ANSCHREIBEN_BODY}}                                     letter body
 
@@ -23,7 +24,7 @@ import re
 BODY_P_STYLE = "font-size:13px;line-height:1.55;color:#2b3640;margin:0 0 10px"
 
 SIMPLE_TOKENS = ("FIRMA", "ANSPRECHPARTNER", "STRASSE", "PLZ_ORT",
-                 "ORT", "DATUM", "BETREFF")
+                 "ORT", "DATUM", "BETREFF", "DECKBLATT_ROLLE")
 
 
 class TemplateError(ValueError):

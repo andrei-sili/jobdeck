@@ -35,6 +35,23 @@ def test_letter_betreff_drops_only_the_name_suffix():
         == "Bewerbung als Max Muster Nachfolge"
 
 
+def test_deckblatt_rolle_cannot_contradict_the_letter_subject():
+    """Cover sheet and Betreff come from ONE string: page 1 naming a
+    different Stelle than page 2 is the classic copy-paste tell."""
+    betreff = "Bewerbung als Full-Stack Entwickler m/w/d, K-17 – Max Muster"
+    assert ai_drafting.deckblatt_rolle(betreff, "Max Muster") \
+        == "als Full-Stack Entwickler m/w/d, K-17"
+    # whatever the user corrects in the subject follows onto the cover sheet
+    corrected = "Bewerbung als Backend Entwickler, K-99 – Max Muster"
+    assert ai_drafting.deckblatt_rolle(corrected, "Max Muster") \
+        == "als Backend Entwickler, K-99"
+    # the role always matches the letter's own Betreff, minus the lead-in
+    for subject in (betreff, corrected):
+        letter = ai_drafting.letter_betreff(subject, "Max Muster")
+        assert letter.removeprefix("Bewerbung ") == \
+            ai_drafting.deckblatt_rolle(subject, "Max Muster")
+
+
 def test_resolve_refnr_prefers_extraction_then_arbeitsagentur_id():
     assert drafting.resolve_refnr(
         {"refnr": "K-9", "source": "arbeitsagentur", "external_id": "10001-X"}
