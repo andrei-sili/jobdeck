@@ -51,22 +51,38 @@ DRAFT_ATTEMPTS = 4
 # structured data, not long prose.) The analysis is emitted first so the model
 # reasons before it writes, which sharpens positioning and keeps attribution
 # correct.
+#
+# Plain text gives up the structural guarantees JSON decoding had, so the parser
+# restores them itself: the marker must be the exact emitted fence (>=3 '=',
+# uppercase — a stray "= EMAIL_BODY =" line in the prose is NOT a delimiter); a
+# duplicated marker (a degenerate loop or a posting-echoed marker) is rejected
+# rather than silently resolved last-wins; and a trailing ===END=== bounds the
+# e-mail body so a code fence or trailing model chatter cannot leak into the
+# sent e-mail. Any of these missing/ambiguous → None → the caller retries.
 DRAFT_FIELDS = ("analysis", "stellenbezeichnung", "anschreiben_body", "email_body")
 _SECTION_RE = re.compile(
-    r"^\s*=+\s*(ANALYSIS|STELLENBEZEICHNUNG|ANSCHREIBEN_BODY|EMAIL_BODY)\s*=+\s*$",
-    re.I | re.M,
+    r"^[ \t]*={3,}[ \t]*"
+    r"(ANALYSIS|STELLENBEZEICHNUNG|ANSCHREIBEN_BODY|EMAIL_BODY|END)"
+    r"[ \t]*={3,}[ \t]*$",
+    re.M,
 )
 
 
 def parse_draft_sections(text: str) -> dict[str, str] | None:
-    """Split the delimited plain-text drafting response into its four sections.
+    """Split the delimited plain-text drafting response into its sections.
 
-    Returns None when any required marker is missing — a truncated or garbled
-    sample the caller retries."""
-    parts = _SECTION_RE.split(text)  # [pre, MARKER, body, MARKER, body, ...]
+    Returns None — the caller retries — when the sample is truncated, garbled or
+    structurally ambiguous: a missing content marker, a missing ===END===
+    terminator (the e-mail body would otherwise run to the end of the response),
+    or any marker emitted more than once (a degenerate/echoed sample)."""
+    parts = _SECTION_RE.split(text)  # [pre, MARKER, body, MARKER, body, ..., tail]
+    names = parts[1::2]  # captured marker names, in order of appearance
+    if len(names) != len(set(names)):
+        return None  # a duplicated marker is a degenerate sample, not a draft
     sections = {parts[i].lower(): parts[i + 1].strip()
                 for i in range(1, len(parts) - 1, 2)}
-    if not all(field in sections for field in DRAFT_FIELDS):
+    # every content field must be present, and ===END=== must bound the e-mail
+    if not all(field in sections for field in DRAFT_FIELDS) or "end" not in sections:
         return None
     return sections
 
@@ -162,9 +178,11 @@ Write flawless German in every prose field — correct spelling and grammar; a
 single typo in the subject or the letter reads as careless and sinks the
 application.
 
-OUTPUT FORMAT — emit exactly these four fields in this order, each introduced
-by its marker alone on its own line, and NOTHING else: no JSON, no markdown,
-nothing before the first marker or after the e-mail body.
+OUTPUT FORMAT — emit exactly these sections in this order, each marker alone on
+its own line written EXACTLY as shown (three '=' each side, uppercase), and
+NOTHING else: no JSON, no markdown, nothing before the first marker or after the
+final ===END=== marker. Close with ===END=== on its own line so the e-mail body
+is unambiguously terminated.
 ===ANALYSIS===
 <the analysis>
 ===STELLENBEZEICHNUNG===
@@ -173,6 +191,7 @@ nothing before the first marker or after the e-mail body.
 <the Anschreiben body>
 ===EMAIL_BODY===
 <the e-mail body>
+===END===
 """
 
 

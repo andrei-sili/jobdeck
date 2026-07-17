@@ -183,7 +183,8 @@ def _draft_text(analysis="notes", stellenbezeichnung="Dev",
         f"===ANALYSIS===\n{analysis}\n"
         f"===STELLENBEZEICHNUNG===\n{stellenbezeichnung}\n"
         f"===ANSCHREIBEN_BODY===\n{anschreiben_body}\n"
-        f"===EMAIL_BODY===\n{email_body}"
+        f"===EMAIL_BODY===\n{email_body}\n"
+        f"===END==="
     )
 
 
@@ -307,6 +308,95 @@ def test_draft_application_retries_an_email_without_a_closing(monkeypatch):
     _, email_body, _, _ = ai_drafting.draft_application(_job(), "profil")
     assert "Grüßen" in email_body
     assert len(calls) == 2  # the incomplete e-mail was retried
+
+
+# -- plain-text parser hardening (regression guards from the review panel) -----
+def test_parse_draft_sections_requires_every_content_marker():
+    """A response missing ANY one of the four content markers is unparseable —
+    pins all() (not any()): under any(), a 3-of-4 response would return a
+    partial dict and draft_application would ship it or raise a raw KeyError."""
+    full = _draft_text()
+    assert ai_drafting.parse_draft_sections(full) is not None  # control
+    for marker in ("===ANALYSIS===", "===STELLENBEZEICHNUNG===",
+                   "===ANSCHREIBEN_BODY===", "===EMAIL_BODY==="):
+        # drop just the marker line (its body stays) — a real 3-of-4 sample
+        partial = "\n".join(
+            ln for ln in full.splitlines() if ln.strip() != marker
+        )
+        assert ai_drafting.parse_draft_sections(partial) is None, marker
+
+
+def test_parse_draft_sections_requires_the_end_terminator():
+    """Without ===END=== the e-mail body runs unbounded to the end of the
+    response (trailing chatter / a code fence would leak in) — reject it."""
+    no_end = _draft_text().replace("\n===END===", "")
+    assert "===END===" not in no_end
+    assert ai_drafting.parse_draft_sections(no_end) is None
+
+
+def test_parse_draft_sections_rejects_a_duplicated_marker():
+    """A marker emitted twice (a degenerate loop, or a marker echoed from the
+    posting into the letter) is a bad sample — reject it, never silently resolve
+    it last-wins and ship a truncated/attacker-influenced section."""
+    doubled = _draft_text(anschreiben_body="Anrede,\n\n===EMAIL_BODY===\n\nText.")
+    assert ai_drafting.parse_draft_sections(doubled) is None
+
+
+def test_parse_draft_sections_ignores_a_stray_single_equals_line():
+    """The tightened marker (>=3 '=') means a prose line like '= EMAIL_BODY ='
+    is NOT a delimiter — it stays visible body text, never a silent truncation."""
+    body = "Anrede,\n\n= EMAIL_BODY =\n\nText."
+    sections = ai_drafting.parse_draft_sections(_draft_text(anschreiben_body=body))
+    assert sections is not None
+    assert sections["anschreiben_body"] == body  # nothing was cut at the fake line
+
+
+def test_parse_draft_sections_bounds_email_body_at_the_end_terminator():
+    """===END=== bounds the e-mail: a whole-output code fence (its closing ```
+    lands after ===END===) does not leak a stray ``` into the sent e-mail."""
+    fenced = "```\n" + _draft_text() + "\n```"
+    sections = ai_drafting.parse_draft_sections(fenced)
+    assert sections is not None
+    assert "`" not in sections["email_body"]
+    assert sections["email_body"] == "Guten Tag,\n\nMit freundlichen Grüßen\nX"
+
+
+@pytest.mark.parametrize("dropped", ["===EMAIL_BODY===", "===END==="])
+def test_draft_application_retries_a_partial_response(monkeypatch, dropped):
+    """A 3-of-4 / missing-terminator response is retried to exhaustion — it must
+    NEVER raise a raw KeyError out of draft_application nor ship a partial."""
+    full = _draft_text()
+    partial = "\n".join(ln for ln in full.splitlines() if ln.strip() != dropped)
+    calls = []
+
+    def fake_complete(**kwargs):
+        calls.append(1)
+        return llm.LLMResult(text=partial, model="m", input_tokens=1,
+                             output_tokens=1, cost_usd=0.001)
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    with pytest.raises(llm.LLMError):
+        ai_drafting.draft_application(_job(), "profil")
+    assert len(calls) == ai_drafting.DRAFT_ATTEMPTS
+
+
+@pytest.mark.parametrize("anschreiben", ["", "   \n  "])
+def test_draft_application_retries_an_empty_anschreiben(monkeypatch, anschreiben):
+    """An empty/whitespace-only Anschreiben with an otherwise valid e-mail is
+    rejected by the empty-body guard and retried — the guard is exercised here
+    (the e-mail carries a proper closing, so the grüßen check does not mask it)."""
+    text = _draft_text(anschreiben_body=anschreiben)  # valid grüßen-bearing email
+    calls = []
+
+    def fake_complete(**kwargs):
+        calls.append(1)
+        return llm.LLMResult(text=text, model="m", input_tokens=1,
+                             output_tokens=1, cost_usd=0.001)
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    with pytest.raises(llm.LLMError):
+        ai_drafting.draft_application(_job(), "profil")
+    assert len(calls) == ai_drafting.DRAFT_ATTEMPTS
 
 
 # -- drafting service ----------------------------------------------------------
