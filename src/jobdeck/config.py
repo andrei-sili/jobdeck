@@ -53,4 +53,14 @@ def anthropic_api_key() -> str:
 
 
 def anthropic_model() -> str:
+    """Default model — the cheap, high-volume path (scoring, contact
+    extraction). Drafting overrides it with anthropic_drafting_model()."""
     return os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
+
+
+def anthropic_drafting_model() -> str:
+    """Model for application drafting — the low-volume, quality-critical call
+    the user actually applies with. Stronger than the scoring default so the
+    letter reads professionally (accurate attribution, role-fit positioning,
+    no typos); configurable via env."""
+    return os.environ.get("ANTHROPIC_DRAFTING_MODEL", "claude-sonnet-5")

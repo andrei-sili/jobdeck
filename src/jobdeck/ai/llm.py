@@ -85,17 +85,27 @@ def complete(
     user_content: str,
     max_tokens: int = 1024,
     output_schema: dict | None = None,
+    model: str | None = None,
+    timeout: float | None = None,
 ) -> LLMResult:
     """One model call. With output_schema, structured outputs guarantee the
-    response text is JSON matching the schema."""
+    response text is JSON matching the schema. `model` overrides the default
+    (anthropic_model()) so a caller can pick a stronger model per call —
+    e.g. drafting on Sonnet while scoring stays on Haiku. `timeout` overrides
+    the default 60s bound for a call that legitimately runs longer (a Sonnet
+    draft with adaptive thinking) without loosening it for the fast scoring
+    batch."""
     kwargs = {}
     if output_schema is not None:
         kwargs["output_config"] = {
             "format": {"type": "json_schema", "schema": output_schema}
         }
+    api = client()
+    if timeout is not None:
+        api = api.with_options(timeout=timeout)
     try:
-        response = client().messages.create(
-            model=config.anthropic_model(),
+        response = api.messages.create(
+            model=model or config.anthropic_model(),
             max_tokens=max_tokens,
             system=system,
             messages=[{"role": "user", "content": user_content}],
