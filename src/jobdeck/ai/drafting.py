@@ -69,6 +69,20 @@ def _clean(value: str) -> str:
     return " ".join((value or "").split())
 
 
+def append_signature(email_body: str, signature: str) -> str:
+    """Put the contact block under the LLM's closing.
+
+    Built in code for the same reason as the Betreff: a model that mistypes
+    one character of a profile URL or a phone number costs a reply, and no
+    reviewer reliably spots it. The block is stored on the draft, so the
+    review queue shows exactly what will be sent."""
+    body = (email_body or "").rstrip()
+    block = (signature or "").strip()
+    if not block:
+        return body
+    return f"{body}\n\n{block}"
+
+
 def build_betreff(title: str, refnr: str = "", applicant_name: str = "") -> str:
     """Deterministic subject line: `Bewerbung als [title], [Refnr] – [Name]`.
 
@@ -95,6 +109,15 @@ def letter_betreff(email_betreff: str, applicant_name: str = "") -> str:
     if name:
         betreff = betreff.removesuffix(f" – {name}")
     return betreff.strip()
+
+
+def deckblatt_rolle(email_betreff: str, applicant_name: str = "") -> str:
+    """The Deckblatt's role line, derived from the very subject the letter
+    carries — so page 1 can never name a different Stelle than page 2.
+
+    The cover sheet already prints "BEWERBUNG" as its heading, so only the
+    "als …" remainder belongs here."""
+    return letter_betreff(email_betreff, applicant_name).removeprefix("Bewerbung ").strip()
 
 
 def build_user_content(

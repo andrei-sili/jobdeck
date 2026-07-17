@@ -20,6 +20,7 @@ def _get_settings():
             "applicant_ort": db.get_setting(con, "applicant_ort", ""),
             "template_path": db.get_setting(con, "template_path", ""),
             "anlagen_dir": db.get_setting(con, "anlagen_dir", ""),
+            "email_signature": db.get_setting(con, "email_signature", ""),
             "real_send_enabled": db.get_setting(con, "real_send_enabled", "0"),
             "test_recipient": db.get_setting(con, "test_recipient", ""),
             "gmail_address": db.get_setting(con, "gmail_address", ""),
@@ -153,6 +154,16 @@ async def settings_page():
                 "Anlagen are appended in filename order — prefix them "
                 "01_, 02_, … to control the sequence."
             ).classes("text-xs text-gray-500")
+            email_signature = ui.textarea(
+                "E-mail signature (contact block under every application e-mail)",
+                value=settings["email_signature"],
+            ).classes("w-full").props("autogrow")
+            ui.label(
+                "Added by the app, never written by the AI — a model that "
+                "mistypes one character of a URL or phone number costs a "
+                "reply. Plain text only: bare URLs read as credibility links "
+                "to spam filters, hidden links do not."
+            ).classes("text-xs text-gray-500")
 
             async def save_application():
                 await run.io_bound(_set_setting, "applicant_name",
@@ -163,6 +174,8 @@ async def settings_page():
                                    template_path.value.strip())
                 await run.io_bound(_set_setting, "anlagen_dir",
                                    anlagen_dir.value.strip())
+                await run.io_bound(_set_setting, "email_signature",
+                                   (email_signature.value or "").strip())
                 ui.notify("Saved", type="positive")
 
             ui.button("Save", on_click=save_application)

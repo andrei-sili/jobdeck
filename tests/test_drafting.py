@@ -17,6 +17,27 @@ def test_build_betreff_full_and_partial():
     assert ai_drafting.build_betreff(" Dev ") == "Bewerbung als Dev"
 
 
+def test_append_signature_puts_the_contact_block_under_the_closing():
+    """Built in code, never by the LLM: one mistyped character in a URL or
+    phone number costs a reply and no reviewer reliably spots it."""
+    body = "Guten Tag,\n\nanbei meine Bewerbung.\n\nMit freundlichen Grüßen\nMax Muster"
+    sig = "linkedin.com/in/max\ngithub.com/max\nmax.example\n+49 111 222"
+    out = ai_drafting.append_signature(body, sig)
+    assert out == body + "\n\n" + sig
+    assert out.index("Mit freundlichen Grüßen") < out.index("linkedin.com")
+
+
+@pytest.mark.parametrize("sig", ["", "   ", "\n\n", None])
+def test_append_signature_without_one_leaves_the_body_alone(sig):
+    body = "Guten Tag,\n\nText.\n\nMit freundlichen Grüßen\nMax Muster"
+    assert ai_drafting.append_signature(body, sig) == body
+
+
+def test_append_signature_does_not_stack_blank_lines():
+    out = ai_drafting.append_signature("Text.\n\n\n", "github.com/max")
+    assert out == "Text.\n\ngithub.com/max"
+
+
 def test_letter_betreff_drops_only_the_name_suffix():
     assert ai_drafting.letter_betreff(
         "Bewerbung als Python Entwickler (m/w/d), K-17 – Max Muster", "Max Muster"
@@ -33,6 +54,23 @@ def test_letter_betreff_drops_only_the_name_suffix():
     assert ai_drafting.letter_betreff("Bewerbung als Max Muster Nachfolge",
                                       "Max Muster") \
         == "Bewerbung als Max Muster Nachfolge"
+
+
+def test_deckblatt_rolle_cannot_contradict_the_letter_subject():
+    """Cover sheet and Betreff come from ONE string: page 1 naming a
+    different Stelle than page 2 is the classic copy-paste tell."""
+    betreff = "Bewerbung als Full-Stack Entwickler m/w/d, K-17 – Max Muster"
+    assert ai_drafting.deckblatt_rolle(betreff, "Max Muster") \
+        == "als Full-Stack Entwickler m/w/d, K-17"
+    # whatever the user corrects in the subject follows onto the cover sheet
+    corrected = "Bewerbung als Backend Entwickler, K-99 – Max Muster"
+    assert ai_drafting.deckblatt_rolle(corrected, "Max Muster") \
+        == "als Backend Entwickler, K-99"
+    # the role always matches the letter's own Betreff, minus the lead-in
+    for subject in (betreff, corrected):
+        letter = ai_drafting.letter_betreff(subject, "Max Muster")
+        assert letter.removeprefix("Bewerbung ") == \
+            ai_drafting.deckblatt_rolle(subject, "Max Muster")
 
 
 def test_resolve_refnr_prefers_extraction_then_arbeitsagentur_id():
@@ -206,6 +244,46 @@ async def test_successful_draft_is_persisted_and_metered(
     assert db.get_setting(con, "llm_calls") == "1"
     assert float(db.get_setting(con, "llm_cost_usd")) == pytest.approx(0.002)
     assert db.get_draft_by_job(con, job_id)["status"] == "ready"
+
+
+async def test_drafted_email_carries_the_configured_signature(
+    con, ai_on, applicant, profile_file, monkeypatch
+):
+    """The contact block must reach the draft, so the review queue shows
+    exactly what will be sent."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    db.set_setting(con, "email_signature",
+                   "linkedin.com/in/max\ngithub.com/max\n+49 111 222")
+    job_id = _insert_job(con)
+    con.commit()
+    monkeypatch.setattr(
+        "jobdeck.ai.drafting.draft_application",
+        lambda job, profile_text, refnr="", applicant_name="":
+            ("Anrede,\n\nText.", "Guten Tag,\n\nanbei meine Bewerbung.\n\n"
+                                 "Mit freundlichen Grüßen\nMax Muster", _usage()),
+    )
+
+    result = await drafting.draft_for_job(job_id)
+    body = result["draft"]["email_body"]
+    assert body.endswith("linkedin.com/in/max\ngithub.com/max\n+49 111 222")
+    assert body.index("Mit freundlichen Grüßen") < body.index("linkedin.com")
+
+
+async def test_no_signature_configured_leaves_the_email_untouched(
+    con, ai_on, applicant, profile_file, monkeypatch
+):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    job_id = _insert_job(con)
+    con.commit()
+    monkeypatch.setattr(
+        "jobdeck.ai.drafting.draft_application",
+        lambda job, profile_text, refnr="", applicant_name="":
+            ("Anrede,\n\nText.", "Guten Tag,\n\nMit freundlichen Grüßen\nMax",
+             _usage()),
+    )
+
+    result = await drafting.draft_for_job(job_id)
+    assert result["draft"]["email_body"] == "Guten Tag,\n\nMit freundlichen Grüßen\nMax"
 
 
 async def test_failed_draft_is_recorded_and_metered(
