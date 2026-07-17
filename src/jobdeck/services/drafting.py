@@ -50,6 +50,11 @@ def _applicant_name() -> str:
         return db.get_setting(con, "applicant_name", "").strip()
 
 
+def _email_signature() -> str:
+    with db.db() as con:
+        return db.get_setting(con, "email_signature", "")
+
+
 def _get_job(job_id: int):
     with db.db() as con:
         return db.get_job(con, job_id)
@@ -159,6 +164,7 @@ async def draft_for_job(job_id: int) -> dict:
         raise
 
     betreff = ai_drafting.build_betreff(job["title"], refnr, applicant_name)
+    signature = await asyncio.to_thread(_email_signature)
     draft = await asyncio.to_thread(
         _finish,
         job_id,
@@ -166,7 +172,7 @@ async def draft_for_job(job_id: int) -> dict:
             "status": "ready",
             "recipient": job["contact_email"] or "",
             "betreff": betreff,
-            "email_body": email_body,
+            "email_body": ai_drafting.append_signature(email_body, signature),
             "anschreiben_body": anschreiben,
             "llm_model": usage.model,
         },
