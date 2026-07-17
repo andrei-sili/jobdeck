@@ -1,6 +1,5 @@
 import json
 import stat
-from email.message import EmailMessage
 from types import SimpleNamespace
 
 import httplib2
@@ -361,11 +360,27 @@ def test_stub_send_never_wrote_a_real_token_outside_tmp(data_dir):
     assert str(config.CLIENT_SECRET_PATH).startswith(str(data_dir))
 
 
-def test_mime_roundtrip_through_bytes_parses_back():
+def test_mime_roundtrip_through_bytes_preserves_structure_and_text(tmp_path):
+    """What Gmail receives is the base64 of as_bytes() — parsing it back is
+    the closest check that the wire form still carries the real message."""
     import email
     from email import policy
 
-    message = _mime()
+    message = _mime(attachment=_pdf(tmp_path))
     parsed = email.message_from_bytes(message.as_bytes(), policy=policy.default)
-    assert isinstance(parsed, EmailMessage) or hasattr(parsed, "iter_parts")
+
     assert parsed["Subject"] == message["Subject"]
+    assert parsed["To"] == "hr@firma.de"
+    assert parsed.get_content_type() == "multipart/mixed"
+
+    alternative, attachment = list(parsed.iter_parts())
+    text, html_part = list(alternative.iter_parts())
+    # umlauts survive whatever transfer encoding was chosen
+    assert text.get_content().strip() == (
+        "Sehr geehrte Frau Weber,\n\nanbei meine Bewerbung.\n\n"
+        "Mit freundlichen Grüßen\nMax Muster"
+    )
+    assert "Mit freundlichen Grüßen<br>Max Muster" in html_part.get_content()
+    assert attachment.get_content_type() == "application/pdf"
+    assert attachment.get_content() == b"%PDF-1.4 fake"
+    assert attachment.get_filename() == "Bewerbung_Max_Muster_Firma.pdf"

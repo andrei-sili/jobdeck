@@ -101,6 +101,20 @@ def test_resolve_recipient_real_mode_uses_draft_recipient():
     assert (recipient, test_mode, error) == ("hr@firma.de", False, "")
 
 
+@pytest.mark.parametrize("stored", ["", "0", "true", "TRUE", "True", "yes",
+                                    "on", "2", "1 ", " 1", "01"])
+def test_only_the_exact_string_1_enables_real_sending(stored):
+    """Fail-closed is the slice's central invariant: ANY value other than
+    '1' must mean test mode, whatever a future settings refactor stores."""
+    recipient, test_mode, error = send.resolve_recipient(
+        "hr@firma.de", {"real_send_enabled": stored,
+                        "test_recipient": TEST_INBOX}
+    )
+    assert test_mode is True
+    assert recipient == TEST_INBOX
+    assert error == ""
+
+
 # -- gate chain ----------------------------------------------------------------
 async def test_gates_fire_in_order_without_any_send(
     con, data_dir, tmp_path, monkeypatch
@@ -196,6 +210,35 @@ async def test_test_send_is_repeatable(con, gmail_connected, sent_messages,
     assert (await send.send_draft(job_id))["ok"]
     assert len(sent_messages) == 2
     assert db.count_outbound_today(con) == 2
+
+
+async def test_a_test_sent_draft_can_still_be_really_sent_later(
+    con, gmail_connected, sent_messages, tmp_path
+):
+    """The slice's primary workflow: rehearse to the test inbox, then send
+    for real. A test send must not consume the draft's one real send."""
+    job_id = _insert_job(con)
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path))
+    _settings(con, test_recipient=TEST_INBOX)
+    assert (await send.send_draft(job_id))["ok"]
+
+    _settings(con, real_send_enabled="1")
+    result = await send.send_draft(job_id)
+    assert result["ok"], result["error"]
+    assert result["test_mode"] is False
+    assert sent_messages[-1]["To"] == "hr@firma.de"
+    assert db.get_draft_by_job(con, job_id)["status"] == "sent"
+
+
+async def test_test_send_of_an_approved_draft_leaves_it_approved(
+    con, gmail_connected, sent_messages, tmp_path
+):
+    job_id = _insert_job(con)
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path), status="approved")
+    _settings(con, test_recipient=TEST_INBOX)
+
+    assert (await send.send_draft(job_id))["ok"]
+    assert db.get_draft_by_job(con, job_id)["status"] == "approved"
 
 
 # -- real mode -----------------------------------------------------------------
@@ -355,16 +398,66 @@ async def test_concurrent_real_sends_send_exactly_once(
     assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 1
 
 
-def test_claim_refuses_when_draft_changed_after_snapshot(con, data_dir,
-                                                         tmp_path):
+@pytest.mark.parametrize("field,stale", [
+    ("updated_at", "2020-01-01T00:00:00"),
+    ("recipient", "someone-else@firma.de"),
+    ("betreff", "what the user THOUGHT they approved"),
+    ("email_body", "an older body"),
+    ("anschreiben_body", "an older letter"),
+    ("pdf_path", "/tmp/an-older-mappe.pdf"),
+])
+def test_claim_refuses_when_any_content_field_changed(con, data_dir, tmp_path,
+                                                     field, stale):
+    """Each compared field is an independent guarantee that what leaves is
+    what was approved — updated_at alone has only one-second resolution."""
     job_id = _insert_job(con)
     _ready_draft(con, job_id, pdf_path=_pdf(tmp_path))
     snapshot = dict(db.get_draft_by_job(con, job_id))
-    snapshot["betreff"] = "what the user THOUGHT they approved"
+    snapshot[field] = stale
 
     error = send._claim(job_id, snapshot, test_mode=True)
     assert "changed while preparing" in error
     assert db.get_draft_by_job(con, job_id)["status"] == "ready"
+
+
+def test_claim_itself_refuses_a_draft_already_claimed(con, data_dir, tmp_path):
+    """Pins the claim layer directly: send._lock hides it from the
+    concurrent-send test, which fails at the pre-gate instead."""
+    job_id = _insert_job(con)
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path))
+    snapshot = dict(db.get_draft_by_job(con, job_id))
+
+    assert send._claim(job_id, snapshot, test_mode=True) == ""
+    assert db.get_draft_by_job(con, job_id)["status"] == "sending"
+
+    second = send._claim(job_id, snapshot, test_mode=True)
+    assert "already in progress" in second
+
+
+def test_two_threads_claiming_the_same_draft_claim_it_once(con, data_dir,
+                                                           tmp_path):
+    """Without BEGIN IMMEDIATE both connections can read 'ready' before
+    either writes — the interleaving that double-sends to a company."""
+    import threading
+
+    job_id = _insert_job(con)
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path))
+    snapshot = dict(db.get_draft_by_job(con, job_id))
+    results: list[str] = []
+    start = threading.Barrier(2)
+
+    def claim():
+        start.wait()
+        results.append(send._claim(job_id, snapshot, test_mode=True))
+
+    threads = [threading.Thread(target=claim) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(r == "" for r in results) == [False, True]
+    assert db.get_draft_by_job(con, job_id)["status"] == "sending"
 
 
 # -- expectation pinning (what the human approved is what leaves) --------------
@@ -553,6 +646,22 @@ async def test_recording_failure_leaves_sending_and_raises(
 
 
 # -- queue transitions -----------------------------------------------------------
+@pytest.mark.parametrize("field,hint", [
+    ("betreff", "no Betreff"),
+    ("email_body", "no Betreff"),  # same gate covers both e-mail fields
+    ("anschreiben_body", "no Anschreiben"),
+])
+def test_approve_refuses_empty_content(con, data_dir, tmp_path, field, hint):
+    """An approved draft must be sendable without further human input —
+    the unattended worker never re-checks what the user blanked."""
+    job_id = _insert_job(con)
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path), **{field: "   "})
+
+    result = send.approve(job_id)
+    assert not result["ok"] and hint in result["error"]
+    assert db.get_draft_by_job(con, job_id)["status"] == "ready"
+
+
 def test_approve_requires_ready_content_and_pdf(con, data_dir, tmp_path):
     job_id = _insert_job(con)
     _ready_draft(con, job_id, pdf_path="")
