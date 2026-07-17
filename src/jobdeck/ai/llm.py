@@ -93,8 +93,7 @@ def complete(
     (anthropic_model()) so a caller can pick a stronger model per call —
     e.g. drafting on Sonnet while scoring stays on Haiku. `timeout` overrides
     the default 60s bound for a call that legitimately runs longer (a Sonnet
-    draft with adaptive thinking) without loosening it for the fast scoring
-    batch."""
+    draft with adaptive thinking)."""
     kwargs = {}
     if output_schema is not None:
         kwargs["output_config"] = {
@@ -127,5 +126,11 @@ def complete(
     if response.stop_reason == "refusal":
         raise LLMError("model declined the request (stop_reason=refusal)", usage=result)
     if response.stop_reason == "max_tokens":
-        log.warning("LLM response truncated at %d output tokens", max_tokens)
+        # A truncated structured-output response is unusable JSON — fail closed
+        # so a half-written draft is never parsed, recorded or sent.
+        log.warning("LLM response truncated at max_tokens=%d", max_tokens)
+        raise LLMError(
+            f"response truncated at max_tokens={max_tokens} — the output is "
+            f"incomplete; raise max_tokens", usage=result
+        )
     return result

@@ -90,6 +90,17 @@ def test_complete_raises_on_refusal_but_keeps_usage(monkeypatch):
     assert excinfo.value.usage.input_tokens == 100
 
 
+def test_complete_raises_on_truncation_but_keeps_usage(monkeypatch):
+    # a max_tokens-truncated structured response is unusable JSON — fail closed
+    # rather than hand back a half-written draft that could be recorded or sent
+    stub = StubClient(_response('{"score": 7', stop_reason="max_tokens"))
+    monkeypatch.setattr(llm, "client", lambda: stub)
+    with pytest.raises(llm.LLMError) as excinfo:
+        llm.complete(system="s", user_content="u")
+    assert "truncated" in str(excinfo.value)
+    assert excinfo.value.usage is not None  # the billed call stays meterable
+
+
 def test_complete_wraps_api_errors(monkeypatch):
     import anthropic
     import httpx

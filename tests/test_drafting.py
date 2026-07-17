@@ -210,6 +210,33 @@ def test_draft_application_rejects_unusable_response(monkeypatch, text):
     assert excinfo.value.usage is not None  # billed call stays meterable
 
 
+def test_draft_application_retries_a_truncated_attempt_and_meters_all(monkeypatch):
+    """Sonnet occasionally truncates; a retry lands, and every billed attempt
+    (the failed one included) is metered so the cost is not under-reported."""
+    good = ('{"analysis": "x", "stellenbezeichnung": "Dev",'
+            ' "anschreiben_body": "Anrede,\\n\\nText.", "email_body": "Mail."}')
+    calls = []
+
+    def fake_complete(**kwargs):
+        calls.append(1)
+        if len(calls) == 1:  # first attempt truncates (fails closed, still billed)
+            raise llm.LLMError(
+                "response truncated at max_tokens=8000",
+                usage=llm.LLMResult(text="", model="m", input_tokens=100,
+                                    output_tokens=8000, cost_usd=0.12),
+            )
+        return llm.LLMResult(text=good, model="m", input_tokens=100,
+                             output_tokens=300, cost_usd=0.006)
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    anschreiben, _, stellen, usage = ai_drafting.draft_application(_job(), "profil")
+    assert anschreiben.startswith("Anrede,") and stellen == "Dev"
+    assert len(calls) == 2  # one truncated attempt, then a good one
+    # both attempts metered — the truncated one was billed too
+    assert usage.output_tokens == 8000 + 300
+    assert usage.cost_usd == pytest.approx(0.12 + 0.006)
+
+
 # -- drafting service ----------------------------------------------------------
 def _insert_job(con, **over):
     values = dict(
