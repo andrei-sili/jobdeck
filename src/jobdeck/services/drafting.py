@@ -6,6 +6,11 @@ toggle, API key, profile.md, plus the applicant name that the code-built
 Betreff needs. A 'generating' draft row acts as an optimistic claim so a
 double-click cannot pay for the same posting twice; a claim older than
 CLAIM_TIMEOUT_MIN is treated as abandoned (process died mid-call).
+
+Regeneration never touches a draft that is committed to the send path:
+'sending' is the evidence a stuck send leaves behind (only the review
+queue may resolve it), and rewriting an 'approved' or 'sent' draft would
+throw away the user's approval or falsify the record of what went out.
 """
 
 import asyncio
@@ -19,6 +24,16 @@ from jobdeck.ai import llm, profile
 log = logging.getLogger(__name__)
 
 CLAIM_TIMEOUT_MIN = 15
+
+# Statuses a regeneration must refuse, with the way out for each.
+NO_REGEN = {
+    "approved": "this draft is approved for sending — return it to ready in "
+                "the review queue before re-drafting",
+    "sending": "a send for this posting is in progress or stuck — resolve it "
+               "in the review queue before re-drafting",
+    "sent": "this application was already sent — re-drafting would rewrite "
+            "the record of what went out",
+}
 
 
 def _error(message: str) -> dict:
@@ -40,8 +55,8 @@ def _get_job(job_id: int):
         return db.get_job(con, job_id)
 
 
-def _claim(job_id: int) -> bool:
-    """Mark the job's draft as 'generating'; False if already claimed.
+def _claim(job_id: int) -> str:
+    """Mark the job's draft as 'generating'; '' on success, else the refusal.
 
     BEGIN IMMEDIATE makes the check-then-write atomic across connections:
     a concurrent second claim blocks on the write lock, then sees the
@@ -49,25 +64,41 @@ def _claim(job_id: int) -> bool:
     with db.db() as con:
         con.execute("BEGIN IMMEDIATE")
         existing = db.get_draft_by_job(con, job_id)
-        if existing is not None and existing["status"] == "generating":
-            started = datetime.datetime.fromisoformat(existing["updated_at"])
-            age_min = (datetime.datetime.now() - started).total_seconds() / 60
-            if age_min < CLAIM_TIMEOUT_MIN:
-                return False
-            log.warning("reclaiming abandoned draft for job %s", job_id)
+        if existing is not None:
+            refusal = NO_REGEN.get(existing["status"])
+            if refusal:
+                return refusal
+            if existing["status"] == "generating":
+                started = datetime.datetime.fromisoformat(existing["updated_at"])
+                age_min = (datetime.datetime.now() - started).total_seconds() / 60
+                if age_min < CLAIM_TIMEOUT_MIN:
+                    return "a draft for this posting is already being generated"
+                log.warning("reclaiming abandoned draft for job %s", job_id)
         # A regenerated draft invalidates any previously built Mappe — the
         # PDF on disk still holds the OLD Anschreiben.
         db.upsert_draft(con, job_id, {"status": "generating", "pdf_path": ""})
-        return True
+        return ""
 
 
 def _finish(job_id: int, values: dict, usage: llm.LLMResult | None) -> dict | None:
+    """Persist the generation result, unless the claim is no longer ours.
+
+    Metering happens either way: those tokens were paid for."""
     with db.db() as con:
-        draft_id = db.upsert_draft(con, job_id, values)
+        con.execute("BEGIN IMMEDIATE")
+        current = db.get_draft_by_job(con, job_id)
         if usage is not None:
             db.record_llm_usage(
                 con, usage.input_tokens, usage.output_tokens, usage.cost_usd
             )
+        if current is None or current["status"] != "generating":
+            # Something moved the draft out from under this generation —
+            # never stomp the newer state with a stale result.
+            log.warning("draft for job %s changed while generating (now %s) "
+                        "— discarding the generated text", job_id,
+                        current["status"] if current else "gone")
+            return None
+        draft_id = db.upsert_draft(con, job_id, values)
         row = db.get_draft(con, draft_id)
         return dict(row) if row is not None else None
 
@@ -99,8 +130,9 @@ async def draft_for_job(job_id: int) -> dict:
     job = await asyncio.to_thread(_get_job, job_id)
     if job is None:
         return _error("posting not found")
-    if not await asyncio.to_thread(_claim, job_id):
-        return _error("a draft for this posting is already being generated")
+    claim_error = await asyncio.to_thread(_claim, job_id)
+    if claim_error:
+        return _error(claim_error)
 
     refnr = resolve_refnr(job)
     try:
@@ -140,4 +172,7 @@ async def draft_for_job(job_id: int) -> dict:
         },
         usage,
     )
+    if draft is None:
+        return _error("the draft changed while it was being generated — "
+                      "check the review queue")
     return {"ok": True, "error": "", "draft": draft}
