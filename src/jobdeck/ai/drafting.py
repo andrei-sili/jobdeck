@@ -19,7 +19,6 @@ and the applicant name — the ID and the name must be exact (HR matches on the
 Refnr) and no reviewer reliably spots a mistyped one.
 """
 
-import json
 import re
 
 from jobdeck import config
@@ -30,36 +29,46 @@ from jobdeck.ai.scoring import (  # noqa: F401 — re-exported for callers/tests
 )
 
 # Sonnet drafts with adaptive thinking ON (disabling it made the model loop on
-# trailing whitespace instead of closing the JSON, truncating the response).
-# The bound comfortably holds the thinking + analysis + Stellenbezeichnung +
-# Anschreiben + e-mail; a truncated draft is a hard error (llm.complete), never
-# a silently half-written one. The longer timeout covers a slow Sonnet call.
+# trailing whitespace and truncate instead of finishing cleanly). The bound
+# comfortably holds the thinking + analysis + Stellenbezeichnung + Anschreiben +
+# e-mail; a truncated draft is a hard error (llm.complete), never a silently
+# half-written one. The longer timeout covers a slow Sonnet call.
 DRAFT_MAX_TOKENS = 5000
 DRAFT_TIMEOUT_S = 240.0
-# Sonnet occasionally degenerates into a raw-newline loop instead of closing the
-# JSON, so that attempt truncates at max_tokens (a hard error in llm.complete).
-# DRAFT_ATTEMPTS retries the whole draft — a fresh sample almost always lands —
-# and the bound is kept moderate so a looping attempt fails fast and cheap
-# (holding thinking + analysis + Stellenbezeichnung + Anschreiben + e-mail).
+# Sonnet can still degenerate into a raw-newline loop and truncate at max_tokens
+# (a hard error in llm.complete), so DRAFT_ATTEMPTS retries the whole draft — a
+# fresh sample almost always lands — with a moderate bound so a looping attempt
+# fails fast and cheap.
 DRAFT_ATTEMPTS = 4
 
-DRAFT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        # Ordered first on purpose: the model commits to the posting's
-        # priorities and which profile fact sits under which project BEFORE
-        # writing prose (reasoning-before-answer) — this sharpens the
-        # positioning and keeps each claim attributed correctly. Internal:
-        # stripped after parsing, never stored or shown.
-        "analysis": {"type": "string"},
-        "stellenbezeichnung": {"type": "string"},
-        "anschreiben_body": {"type": "string"},
-        "email_body": {"type": "string"},
-    },
-    "required": ["analysis", "stellenbezeichnung", "anschreiben_body",
-                 "email_body"],
-    "additionalProperties": False,
-}
+# The drafting response is delimited PLAIN TEXT, not JSON. Constrained JSON
+# decoding (output_config.format) forces every token through a schema-derived
+# mask; on the long free-form German prose fields that pushes Sonnet off its
+# natural distribution and into degenerate loops that truncate at max_tokens.
+# Marker-delimited sections lift that constraint — on the posting that garbled
+# under JSON decoding, plain text lands a clean sample on the first attempt —
+# and the retry above is the safety net. (Scoring keeps its JSON schema: short
+# structured data, not long prose.) The analysis is emitted first so the model
+# reasons before it writes, which sharpens positioning and keeps attribution
+# correct.
+DRAFT_FIELDS = ("analysis", "stellenbezeichnung", "anschreiben_body", "email_body")
+_SECTION_RE = re.compile(
+    r"^\s*=+\s*(ANALYSIS|STELLENBEZEICHNUNG|ANSCHREIBEN_BODY|EMAIL_BODY)\s*=+\s*$",
+    re.I | re.M,
+)
+
+
+def parse_draft_sections(text: str) -> dict[str, str] | None:
+    """Split the delimited plain-text drafting response into its four sections.
+
+    Returns None when any required marker is missing — a truncated or garbled
+    sample the caller retries."""
+    parts = _SECTION_RE.split(text)  # [pre, MARKER, body, MARKER, body, ...]
+    sections = {parts[i].lower(): parts[i + 1].strip()
+                for i in range(1, len(parts) - 1, 2)}
+    if not all(field in sections for field in DRAFT_FIELDS):
+        return None
+    return sections
 
 SYSTEM_PROMPT = """\
 You draft a German job application (Bewerbung) for a candidate, tailored to
@@ -151,7 +160,19 @@ Rules:
   the candidate's name on its own line.
 Write flawless German in every prose field — correct spelling and grammar; a
 single typo in the subject or the letter reads as careless and sinks the
-application. Plain text only — no markdown, no HTML.
+application.
+
+OUTPUT FORMAT — emit exactly these four fields in this order, each introduced
+by its marker alone on its own line, and NOTHING else: no JSON, no markdown,
+nothing before the first marker or after the e-mail body.
+===ANALYSIS===
+<the analysis>
+===STELLENBEZEICHNUNG===
+<the clean Stellenbezeichnung>
+===ANSCHREIBEN_BODY===
+<the Anschreiben body>
+===EMAIL_BODY===
+<the e-mail body>
 """
 
 
@@ -279,7 +300,7 @@ def draft_application(
     stellenbezeichnung is the LLM's clean job title for the Betreff; the
     internal `analysis` field is parsed off and discarded. Runs on the stronger
     drafting model (Sonnet by default). A truncated or unparseable response
-    (Sonnet's occasional JSON-close failure) is retried up to DRAFT_ATTEMPTS
+    (Sonnet's occasional degenerate loop) is retried up to DRAFT_ATTEMPTS
     times; the returned usage sums every attempt so the retries are metered in
     full."""
     model = config.anthropic_drafting_model()
@@ -292,7 +313,6 @@ def draft_application(
                 system=SYSTEM_PROMPT,
                 user_content=user_content,
                 max_tokens=DRAFT_MAX_TOKENS,
-                output_schema=DRAFT_SCHEMA,
                 model=model,
                 timeout=DRAFT_TIMEOUT_S,
             )
@@ -304,21 +324,20 @@ def draft_application(
             last_error = str(exc)
             continue
         billed.append(result)
-        try:
-            data = json.loads(result.text)
-            anschreiben = str(data["anschreiben_body"] or "").strip()
-            email_body = str(data["email_body"] or "").strip()
-            stellenbezeichnung = str(data["stellenbezeichnung"] or "").strip()
-        except (ValueError, KeyError, TypeError):
+        sections = parse_draft_sections(result.text)
+        if sections is None:
             last_error = f"unparseable drafting response: {result.text!r}"
             continue
+        anschreiben = sections["anschreiben_body"]
+        email_body = sections["email_body"]
+        stellenbezeichnung = sections["stellenbezeichnung"]
         if not anschreiben or not email_body:
             last_error = "drafting returned empty text"
             continue
         if "grüßen" not in email_body.lower():
-            # Sonnet also degenerates into garbled/cut-off (but still valid
-            # JSON) drafts; a complete e-mail always signs off "Mit
-            # freundlichen Grüßen", so its absence flags a bad sample — retry.
+            # Sonnet also produces garbled/cut-off but still-parseable drafts;
+            # a complete e-mail always signs off "Mit freundlichen Grüßen", so
+            # its absence flags a bad sample — retry.
             last_error = "drafting produced an incomplete e-mail (no closing)"
             continue
         return anschreiben, email_body, stellenbezeichnung, _combined_usage(

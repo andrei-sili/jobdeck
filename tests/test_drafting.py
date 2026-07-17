@@ -173,16 +173,33 @@ def test_build_betreff_cleans_board_noise_from_the_title():
     ) == "Bewerbung als Fullstack-Entwickler (m/w/d), K-9 – Max Muster"
 
 
+def _draft_text(analysis="notes", stellenbezeichnung="Dev",
+                anschreiben_body="Anrede,\n\nText.",
+                email_body="Guten Tag,\n\nMit freundlichen Grüßen\nX"):
+    """A marker-delimited drafting response — the plain-text shape Sonnet
+    returns. Drafting uses NO JSON schema: constrained decoding degraded the
+    long German prose fields, so sections are delimited by markers instead."""
+    return (
+        f"===ANALYSIS===\n{analysis}\n"
+        f"===STELLENBEZEICHNUNG===\n{stellenbezeichnung}\n"
+        f"===ANSCHREIBEN_BODY===\n{anschreiben_body}\n"
+        f"===EMAIL_BODY===\n{email_body}"
+    )
+
+
 def test_draft_application_parses_and_strips(monkeypatch):
     captured = {}
 
     def fake_complete(**kwargs):
         captured.update(kwargs)
+        # surrounding whitespace on every section proves the parser strips it
         return llm.LLMResult(
-            text='{"analysis": "internal reasoning",'
-                 ' "stellenbezeichnung": " Backend Developer (m/w/d) ",'
-                 ' "anschreiben_body": " Sehr geehrte Frau Weber,\\n\\nAbsatz. ",'
-                 ' "email_body": " Guten Tag,\\n\\nMit freundlichen Grüßen\\nMax "}',
+            text=_draft_text(
+                analysis="internal reasoning",
+                stellenbezeichnung=" Backend Developer (m/w/d) ",
+                anschreiben_body=" Sehr geehrte Frau Weber,\n\nAbsatz. ",
+                email_body=" Guten Tag,\n\nMit freundlichen Grüßen\nMax ",
+            ),
             model="m", input_tokens=5, output_tokens=5, cost_usd=0.0,
         )
 
@@ -197,11 +214,14 @@ def test_draft_application_parses_and_strips(monkeypatch):
     # drafting runs on the stronger drafting model, not the scoring default
     assert captured["model"] == config.anthropic_drafting_model()
     assert captured["timeout"] == ai_drafting.DRAFT_TIMEOUT_S
+    # drafting must NOT constrain decoding with a JSON schema (the whole point
+    # of the plain-text format) — guard against a structured-output regression
+    assert "output_schema" not in captured and "output_config" not in captured
 
 
 @pytest.mark.parametrize("text", [
-    "not json",
-    '{"anschreiben_body": "", "email_body": "x"}',   # empty text is unusable
+    "no section markers here at all",                    # unparseable
+    _draft_text(anschreiben_body="", email_body="x"),    # parses, but empty body
 ])
 def test_draft_application_rejects_unusable_response(monkeypatch, text):
     calls = []
@@ -224,9 +244,7 @@ def test_draft_application_rejects_unusable_response(monkeypatch, text):
 def test_draft_application_retries_a_truncated_attempt_and_meters_all(monkeypatch):
     """Sonnet occasionally truncates; a retry lands, and every billed attempt
     (the failed one included) is metered so the cost is not under-reported."""
-    good = ('{"analysis": "x", "stellenbezeichnung": "Dev",'
-            ' "anschreiben_body": "Anrede,\\n\\nText.",'
-            ' "email_body": "Guten Tag,\\n\\nMit freundlichen Grüßen\\nX"}')
+    good = _draft_text()  # a clean, parseable draft that signs off properly
     calls = []
 
     def fake_complete(**kwargs):
@@ -273,15 +291,11 @@ def test_draft_application_exhausts_retries_on_repeated_truncation(monkeypatch):
 
 
 def test_draft_application_retries_an_email_without_a_closing(monkeypatch):
-    """A garbled/cut-off e-mail (valid JSON but no 'Mit freundlichen Grüßen')
-    is rejected and retried, not returned — Sonnet's other degeneration mode."""
+    """A garbled/cut-off e-mail (parseable sections but no 'Mit freundlichen
+    Grüßen') is rejected and retried — Sonnet's other degeneration mode."""
     calls = []
-    bad = ('{"analysis": "x", "stellenbezeichnung": "Dev",'
-           ' "anschreiben_body": "Anrede,\\n\\nText.",'
-           ' "email_body": "Guten Tag,\\n\\nanbei meine Bewerbung ("}')  # cut off
-    good = ('{"analysis": "x", "stellenbezeichnung": "Dev",'
-            ' "anschreiben_body": "Anrede,\\n\\nText.",'
-            ' "email_body": "Guten Tag,\\n\\nMit freundlichen Grüßen\\nX"}')
+    bad = _draft_text(email_body="Guten Tag,\n\nanbei meine Bewerbung (")  # cut off
+    good = _draft_text()  # complete, signs off with "Mit freundlichen Grüßen"
 
     def fake_complete(**kwargs):
         calls.append(1)
