@@ -4,8 +4,8 @@ import pathlib
 
 from nicegui import run, ui
 
-from jobdeck import db
-from jobdeck.services import drafting, mappe
+from jobdeck import apply_channel, db
+from jobdeck.services import apply_resolve, drafting, mappe
 from jobdeck.ui.helpers import open_in_system
 from jobdeck.ui.layout import frame
 
@@ -43,6 +43,18 @@ def _load_draft(job_id: int):
     with db.db() as con:
         row = db.get_draft_by_job(con, job_id)
         return dict(row) if row is not None else None
+
+
+def _apply_line(job: dict) -> str:
+    """Human one-liner for the resolved apply channel; '' when not yet resolved."""
+    channel, vendor = job["apply_channel"] or "", job["ats_vendor"] or ""
+    if channel == apply_channel.CHANNEL_DIRECT_EMAIL:
+        return "Bewerbung: direkt per E-Mail"
+    if channel in (apply_channel.CHANNEL_ATS, apply_channel.CHANNEL_BOARD):
+        return f"Bewerbung über {vendor}" if vendor else "Bewerbung über ein Portal"
+    if channel == apply_channel.CHANNEL_COMPANY_SITE:
+        return "Bewerbung: Formular auf der Firmen-Website"
+    return ""
 
 
 @ui.page("/jobs")
@@ -91,12 +103,19 @@ async def jobs_page():
                 if job["duplicate_of"]:
                     ui.label("⚠ You already applied at this company — see Applications.") \
                         .classes("text-sm text-amber-700")
+                channel_line = _apply_line(job)
+                if channel_line:
+                    ui.label(channel_line).classes("text-sm text-blue-700")
                 description = job["description"] or "(no description available)"
                 ui.markdown(description[:4000]).classes("text-sm")
                 with ui.row().classes("gap-2"):
+                    open_url = job["apply_url"] or job["url"]
                     ui.button("Open posting", icon="open_in_new",
-                              on_click=lambda url=job["url"]: ui.navigate.to(url, new_tab=True)) \
+                              on_click=lambda u=open_url: ui.navigate.to(u, new_tab=True)) \
                         .props("outline")
+                    if not job["apply_channel"]:
+                        ui.button("Kanal ermitteln", icon="travel_explore",
+                                  on_click=lambda j=job: resolve_channel(j)).props("outline")
                     if job["status"] == "new":
                         ui.button("Draft application", icon="edit_note",
                                   on_click=lambda j=job: draft(j)).props("outline")
@@ -191,6 +210,15 @@ async def jobs_page():
                 ui.notify(result["error"], type="warning", multi_line=True)
                 return
             show_draft(result["draft"], job)
+
+        async def resolve_channel(job: dict):
+            ui.notify("Bewerbungskanal wird ermittelt…")
+            res = await apply_resolve.resolve_and_store(job["id"])
+            label = _apply_line({**job, "apply_channel": res["channel"],
+                                 "ats_vendor": res["vendor"]})
+            ui.notify(label or "Kanal nicht ermittelbar",
+                      type="positive" if label else "warning")
+            await refresh()
 
         async def mark_portal(job: dict):
             await run.io_bound(_set_status, job["id"], "portal")
