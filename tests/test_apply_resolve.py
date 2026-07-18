@@ -61,6 +61,21 @@ async def test_a_known_email_short_circuits_without_network():
     assert final == "https://de.jooble.org/away/1"
 
 
+async def test_a_redirect_to_a_private_host_is_ignored():
+    # a poisoned redirect chain to an internal address must not be persisted or
+    # navigated to — the resolver drops it and falls back to the original URL
+    def handler(request):
+        if "/away/" in str(request.url):
+            return httpx.Response(302, headers={"Location": "http://127.0.0.1:8080/x"})
+        return httpx.Response(200)
+
+    async with _client(handler) as client:
+        final, ch = await apply_resolve.resolve(
+            _job("https://de.jooble.org/away/6"), client)
+    assert final == "https://de.jooble.org/away/6"  # fell back, did not store 127.0.0.1
+    assert ch.channel == ac.CHANNEL_BOARD and ch.vendor == "Jooble"
+
+
 async def test_a_follow_failure_falls_back_to_the_original_url():
     def handler(request):
         raise httpx.ConnectError("boom")

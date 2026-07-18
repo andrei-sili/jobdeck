@@ -15,6 +15,7 @@ when the user acts on a posting — never in bulk.
 """
 
 import asyncio
+import ipaddress
 import logging
 from urllib.parse import urlsplit
 
@@ -37,14 +38,30 @@ def _is_redirector(url: str) -> bool:
     return host.endswith("jooble.org") and parts.path.startswith("/away/")
 
 
+def _is_public_host(host: str) -> bool:
+    """A literal-IP host that is loopback/private/link-local/reserved is NOT
+    persisted or navigated to (SSRF defense-in-depth). A hostname is not
+    resolved here — full hop-by-hop IP validation is a later slice."""
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return True  # a hostname, not a literal IP
+    return not (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
+
+
 async def _follow(client: httpx.AsyncClient, url: str) -> str:
-    """Return the final URL after redirects, or '' on any failure."""
+    """Return the final URL after redirects, or '' on failure / an unsafe host."""
     try:
         resp = await client.head(url, follow_redirects=True)
-        return str(resp.url)
     except Exception as exc:  # network / timeout / too-many-redirects — non-fatal
         log.info("apply-resolve: could not follow %s: %s", url, exc)
         return ""
+    final = str(resp.url)
+    if not _is_public_host((urlsplit(final).hostname or "").lower()):
+        log.warning("apply-resolve: %s resolved to a non-public host — ignoring", url)
+        return ""
+    return final
 
 
 async def resolve(
