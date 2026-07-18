@@ -496,6 +496,17 @@ def reset_job_scores(con: sqlite3.Connection, job_ids: list[int]) -> int:
     return cur.rowcount
 
 
+def set_apply_channel(
+    con: sqlite3.Connection, job_id: int, channel: str, vendor: str, apply_url: str
+) -> None:
+    """Record where/how one applies to a posting (from the apply-channel
+    classifier). Additive metadata — never touches status or the send path."""
+    con.execute(
+        "UPDATE jobs SET apply_channel=?, ats_vendor=?, apply_url=? WHERE id=?",
+        (channel, vendor, apply_url, job_id),
+    )
+
+
 def count_jobs_by_status(con: sqlite3.Connection) -> dict[str, int]:
     rows = con.execute("SELECT status, COUNT(*) AS n FROM jobs GROUP BY status")
     return {row["status"]: row["n"] for row in rows}
