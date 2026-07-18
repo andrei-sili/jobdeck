@@ -7,7 +7,7 @@ legacy `bewerbungen` table keeps its exact shape so the historical data
 
 import sqlite3
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Legacy table, exactly as the previous tracker created it.
 BEWERBUNGEN_SQL = """
@@ -166,6 +166,19 @@ def _ensure_job_contact_columns(con: sqlite3.Connection) -> None:
             con.execute(f"ALTER TABLE jobs ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
 
 
+def _ensure_apply_channel_columns(con: sqlite3.Connection) -> None:
+    """Apply-channel columns added in schema v5 (additive only).
+
+    Filled by the deterministic apply-channel classifier (apply_channel.py):
+    where one applies (direct e-mail / ATS portal / board / company site), the
+    ATS vendor label when known, and the resolved final apply URL (after
+    following an aggregator redirect). Auto-send stays gated to direct_email."""
+    existing = [row[1] for row in con.execute("PRAGMA table_info(jobs)")]
+    for col in ("apply_channel", "ats_vendor", "apply_url"):
+        if col not in existing:
+            con.execute(f"ALTER TABLE jobs ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+
+
 def _ensure_draft_columns(con: sqlite3.Connection) -> None:
     """Send-tracking columns added in schema v4 (additive only).
 
@@ -186,6 +199,7 @@ def migrate(con: sqlite3.Connection) -> None:
     con.executescript(NEW_TABLES_SQL)
     _ensure_search_profile_columns(con)
     _ensure_job_contact_columns(con)
+    _ensure_apply_channel_columns(con)
     _ensure_draft_columns(con)
     if version < 2:
         # v2 reserves match_score 0 for hard-criteria violations and hides
