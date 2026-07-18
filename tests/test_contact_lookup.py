@@ -2,6 +2,7 @@
 
 import httpx
 
+from jobdeck import db
 from jobdeck.ai import llm
 from jobdeck.services import contact_lookup as cl
 
@@ -113,3 +114,13 @@ async def test_ai_fallback_discovers_the_domain_then_resolves(con, monkeypatch):
     async with _client(handler) as client:
         r = await cl.lookup(job, client, ai_search=True)
     assert r["email"] == "bewerbung@firma.de" and r["dedicated"] is True
+
+
+def test_ai_search_needs_both_master_and_feature_toggle(con):
+    db.set_setting(con, "web_contact_search", "1")
+    db.set_setting(con, "ai_enabled", "0")  # master kill-switch off
+    con.commit()
+    assert cl._ai_search_enabled() is False   # master off wins
+    db.set_setting(con, "ai_enabled", "1")
+    con.commit()
+    assert cl._ai_search_enabled() is True

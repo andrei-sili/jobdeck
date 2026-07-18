@@ -65,15 +65,29 @@ def _employer_host(job) -> str:
 
 
 async def _fetch_text(client: httpx.AsyncClient, url: str) -> str:
-    """GET a page body (untrusted), or '' on failure / a non-public final host."""
-    try:
-        resp = await client.get(url, follow_redirects=True)
-    except Exception as exc:  # network / timeout / too-many-redirects — non-fatal
-        log.info("contact-lookup: fetch %s failed: %s", url, exc)
-        return ""
-    if resp.status_code != 200 or not _public_host(str(resp.url)):
-        return ""
-    return resp.text[:_MAX_BYTES]
+    """GET a page body (untrusted), or '' on failure. Walks redirects manually
+    so EVERY hop's host is re-checked before the request fires — a redirect
+    chain must not GET a private/link-local address. (A hostname that DNS-
+    resolves to a private IP is still a residual — closing it needs a mockable
+    resolver; tracked for a later slice.)"""
+    for _ in range(_MAX_REDIRECTS + 1):
+        if not _public_host(url):
+            return ""
+        try:
+            resp = await client.get(url, follow_redirects=False)
+        except Exception as exc:  # network / timeout — non-fatal
+            log.info("contact-lookup: fetch %s failed: %s", url, exc)
+            return ""
+        if resp.is_redirect:
+            loc = resp.headers.get("location")
+            if not loc:
+                return ""
+            url = str(httpx.URL(url).join(loc))
+            continue
+        if resp.status_code != 200:
+            return ""
+        return resp.text[:_MAX_BYTES]
+    return ""  # too many redirects
 
 
 async def _lookup_on_host(client: httpx.AsyncClient, host: str) -> dict:
@@ -157,10 +171,12 @@ def _load_job(job_id: int):
 
 
 def _ai_search_enabled() -> bool:
-    """The per-install web-contact-search toggle (default off) — the on/off
-    button that authorises the AI web-search fallback and its spend."""
+    """AI web-search runs only when BOTH the master AI kill-switch and the
+    per-install web-contact-search toggle are on — the master switch's promise
+    is that nothing is sent to the API while it is off."""
     with db.db() as con:
-        return db.get_setting(con, "web_contact_search", "0") == "1"
+        return (db.ai_enabled(con)
+                and db.get_setting(con, "web_contact_search", "0") == "1")
 
 
 async def lookup_and_propose(job_id: int) -> dict:
