@@ -5,7 +5,7 @@ import pathlib
 from nicegui import run, ui
 
 from jobdeck import apply_channel, db
-from jobdeck.services import apply_resolve, drafting, mappe
+from jobdeck.services import apply_resolve, contact_lookup, drafting, mappe
 from jobdeck.ui.helpers import open_in_system
 from jobdeck.ui.layout import frame
 
@@ -43,6 +43,11 @@ def _load_draft(job_id: int):
     with db.db() as con:
         row = db.get_draft_by_job(con, job_id)
         return dict(row) if row is not None else None
+
+
+def _set_contact_email(job_id: int, email: str):
+    with db.db() as con:
+        db.set_contact_email(con, job_id, email, "web_lookup")
 
 
 def _apply_line(job: dict) -> str:
@@ -121,6 +126,9 @@ async def jobs_page():
                                   on_click=lambda j=job: draft(j)).props("outline")
                         ui.button("Apply via portal", icon="language",
                                   on_click=lambda j=job: mark_portal(j)).props("outline")
+                        if not job["contact_email"]:
+                            ui.button("Kontakt-E-Mail suchen", icon="alternate_email",
+                                      on_click=lambda j=job: find_email(j)).props("outline")
                         ui.button("Skip", icon="close",
                                   on_click=lambda j=job: skip(j)).props("outline color=grey")
                     if job["status"] == "portal":
@@ -219,6 +227,38 @@ async def jobs_page():
             ui.notify(label or "Kanal nicht ermittelbar",
                       type="positive" if label else "warning")
             await refresh()
+
+        async def find_email(job: dict):
+            ui.notify("Kontakt-E-Mail wird gesucht…")
+            res = await contact_lookup.lookup_and_propose(job["id"])
+            if not res["email"]:
+                ui.notify("Keine verifizierte Bewerbungs-E-Mail gefunden",
+                          type="warning")
+                return
+            with ui.dialog() as dialog, ui.card().classes("w-[440px] max-w-full"):
+                ui.label("Gefundene Bewerbungs-E-Mail").classes("font-bold")
+                ui.label(res["email"]).classes("text-lg")
+                ui.label(f"Quelle: {res['source_url']}").classes(
+                    "text-xs text-gray-500")
+                if res["generic"]:
+                    ui.label("⚠ Allgemeine Adresse (info@) — nicht für den "
+                             "Auto-Versand.").classes("text-sm text-amber-700")
+                elif not res["dedicated"]:
+                    ui.label("Persönliche Adresse — bitte vor dem Versand "
+                             "prüfen.").classes("text-sm text-gray-600")
+
+                async def adopt():
+                    await run.io_bound(_set_contact_email, job["id"], res["email"])
+                    ui.notify(f"Übernommen: {res['email']}", type="positive")
+                    dialog.close()
+                    await refresh()
+
+                with ui.row().classes("w-full justify-end gap-2"):
+                    if not res["generic"]:  # never adopt a generic info@ inbox
+                        ui.button("Übernehmen", icon="check",
+                                  on_click=adopt).props("color=positive")
+                    ui.button("Schließen", on_click=dialog.close).props("flat")
+            dialog.open()
 
         async def mark_portal(job: dict):
             await run.io_bound(_set_status, job["id"], "portal")

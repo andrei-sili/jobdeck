@@ -507,6 +507,19 @@ def set_apply_channel(
     )
 
 
+def set_contact_email(
+    con: sqlite3.Connection, job_id: int, email: str, source: str
+) -> None:
+    """Adopt a human-confirmed application e-mail for a posting (from the
+    web contact lookup). `source` records provenance (e.g. 'web_lookup'). The
+    address becomes the send recipient only through the normal draft→queue path,
+    still behind real_send_enabled and the per-send human confirmation."""
+    con.execute(
+        "UPDATE jobs SET contact_email=?, contact_source=? WHERE id=?",
+        (email, source, job_id),
+    )
+
+
 def count_jobs_by_status(con: sqlite3.Connection) -> dict[str, int]:
     rows = con.execute("SELECT status, COUNT(*) AS n FROM jobs GROUP BY status")
     return {row["status"]: row["n"] for row in rows}

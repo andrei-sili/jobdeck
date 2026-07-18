@@ -16,6 +16,7 @@ def _get_settings():
             "follow_up_days": db.get_setting(con, "follow_up_days", "14"),
             "daily_send_cap": db.get_setting(con, "daily_send_cap", "15"),
             "ai_enabled": db.ai_enabled(con),
+            "web_contact_search": db.get_setting(con, "web_contact_search", "0"),
             "applicant_name": db.get_setting(con, "applicant_name", ""),
             "applicant_ort": db.get_setting(con, "applicant_ort", ""),
             "template_path": db.get_setting(con, "template_path", ""),
@@ -268,6 +269,25 @@ async def settings_page():
             ui.label(
                 "Master switch for all LLM spend. While off, nothing is sent "
                 "to the API — scheduled and manual scoring both skip."
+            ).classes("text-xs text-gray-500")
+
+            async def toggle_web_search(e):
+                async with toggle_write_lock:
+                    await run.io_bound(_set_setting, "web_contact_search",
+                                       "1" if e.value else "0")
+                ui.notify("Web contact search on — an LLM may look up the "
+                          "employer domain" if e.value
+                          else "Web contact search off",
+                          type="positive" if e.value else "info")
+
+            ui.switch("Find the application e-mail via web search (AI)",
+                      value=settings["web_contact_search"] == "1",
+                      on_change=toggle_web_search)
+            ui.label(
+                "On demand only: when a posting has no e-mail, an LLM web search "
+                "finds the employer domain, then its Impressum is checked for a "
+                "bewerbung@ address (domain-verified). A few cents per lookup; "
+                "off by default."
             ).classes("text-xs text-gray-500")
             global_tags = ui.textarea(
                 "Hard requirements for EVERY search (one per line)",

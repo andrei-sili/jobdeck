@@ -134,3 +134,40 @@ def complete(
             f"incomplete; raise max_tokens", usage=result
         )
     return result
+
+
+def web_search(user_content: str, max_tokens: int = 512,
+               model: str | None = None, max_uses: int = 3) -> LLMResult:
+    """One web-search-enabled call: the model may search the web server-side,
+    then answers. Returns the final text plus the metered token usage summed
+    across any pause_turn continuations. Kept separate from complete() so the
+    scoring/drafting paths carry no tool surface. NOTE: the per-search fee
+    (~$0.01/search) is NOT captured here — only token cost is metered.
+
+    Used ONLY behind the per-install web-contact-search toggle (AI spend,
+    on-demand)."""
+    api = client()
+    tools = [{"type": "web_search_20250305", "name": "web_search",
+              "max_uses": max_uses}]
+    messages: list[dict] = [{"role": "user", "content": user_content}]
+    model_used = model or config.anthropic_model()
+    total_in = total_out = 0
+    response = None
+    for _ in range(max_uses + 1):  # bound pause_turn continuations
+        try:
+            response = api.messages.create(
+                model=model_used, max_tokens=max_tokens, tools=tools,
+                messages=messages,
+            )
+        except anthropic.APIError as exc:
+            raise LLMError(str(exc)) from exc
+        total_in += response.usage.input_tokens
+        total_out += response.usage.output_tokens
+        if response.stop_reason != "pause_turn":
+            break
+        messages.append({"role": "assistant", "content": response.content})
+    text = " ".join(b.text for b in response.content if b.type == "text")
+    in_rate, out_rate = pricing(response.model)
+    cost = (total_in * in_rate + total_out * out_rate) / 1_000_000
+    return LLMResult(text=text, model=response.model, input_tokens=total_in,
+                     output_tokens=total_out, cost_usd=cost)
