@@ -168,12 +168,29 @@ Rules:
   no filler like "hiermit bewerbe ich mich", no generic praise of the
   company. Do NOT include a subject line, closing formula or signature;
   the letter template provides those.
-- email_body: the complete short e-mail that delivers the application.
-  German, Sie-Form, 3-6 sentences: Anrede (same rules as above), which
-  position is being applied for (with Referenznummer when given), a
-  pointer to the attached application documents (one PDF), an availability
-  note only if the profile states one, then "Mit freundlichen Grüßen" and
-  the candidate's name on its own line.
+- email_body: the complete short e-mail that DELIVERS the application — a
+  transmittal note, NOT a second Anschreiben. The full cover letter is page 1
+  of the attached PDF, so never restate its arguments or re-list the
+  candidate's qualifications here (a German recruiter reads that as redundant).
+  German, Sie-Form, 3-5 sentences (including the hook): Anrede (same rules as
+  above); then ONE warm, concrete hook sentence that shows genuine, specific
+  interest in THIS role — a HIGH-LEVEL spark tied to the candidate's OWN
+  matching fact (the tech pairing or the domain the posting foregrounds), framed
+  as his fact rather than an inference about how the company "thinks". Do NOT
+  reproduce a project's stack, feature list or metrics here — that detail lives
+  in the letter, and repeating it is exactly what makes the e-mail redundant;
+  the hook teases the connection, it does not describe the project. Keep every
+  count faithful (one project is "meinem Projekt", never "Projekten"/"mehreren")
+  and never blend two projects' stacks. It is a spark that invites opening the
+  PDF, not a summary of the letter; then state which position is being applied
+  for as a plain
+  transmittal — pattern: "Für die Position als <Titel> (Referenznummer <…>)
+  sende ich Ihnen anbei meine vollständigen Bewerbungsunterlagen", never opening
+  with "Hiermit bewerbe ich mich" (in this running text the title may drop its
+  "(m/w/d)" marker — keep that only in the subject line); an availability note
+  only if the profile states one; then "Mit freundlichen Grüßen" and the
+  candidate's name on its own line. No Floskeln anywhere — not "Hiermit bewerbe
+  ich mich", not "mit großem Interesse", no generic praise of the company.
 Write flawless German in every prose field — correct spelling and grammar; a
 single typo in the subject or the letter reads as careless and sinks the
 application.
