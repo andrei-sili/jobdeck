@@ -16,12 +16,20 @@ DNS. Accepted residual for a local single-user tool (OWASP's check-then-
 connect tier): a rebinding authoritative server could answer public at check
 time and private at connect time; closing that needs per-hop IP pinning via a
 custom transport — future hardening, not this slice.
+
+``fetch_text`` is the one sanctioned way to GET an untrusted page: the manual
+redirect walk clears every hop through the guard before its request fires.
 """
 
 import asyncio
 import ipaddress
+import logging
 import socket
 from urllib.parse import urlsplit
+
+import httpx
+
+log = logging.getLogger(__name__)
 
 _NAT64 = ipaddress.ip_network("64:ff9b::/96")
 _SCHEMES = ("http", "https")
@@ -110,3 +118,29 @@ async def url_is_safe(url: str, *, resolver=None) -> bool:
     if parts.scheme.lower() not in _SCHEMES:
         return False
     return await host_is_safe((parts.hostname or "").lower(), resolver=resolver)
+
+
+async def fetch_text(client: httpx.AsyncClient, url: str, *,
+                     max_bytes: int, max_redirects: int = 10) -> str:
+    """GET one untrusted page body, or '' on any failure. Walks redirects
+    manually so EVERY hop clears `url_is_safe` before its request fires — a
+    redirect chain must not GET a private address any more than the first
+    URL may be one."""
+    for _ in range(max_redirects + 1):
+        if not await url_is_safe(url):
+            return ""
+        try:
+            resp = await client.get(url, follow_redirects=False)
+        except Exception as exc:  # network / timeout — non-fatal
+            log.info("netsafe: fetch %s failed: %s", url, exc)
+            return ""
+        if resp.is_redirect:
+            loc = resp.headers.get("location")
+            if not loc:
+                return ""
+            url = str(httpx.URL(url).join(loc))
+            continue
+        if resp.status_code != 200:
+            return ""
+        return resp.text[:max_bytes]
+    return ""  # too many redirects

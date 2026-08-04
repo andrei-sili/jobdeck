@@ -48,38 +48,15 @@ def _employer_host(job) -> str:
     return ""
 
 
-async def _fetch_text(client: httpx.AsyncClient, url: str) -> str:
-    """GET a page body (untrusted), or '' on failure. Walks redirects manually
-    so EVERY hop clears the SSRF guard before its request fires — including
-    resolving a hostname and requiring every returned address to be public
-    (the check-then-connect rebinding residual is documented in netsafe)."""
-    for _ in range(_MAX_REDIRECTS + 1):
-        if not await netsafe.url_is_safe(url):
-            return ""
-        try:
-            resp = await client.get(url, follow_redirects=False)
-        except Exception as exc:  # network / timeout — non-fatal
-            log.info("contact-lookup: fetch %s failed: %s", url, exc)
-            return ""
-        if resp.is_redirect:
-            loc = resp.headers.get("location")
-            if not loc:
-                return ""
-            url = str(httpx.URL(url).join(loc))
-            continue
-        if resp.status_code != 200:
-            return ""
-        return resp.text[:_MAX_BYTES]
-    return ""  # too many redirects
-
-
 async def _lookup_on_host(client: httpx.AsyncClient, host: str) -> dict:
     """Try the contact pages on one host; return the first dedicated address,
     else the first (generic/named) one found."""
     fallback = dict(_EMPTY)
     for path in _PATHS:
         url = f"https://{host}{path}"
-        r = contact_resolve.resolve_email(await _fetch_text(client, url), host)
+        page = await netsafe.fetch_text(
+            client, url, max_bytes=_MAX_BYTES, max_redirects=_MAX_REDIRECTS)
+        r = contact_resolve.resolve_email(page, host)
         if r["dedicated"]:
             return {**r, "source_url": url}
         if r["email"] and not fallback["email"]:

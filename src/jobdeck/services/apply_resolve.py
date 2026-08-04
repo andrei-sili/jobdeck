@@ -5,7 +5,9 @@ interesting channel (an ATS portal) is usually hidden behind an aggregator
 redirect: Jooble stores an ``/away/<id>`` link that 3xx-redirects to the real
 posting. This service follows that redirect POLITELY — honest User-Agent, short
 timeout, capped redirects, a HEAD-only Location lookup, never a form submission
-or a bulk crawl — then classifies the resolved URL.
+or a bulk crawl — then classifies the resolved URL. When the result looks like
+the employer's own site, ONE capped GET inspects the page for ATS vendor
+fingerprints (a CNAME'd career domain hides its vendor from the hostname).
 
 Only Jooble ``/away/`` links are followed today; Arbeitsagentur already captures
 the employer's externeURL at ingestion, and Arbeitnow needs page parsing (a
@@ -27,6 +29,7 @@ log = logging.getLogger(__name__)
 _USER_AGENT = "JobDeck/0.1 (+https://github.com/andrei-sili/jobdeck)"
 _TIMEOUT = 10.0
 _MAX_REDIRECTS = 10
+_MAX_BYTES = 400_000
 
 
 def _is_redirector(url: str) -> bool:
@@ -62,6 +65,19 @@ async def _follow(client: httpx.AsyncClient, url: str) -> str:
     return ""
 
 
+async def _inspect_page(
+    client: httpx.AsyncClient, url: str
+) -> apply_channel.ApplyChannel | None:
+    """One polite capped GET of a company-site page to look for ATS vendor
+    fingerprints (a CNAME'd career domain hides its vendor from the hostname).
+    Any failure or non-match keeps the existing classification."""
+    page = await netsafe.fetch_text(
+        client, url, max_bytes=_MAX_BYTES, max_redirects=_MAX_REDIRECTS)
+    if not page:
+        return None
+    return apply_channel.detect_ats_from_page(page)
+
+
 async def resolve(
     job, client: httpx.AsyncClient
 ) -> tuple[str, apply_channel.ApplyChannel]:
@@ -77,7 +93,12 @@ async def resolve(
         followed = await _follow(client, url)
         if followed:
             final = followed
-    return final, apply_channel.classify(final, email)
+    ch = apply_channel.classify(final, email)
+    if ch.channel == apply_channel.CHANNEL_COMPANY_SITE:
+        detected = await _inspect_page(client, final)
+        if detected is not None:
+            ch = detected
+    return final, ch
 
 
 def _load_job(job_id: int):

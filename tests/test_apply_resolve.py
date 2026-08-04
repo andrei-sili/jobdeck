@@ -153,6 +153,55 @@ async def test_an_unresolvable_host_falls_back_to_the_original_url(monkeypatch):
     assert final == "https://de.jooble.org/away/9"
 
 
+async def test_a_company_site_page_with_vendor_markers_upgrades_to_ats():
+    # jobs.hoermann.de is a rexx portal behind a CNAME — the landing host says
+    # company_site, but the page's form action betrays the vendor
+    def handler(request):
+        assert request.method == "GET"
+        return httpx.Response(200, text=(
+            '<form action="https://hoermann.rexx-systems.com/apply/1"></form>'))
+
+    async with _client(handler) as client:
+        final, ch = await apply_resolve.resolve(
+            _job("https://jobs.hoermann.de/stelle-42"), client)
+    assert final == "https://jobs.hoermann.de/stelle-42"  # URL stays the page
+    assert ch.channel == ac.CHANNEL_ATS and ch.vendor == "rexx systems"
+
+
+async def test_a_company_site_page_without_markers_stays_company_site():
+    def handler(request):
+        return httpx.Response(200, text="<h1>Karriere</h1><p>Mail uns.</p>")
+
+    async with _client(handler) as client:
+        _, ch = await apply_resolve.resolve(
+            _job("https://firma.de/karriere/dev"), client)
+    assert ch.channel == ac.CHANNEL_COMPANY_SITE and ch.vendor == ""
+
+
+async def test_a_failing_company_site_fetch_keeps_the_classification():
+    def handler(request):
+        raise httpx.ConnectError("down")
+
+    async with _client(handler) as client:
+        _, ch = await apply_resolve.resolve(
+            _job("https://firma.de/karriere/dev"), client)
+    assert ch.channel == ac.CHANNEL_COMPANY_SITE
+
+
+async def test_an_ats_or_board_landing_is_never_page_fetched():
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(200, text="x")
+
+    async with _client(handler) as client:
+        await apply_resolve.resolve(
+            _job("https://acme.jobs.personio.de/job/1"), client)
+        await apply_resolve.resolve(_job("https://de.jooble.org/desc/2"), client)
+    assert calls == []  # the classification was decisive without any network
+
+
 async def test_a_redirect_loop_gives_up_and_falls_back():
     def handler(request):  # every hop redirects forever
         return httpx.Response(302, headers={"Location": str(request.url)})
