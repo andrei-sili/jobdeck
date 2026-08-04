@@ -121,9 +121,18 @@ def is_openable(url: str) -> bool:
 
     The last gate before `window.open`: a URL reaching the UI may have come
     from a board feed or an employer-supplied field, and a `javascript:` or
-    `data:` URL opened from the app's own page would run in its origin."""
+    `data:` URL opened from the app's own page would run in its origin.
+
+    An authority carrying a backslash or userinfo is refused even though it
+    parses: a browser applies WHATWG rules, which END the authority at a
+    backslash, so `https://evil.example\\@join.com/x` is join.com to urlsplit
+    and to httpx — the host we screen and label "Bewerbung über JOIN" — but
+    evil.example to the click. A URL whose destination depends on who parses
+    it must not be offered at all."""
     parts = split_url(url)
-    return parts is not None and parts.scheme.lower() in _SCHEMES and bool(parts.hostname)
+    if parts is None or parts.scheme.lower() not in _SCHEMES or not parts.hostname:
+        return False
+    return "\\" not in parts.netloc and "@" not in parts.netloc
 
 
 async def host_is_safe(host: str, *, resolver=None) -> bool:
@@ -146,6 +155,12 @@ async def host_is_safe(host: str, *, resolver=None) -> bool:
             host = idna.encode(host.lower()).decode("ascii")
         except idna.IDNAError:
             return False
+        # alternate separators (U+3002 and friends) are label dots to idna, so
+        # a host can BECOME an IP literal only after encoding — judge it as one
+        # rather than trusting the resolver to echo a numeric string back
+        ip = _literal_ip(host)
+        if ip is not None:
+            return ip_is_public(ip)
     if resolver is None:
         resolver = _system_resolver
     try:
@@ -173,15 +188,33 @@ async def url_is_safe(url: str, *, resolver=None) -> bool:
     return await host_is_safe((parts.hostname or "").lower(), resolver=resolver)
 
 
-async def fetch_text(client: httpx.AsyncClient, url: str, *,
-                     max_bytes: int, max_redirects: int = 10) -> str:
-    """GET one untrusted page body, or '' on any failure. Walks redirects
-    manually so EVERY hop clears `url_is_safe` before its request fires — a
-    redirect chain must not GET a private address any more than the first URL
-    may be one. Streams the body and STOPS at max_bytes: a hostile response
-    cannot be drained indefinitely, though httpx decompresses one transport
-    chunk at a time, so a compressed bomb can still materialize a single
-    inflated chunk before the cap ends the loop."""
+async def fetch_text(client: httpx.AsyncClient, url: str, *, max_bytes: int,
+                     max_redirects: int = 10, deadline: float = 60.0) -> str:
+    """GET one untrusted page body, or '' on any failure.
+
+    Bounded three ways, because an httpx timeout is per-operation and bounds
+    none of them: `max_redirects` hops, `max_bytes` of body, and `deadline`
+    seconds of wall clock for the whole exchange. Without the deadline a server
+    trickling one byte every 19 s never trips the client's 20 s read timeout,
+    and since the poll job is `max_instances=1` a single such posting silently
+    halts ALL job discovery until the app restarts.
+
+    Redirects are walked manually so EVERY hop clears `url_is_safe` before its
+    request fires — a redirect chain must not GET a private address any more
+    than the first URL may be one. The body streams and STOPS at max_bytes,
+    though httpx decompresses one transport chunk at a time, so a compressed
+    bomb can still materialize a single inflated chunk before the cap ends the
+    loop."""
+    try:
+        async with asyncio.timeout(deadline):
+            return await _fetch_text(client, url, max_bytes, max_redirects)
+    except TimeoutError:
+        log.info("netsafe: fetch %s exceeded %.0fs — giving up", url, deadline)
+        return ""
+
+
+async def _fetch_text(client: httpx.AsyncClient, url: str,
+                      max_bytes: int, max_redirects: int) -> str:
     for _ in range(max_redirects + 1):
         if not await url_is_safe(url):
             return ""

@@ -1,5 +1,7 @@
 """Tests for netsafe.fetch_text — the one guarded way to GET an untrusted page."""
 
+import asyncio
+
 import httpx
 
 from jobdeck import netsafe
@@ -147,6 +149,31 @@ async def test_an_unknown_declared_charset_falls_back_instead_of_raising():
                               headers={"content-type": "text/html; charset=nonsense-8"})
 
     assert await _fetch(handler) == "bewerbung@firma.de"
+
+
+async def test_a_slow_drip_server_is_cut_off_by_the_deadline():
+    """The byte cap bounds SIZE, not TIME: httpx's timeout is per-read, so a
+    server sending one small chunk per interval never trips it and would wedge
+    the single-instance poll job for the process lifetime."""
+    async def content():
+        for _ in range(1000):
+            await asyncio.sleep(0.05)
+            yield b"x"
+
+    def handler(request):
+        return httpx.Response(200, content=content())
+
+    started = asyncio.get_running_loop().time()
+    body = await _fetch(handler, max_bytes=400_000, deadline=0.2)
+    assert body == ""
+    assert asyncio.get_running_loop().time() - started < 5.0
+
+
+async def test_a_fast_response_is_unaffected_by_the_deadline():
+    def handler(request):
+        return httpx.Response(200, text="bewerbung@firma.de")
+
+    assert await _fetch(handler, deadline=0.2) == "bewerbung@firma.de"
 
 
 async def test_streaming_stops_pulling_once_the_cap_is_reached():

@@ -126,6 +126,37 @@ async def test_an_idn_host_resolving_private_is_refused():
     assert await netsafe.host_is_safe("straße.de", resolver=private) is False
 
 
+async def test_a_host_that_becomes_an_ip_literal_after_idna_is_judged_as_one():
+    # U+3002 and friends are label separators to idna, so '127。0。0。1' encodes
+    # to '127.0.0.1' — it must be screened as the literal it is, not handed to
+    # a resolver whose numeric-echo behaviour we would then be relying on
+    async def resolver(host):
+        raise AssertionError(f"an IP literal must not be resolved: {host}")
+
+    assert await netsafe.host_is_safe("127。0。0。1", resolver=resolver) is False
+    assert await netsafe.host_is_safe("192。168。1。1", resolver=resolver) is False
+    assert await netsafe.host_is_safe("93。184。216。34", resolver=resolver) is True
+
+
+@pytest.mark.parametrize("url", [
+    r"https://evil.example\@join.com/jobs/x",   # browser stops the authority at '\'
+    r"https://evil.example\.join.com/x",
+    "https://user:pw@join.com/x",
+    "https://join.com%5c@evil.example/x",
+])
+def test_an_authority_the_browser_reads_differently_is_not_openable(url):
+    # urlsplit and httpx read the host after the last '@'; a WHATWG parser (any
+    # browser) ends the authority at the backslash — so the host we screened and
+    # labelled is not the host the click reaches
+    assert netsafe.is_openable(url) is False
+
+
+def test_ordinary_urls_stay_openable():
+    assert netsafe.is_openable("https://join.com/companies/x/y") is True
+    assert netsafe.is_openable("http://karriere.firma.de/stellen?id=4&a=b") is True
+    assert netsafe.is_openable("https://xn--mnchen-3ya.de/jobs") is True
+
+
 async def test_an_unencodable_idn_host_is_refused_without_resolving():
     # idna rejects the label, exactly as httpx's encode_host would with
     # InvalidURL — fail closed before any resolution
