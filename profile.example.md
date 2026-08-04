@@ -26,7 +26,7 @@ better the scores and drafts.
 
 ## Experience & projects
 
-- 2024–2026: Umschulung Fachinformatiker Anwendungsentwicklung (IHK), incl.
+- 2024–2026: Ausbildung Fachinformatiker Anwendungsentwicklung (IHK), incl.
   6-month Praktikum at Example GmbH — built internal reporting tools in
   Python/FastAPI.
 - Open-source: maintainer of example-project (github.com/example/example) —
