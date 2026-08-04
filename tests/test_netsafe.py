@@ -110,3 +110,40 @@ async def test_a_non_ascii_host_is_refused_without_resolving():
 
     assert await netsafe.host_is_safe("straße.de", resolver=resolver) is False
     assert await netsafe.url_is_safe("https://straße.de/x", resolver=resolver) is False
+
+
+@pytest.mark.parametrize("url", [
+    "https://www.arbeitnow.com／@evil.example/x",  # netloc changes under NFKC
+    "http://[::1",                                # invalid IPv6 literal
+    "https://[not-an-ip]/x",
+])
+def test_a_malformed_url_never_raises_out_of_the_url_helpers(url):
+    # urlsplit rejects these with ValueError; every helper must fail closed
+    assert netsafe.split_url(url) is None
+    assert netsafe.url_hostname(url) == ""
+    assert netsafe.public_literal_host(url) == ""
+    assert netsafe.is_openable(url) is False
+
+
+async def test_a_malformed_url_is_refused_by_the_fetch_gate():
+    async def resolver(host):
+        return ["93.184.216.34"]
+
+    assert await netsafe.url_is_safe("http://[::1", resolver=resolver) is False
+
+
+@pytest.mark.parametrize("url, openable", [
+    ("https://firma.de/stelle", True),
+    ("http://firma.de/stelle", True),
+    ("javascript:alert(document.domain)", False),
+    ("javascript://www.arbeitnow.com/jobs/x/apply", False),
+    ("data:text/html,<script>alert(1)</script>", False),
+    ("vbscript:msgbox(1)", False),
+    ("file:///etc/passwd", False),
+    ("//evil.example/x", False),   # protocol-relative: no scheme
+    ("/jobs/local", False),
+    ("https://", False),           # no host
+    ("", False),
+])
+def test_is_openable_gates_what_the_browser_may_open(url, openable):
+    assert netsafe.is_openable(url) is openable

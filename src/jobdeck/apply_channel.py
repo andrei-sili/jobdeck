@@ -17,7 +17,8 @@ redirects (jooble/arbeitnow) and web e-mail lookup are later slices.
 import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
-from urllib.parse import urlsplit
+
+from jobdeck import netsafe
 
 # Channel vocabulary — a subset of the full cascade enum; the rest (RECRUITER,
 # IMPRESSUM_ONLY, PHONE_POSTAL) needs the web-lookup slice.
@@ -86,11 +87,15 @@ _BOARD_RULES = tuple((label, re.compile(h, re.I)) for label, h in _BOARDS)
 
 
 def _hostname(url: str) -> tuple[str, str]:
-    """(lowercased host, path) for a URL, tolerating a missing scheme."""
+    """(lowercased host, path) for a URL, tolerating a missing scheme. A
+    malformed URL yields no host, so it classifies as UNKNOWN rather than
+    raising into the caller."""
     raw = (url or "").strip()
     if raw and "://" not in raw:
         raw = "https://" + raw
-    parts = urlsplit(raw)
+    parts = netsafe.split_url(raw)
+    if parts is None:
+        return "", ""
     return (parts.hostname or "").lower(), parts.path or ""
 
 
@@ -188,9 +193,9 @@ def detect_ats_from_page(page_html: str) -> ApplyChannel | None:
     except Exception:  # tolerate any parser hiccup on hostile HTML — no match
         return None
     for url in parser.urls:
-        host = (urlsplit(url).hostname or "").lower()
+        host = netsafe.url_hostname(url)  # never raises on a poisoned URL
         if not host:
-            continue  # relative URL — same host as the page, no vendor signal
+            continue  # relative or malformed — no vendor signal
         vendor = _content_vendor(host)
         if vendor:
             return ApplyChannel(CHANNEL_ATS, vendor)

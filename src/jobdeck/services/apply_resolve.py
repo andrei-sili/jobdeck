@@ -21,7 +21,6 @@ Resolve on demand when the user acts on a posting — never in bulk.
 import asyncio
 import logging
 from html.parser import HTMLParser
-from urllib.parse import urlsplit
 
 import httpx
 
@@ -37,16 +36,18 @@ _MAX_BYTES = 400_000
 
 def _is_redirector(url: str) -> bool:
     """True for a Jooble away-link, which 3xx-redirects to the real posting."""
-    raw = url if "://" in url else "https://" + url
-    parts = urlsplit(raw)
+    parts = netsafe.split_url(url if "://" in url else "https://" + url)
+    if parts is None:
+        return False
     host = (parts.hostname or "").lower()
     return host.endswith("jooble.org") and parts.path.startswith("/away/")
 
 
 def _is_arbeitnow_job(url: str) -> bool:
     """True for an Arbeitnow job page (its feed URLs all point there)."""
-    raw = url if "://" in url else "https://" + url
-    parts = urlsplit(raw)
+    parts = netsafe.split_url(url if "://" in url else "https://" + url)
+    if parts is None:
+        return False
     host = (parts.hostname or "").lower()
     return (host == "arbeitnow.com" or host.endswith(".arbeitnow.com")) \
         and parts.path.startswith("/jobs/")
@@ -89,9 +90,14 @@ def _arbeitnow_apply_href(hrefs: list[str], page_url: str) -> str:
     path + '/apply' — a planted anchor earlier in the document (employer-
     supplied description HTML, a 'related jobs' block) must not win, and a
     non-http scheme must never become a URL the app opens."""
-    want = urlsplit(page_url).path.rstrip("/") + "/apply"
+    page_parts = netsafe.split_url(page_url)
+    if page_parts is None:
+        return ""
+    want = page_parts.path.rstrip("/") + "/apply"
     for href in hrefs:
-        parts = urlsplit(href)
+        parts = netsafe.split_url(href)  # a poisoned href must not raise
+        if parts is None:
+            continue
         host = (parts.hostname or "").lower()
         if (parts.scheme in ("http", "https")
                 and host in ("www.arbeitnow.com", "arbeitnow.com")

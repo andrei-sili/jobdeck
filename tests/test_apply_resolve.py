@@ -407,3 +407,49 @@ async def test_an_arbeitnow_page_redirect_to_a_private_host_is_never_fetched():
         final, ch = await apply_resolve.resolve(_job(_AN_JOB), client)
     assert seen == ["www.arbeitnow.com"]
     assert final == _AN_JOB and ch.channel == ac.CHANNEL_BOARD
+
+
+async def test_a_poisoned_href_does_not_abort_the_arbeitnow_resolution():
+    # a malformed href earlier in the document must be skipped, not raise
+    def handler(request):
+        return httpx.Response(200, text=(
+            '<a href="https://www.arbeitnow.com／@evil.example/x/apply">x</a>'
+            f'<a href="{_AN_APPLY}">Apply Now</a>'))
+
+    async with _client(handler) as client:
+        final, ch = await apply_resolve.resolve(_job(_AN_JOB), client)
+    assert final == _AN_APPLY and ch.vendor == "Arbeitnow"
+
+
+async def test_a_malformed_stored_url_resolves_without_raising():
+    def handler(request):
+        raise AssertionError("a malformed URL must not be fetched")
+
+    async with _client(handler) as client:
+        final, ch = await apply_resolve.resolve(_job("http://[::1"), client)
+    assert final == "http://[::1" and ch.channel == ac.CHANNEL_UNKNOWN
+
+
+async def test_an_apply_href_on_a_foreign_host_with_this_jobs_path_is_rejected():
+    # pins the HOST allowlist independently of the path check
+    foreign = "https://evil.example" + _AN_JOB.split(".com", 1)[1] + "/apply"
+
+    def handler(request):
+        return httpx.Response(200, text=f'<a href="{foreign}">Apply</a>')
+
+    async with _client(handler) as client:
+        final, ch = await apply_resolve.resolve(_job(_AN_JOB), client)
+    assert final == _AN_JOB and ch.vendor == "Arbeitnow"
+
+
+async def test_a_join_form_on_a_foreign_host_does_not_use_the_board_parser():
+    # the JOIN form-id signal is Arbeitnow-specific: on any other host the page
+    # must go through the generic vendor-fingerprint path instead, which finds
+    # no vendor here (no join.com resource is loaded)
+    def handler(request):
+        return httpx.Response(200, text='<form id="form_job_application"></form>')
+
+    async with _client(handler) as client:
+        _, ch = await apply_resolve.resolve(
+            _job("https://evil-arbeitnow.com/jobs/companies/x/1"), client)
+    assert ch.channel == ac.CHANNEL_COMPANY_SITE and ch.vendor == ""

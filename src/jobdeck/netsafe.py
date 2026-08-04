@@ -69,6 +69,27 @@ def ip_is_public(ip: _IPAddress) -> bool:
     )
 
 
+def split_url(url: str):
+    """`urlsplit` that never raises on untrusted input, returning None instead.
+
+    urlsplit rejects a malformed netloc (an invalid IPv6 literal, a netloc that
+    changes under NFKC normalization) with ValueError, and `.hostname` can
+    raise for the same reasons — a poisoned URL must fail closed, not kill the
+    user's action."""
+    try:
+        parts = urlsplit(url or "")
+        parts.hostname  # noqa: B018 — this is where a bad netloc actually raises
+    except ValueError:
+        return None
+    return parts
+
+
+def url_hostname(url: str) -> str:
+    """Lowercased hostname of a URL, '' when absent or malformed."""
+    parts = split_url(url)
+    return (parts.hostname or "").lower() if parts is not None else ""
+
+
 def _literal_ip(host: str) -> _IPAddress | None:
     try:
         return ipaddress.ip_address(host.split("%", 1)[0])
@@ -80,11 +101,21 @@ def public_literal_host(url: str) -> str:
     """Host of a URL, or '' when it is a non-public IP literal. DNS-free — the
     synchronous pre-check for code that only persists/labels a URL; anything
     that FETCHES must pass `url_is_safe` per hop instead."""
-    host = (urlsplit(url if "://" in url else "//" + url).hostname or "").lower()
+    host = url_hostname(url if "://" in url else "//" + url)
     ip = _literal_ip(host) if host else None
     if ip is not None and not ip_is_public(ip):
         return ""
     return host
+
+
+def is_openable(url: str) -> bool:
+    """True when a stored URL is safe to hand to the browser.
+
+    The last gate before `window.open`: a URL reaching the UI may have come
+    from a board feed or an employer-supplied field, and a `javascript:` or
+    `data:` URL opened from the app's own page would run in its origin."""
+    parts = split_url(url)
+    return parts is not None and parts.scheme.lower() in _SCHEMES and bool(parts.hostname)
 
 
 async def host_is_safe(host: str, *, resolver=None) -> bool:
@@ -121,8 +152,8 @@ async def host_is_safe(host: str, *, resolver=None) -> bool:
 async def url_is_safe(url: str, *, resolver=None) -> bool:
     """Gate one fetch hop: an absolute http(s) URL whose host passes
     `host_is_safe`. Call it before EVERY request, including each redirect."""
-    parts = urlsplit(url or "")
-    if parts.scheme.lower() not in _SCHEMES:
+    parts = split_url(url)
+    if parts is None or parts.scheme.lower() not in _SCHEMES:
         return False
     return await host_is_safe((parts.hostname or "").lower(), resolver=resolver)
 
@@ -132,8 +163,10 @@ async def fetch_text(client: httpx.AsyncClient, url: str, *,
     """GET one untrusted page body, or '' on any failure. Walks redirects
     manually so EVERY hop clears `url_is_safe` before its request fires — a
     redirect chain must not GET a private address any more than the first URL
-    may be one. Streams the body and STOPS at max_bytes, so a hostile or
-    compressed-bomb response cannot be inflated into memory."""
+    may be one. Streams the body and STOPS at max_bytes: a hostile response
+    cannot be drained indefinitely, though httpx decompresses one transport
+    chunk at a time, so a compressed bomb can still materialize a single
+    inflated chunk before the cap ends the loop."""
     for _ in range(max_redirects + 1):
         if not await url_is_safe(url):
             return ""

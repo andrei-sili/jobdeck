@@ -141,3 +141,15 @@ def test_a_vendor_lookalike_suffix_is_not_a_fingerprint():
     # while a real vendor subdomain still matches
     assert ac.detect_ats_from_page(
         '<script src="https://cdn.join.com/w.js"></script>').vendor == "JOIN"
+
+
+def test_a_malformed_marker_url_is_skipped_instead_of_raising():
+    # a poisoned form action must not kill the detection pass
+    html = ('<form action="https://www.arbeitnow.com／@evil.example/x"></form>'
+            '<script src="https://cdn.join.com/w.js"></script>')
+    r = ac.detect_ats_from_page(html)
+    assert r is not None and r.vendor == "JOIN"  # skipped the bad one, found the real
+
+
+def test_a_malformed_posting_url_classifies_as_unknown():
+    assert ac.classify("http://[::1").channel == ac.CHANNEL_UNKNOWN

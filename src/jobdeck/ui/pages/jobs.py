@@ -4,7 +4,7 @@ import pathlib
 
 from nicegui import run, ui
 
-from jobdeck import apply_channel, db
+from jobdeck import apply_channel, db, netsafe
 from jobdeck.services import apply_resolve, contact_lookup, drafting, mappe
 from jobdeck.ui.helpers import open_in_system
 from jobdeck.ui.layout import frame
@@ -62,6 +62,18 @@ def _apply_line(job: dict) -> str:
     return ""
 
 
+def _openable_url(job: dict) -> str:
+    """The URL the "Open posting" button may hand to the browser, '' when
+    there is none that is safe.
+
+    The stored URL comes from a board feed, an employer-supplied field, or a
+    resolved apply link — untrusted in every case. Only an http(s) URL may be
+    opened: a `javascript:`/`data:` URL passed to window.open would execute in
+    the app's own origin."""
+    url = job["apply_url"] or job["url"] or ""
+    return url if netsafe.is_openable(url) else ""
+
+
 @ui.page("/jobs")
 async def jobs_page():
     with frame("Job inbox"):
@@ -114,10 +126,11 @@ async def jobs_page():
                 description = job["description"] or "(no description available)"
                 ui.markdown(description[:4000]).classes("text-sm")
                 with ui.row().classes("gap-2"):
-                    open_url = job["apply_url"] or job["url"]
-                    ui.button("Open posting", icon="open_in_new",
-                              on_click=lambda u=open_url: ui.navigate.to(u, new_tab=True)) \
-                        .props("outline")
+                    open_url = _openable_url(job)
+                    if open_url:
+                        ui.button("Open posting", icon="open_in_new",
+                                  on_click=lambda u=open_url:
+                                      ui.navigate.to(u, new_tab=True)).props("outline")
                     if not job["apply_channel"]:
                         ui.button("Kanal ermitteln", icon="travel_explore",
                                   on_click=lambda j=job: resolve_channel(j)).props("outline")
