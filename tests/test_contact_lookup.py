@@ -22,6 +22,17 @@ def test_employer_host_only_for_a_company_site():
     assert cl._employer_host(_job("http://127.0.0.1/x")) == ""                # private
 
 
+def test_a_host_no_anchor_can_verify_is_not_fetched_at_all():
+    """netsafe can reach an IDN host since the guard learned IDNA, but the
+    domain check stays ASCII-only (homograph guard) — so resolve_email would
+    discard whatever these pages contain. Five fetches that cannot produce an
+    answer must not happen."""
+    assert cl._employer_host(_job("https://münchen-firma.de/karriere")) == ""
+    assert cl._employer_host(_job("https://xn--mnchen-3ya.de/karriere")) == ""
+    assert cl._employer_host(_job("https://firma.notarealtld/karriere")) == ""
+    assert cl._employer_host(_job("https://firma.de/karriere")) == "firma.de"
+
+
 async def test_finds_a_dedicated_address_on_the_impressum():
     def handler(request):
         if str(request.url).endswith("/impressum"):

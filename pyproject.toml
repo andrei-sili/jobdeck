@@ -20,7 +20,10 @@ classifiers = [
 dependencies = [
     "nicegui>=3.14",
     "apscheduler>=3.11,<4",
-    "httpx>=0.27",
+    # 0.28 is the implementation netsafe's IDN guard was audited against: its
+    # encode_host is idna.encode(host.lower()), the exact call the guard screens
+    # with. A test pins the coupling so an upgrade that breaks it turns red.
+    "httpx>=0.28",
     "anthropic>=0.116",  # structured outputs (output_config) required
     "google-api-python-client>=2.150",
     "google-auth-oauthlib>=1.2",
@@ -28,6 +31,9 @@ dependencies = [
     # imported directly: gmail.py classifies HttpLib2Error as an ambiguous
     # send, so it must not rest on a transitive dependency
     "httplib2>=0.22",
+    # imported directly: netsafe checks an IDN host via the exact IDNA form
+    # httpx connects to, so both must encode with the same library
+    "idna>=3.7",
     "pypdf>=5.0",
     # registrable-domain (eTLD+1) trust-anchor matching; the PSL snapshot ships
     # inside the wheel (zero network at runtime) and freshens via dependency

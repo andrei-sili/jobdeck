@@ -3,6 +3,19 @@
 import subprocess
 import sys
 
+from jobdeck import netsafe
+
+
+def openable_url(url: str) -> str:
+    """A stored URL the browser may be handed, '' when there is none safe.
+
+    The single gate in front of every `ui.navigate.to`. Stored URLs come from
+    board feeds, employer-supplied fields and resolved apply links — untrusted
+    in every case — and NiceGUI turns navigate.to into window.open in the app's
+    own origin, so a `javascript:` URL would execute there. Every page must go
+    through here rather than reimplementing the check per button."""
+    return url if netsafe.is_openable(url or "") else ""
+
 
 def open_in_system(path: str) -> None:
     """Open a file or folder with the system's default application.

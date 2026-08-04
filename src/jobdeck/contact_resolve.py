@@ -12,9 +12,10 @@ proposed address is never auto-used; a human confirms it in the review queue.
 """
 
 import re
-from urllib.parse import urlsplit
 
 from publicsuffixlist import PublicSuffixList
+
+from jobdeck import netsafe
 
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 
@@ -37,12 +38,17 @@ def registrable_domain(host_or_url: str) -> str:
     """Registrable domain (eTLD+1) against the real public-suffix list,
     lowercased; '' when the host has none (bare suffix, unknown TLD, IP
     literal). Empty for a non-ASCII or punycode host — a homograph guard, since
-    a verified match must be exact ASCII."""
+    a verified match must be exact ASCII.
+
+    Parsing goes through netsafe's fail-closed splitter: urlsplit raises on a
+    malformed netloc (a bad IPv6 literal, a netloc that changes under NFKC),
+    and this reads addresses out of an UNTRUSTED page — an unparseable one must
+    yield no domain, not an exception through the caller."""
     raw = (host_or_url or "").strip()
     if "://" not in raw and not raw.startswith("//"):
-        raw = "//" + raw  # give urlsplit a netloc to parse
-    host = urlsplit(raw).hostname or ""
-    host = host.lower().rstrip(".")
+        raw = "//" + raw  # give the splitter a netloc to parse
+    host = netsafe.url_hostname(raw)
+    host = host.rstrip(".")
     if not host or not host.isascii() or host.startswith("xn--") or ".xn--" in host:
         return ""
     return _PSL.privatesuffix(host) or ""

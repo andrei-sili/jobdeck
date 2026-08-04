@@ -37,11 +37,27 @@ def test_known_ats_hosts_are_named(url, vendor):
     ("https://www.arbeitnow.com/jobs/companies/x/y", "Arbeitnow"),
     ("https://www.xing.com/jobs/osnabrueck-ki-154887444", "XING"),
     ("https://jobs.ams.at/public/emps/jobs/abc", "AMS"),
+    ("https://www.get-in-it.de/jobsuche/p12345", "get in IT"),
+    ("https://germantechjobs.de/jobs/python-developer-berlin", "GermanTechJobs"),
+    ("https://persy.jobs/jobs/12345", "Persy"),
+    ("https://www.deutschland-stellenmarkt.de/anzeige/12345", "Deutschland-Stellenmarkt"),
+    ("https://www.studyflix.de/jobs/detail/1234", "Studyflix"),
 ])
 def test_known_boards_are_labelled(url, label):
     r = ac.classify(url)
     assert r.channel == ac.CHANNEL_BOARD
     assert r.vendor == label
+
+
+@pytest.mark.parametrize("lookalike", [
+    "https://persy.jobs.evil.com/x",
+    "https://evilgermantechjobs.de/x",
+    "https://get-in-it.de.evil.com/jobsuche/p1",
+    "https://studyflix.de.attacker.test/jobs/detail/1",
+])
+def test_board_suffix_anchors_reject_lookalike_hosts(lookalike):
+    # without the '$' anchor a foreign host inherits a board's trusted label
+    assert ac.classify(lookalike).channel == ac.CHANNEL_COMPANY_SITE
 
 
 def test_join_requires_the_companies_or_jobs_path():

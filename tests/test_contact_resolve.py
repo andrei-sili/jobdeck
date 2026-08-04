@@ -81,3 +81,15 @@ def test_an_unverifiable_anchor_verifies_nothing():
     assert cr.registrable_domain("firma.notarealtld") == ""
     assert cr.resolve_email(
         "bewerbung@evil.notarealtld", "firma.notarealtld")["email"] == ""
+
+
+@pytest.mark.parametrize("malformed", [
+    "[::1",                 # invalid IPv6 literal — urlsplit raises here
+    "firma.de／x",          # netloc changes under NFKC normalization
+    "https://[not-an-ip]/x",
+])
+def test_a_malformed_host_yields_no_domain_instead_of_raising(malformed):
+    # the anchor and the addresses both come from an UNTRUSTED page; a value
+    # urlsplit refuses must fail closed, not abort the user's action
+    assert cr.registrable_domain(malformed) == ""
+    assert cr.resolve_email("bewerbung@firma.de", malformed)["email"] == ""

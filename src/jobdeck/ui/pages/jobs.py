@@ -4,9 +4,9 @@ import pathlib
 
 from nicegui import run, ui
 
-from jobdeck import apply_channel, db, netsafe
+from jobdeck import apply_channel, db
 from jobdeck.services import apply_resolve, contact_lookup, drafting, mappe
-from jobdeck.ui.helpers import open_in_system
+from jobdeck.ui.helpers import open_in_system, openable_url
 from jobdeck.ui.layout import frame
 
 FILTERS = ["new", "portal", "duplicate", "skipped", "applied", "all"]
@@ -63,15 +63,9 @@ def _apply_line(job: dict) -> str:
 
 
 def _openable_url(job: dict) -> str:
-    """The URL the "Open posting" button may hand to the browser, '' when
-    there is none that is safe.
-
-    The stored URL comes from a board feed, an employer-supplied field, or a
-    resolved apply link — untrusted in every case. Only an http(s) URL may be
-    opened: a `javascript:`/`data:` URL passed to window.open would execute in
-    the app's own origin."""
-    url = job["apply_url"] or job["url"] or ""
-    return url if netsafe.is_openable(url) else ""
+    """The URL a posting's buttons may hand to the browser, '' when none is
+    safe. The resolved apply link wins over the raw feed URL."""
+    return openable_url(job["apply_url"] or job["url"] or "")
 
 
 @ui.page("/jobs")
@@ -275,7 +269,12 @@ async def jobs_page():
 
         async def mark_portal(job: dict):
             await run.io_bound(_set_status, job["id"], "portal")
-            ui.navigate.to(job["url"], new_tab=True)
+            open_url = _openable_url(job)
+            if open_url:
+                ui.navigate.to(open_url, new_tab=True)
+            else:
+                ui.notify("No safe URL stored for this posting — open it manually.",
+                          type="warning")
             await refresh()
 
         async def skip(job: dict):

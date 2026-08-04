@@ -3,6 +3,7 @@
 import ipaddress
 import socket
 
+import httpx
 import pytest
 
 from jobdeck import netsafe
@@ -41,6 +42,56 @@ def test_public_literal_host_drops_a_private_ip_but_keeps_hostnames():
     assert netsafe.public_literal_host("http://[::1]/x") == ""
     assert netsafe.public_literal_host("https://firma.de/jobs") == "firma.de"
     assert netsafe.public_literal_host("firma.de/jobs") == "firma.de"
+
+
+@pytest.mark.parametrize("host", [
+    "2130706433",        # decimal 127.0.0.1 — the app's own UI on :8123
+    "3232235777",        # decimal 192.168.1.1
+    "0x7f.0.0.1",        # hex
+    "0177.0.0.1",        # octal
+    "127.1",             # two-part shorthand
+    "192.168.257",       # three-part shorthand
+    "127。0。0。1",        # U+3002 separators: dots only after IDNA
+    "１２７.0.0.1",        # fullwidth digits
+    "localhost",         # RFC 6761 loopback, not a literal at all
+    "sub.localhost",
+    "localhost.",        # the fully-qualified form resolves to loopback too
+    "sub.localhost.",
+])
+def test_every_spelling_of_an_internal_address_is_refused(host):
+    """This value is handed to the USER'S BROWSER, which parses hosts by WHATWG
+    rules: a numeric last label is an IPv4 address in decimal, octal or hex,
+    with fewer than four parts allowed. Screening only the canonical dotted
+    quad let an employer aim the "Open posting" button at the user's router —
+    or at JobDeck's own UI on localhost:8123. Verified against Node's WHATWG
+    parser: each of these navigates to 127.0.0.1 or 192.168.1.1."""
+    assert netsafe.public_literal_host(f"https://{host}/x") == ""
+
+
+@pytest.mark.parametrize("host", [
+    "8.8.8.8", "93.184.216.34",
+    "0x08080808",        # a public address is public in any spelling
+    "134744072",
+    "www.firma.de", "karriere.firma.de", "firma.de.", "join.com",
+    "münchen.de", "xn--mnchen-3ya.de",
+])
+def test_a_public_or_named_host_is_kept(host):
+    assert netsafe.public_literal_host(f"https://{host}/x") == host
+
+
+@pytest.mark.parametrize("host", [
+    "999.0.0.1",           # a part over 255
+    "256.0.0.1",
+    "300.300.300.300",
+    "0x100000000",         # the last part overflows what remains
+    "1.2.3.4.5",           # more than four parts
+])
+def test_an_out_of_range_numeric_host_never_raises_out_of_the_screen(host):
+    """A browser refuses these outright, so letting them through is inert — but
+    the RANGE GUARDS must be the reason. Without them the arithmetic reaches
+    IPv4Address with an out-of-range value and the AddressValueError escapes
+    through openable_url into the UI action."""
+    assert netsafe.public_literal_host(f"https://{host}/x") == host
 
 
 async def test_a_literal_ip_host_never_consults_the_resolver():
@@ -105,14 +156,93 @@ async def test_a_resolver_unicode_error_fails_closed():
     assert await netsafe.host_is_safe("firma..de", resolver=idna_reject) is False
 
 
-async def test_a_non_ascii_host_is_refused_without_resolving():
-    # getaddrinfo would IDNA-2003-encode it while httpx sends the IDNA-2008
-    # form: the address checked would not be the address connected to
-    async def resolver(host):
-        raise AssertionError("a non-ASCII host must not be resolved")
+async def test_an_idn_host_is_resolved_via_the_form_httpx_connects_to():
+    # httpx's encode_host sends idna.encode(host.lower()); the guard must
+    # check THAT host, not the unicode form getaddrinfo would encode itself
+    seen = []
 
-    assert await netsafe.host_is_safe("straße.de", resolver=resolver) is False
-    assert await netsafe.url_is_safe("https://straße.de/x", resolver=resolver) is False
+    async def public(host):
+        seen.append(host)
+        return ["93.184.216.34"]
+
+    assert await netsafe.host_is_safe("straße.de", resolver=public) is True
+    assert await netsafe.url_is_safe("https://MÜNCHEN.de/x", resolver=public) is True
+    # host_is_safe is a public seam: called DIRECTLY, it must lowercase itself
+    # rather than lean on urlsplit having done it (idna rejects an uppercase
+    # IDN host, so dropping the .lower() would refuse a legitimate employer)
+    assert await netsafe.host_is_safe("MÜNCHEN.de", resolver=public) is True
+    assert seen == ["xn--strae-oqa.de", "xn--mnchen-3ya.de", "xn--mnchen-3ya.de"]
+
+
+async def test_an_idn_host_resolving_private_is_refused():
+    async def private(host):
+        return ["192.168.1.10"]
+
+    assert await netsafe.host_is_safe("straße.de", resolver=private) is False
+
+
+@pytest.mark.parametrize("host, wire", [
+    ("straße.de", b"xn--strae-oqa.de"),
+    ("MÜNCHEN.de", b"xn--mnchen-3ya.de"),
+    ("firma。de", b"firma.de"),          # U+3002 is a label separator to idna
+    ("xn--bcher-kva.de", b"xn--bcher-kva.de"),
+    ("FIRMA.DE", b"firma.de"),
+])
+def test_httpx_still_sends_the_host_the_guard_screens(host, wire):
+    """The IDN guard's whole safety argument is that it screens the host httpx
+    connects to. That parity lives in another library: httpx's encode_host is
+    idna.encode(host.lower()), which this pins so an upgrade that changes the
+    encoding turns the suite red instead of silently reopening a check-vs-
+    connect split. Same lesson as the CI 3.12.3 ipaddress break — a security
+    verdict resting on another implementation needs the fact itself pinned."""
+    assert httpx.URL(f"https://{host}/x").raw_host == wire
+
+
+def test_httpx_refuses_a_host_the_guard_refuses():
+    # the fail-closed direction of the same coupling
+    with pytest.raises(httpx.InvalidURL):
+        assert httpx.URL("https://💩.de/x").raw_host
+
+
+async def test_a_host_that_becomes_an_ip_literal_after_idna_is_judged_as_one():
+    # U+3002 and friends are label separators to idna, so '127。0。0。1' encodes
+    # to '127.0.0.1' — it must be screened as the literal it is, not handed to
+    # a resolver whose numeric-echo behaviour we would then be relying on
+    async def resolver(host):
+        raise AssertionError(f"an IP literal must not be resolved: {host}")
+
+    assert await netsafe.host_is_safe("127。0。0。1", resolver=resolver) is False
+    assert await netsafe.host_is_safe("192。168。1。1", resolver=resolver) is False
+    assert await netsafe.host_is_safe("93。184。216。34", resolver=resolver) is True
+
+
+@pytest.mark.parametrize("url", [
+    r"https://evil.example\@join.com/jobs/x",   # browser stops the authority at '\'
+    r"https://evil.example\.join.com/x",
+    "https://user:pw@join.com/x",
+    "https://join.com%5c@evil.example/x",
+])
+def test_an_authority_the_browser_reads_differently_is_not_openable(url):
+    # urlsplit and httpx read the host after the last '@'; a WHATWG parser (any
+    # browser) ends the authority at the backslash — so the host we screened and
+    # labelled is not the host the click reaches
+    assert netsafe.is_openable(url) is False
+
+
+def test_ordinary_urls_stay_openable():
+    assert netsafe.is_openable("https://join.com/companies/x/y") is True
+    assert netsafe.is_openable("http://karriere.firma.de/stellen?id=4&a=b") is True
+    assert netsafe.is_openable("https://xn--mnchen-3ya.de/jobs") is True
+
+
+async def test_an_unencodable_idn_host_is_refused_without_resolving():
+    # idna rejects the label, exactly as httpx's encode_host would with
+    # InvalidURL — fail closed before any resolution
+    async def resolver(host):
+        raise AssertionError("an unencodable host must not be resolved")
+
+    assert await netsafe.host_is_safe("💩.de", resolver=resolver) is False
+    assert await netsafe.url_is_safe("https://💩.de/x", resolver=resolver) is False
 
 
 @pytest.mark.parametrize("url", [
