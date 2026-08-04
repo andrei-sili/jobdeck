@@ -14,7 +14,16 @@ proposed address is never auto-used; a human confirms it in the review queue.
 import re
 from urllib.parse import urlsplit
 
+from publicsuffixlist import PublicSuffixList
+
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+
+# The PSL snapshot bundled in the wheel — zero network I/O, ever. Both list
+# sections stay on (ICANN + private): the STRICTER trust anchor — tenants of a
+# shared hosting suffix (foo.github.io) do not collapse into one registrable
+# domain, and a bare shared suffix yields no match. accept_unknown=False makes
+# an off-list TLD unmatchable (can't verify -> no match, fail closed).
+_PSL = PublicSuffixList(accept_unknown=False)
 
 # Local-parts that signal a dedicated application inbox (best first).
 _DEDICATED = ("bewerbung", "karriere", "jobs", "job", "recruiting", "career",
@@ -25,10 +34,10 @@ _GENERIC = ("info", "kontakt", "contact", "office", "mail", "hallo", "service",
 
 
 def registrable_domain(host_or_url: str) -> str:
-    """Naive eTLD+1 (last two labels), lowercased. Correct for the .de / .com
-    domains German employers use; a public-suffix list (.co.uk etc.) is a later
-    hardening. Empty for a non-ASCII host — a homograph/punycode guard, since a
-    verified match must be exact ASCII."""
+    """Registrable domain (eTLD+1) against the real public-suffix list,
+    lowercased; '' when the host has none (bare suffix, unknown TLD, IP
+    literal). Empty for a non-ASCII or punycode host — a homograph guard, since
+    a verified match must be exact ASCII."""
     raw = (host_or_url or "").strip()
     if "://" not in raw and not raw.startswith("//"):
         raw = "//" + raw  # give urlsplit a netloc to parse
@@ -36,8 +45,7 @@ def registrable_domain(host_or_url: str) -> str:
     host = host.lower().rstrip(".")
     if not host or not host.isascii() or host.startswith("xn--") or ".xn--" in host:
         return ""
-    labels = host.split(".")
-    return ".".join(labels[-2:]) if len(labels) >= 2 else ""
+    return _PSL.privatesuffix(host) or ""
 
 
 def _local_part(email: str) -> str:

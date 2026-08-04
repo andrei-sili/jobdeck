@@ -12,12 +12,25 @@ from jobdeck import contact_resolve as cr
     ("https://firma.de/impressum", "firma.de"),
     ("//firma.de", "firma.de"),
     ("FIRMA.DE", "firma.de"),
+    ("firma.de.", "firma.de"),               # trailing dot normalized
+    ("jobs.example.co.uk", "example.co.uk"),  # multi-label public suffix
+    ("a.b.example.github.io", "example.github.io"),  # private-section tenant
+    ("github.io", ""),          # a bare shared suffix is not registrable
+    ("firma.notarealtld", ""),  # off-list TLD -> unverifiable -> no match
+    ("192.168.1.1", ""),        # an IP literal is never a registrable domain
     ("localhost", ""),          # single label
     ("", ""),
     ("xn--mnchen-3ya.de", ""),  # punycode homograph — rejected
 ])
 def test_registrable_domain(host, expected):
     assert cr.registrable_domain(host) == expected
+
+
+def test_a_shared_suffix_tenant_does_not_match_its_neighbour():
+    # two tenants of the same hosting suffix are DIFFERENT organizations: an
+    # address on evil.github.io must not verify against firma.github.io
+    page = "Bewerbung an bewerbung@evil.github.io"
+    assert cr.resolve_email(page, "firma.github.io")["email"] == ""
 
 
 def test_prefers_a_dedicated_application_inbox_over_generic():
