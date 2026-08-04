@@ -45,12 +45,29 @@ def posting_markdown(text: str) -> str:
     which a test pins. A dangerous link also needs a human click, while a
     `<style>` rule fires on render.
 
-    Known cosmetic limit: inside a fenced or indented CODE BLOCK the escape is
+    Escaping tags is not enough on its own, because Markdown GENERATES markup
+    from syntax that contains no '<' at all. Two constructs have to go:
+
+    * `![alt](url)` becomes a real `<img>` that the browser fetches on render —
+      a read receipt (IP, time, which posting) for whoever wrote the posting,
+      and Quasar renders every expansion's content eagerly, so 100 postings
+      would fire 100 requests on page load without a single click. The '!' is
+      escaped away, leaving an ordinary link the user may follow deliberately.
+    * a run of '>' is nested blockquotes, and Markdown recurses once per level:
+      195 of them cost 1.7 s of blocked event loop and ~199 raise
+      RecursionError, which surfaces as HTTP 500 for the WHOLE job inbox. With
+      '>' escaped the same input renders in 4 ms. Exactly one of his 332
+      postings uses a blockquote, so the formatting loss is negligible.
+
+    Known cosmetic limit: inside a fenced or indented CODE BLOCK the escapes are
     shown literally (`&lt;` instead of `<`), because Markdown escapes code
     content again. Measured on his 332 stored postings: none contains '<' at
-    all, so nothing real is affected today.
+    all and two contain '>', so nothing real is affected today.
     """
-    return (text or "").replace("<", "&lt;")
+    escaped = (text or "").replace("<", "&lt;").replace(">", "&gt;")
+    # inserting the backslash cannot re-form the construct the way deleting the
+    # '!' would ("!![x]" -> "![x]" is an image again)
+    return escaped.replace("![", "!\\[")
 
 
 def open_in_system(path: str) -> None:
