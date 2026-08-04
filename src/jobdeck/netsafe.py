@@ -105,12 +105,80 @@ def _literal_ip(host: str) -> _IPAddress | None:
         return None
 
 
+def _ipv4_part(part: str) -> int | None:
+    """One dot-separated part of a WHATWG IPv4 address: decimal, 0-prefixed
+    octal or 0x-prefixed hex. Digits must be ASCII — `int()` alone would also
+    accept unicode digits, '+1' and '1_0', which no browser does."""
+    if not part:
+        return None
+    digits, base = part, 10
+    if len(part) >= 2 and part[:2].lower() == "0x":
+        digits, base = part[2:], 16
+        if not digits:
+            return 0
+    elif len(part) >= 2 and part[0] == "0":
+        digits, base = part[1:], 8
+    allowed = {10: "0123456789", 8: "01234567", 16: "0123456789abcdefABCDEF"}[base]
+    if any(ch not in allowed for ch in digits):
+        return None
+    return int(digits, base)
+
+
+def _browser_literal_ip(host: str) -> _IPAddress | None:
+    """The address a BROWSER reads out of a host string, or None for a name.
+
+    `ipaddress` accepts only the canonical dotted quad, but a browser follows
+    WHATWG: a host whose last label is numeric IS an IPv4 address, written in
+    decimal, octal or hex, with fewer than four parts allowed — so 2130706433,
+    0x7f.0.0.1, 0177.0.0.1 and 127.1 all mean 127.0.0.1. Screening only the
+    canonical spelling would let an employer point the "Open posting" button at
+    the user's own network in a form only the browser resolves."""
+    ip = _literal_ip(host)
+    if ip is not None:
+        return ip
+    parts = host.split(".")
+    if parts and parts[-1] == "":  # one trailing dot is allowed
+        parts = parts[:-1]
+    if not parts or len(parts) > 4:
+        return None
+    numbers = []
+    for part in parts:
+        number = _ipv4_part(part)
+        if number is None:
+            return None  # a non-numeric label: this is a domain name
+        numbers.append(number)
+    if any(number > 255 for number in numbers[:-1]):
+        return None
+    if numbers[-1] >= 256 ** (5 - len(numbers)):
+        return None
+    value = numbers[-1]
+    for index, number in enumerate(numbers[:-1]):
+        value += number * 256 ** (3 - index)
+    return ipaddress.IPv4Address(value)
+
+
 def public_literal_host(url: str) -> str:
-    """Host of a URL, or '' when it is a non-public IP literal. DNS-free — the
-    synchronous pre-check for code that only persists/labels a URL; anything
-    that FETCHES must pass `url_is_safe` per hop instead."""
+    """Host of a URL, or '' when it cannot be a public destination. DNS-free —
+    the synchronous pre-check for code that only persists/labels a URL, and the
+    last gate before a stored URL is handed to the BROWSER; anything that
+    FETCHES must pass `url_is_safe` per hop instead.
+
+    Judged the way a browser would read the host: every IPv4 spelling, the
+    address embedded in an IDN host (alternate separators encode to dots), and
+    `localhost`, which resolves to loopback by RFC 6761 without being a literal
+    at all."""
     host = url_hostname(url if "://" in url else "//" + url)
-    ip = _literal_ip(host) if host else None
+    if not host:
+        return ""
+    screened = host
+    if not screened.isascii():
+        try:
+            screened = idna.encode(screened.lower()).decode("ascii")
+        except idna.IDNAError:
+            return ""
+    if screened == "localhost" or screened.endswith(".localhost"):
+        return ""
+    ip = _browser_literal_ip(screened)
     if ip is not None and not ip_is_public(ip):
         return ""
     return host
@@ -209,7 +277,7 @@ async def fetch_text(client: httpx.AsyncClient, url: str, *, max_bytes: int,
         async with asyncio.timeout(deadline):
             return await _fetch_text(client, url, max_bytes, max_redirects)
     except TimeoutError:
-        log.info("netsafe: fetch %s exceeded %.0fs — giving up", url, deadline)
+        log.info("netsafe: fetch %s exceeded %gs — giving up", url, deadline)
         return ""
 
 

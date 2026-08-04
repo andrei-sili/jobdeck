@@ -44,6 +44,39 @@ def test_public_literal_host_drops_a_private_ip_but_keeps_hostnames():
     assert netsafe.public_literal_host("firma.de/jobs") == "firma.de"
 
 
+@pytest.mark.parametrize("host", [
+    "2130706433",        # decimal 127.0.0.1 — the app's own UI on :8123
+    "3232235777",        # decimal 192.168.1.1
+    "0x7f.0.0.1",        # hex
+    "0177.0.0.1",        # octal
+    "127.1",             # two-part shorthand
+    "192.168.257",       # three-part shorthand
+    "127。0。0。1",        # U+3002 separators: dots only after IDNA
+    "１２７.0.0.1",        # fullwidth digits
+    "localhost",         # RFC 6761 loopback, not a literal at all
+    "sub.localhost",
+])
+def test_every_spelling_of_an_internal_address_is_refused(host):
+    """This value is handed to the USER'S BROWSER, which parses hosts by WHATWG
+    rules: a numeric last label is an IPv4 address in decimal, octal or hex,
+    with fewer than four parts allowed. Screening only the canonical dotted
+    quad let an employer aim the "Open posting" button at the user's router —
+    or at JobDeck's own UI on localhost:8123. Verified against Node's WHATWG
+    parser: each of these navigates to 127.0.0.1 or 192.168.1.1."""
+    assert netsafe.public_literal_host(f"https://{host}/x") == ""
+
+
+@pytest.mark.parametrize("host", [
+    "8.8.8.8", "93.184.216.34",
+    "0x08080808",        # a public address is public in any spelling
+    "134744072",
+    "www.firma.de", "karriere.firma.de", "firma.de.", "join.com",
+    "münchen.de", "xn--mnchen-3ya.de",
+])
+def test_a_public_or_named_host_is_kept(host):
+    assert netsafe.public_literal_host(f"https://{host}/x") == host
+
+
 async def test_a_literal_ip_host_never_consults_the_resolver():
     async def resolver(host):  # a lying resolver must not even be asked
         raise AssertionError("resolver consulted for a literal IP")
