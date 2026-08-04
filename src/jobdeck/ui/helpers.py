@@ -17,6 +17,59 @@ def openable_url(url: str) -> str:
     return url if netsafe.is_openable(url or "") else ""
 
 
+def posting_markdown(text: str) -> str:
+    """Posting text made safe to render as Markdown.
+
+    A posting is scraped from a job board, so its text is untrusted, and
+    Markdown carries raw HTML through by design. NiceGUI sanitizes the result
+    client-side (it overrides `setHTML` with DOMPurify), which does stop script
+    execution — verified: `<script>`, every `on*` handler and every
+    `javascript:`/`data:` href are removed. But DOMPurify's default allowlist
+    KEEPS `<style>`, and a style element is not scoped to where it sits: a
+    posting carrying `body{display:none}` blanked the entire application
+    (observed in the running app), and rules that merely REPOSITION elements
+    are the more interesting version — this UI has a Send button.
+
+    Escaping '<' means no tag can form in the first place, so the tag surface
+    stops depending on someone else's allowlist. '&' is deliberately left
+    alone: postings really do carry entities like `&amp;` (43 of his stored
+    ones) and an entity cannot open a tag. Markdown links, emphasis and
+    paragraphs are untouched, which is what postings actually use.
+
+    Two layers, and it is worth being exact about which owns what. TAGS are
+    ours, here. LINK SCHEMES are the framework's: `[x](javascript:…)` is
+    Markdown, not a tag, so it still becomes an anchor and DOMPurify is what
+    drops the href (verified in the running app). That split is deliberate —
+    hand-rolling a Markdown link parser inside a security boundary would add
+    more bypasses than it closes — so the framework's sanitizer must stay ON,
+    which a test pins. A dangerous link also needs a human click, while a
+    `<style>` rule fires on render.
+
+    Escaping tags is not enough on its own, because Markdown GENERATES markup
+    from syntax that contains no '<' at all. Two constructs have to go:
+
+    * `![alt](url)` becomes a real `<img>` that the browser fetches on render —
+      a read receipt (IP, time, which posting) for whoever wrote the posting,
+      and Quasar renders every expansion's content eagerly, so 100 postings
+      would fire 100 requests on page load without a single click. The '!' is
+      escaped away, leaving an ordinary link the user may follow deliberately.
+    * a run of '>' is nested blockquotes, and Markdown recurses once per level:
+      195 of them cost 1.7 s of blocked event loop and ~199 raise
+      RecursionError, which surfaces as HTTP 500 for the WHOLE job inbox. With
+      '>' escaped the same input renders in 4 ms. Exactly one of his 332
+      postings uses a blockquote, so the formatting loss is negligible.
+
+    Known cosmetic limit: inside a fenced or indented CODE BLOCK the escapes are
+    shown literally (`&lt;` instead of `<`), because Markdown escapes code
+    content again. Measured on his 332 stored postings: none contains '<' at
+    all and two contain '>', so nothing real is affected today.
+    """
+    escaped = (text or "").replace("<", "&lt;").replace(">", "&gt;")
+    # inserting the backslash cannot re-form the construct the way deleting the
+    # '!' would ("!![x]" -> "![x]" is an image again)
+    return escaped.replace("![", "!\\[")
+
+
 def open_in_system(path: str) -> None:
     """Open a file or folder with the system's default application.
 
