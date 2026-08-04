@@ -20,7 +20,10 @@ classifiers = [
 dependencies = [
     "nicegui>=3.14",
     "apscheduler>=3.11,<4",
-    "httpx>=0.27",
+    # 0.28 is the implementation netsafe's IDN guard was audited against: its
+    # encode_host is idna.encode(host.lower()), the exact call the guard screens
+    # with. A test pins the coupling so an upgrade that breaks it turns red.
+    "httpx>=0.28",
     "anthropic>=0.116",  # structured outputs (output_config) required
     "google-api-python-client>=2.150",
     "google-auth-oauthlib>=1.2",

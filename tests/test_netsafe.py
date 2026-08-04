@@ -3,6 +3,7 @@
 import ipaddress
 import socket
 
+import httpx
 import pytest
 
 from jobdeck import netsafe
@@ -116,7 +117,11 @@ async def test_an_idn_host_is_resolved_via_the_form_httpx_connects_to():
 
     assert await netsafe.host_is_safe("straße.de", resolver=public) is True
     assert await netsafe.url_is_safe("https://MÜNCHEN.de/x", resolver=public) is True
-    assert seen == ["xn--strae-oqa.de", "xn--mnchen-3ya.de"]
+    # host_is_safe is a public seam: called DIRECTLY, it must lowercase itself
+    # rather than lean on urlsplit having done it (idna rejects an uppercase
+    # IDN host, so dropping the .lower() would refuse a legitimate employer)
+    assert await netsafe.host_is_safe("MÜNCHEN.de", resolver=public) is True
+    assert seen == ["xn--strae-oqa.de", "xn--mnchen-3ya.de", "xn--mnchen-3ya.de"]
 
 
 async def test_an_idn_host_resolving_private_is_refused():
@@ -124,6 +129,29 @@ async def test_an_idn_host_resolving_private_is_refused():
         return ["192.168.1.10"]
 
     assert await netsafe.host_is_safe("straße.de", resolver=private) is False
+
+
+@pytest.mark.parametrize("host, wire", [
+    ("straße.de", b"xn--strae-oqa.de"),
+    ("MÜNCHEN.de", b"xn--mnchen-3ya.de"),
+    ("firma。de", b"firma.de"),          # U+3002 is a label separator to idna
+    ("xn--bcher-kva.de", b"xn--bcher-kva.de"),
+    ("FIRMA.DE", b"firma.de"),
+])
+def test_httpx_still_sends_the_host_the_guard_screens(host, wire):
+    """The IDN guard's whole safety argument is that it screens the host httpx
+    connects to. That parity lives in another library: httpx's encode_host is
+    idna.encode(host.lower()), which this pins so an upgrade that changes the
+    encoding turns the suite red instead of silently reopening a check-vs-
+    connect split. Same lesson as the CI 3.12.3 ipaddress break — a security
+    verdict resting on another implementation needs the fact itself pinned."""
+    assert httpx.URL(f"https://{host}/x").raw_host == wire
+
+
+def test_httpx_refuses_a_host_the_guard_refuses():
+    # the fail-closed direction of the same coupling
+    with pytest.raises(httpx.InvalidURL):
+        assert httpx.URL("https://💩.de/x").raw_host
 
 
 async def test_a_host_that_becomes_an_ip_literal_after_idna_is_judged_as_one():

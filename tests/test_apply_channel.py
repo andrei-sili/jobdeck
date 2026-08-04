@@ -49,6 +49,17 @@ def test_known_boards_are_labelled(url, label):
     assert r.vendor == label
 
 
+@pytest.mark.parametrize("lookalike", [
+    "https://persy.jobs.evil.com/x",
+    "https://evilgermantechjobs.de/x",
+    "https://get-in-it.de.evil.com/jobsuche/p1",
+    "https://studyflix.de.attacker.test/jobs/detail/1",
+])
+def test_board_suffix_anchors_reject_lookalike_hosts(lookalike):
+    # without the '$' anchor a foreign host inherits a board's trusted label
+    assert ac.classify(lookalike).channel == ac.CHANNEL_COMPANY_SITE
+
+
 def test_join_requires_the_companies_or_jobs_path():
     # join.com landing/marketing pages are not an application link
     assert ac.classify("https://join.com/about").channel == ac.CHANNEL_COMPANY_SITE
