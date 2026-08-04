@@ -77,6 +77,13 @@ _BOARDS = (
     ("Arbeitsagentur", r"(?:^|\.)arbeitsagentur\.de$"),
     ("Jooble", r"(?:^|\.)jooble\.org$"),
     ("Arbeitnow", r"(?:^|\.)arbeitnow\.com$"),
+    # aggregators the Arbeitsagentur feed points at via externeURL — without an
+    # entry they classify as company_site and earn a pointless page inspection
+    ("get in IT", r"(?:^|\.)get-in-it\.de$"),
+    ("GermanTechJobs", r"(?:^|\.)germantechjobs\.de$"),
+    ("Persy", r"(?:^|\.)persy\.jobs$"),
+    ("Deutschland-Stellenmarkt", r"(?:^|\.)deutschland-stellenmarkt\.de$"),
+    ("Studyflix", r"(?:^|\.)studyflix\.de$"),
     ("StepStone", r"(?:^|\.)stepstone\.de$"),
     ("Indeed", r"(?:^|\.)indeed\.(?:com|de)$"),
     ("XING", r"(?:^|\.)xing\.com$"),
