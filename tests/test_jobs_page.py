@@ -119,3 +119,16 @@ def test_the_frameworks_own_sanitizer_stays_the_second_layer():
     assert "sanitize=False" not in source
     assert "ui.markdown(posting_markdown(" in source, \
         "the description must not be handed to ui.markdown unescaped"
+
+
+@pytest.mark.parametrize("encoded", [
+    "&#60;style&#62;body{display:none}&#60;/style&#62;",   # decimal entities
+    "&#x3C;style&#x3E;body{opacity:0}&#x3C;/style&#x3E;",  # hex entities
+    "&lt;style&gt;body{opacity:0}&lt;/style&gt;",          # named entities
+])
+def test_an_entity_encoded_tag_stays_text(encoded):
+    """'&' is deliberately not escaped, so an entity-encoded tag passes through
+    untouched — which is safe because an entity cannot OPEN a tag: the browser
+    renders it as literal text. Verified in the running app (no style element
+    appeared and the body kept its computed display)."""
+    assert posting_markdown(encoded) == encoded

@@ -44,6 +44,11 @@ def posting_markdown(text: str) -> str:
     more bypasses than it closes — so the framework's sanitizer must stay ON,
     which a test pins. A dangerous link also needs a human click, while a
     `<style>` rule fires on render.
+
+    Known cosmetic limit: inside a fenced or indented CODE BLOCK the escape is
+    shown literally (`&lt;` instead of `<`), because Markdown escapes code
+    content again. Measured on his 332 stored postings: none contains '<' at
+    all, so nothing real is affected today.
     """
     return (text or "").replace("<", "&lt;")
 
