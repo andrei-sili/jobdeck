@@ -176,7 +176,8 @@ def public_literal_host(url: str) -> str:
             screened = idna.encode(screened.lower()).decode("ascii")
         except idna.IDNAError:
             return ""
-    if screened == "localhost" or screened.endswith(".localhost"):
+    bare = screened.rstrip(".")  # a fully-qualified 'localhost.' resolves the same
+    if bare == "localhost" or bare.endswith(".localhost"):
         return ""
     ip = _browser_literal_ip(screened)
     if ip is not None and not ip_is_public(ip):

@@ -55,6 +55,8 @@ def test_public_literal_host_drops_a_private_ip_but_keeps_hostnames():
     "１２７.0.0.1",        # fullwidth digits
     "localhost",         # RFC 6761 loopback, not a literal at all
     "sub.localhost",
+    "localhost.",        # the fully-qualified form resolves to loopback too
+    "sub.localhost.",
 ])
 def test_every_spelling_of_an_internal_address_is_refused(host):
     """This value is handed to the USER'S BROWSER, which parses hosts by WHATWG
@@ -74,6 +76,21 @@ def test_every_spelling_of_an_internal_address_is_refused(host):
     "münchen.de", "xn--mnchen-3ya.de",
 ])
 def test_a_public_or_named_host_is_kept(host):
+    assert netsafe.public_literal_host(f"https://{host}/x") == host
+
+
+@pytest.mark.parametrize("host", [
+    "999.0.0.1",           # a part over 255
+    "256.0.0.1",
+    "300.300.300.300",
+    "0x100000000",         # the last part overflows what remains
+    "1.2.3.4.5",           # more than four parts
+])
+def test_an_out_of_range_numeric_host_never_raises_out_of_the_screen(host):
+    """A browser refuses these outright, so letting them through is inert — but
+    the RANGE GUARDS must be the reason. Without them the arithmetic reaches
+    IPv4Address with an out-of-range value and the AddressValueError escapes
+    through openable_url into the UI action."""
     assert netsafe.public_literal_host(f"https://{host}/x") == host
 
 
