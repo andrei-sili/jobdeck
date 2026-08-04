@@ -12,7 +12,7 @@ from nicegui import run, ui
 
 from jobdeck import db
 from jobdeck.services import mappe, send
-from jobdeck.ui.helpers import open_in_system
+from jobdeck.ui.helpers import open_in_system, openable_url
 from jobdeck.ui.layout import frame
 
 FILTERS = ["open", "sent", "discarded"]
@@ -183,10 +183,12 @@ async def queue_page():
                         ui.button("Restore", icon="restore",
                                   on_click=lambda r=row: restore(r)) \
                             .props("outline")
-                    ui.button("Open posting", icon="open_in_new",
-                              on_click=lambda r=row:
-                              ui.navigate.to(r["job_url"], new_tab=True)) \
-                        .props("flat")
+                    posting_url = openable_url(row["job_url"])
+                    if posting_url:
+                        ui.button("Open posting", icon="open_in_new",
+                                  on_click=lambda u=posting_url:
+                                  ui.navigate.to(u, new_tab=True)) \
+                            .props("flat")
 
         async def _simple_action(action, job_id: int, success: str):
             result = await run.io_bound(action, job_id)
