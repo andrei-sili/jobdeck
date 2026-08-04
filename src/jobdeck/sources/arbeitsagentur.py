@@ -7,6 +7,7 @@ officially sanctioned API, and has changed shape before — hence the
 defensive parsing: a malformed item is logged and skipped, never fatal.
 """
 
+import asyncio
 import base64
 import logging
 
@@ -35,17 +36,23 @@ def _screen_external_url(raw) -> str:
     """The employer-supplied externeURL normalized, or '' when unusable.
 
     The field is UNTRUSTED third-party data that becomes the posting URL the
-    UI offers to open and the page the poller fetches — only an http(s) URL
-    with a host may be adopted, so a javascript:/data:/file: value dies here
-    at ingestion, not at a later sink. A bare host form (www.firma.de/jobs,
-    seen in the wild) gets the https scheme it implies."""
+    UI offers to open and the page the poller fetches, so it must clear both
+    gates here at ingestion rather than at a later sink: only an http(s) URL
+    with a host (a javascript:/data:/file: value dies), and only a host that
+    is not a non-public IP literal — the server-side guard protects the fetch,
+    but the button hands the URL to the user's OWN browser, which sits inside
+    the network a 192.168.x.x or 169.254.169.254 target aims at. A bare host
+    form (www.firma.de/jobs, seen in the wild) gets the https scheme it
+    implies."""
     if not isinstance(raw, str):
         return ""
     url = raw.strip()
     parts = netsafe.split_url(url)
     if parts is not None and not parts.scheme:
         url = "https://" + url
-    return url if netsafe.is_openable(url) else ""
+    if not netsafe.is_openable(url) or not netsafe.public_literal_host(url):
+        return ""
+    return url
 
 
 class ArbeitsagenturSource:
@@ -111,6 +118,14 @@ class ArbeitsagenturSource:
                      posting.external_id, ex)
             return posting
 
+        if not isinstance(detail, dict):
+            # the endpoint is community-documented and has changed shape before;
+            # polling awaits this with no try/except, so one odd payload must
+            # not abort the remaining postings of the tick
+            log.warning("arbeitsagentur: unexpected detail payload for %s: %s",
+                        posting.external_id, type(detail).__name__)
+            return posting
+
         # Field name observed live in July 2026; the older community docs
         # still list "stellenbeschreibung", kept as fallback.
         description = (
@@ -144,11 +159,17 @@ class ArbeitsagenturSource:
         The URL is employer-supplied and this runs on the background polling
         path, so the GET goes through the shared netsafe guard: every redirect
         hop is SSRF-screened before its request fires and the body is
-        byte-capped. Server-rendered career pages yield usable text; JS-heavy
-        ones come back thin — the UI lets the user paste the posting manually
-        then.
+        byte-capped. Stripping the result stays off the event loop — the page
+        is attacker-shaped and nobody is watching this path. Server-rendered
+        career pages yield usable text; JS-heavy ones come back thin — the UI
+        lets the user paste the posting manually then.
         """
         page = await netsafe.fetch_text(self._client, url, max_bytes=MAX_PAGE_BYTES)
         if not page:
+            # netsafe answers '' for a refused hop, a non-200 and a transport
+            # error alike; without this the posting's empty description has no
+            # explanation anywhere in the log
+            log.info("arbeitsagentur: no usable external page at %s", url)
             return ""
-        return strip_html(page)[:MAX_PAGE_TEXT]
+        text = await asyncio.to_thread(strip_html, page)
+        return text[:MAX_PAGE_TEXT]

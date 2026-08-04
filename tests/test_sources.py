@@ -7,11 +7,7 @@ import pytest
 
 from jobdeck import netsafe
 from jobdeck.sources.arbeitnow import ArbeitnowSource
-from jobdeck.sources.arbeitsagentur import (
-    MAX_PAGE_BYTES,
-    MAX_PAGE_TEXT,
-    ArbeitsagenturSource,
-)
+from jobdeck.sources.arbeitsagentur import MAX_PAGE_BYTES, ArbeitsagenturSource
 from jobdeck.sources.base import (
     EMAIL_RE,
     SearchQuery,
@@ -291,6 +287,22 @@ async def test_arbeitsagentur_external_redirect_hops_are_screened(monkeypatch):
 
 
 async def test_arbeitsagentur_external_page_is_byte_capped():
+    """The adapter must WIRE netsafe's byte cap, not merely truncate the text.
+
+    The page is padding tags (which strip to whitespace) followed by real text
+    past byte MAX_PAGE_BYTES, so the marker can only appear if the raw body was
+    downloaded beyond the cap — the text cap alone cannot hide it.
+    """
+    padding = b"<i></i>" * (MAX_PAGE_BYTES // 7 + 1)
+    assert len(padding) > MAX_PAGE_BYTES
+    pulled = []
+
+    async def content():
+        for offset in range(0, len(padding), 64_000):
+            pulled.append(offset)
+            yield padding[offset:offset + 64_000]
+        yield b"BEYONDTHECAP"
+
     def handler(request):
         url = str(request.url)
         if "jobdetails" in url:
@@ -299,13 +311,130 @@ async def test_arbeitsagentur_external_page_is_byte_capped():
                 "externeURL": "https://karriere.beispiel.de/big",
             })
         if request.url.host == "karriere.beispiel.de":
-            return httpx.Response(200, content=b"x" * 1_000_000)
+            return httpx.Response(200, content=content())
         return httpx.Response(200, json=BA_SEARCH)
 
     source = ArbeitsagenturSource(make_client(handler))
     postings = await source.search(SearchQuery(keywords="Python"))
     enriched = await source.fetch_details(postings[0])
-    assert len(enriched.description) == MAX_PAGE_TEXT
+    assert "BEYONDTHECAP" not in enriched.description
+    # only the tag fragment the cut landed inside survives the strip
+    assert len(enriched.description) < 20
+    # and the cap bounded the DOWNLOAD, not just the returned text
+    assert len(pulled) <= MAX_PAGE_BYTES // 64_000 + 1
+
+
+async def test_arbeitsagentur_non_str_externe_url_is_ignored():
+    """The community-documented BA API has changed shape before: a non-string
+    externeURL must not raise out of fetch_details, which polling awaits with
+    no try/except — one malformed item would abort the whole profile's poll."""
+    def handler(request):
+        if "jobdetails" in str(request.url):
+            return httpx.Response(200, json={
+                "stellenangebotsBeschreibung": "",
+                "externeURL": {"url": "https://karriere.beispiel.de/x"},
+            })
+        return httpx.Response(200, json=BA_SEARCH)
+
+    source = ArbeitsagenturSource(make_client(handler))
+    postings = await source.search(SearchQuery(keywords="Python"))
+    enriched = await source.fetch_details(postings[0])
+    assert enriched.url == "https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-123"
+    assert enriched.description == ""
+
+
+async def test_arbeitsagentur_non_dict_detail_payload_is_not_fatal():
+    """Same contract one level up: a JSON array where an object was expected
+    must leave the posting usable instead of killing the polling tick."""
+    def handler(request):
+        if "jobdetails" in str(request.url):
+            return httpx.Response(200, json=["unexpected"])
+        return httpx.Response(200, json=BA_SEARCH)
+
+    source = ArbeitsagenturSource(make_client(handler))
+    postings = await source.search(SearchQuery(keywords="Python"))
+    enriched = await source.fetch_details(postings[0])
+    assert enriched.external_id == "10001-123"
+    assert enriched.description == ""
+
+
+async def test_arbeitsagentur_whitespace_padded_externe_url_is_normalized():
+    def handler(request):
+        url = str(request.url)
+        if "jobdetails" in url:
+            return httpx.Response(200, json={
+                "stellenangebotsBeschreibung": "",
+                "externeURL": "  www.beispiel.de/jobs/42  ",
+            })
+        if request.url.host == "www.beispiel.de":
+            return httpx.Response(200, text="<p>Stellenprofil</p>")
+        return httpx.Response(200, json=BA_SEARCH)
+
+    source = ArbeitsagenturSource(make_client(handler))
+    postings = await source.search(SearchQuery(keywords="Python"))
+    enriched = await source.fetch_details(postings[0])
+    assert enriched.url == "https://www.beispiel.de/jobs/42"
+
+
+@pytest.mark.parametrize("hostile", [
+    "http://192.168.1.1/reboot",
+    "https://127.0.0.1:8123/x",
+    "http://[::1]/x",
+    "http://169.254.169.254/latest/meta-data/",
+    "http://100.64.0.1/x",
+])
+async def test_arbeitsagentur_private_literal_externe_url_is_not_adopted(hostile):
+    """The stored URL is offered to the user's browser, which is on the LAN the
+    server-side guard protects us from — so a non-public literal must not become
+    the posting URL either."""
+    def handler(request):
+        if "jobdetails" in str(request.url):
+            return httpx.Response(200, json={
+                "stellenangebotsBeschreibung": "",
+                "externeURL": hostile,
+            })
+        return httpx.Response(200, json=BA_SEARCH)
+
+    source = ArbeitsagenturSource(make_client(handler))
+    postings = await source.search(SearchQuery(keywords="Python"))
+    enriched = await source.fetch_details(postings[0])
+    assert enriched.url == "https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-123"
+
+
+# --- text extraction: linear rewrites of the two regexes -------------------
+
+def _regex_strip_html(text: str) -> str:
+    """The implementation strip_html replaces — the equivalence contract."""
+    return re.sub(r"<[^>]+>", " ", text or "").replace("&nbsp;", " ").strip()
+
+
+def _regex_extract_email(text: str) -> str:
+    match = EMAIL_RE.search(text or "")
+    return match.group(0).rstrip(".") if match else ""
+
+
+def test_text_extraction_is_identical_to_the_regexes_it_replaces():
+    """Both functions were rewritten for a hostile-input runtime bound, NOT to
+    change behaviour: extract_email's output becomes an application recipient.
+    Fuzzed over markup, addresses and the non-ASCII characters `\\w` accepts."""
+    rng = random.Random(20260804)
+    alphabet = list("<>abc /=\"'@.-_+\n\t&;§ßüöÄ²0123456789") + [
+        "&nbsp;", "<p>", "</p>", "<a href=\"x>y\">", "<>", "<<", ">>",
+        "bewerbung@firma.de", "a.b+c@sub.firma.co.uk", "hr@firma.de.",
+    ]
+    for _ in range(20_000):
+        s = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 30)))
+        assert strip_html(s) == _regex_strip_html(s), s
+        assert extract_email(s) == _regex_extract_email(s), s
+
+
+def test_hostile_markup_and_word_runs_are_processed_in_bounded_time():
+    """A 400 KB body of '<' (424 bytes gzipped on the wire) took ~52 s of CPU
+    through the regex, freezing the whole app from the background poller."""
+    started = time.perf_counter()
+    assert strip_html("<" * MAX_PAGE_BYTES) == "<" * MAX_PAGE_BYTES
+    assert extract_email("a" * MAX_PAGE_BYTES) == ""
+    assert time.perf_counter() - started < 2.0
 
 
 async def test_jooble_search(monkeypatch):
@@ -358,39 +487,3 @@ def test_extract_email_and_remote_markers():
     assert extract_email("kein kontakt") == ""
     assert looks_remote("Python Dev (Home Office)")
     assert not looks_remote("Python Dev vor Ort")
-
-
-# --- text extraction: linear rewrites of the two regexes -------------------
-
-def _regex_strip_html(text: str) -> str:
-    """The implementation strip_html replaces — the equivalence contract."""
-    return re.sub(r"<[^>]+>", " ", text or "").replace("&nbsp;", " ").strip()
-
-
-def _regex_extract_email(text: str) -> str:
-    match = EMAIL_RE.search(text or "")
-    return match.group(0).rstrip(".") if match else ""
-
-
-def test_text_extraction_is_identical_to_the_regexes_it_replaces():
-    """Both functions were rewritten for a hostile-input runtime bound, NOT to
-    change behaviour: extract_email's output becomes an application recipient.
-    Fuzzed over markup, addresses and the non-ASCII characters `\\w` accepts."""
-    rng = random.Random(20260804)
-    alphabet = list("<>abc /=\"'@.-_+\n\t&;§ßüöÄ²0123456789") + [
-        "&nbsp;", "<p>", "</p>", "<a href=\"x>y\">", "<>", "<<", ">>",
-        "bewerbung@firma.de", "a.b+c@sub.firma.co.uk", "hr@firma.de.",
-    ]
-    for _ in range(20_000):
-        s = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 30)))
-        assert strip_html(s) == _regex_strip_html(s), s
-        assert extract_email(s) == _regex_extract_email(s), s
-
-
-def test_hostile_markup_and_word_runs_are_processed_in_bounded_time():
-    """A 400 KB body of '<' (424 bytes gzipped on the wire) took ~52 s of CPU
-    through the regex, freezing the whole app from the background poller."""
-    started = time.perf_counter()
-    assert strip_html("<" * MAX_PAGE_BYTES) == "<" * MAX_PAGE_BYTES
-    assert extract_email("a" * MAX_PAGE_BYTES) == ""
-    assert time.perf_counter() - started < 2.0
