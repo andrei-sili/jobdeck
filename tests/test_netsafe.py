@@ -105,14 +105,35 @@ async def test_a_resolver_unicode_error_fails_closed():
     assert await netsafe.host_is_safe("firma..de", resolver=idna_reject) is False
 
 
-async def test_a_non_ascii_host_is_refused_without_resolving():
-    # getaddrinfo would IDNA-2003-encode it while httpx sends the IDNA-2008
-    # form: the address checked would not be the address connected to
-    async def resolver(host):
-        raise AssertionError("a non-ASCII host must not be resolved")
+async def test_an_idn_host_is_resolved_via_the_form_httpx_connects_to():
+    # httpx's encode_host sends idna.encode(host.lower()); the guard must
+    # check THAT host, not the unicode form getaddrinfo would encode itself
+    seen = []
 
-    assert await netsafe.host_is_safe("straße.de", resolver=resolver) is False
-    assert await netsafe.url_is_safe("https://straße.de/x", resolver=resolver) is False
+    async def public(host):
+        seen.append(host)
+        return ["93.184.216.34"]
+
+    assert await netsafe.host_is_safe("straße.de", resolver=public) is True
+    assert await netsafe.url_is_safe("https://MÜNCHEN.de/x", resolver=public) is True
+    assert seen == ["xn--strae-oqa.de", "xn--mnchen-3ya.de"]
+
+
+async def test_an_idn_host_resolving_private_is_refused():
+    async def private(host):
+        return ["192.168.1.10"]
+
+    assert await netsafe.host_is_safe("straße.de", resolver=private) is False
+
+
+async def test_an_unencodable_idn_host_is_refused_without_resolving():
+    # idna rejects the label, exactly as httpx's encode_host would with
+    # InvalidURL — fail closed before any resolution
+    async def resolver(host):
+        raise AssertionError("an unencodable host must not be resolved")
+
+    assert await netsafe.host_is_safe("💩.de", resolver=resolver) is False
+    assert await netsafe.url_is_safe("https://💩.de/x", resolver=resolver) is False
 
 
 @pytest.mark.parametrize("url", [

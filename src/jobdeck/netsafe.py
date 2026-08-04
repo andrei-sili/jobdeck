@@ -4,7 +4,9 @@ Every hop of every outbound fetch must pass two gates BEFORE its request
 fires: the scheme is http(s), and the host cannot reach a private network. A
 literal-IP host is checked directly; a hostname is resolved and EVERY address
 the resolver returns (A and AAAA) must be publicly routable — an attacker
-controlling DNS can mix one public record with one private one. The policy
+controlling DNS can mix one public record with one private one. An IDN
+hostname is resolved via its IDNA ASCII form, the host httpx actually
+connects to. The policy
 requires ``is_global`` — not merely "not private" — which also rejects CGNAT
 100.64.0.0/10, where ``is_private`` and ``is_global`` are BOTH False. IPv6
 addresses that embed an IPv4 (v4-mapped, NAT64 64:ff9b::/96, 6to4) have the
@@ -28,6 +30,7 @@ import socket
 from urllib.parse import urlsplit
 
 import httpx
+import idna
 
 log = logging.getLogger(__name__)
 
@@ -125,17 +128,24 @@ def is_openable(url: str) -> bool:
 
 async def host_is_safe(host: str, *, resolver=None) -> bool:
     """True when a host may be fetched: a public IP literal, or a hostname
-    whose EVERY resolved address is public. No answer, a resolver error or a
-    host the resolver cannot even encode is unsafe (fail closed)."""
+    whose EVERY resolved address is public. An IDN host is checked via its
+    IDNA ASCII form — the exact host httpx connects to. No answer, a resolver
+    error or a host that cannot be encoded is unsafe (fail closed)."""
     if not host:
         return False
     ip = _literal_ip(host)
     if ip is not None:
         return ip_is_public(ip)
     if not host.isascii():
-        # getaddrinfo IDNA-encodes to a DIFFERENT host than httpx would send,
-        # so the address checked would not be the address connected to
-        return False
+        # Resolve the exact ASCII form httpx connects to (its encode_host is
+        # idna.encode(host.lower()) — same library, same call). getaddrinfo's
+        # own IDNA pass can encode DIFFERENTLY, so resolving the unicode form
+        # would check an address other than the one connected to. A host idna
+        # rejects fails closed — httpx would refuse it with InvalidURL anyway.
+        try:
+            host = idna.encode(host.lower()).decode("ascii")
+        except idna.IDNAError:
+            return False
     if resolver is None:
         resolver = _system_resolver
     try:
