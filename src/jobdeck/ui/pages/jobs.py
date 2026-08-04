@@ -6,7 +6,7 @@ from nicegui import run, ui
 
 from jobdeck import apply_channel, db
 from jobdeck.services import apply_resolve, contact_lookup, drafting, mappe
-from jobdeck.ui.helpers import open_in_system, openable_url
+from jobdeck.ui.helpers import open_in_system, openable_url, posting_markdown
 from jobdeck.ui.layout import frame
 
 FILTERS = ["new", "portal", "duplicate", "skipped", "applied", "all"]
@@ -118,7 +118,7 @@ async def jobs_page():
                 if channel_line:
                     ui.label(channel_line).classes("text-sm text-blue-700")
                 description = job["description"] or "(no description available)"
-                ui.markdown(description[:4000]).classes("text-sm")
+                ui.markdown(posting_markdown(description[:4000])).classes("text-sm")
                 with ui.row().classes("gap-2"):
                     open_url = _openable_url(job)
                     if open_url:
