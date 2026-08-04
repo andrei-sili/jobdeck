@@ -1,0 +1,112 @@
+"""Shared network-safety guard for fetching board/posting-derived URLs (SSRF).
+
+Every hop of every outbound fetch must pass two gates BEFORE its request
+fires: the scheme is http(s), and the host cannot reach a private network. A
+literal-IP host is checked directly; a hostname is resolved and EVERY address
+the resolver returns (A and AAAA) must be publicly routable — an attacker
+controlling DNS can mix one public record with one private one. The policy
+requires ``is_global`` — not merely "not private" — which also rejects CGNAT
+100.64.0.0/10, where ``is_private`` and ``is_global`` are BOTH False. IPv6
+addresses that embed an IPv4 (v4-mapped, NAT64 64:ff9b::/96, 6to4) have the
+embedded address re-checked, independent of the CPython 3.12.4 fix for
+CVE-2024-4032. Resolution failure fails CLOSED (unsafe).
+
+The DNS seam (``_system_resolver``) is injectable so tests never touch real
+DNS. Accepted residual for a local single-user tool (OWASP's check-then-
+connect tier): a rebinding authoritative server could answer public at check
+time and private at connect time; closing that needs per-hop IP pinning via a
+custom transport — future hardening, not this slice.
+"""
+
+import asyncio
+import ipaddress
+import socket
+from urllib.parse import urlsplit
+
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+_SCHEMES = ("http", "https")
+
+_IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+
+
+async def _system_resolver(host: str) -> list[str]:
+    """All addresses (A + AAAA) the system resolver returns for a host."""
+    loop = asyncio.get_running_loop()
+    infos = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    return sorted({info[4][0] for info in infos})
+
+
+def _embedded_ipv4(ip: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
+    """The IPv4 an IPv6 address transports, for the transition schemes that can
+    smuggle a private v4 behind a globally-routable v6 prefix."""
+    if ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped
+    if ip in _NAT64:
+        return ipaddress.IPv4Address(int(ip) & 0xFFFF_FFFF)
+    if ip.sixtofour is not None:
+        return ip.sixtofour
+    return None
+
+
+def ip_is_public(ip: _IPAddress) -> bool:
+    """Publicly routable per the IANA special-purpose registries, with any
+    embedded IPv4 held to the same rule."""
+    if isinstance(ip, ipaddress.IPv6Address):
+        embedded = _embedded_ipv4(ip)
+        if embedded is not None and not ip_is_public(embedded):
+            return False
+    return ip.is_global and not (
+        ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+        or ip.is_multicast or ip.is_unspecified
+    )
+
+
+def _literal_ip(host: str) -> _IPAddress | None:
+    try:
+        return ipaddress.ip_address(host.split("%", 1)[0])
+    except ValueError:
+        return None
+
+
+def public_literal_host(url: str) -> str:
+    """Host of a URL, or '' when it is a non-public IP literal. DNS-free — the
+    synchronous pre-check for code that only persists/labels a URL; anything
+    that FETCHES must pass `url_is_safe` per hop instead."""
+    host = (urlsplit(url if "://" in url else "//" + url).hostname or "").lower()
+    ip = _literal_ip(host) if host else None
+    if ip is not None and not ip_is_public(ip):
+        return ""
+    return host
+
+
+async def host_is_safe(host: str, *, resolver=None) -> bool:
+    """True when a host may be fetched: a public IP literal, or a hostname
+    whose EVERY resolved address is public. No answer / a resolver error is
+    unsafe (fail closed)."""
+    if not host:
+        return False
+    ip = _literal_ip(host)
+    if ip is not None:
+        return ip_is_public(ip)
+    if resolver is None:
+        resolver = _system_resolver
+    try:
+        addresses = await resolver(host)
+    except OSError:  # NXDOMAIN, timeout, no resolver — socket.gaierror is one
+        return False
+    if not addresses:
+        return False
+    for addr in addresses:
+        parsed = _literal_ip(str(addr))
+        if parsed is None or not ip_is_public(parsed):
+            return False
+    return True
+
+
+async def url_is_safe(url: str, *, resolver=None) -> bool:
+    """Gate one fetch hop: an absolute http(s) URL whose host passes
+    `host_is_safe`. Call it before EVERY request, including each redirect."""
+    parts = urlsplit(url or "")
+    if parts.scheme.lower() not in _SCHEMES:
+        return False
+    return await host_is_safe((parts.hostname or "").lower(), resolver=resolver)

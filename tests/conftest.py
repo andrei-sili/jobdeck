@@ -1,6 +1,16 @@
 import pytest
 
-from jobdeck import config, db, migrations
+from jobdeck import config, db, migrations, netsafe
+
+
+@pytest.fixture(autouse=True)
+def _no_real_dns(monkeypatch):
+    """No test may hit real DNS: the netsafe resolver seam answers a public
+    address for every hostname. SSRF tests override it with their own fake."""
+    async def fake_resolver(host):
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(netsafe, "_system_resolver", fake_resolver)
 
 
 @pytest.fixture()
