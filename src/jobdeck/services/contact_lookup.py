@@ -43,6 +43,12 @@ def _employer_host(job) -> str:
     host = netsafe.public_literal_host(url)
     if not host:
         return ""
+    if not contact_resolve.registrable_domain(host):
+        # no trust anchor -> resolve_email discards every address it could find,
+        # so the five contact-page fetches below could only ever cost time. An
+        # IDN employer lands here: netsafe can now reach the host, but the
+        # domain check stays ASCII-only by design (homograph guard).
+        return ""
     if apply_channel.classify(url, "").channel == apply_channel.CHANNEL_COMPANY_SITE:
         return host
     return ""
