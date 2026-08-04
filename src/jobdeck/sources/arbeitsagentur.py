@@ -133,6 +133,13 @@ class ArbeitsagenturSource:
             or detail.get("stellenbeschreibung", "")
             or ""
         )
+        if not isinstance(description, str):
+            # guarding the payload's TYPE is not enough — a field of the wrong
+            # type reaches extract_email/strip_html and raises out of a call
+            # polling awaits unprotected
+            log.warning("arbeitsagentur: unexpected description for %s: %s",
+                        posting.external_id, type(description).__name__)
+            description = ""
         # Some partner listings have no BA-hosted text at all: the full
         # posting lives on the employer's own page (externeURL).
         external_url = _screen_external_url(

@@ -343,6 +343,24 @@ async def test_arbeitsagentur_non_str_externe_url_is_ignored():
     assert enriched.description == ""
 
 
+@pytest.mark.parametrize("description", [{"text": "x"}, ["a"], 42, True])
+async def test_arbeitsagentur_non_str_description_is_not_fatal(description):
+    """The payload's type is guarded one level up, but a FIELD of the wrong
+    type reaches extract_email/strip_html, and polling awaits fetch_details
+    with no try/except — one odd posting would abort the whole tick."""
+    def handler(request):
+        if "jobdetails" in str(request.url):
+            return httpx.Response(200, json={
+                "stellenangebotsBeschreibung": description})
+        return httpx.Response(200, json=BA_SEARCH)
+
+    source = ArbeitsagenturSource(make_client(handler))
+    postings = await source.search(SearchQuery(keywords="Python"))
+    enriched = await source.fetch_details(postings[0])
+    assert enriched.description == ""
+    assert enriched.contact_email == ""
+
+
 async def test_arbeitsagentur_non_dict_detail_payload_is_not_fatal():
     """Same contract one level up: a JSON array where an object was expected
     must leave the posting usable instead of killing the polling tick."""
