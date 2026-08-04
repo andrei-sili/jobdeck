@@ -21,13 +21,16 @@ from jobdeck import netsafe
     ("::1", False),                     # v6 loopback
     ("fd00::1", False),                 # unique-local
     ("fe80::1", False),                 # v6 link-local
+    # A transition address is judged by the IPv4 it transports, NOT by
+    # CPython's classification of the v6 range — that varies by patch version
+    # (CI caught ::ffff:8.8.8.8 differing from this machine) and is
+    # self-inconsistent (it calls 6to4-with-a-public-v4 "private").
     ("::ffff:10.0.0.1", False),         # v4-mapped private (CVE-2024-4032 class)
     ("::ffff:8.8.8.8", True),           # v4-mapped public
     ("64:ff9b::a00:1", False),          # NAT64 embedding 10.0.0.1
-    # ALL of NAT64 64:ff9b::/96 is is_reserved in CPython — even a public
-    # embedded v4 is rejected; conservative, and pinned here on purpose
-    ("64:ff9b::808:808", False),
+    ("64:ff9b::808:808", True),         # NAT64 embedding 8.8.8.8
     ("2002:a00:1::", False),            # 6to4 embedding 10.0.0.1
+    ("2002:808:808::", True),           # 6to4 embedding 8.8.8.8
 ])
 def test_ip_is_public(ip, public):
     assert netsafe.ip_is_public(ipaddress.ip_address(ip)) is public

@@ -57,12 +57,17 @@ def _embedded_ipv4(ip: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
 
 
 def ip_is_public(ip: _IPAddress) -> bool:
-    """Publicly routable per the IANA special-purpose registries, with any
-    embedded IPv4 held to the same rule."""
+    """Publicly routable per the IANA special-purpose registries.
+
+    An IPv6 address from a transition scheme (v4-mapped, NAT64, 6to4) is judged
+    SOLELY by the IPv4 it transports: that is the address packets really reach,
+    it is the only thing that can smuggle a private destination behind a
+    globally-routable prefix, and — unlike CPython's own classification of
+    those ranges, which varies by patch version — it is deterministic."""
     if isinstance(ip, ipaddress.IPv6Address):
         embedded = _embedded_ipv4(ip)
-        if embedded is not None and not ip_is_public(embedded):
-            return False
+        if embedded is not None:
+            return ip_is_public(embedded)
     return ip.is_global and not (
         ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
         or ip.is_multicast or ip.is_unspecified
