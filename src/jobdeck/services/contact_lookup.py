@@ -8,19 +8,18 @@ per-install toggle in a later commit.
 
 This PROPOSES an address — it never adopts it: the caller/UI shows the proposal
 and the human confirms before it can become a send recipient. Fetches politely
-(honest User-Agent, timeout, capped body), rejects a private/link-local host
-(SSRF), and treats every fetched page as untrusted data.
+(honest User-Agent, timeout, capped body), clears every hop through the shared
+SSRF guard (netsafe: scheme + literal screen + all-resolved-IPs-public DNS
+check), and treats every fetched page as untrusted data.
 """
 
 import asyncio
-import ipaddress
 import logging
 import re
-from urllib.parse import urlsplit
 
 import httpx
 
-from jobdeck import apply_channel, contact_resolve, db
+from jobdeck import apply_channel, contact_resolve, db, netsafe
 from jobdeck.ai import llm
 
 log = logging.getLogger(__name__)
@@ -37,57 +36,16 @@ _PATHS = ("/impressum", "/kontakt", "/karriere", "/impressum/", "/")
 _EMPTY = {"email": "", "dedicated": False, "generic": False, "source_url": ""}
 
 
-def _public_host(url: str) -> str:
-    """Host of a URL, or '' when it is a literal private/loopback/link-local IP."""
-    host = (urlsplit(url if "://" in url else "//" + url).hostname or "").lower()
-    if not host:
-        return ""
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return host  # a hostname
-    if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
-            or ip.is_multicast or ip.is_unspecified):
-        return ""
-    return host
-
-
 def _employer_host(job) -> str:
     """The employer's own host, but only when the apply channel is their own
     site — never a board or an ATS host (which are not the employer's domain)."""
     url = job["apply_url"] or job["url"] or ""
-    host = _public_host(url)
+    host = netsafe.public_literal_host(url)
     if not host:
         return ""
     if apply_channel.classify(url, "").channel == apply_channel.CHANNEL_COMPANY_SITE:
         return host
     return ""
-
-
-async def _fetch_text(client: httpx.AsyncClient, url: str) -> str:
-    """GET a page body (untrusted), or '' on failure. Walks redirects manually
-    so EVERY hop's host is re-checked before the request fires — a redirect
-    chain must not GET a private/link-local address. (A hostname that DNS-
-    resolves to a private IP is still a residual — closing it needs a mockable
-    resolver; tracked for a later slice.)"""
-    for _ in range(_MAX_REDIRECTS + 1):
-        if not _public_host(url):
-            return ""
-        try:
-            resp = await client.get(url, follow_redirects=False)
-        except Exception as exc:  # network / timeout — non-fatal
-            log.info("contact-lookup: fetch %s failed: %s", url, exc)
-            return ""
-        if resp.is_redirect:
-            loc = resp.headers.get("location")
-            if not loc:
-                return ""
-            url = str(httpx.URL(url).join(loc))
-            continue
-        if resp.status_code != 200:
-            return ""
-        return resp.text[:_MAX_BYTES]
-    return ""  # too many redirects
 
 
 async def _lookup_on_host(client: httpx.AsyncClient, host: str) -> dict:
@@ -96,7 +54,9 @@ async def _lookup_on_host(client: httpx.AsyncClient, host: str) -> dict:
     fallback = dict(_EMPTY)
     for path in _PATHS:
         url = f"https://{host}{path}"
-        r = contact_resolve.resolve_email(await _fetch_text(client, url), host)
+        page = await netsafe.fetch_text(
+            client, url, max_bytes=_MAX_BYTES, max_redirects=_MAX_REDIRECTS)
+        r = contact_resolve.resolve_email(page, host)
         if r["dedicated"]:
             return {**r, "source_url": url}
         if r["email"] and not fallback["email"]:

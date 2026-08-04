@@ -79,3 +79,77 @@ def test_empty_or_garbage_url_is_unknown():
     assert ac.classify("").channel == ac.CHANNEL_UNKNOWN
     assert ac.classify("   ").channel == ac.CHANNEL_UNKNOWN
     assert ac.classify(None).channel == ac.CHANNEL_UNKNOWN
+
+
+def test_page_markers_reveal_the_ats_behind_a_custom_domain():
+    # the CNAME'd rexx portal from above: the landing host hides the vendor,
+    # but the apply form posts to the vendor's domain
+    html = """<html><body>
+      <form action="https://hoermann.rexx-systems.com/apply/123" method="post">
+      </form></body></html>"""
+    r = ac.detect_ats_from_page(html)
+    assert r is not None
+    assert r.channel == ac.CHANNEL_ATS and r.vendor == "rexx systems"
+
+
+def test_a_vendor_widget_script_is_a_fingerprint():
+    html = '<script src="https://cdn.personio.de/widget/v2.js"></script>'
+    r = ac.detect_ats_from_page(html)
+    assert r is not None and r.vendor == "Personio"
+
+
+def test_a_vendor_iframe_is_a_fingerprint():
+    html = '<iframe src="https://firma.career.softgarden.de/embed"></iframe>'
+    r = ac.detect_ats_from_page(html)
+    assert r is not None and r.vendor == "softgarden"
+
+
+def test_an_anchor_link_to_a_vendor_is_not_a_fingerprint():
+    # a footer/marketing link is not an application form
+    html = '<a href="https://join.com/companies/acme">Powered by JOIN</a>'
+    assert ac.detect_ats_from_page(html) is None
+
+
+def test_relative_and_same_host_markers_carry_no_vendor_signal():
+    html = """<form action="/bewerbung/absenden"></form>
+              <script src="/assets/app.js"></script>"""
+    assert ac.detect_ats_from_page(html) is None
+
+
+def test_a_lookalike_marker_host_does_not_match():
+    html = '<form action="https://join.com.evil.de/x"></form>'
+    assert ac.detect_ats_from_page(html) is None
+
+
+def test_a_plain_company_page_yields_no_detection():
+    html = "<html><body><h1>Karriere bei Firma</h1><p>Schreiben Sie uns.</p></body></html>"
+    assert ac.detect_ats_from_page(html) is None
+
+
+def test_hostile_or_malformed_html_never_raises():
+    assert ac.detect_ats_from_page("<form action='https://" + "x" * 5000) is None
+    assert ac.detect_ats_from_page("&#x27;<><</form action=<script") is None
+    assert ac.detect_ats_from_page("") is None
+    assert ac.detect_ats_from_page(None) is None
+
+
+def test_a_vendor_lookalike_suffix_is_not_a_fingerprint():
+    # the suffix must be a DOMAIN boundary, not a substring
+    assert ac.detect_ats_from_page('<form action="https://notjoin.com/x"></form>') is None
+    assert ac.detect_ats_from_page(
+        '<script src="https://evil-personio.de/w.js"></script>') is None
+    # while a real vendor subdomain still matches
+    assert ac.detect_ats_from_page(
+        '<script src="https://cdn.join.com/w.js"></script>').vendor == "JOIN"
+
+
+def test_a_malformed_marker_url_is_skipped_instead_of_raising():
+    # a poisoned form action must not kill the detection pass
+    html = ('<form action="https://www.arbeitnow.com／@evil.example/x"></form>'
+            '<script src="https://cdn.join.com/w.js"></script>')
+    r = ac.detect_ats_from_page(html)
+    assert r is not None and r.vendor == "JOIN"  # skipped the bad one, found the real
+
+
+def test_a_malformed_posting_url_classifies_as_unknown():
+    assert ac.classify("http://[::1").channel == ac.CHANNEL_UNKNOWN

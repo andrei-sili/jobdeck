@@ -1,6 +1,27 @@
 import pytest
 
-from jobdeck import config, db, migrations
+from jobdeck import config, db, migrations, netsafe
+
+_REAL_RESOLVER = netsafe._system_resolver
+
+
+@pytest.fixture(autouse=True)
+def _no_real_dns(monkeypatch):
+    """No test may hit real DNS: the netsafe resolver seam answers a public
+    address for every hostname. SSRF tests override it with their own fake."""
+    async def fake_resolver(host):
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(netsafe, "_system_resolver", fake_resolver)
+
+
+@pytest.fixture()
+def real_resolver(monkeypatch):
+    """Restore the REAL resolver seam for the few tests that must prove the
+    production implementation's own behavior. Only safe for hosts getaddrinfo
+    rejects while IDNA-encoding, i.e. before any network I/O."""
+    monkeypatch.setattr(netsafe, "_system_resolver", _REAL_RESOLVER)
+    return _REAL_RESOLVER
 
 
 @pytest.fixture()

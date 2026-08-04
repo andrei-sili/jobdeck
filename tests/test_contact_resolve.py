@@ -12,12 +12,25 @@ from jobdeck import contact_resolve as cr
     ("https://firma.de/impressum", "firma.de"),
     ("//firma.de", "firma.de"),
     ("FIRMA.DE", "firma.de"),
+    ("firma.de.", "firma.de"),               # trailing dot normalized
+    ("jobs.example.co.uk", "example.co.uk"),  # multi-label public suffix
+    ("a.b.example.github.io", "example.github.io"),  # private-section tenant
+    ("github.io", ""),          # a bare shared suffix is not registrable
+    ("firma.notarealtld", ""),  # off-list TLD -> unverifiable -> no match
+    ("192.168.1.1", ""),        # an IP literal is never a registrable domain
     ("localhost", ""),          # single label
     ("", ""),
     ("xn--mnchen-3ya.de", ""),  # punycode homograph — rejected
 ])
 def test_registrable_domain(host, expected):
     assert cr.registrable_domain(host) == expected
+
+
+def test_a_shared_suffix_tenant_does_not_match_its_neighbour():
+    # two tenants of the same hosting suffix are DIFFERENT organizations: an
+    # address on evil.github.io must not verify against firma.github.io
+    page = "Bewerbung an bewerbung@evil.github.io"
+    assert cr.resolve_email(page, "firma.github.io")["email"] == ""
 
 
 def test_prefers_a_dedicated_application_inbox_over_generic():
@@ -59,3 +72,12 @@ def test_no_company_domain_returns_empty():
 
 def test_no_email_on_the_page_returns_empty():
     assert cr.resolve_email("Kein Kontakt hier.", "firma.de")["email"] == ""
+
+
+def test_an_unverifiable_anchor_verifies_nothing():
+    # both sides yield no registrable domain — they must NOT match each other
+    assert cr.registrable_domain("github.io") == ""
+    assert cr.resolve_email("bewerbung@github.io", "github.io")["email"] == ""
+    assert cr.registrable_domain("firma.notarealtld") == ""
+    assert cr.resolve_email(
+        "bewerbung@evil.notarealtld", "firma.notarealtld")["email"] == ""

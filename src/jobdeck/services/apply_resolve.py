@@ -5,63 +5,173 @@ interesting channel (an ATS portal) is usually hidden behind an aggregator
 redirect: Jooble stores an ``/away/<id>`` link that 3xx-redirects to the real
 posting. This service follows that redirect POLITELY — honest User-Agent, short
 timeout, capped redirects, a HEAD-only Location lookup, never a form submission
-or a bulk crawl — then classifies the resolved URL.
+or a bulk crawl — then classifies the resolved URL. When the result looks like
+the employer's own site, ONE capped GET inspects the page for ATS vendor
+fingerprints (a CNAME'd career domain hides its vendor from the hostname).
 
-Only Jooble ``/away/`` links are followed today; Arbeitsagentur already captures
-the employer's externeURL at ingestion, and Arbeitnow needs page parsing (a
-later slice). A known e-mail short-circuits without any network call, and any
-follow failure falls back to classifying the original URL. Resolve on demand
-when the user acts on a posting — never in bulk.
+Jooble ``/away/`` links are followed; an Arbeitnow posting gets its JOB page
+parsed instead (see `_resolve_arbeitnow` — the site's robots.txt allows job
+pages but disallows the ``/apply`` route, so that deep-link is only ever
+STORED for the human to open, never fetched); Arbeitsagentur already captures
+the employer's externeURL at ingestion. A known e-mail short-circuits without
+any network call, and any failure falls back to classifying the original URL.
+Resolve on demand when the user acts on a posting — never in bulk.
 """
 
 import asyncio
-import ipaddress
 import logging
-from urllib.parse import urlsplit
+from html.parser import HTMLParser
 
 import httpx
 
-from jobdeck import apply_channel, db
+from jobdeck import apply_channel, db, netsafe
 
 log = logging.getLogger(__name__)
 
 _USER_AGENT = "JobDeck/0.1 (+https://github.com/andrei-sili/jobdeck)"
 _TIMEOUT = 10.0
 _MAX_REDIRECTS = 10
+_MAX_BYTES = 400_000
 
 
 def _is_redirector(url: str) -> bool:
     """True for a Jooble away-link, which 3xx-redirects to the real posting."""
-    raw = url if "://" in url else "https://" + url
-    parts = urlsplit(raw)
+    parts = netsafe.split_url(url if "://" in url else "https://" + url)
+    if parts is None:
+        return False
     host = (parts.hostname or "").lower()
     return host.endswith("jooble.org") and parts.path.startswith("/away/")
 
 
-def _is_public_host(host: str) -> bool:
-    """A literal-IP host that is loopback/private/link-local/reserved is NOT
-    persisted or navigated to (SSRF defense-in-depth). A hostname is not
-    resolved here — full hop-by-hop IP validation is a later slice."""
+def _is_arbeitnow_job(url: str) -> bool:
+    """True for an Arbeitnow job page (its feed URLs all point there)."""
+    parts = netsafe.split_url(url if "://" in url else "https://" + url)
+    if parts is None:
+        return False
+    host = (parts.hostname or "").lower()
+    return (host == "arbeitnow.com" or host.endswith(".arbeitnow.com")) \
+        and parts.path.startswith("/jobs/")
+
+
+class _ArbeitnowPage(HTMLParser):
+    """Signals an Arbeitnow job page carries in raw server-rendered HTML:
+    anchor hrefs (one is the ``…/apply`` deep-link) and form ids (the
+    JOIN-powered quick-apply variant embeds ``form_job_application``)."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.hrefs: list[str] = []
+        self.form_ids: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        values = dict(attrs)
+        if tag == "a" and values.get("href"):
+            self.hrefs.append(values["href"])
+        elif tag == "form" and values.get("id"):
+            self.form_ids.append(values["id"])
+
+
+def _parse_arbeitnow_page(page_html: str) -> "_ArbeitnowPage | None":
+    """Parse an untrusted job page off the event loop; None on any hiccup."""
+    parser = _ArbeitnowPage()
     try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return True  # a hostname, not a literal IP
-    return not (ip.is_private or ip.is_loopback or ip.is_link_local
-                or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
+        parser.feed(page_html)
+        parser.close()
+    except Exception:  # hostile/odd HTML — no signal, keep the fallback path
+        return None
+    return parser
+
+
+def _arbeitnow_apply_href(hrefs: list[str], page_url: str) -> str:
+    """THIS posting's own ``…/apply`` deep-link, '' when the layout changed.
+
+    The href comes from an UNTRUSTED page, so it is accepted only when it is
+    an https link to the board's own host whose path is exactly this job's
+    path + '/apply' — a planted anchor earlier in the document (employer-
+    supplied description HTML, a 'related jobs' block) must not win, and a
+    non-http scheme must never become a URL the app opens."""
+    page_parts = netsafe.split_url(page_url)
+    if page_parts is None:
+        return ""
+    want = page_parts.path.rstrip("/") + "/apply"
+    for href in hrefs:
+        parts = netsafe.split_url(href)  # a poisoned href must not raise
+        if parts is None:
+            continue
+        host = (parts.hostname or "").lower()
+        if (parts.scheme in ("http", "https")
+                and host in ("www.arbeitnow.com", "arbeitnow.com")
+                and not parts.username and not parts.password
+                and parts.path.rstrip("/") == want):
+            return href
+    return ""
+
+
+async def _resolve_arbeitnow(
+    client: httpx.AsyncClient, url: str
+) -> tuple[str, apply_channel.ApplyChannel] | None:
+    """Resolve an Arbeitnow posting from its JOB page (robots-allowed).
+
+    The board hosts the apply control itself: an ``…/apply`` route that
+    302-redirects to the real destination. robots.txt DISALLOWS that route to
+    bots, so this never fetches it — the deep-link is stored for the HUMAN to
+    open, and the click lands them on the real ATS/company form. The
+    JOIN-powered quick-apply variant is recognizable from the embedded form
+    and labeled as the JOIN ATS. None on any failure -> caller falls back."""
+    page = await netsafe.fetch_text(
+        client, url, max_bytes=_MAX_BYTES, max_redirects=_MAX_REDIRECTS)
+    if not page:
+        return None
+    parser = await asyncio.to_thread(_parse_arbeitnow_page, page)
+    if parser is None:
+        return None
+    apply_href = _arbeitnow_apply_href(parser.hrefs, url)
+    if "form_job_application" in parser.form_ids:
+        return apply_href or url, apply_channel.ApplyChannel(
+            apply_channel.CHANNEL_ATS, "JOIN")
+    if apply_href:
+        return apply_href, apply_channel.ApplyChannel(
+            apply_channel.CHANNEL_BOARD, "Arbeitnow")
+    return None
 
 
 async def _follow(client: httpx.AsyncClient, url: str) -> str:
-    """Return the final URL after redirects, or '' on failure / an unsafe host."""
-    try:
-        resp = await client.head(url, follow_redirects=True)
-    except Exception as exc:  # network / timeout / too-many-redirects — non-fatal
-        log.info("apply-resolve: could not follow %s: %s", url, exc)
-        return ""
-    final = str(resp.url)
-    if not _is_public_host((urlsplit(final).hostname or "").lower()):
-        log.warning("apply-resolve: %s resolved to a non-public host — ignoring", url)
-        return ""
-    return final
+    """Return the final URL after redirects, or '' on failure or an unsafe hop.
+
+    HEAD-only manual walk: every hop's scheme and host pass the shared SSRF
+    guard (netsafe — literal screen + all-resolved-IPs-public) BEFORE its
+    request fires, so an intermediate redirect can no more touch a private
+    network than the final one."""
+    current = url
+    for _ in range(_MAX_REDIRECTS + 1):
+        if not await netsafe.url_is_safe(current):
+            log.warning("apply-resolve: %s reached an unsafe hop — ignoring", url)
+            return ""
+        try:
+            resp = await client.send(client.build_request("HEAD", current))
+        except Exception as exc:  # network / timeout — non-fatal
+            log.info("apply-resolve: could not follow %s: %s", url, exc)
+            return ""
+        if resp.next_request is None:
+            return current
+        current = str(resp.next_request.url)
+    log.info("apply-resolve: %s redirected more than %d times — giving up",
+             url, _MAX_REDIRECTS)
+    return ""
+
+
+async def _inspect_page(
+    client: httpx.AsyncClient, url: str
+) -> apply_channel.ApplyChannel | None:
+    """One polite capped GET of a company-site page to look for ATS vendor
+    fingerprints (a CNAME'd career domain hides its vendor from the hostname).
+    Any failure or non-match keeps the existing classification."""
+    page = await netsafe.fetch_text(
+        client, url, max_bytes=_MAX_BYTES, max_redirects=_MAX_REDIRECTS)
+    if not page:
+        return None
+    # parsing untrusted HTML is CPU-bound; keep it off the NiceGUI event loop
+    return await asyncio.to_thread(apply_channel.detect_ats_from_page, page)
 
 
 async def resolve(
@@ -74,12 +184,21 @@ async def resolve(
     email = (job["contact_email"] or "").strip()
     if email:
         return url, apply_channel.classify(url, email)
+    if url and _is_arbeitnow_job(url):
+        resolved = await _resolve_arbeitnow(client, url)
+        if resolved is not None:
+            return resolved
     final = url
     if url and _is_redirector(url):
         followed = await _follow(client, url)
         if followed:
             final = followed
-    return final, apply_channel.classify(final, email)
+    ch = apply_channel.classify(final, email)
+    if ch.channel == apply_channel.CHANNEL_COMPANY_SITE:
+        detected = await _inspect_page(client, final)
+        if detected is not None:
+            ch = detected
+    return final, ch
 
 
 def _load_job(job_id: int):

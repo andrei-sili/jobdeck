@@ -29,6 +29,10 @@ dependencies = [
     # send, so it must not rest on a transitive dependency
     "httplib2>=0.22",
     "pypdf>=5.0",
+    # registrable-domain (eTLD+1) trust-anchor matching; the PSL snapshot ships
+    # inside the wheel (zero network at runtime) and freshens via dependency
+    # upgrades — the version suffix IS the snapshot date
+    "publicsuffixlist>=1.0.2.20260726",
     "python-dotenv>=1.0",
 ]
 
