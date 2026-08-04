@@ -239,3 +239,70 @@ def test_resolve_and_store_persists_the_channel(con):
     assert row["apply_channel"] == ac.CHANNEL_BOARD
     assert row["ats_vendor"] == "Jooble"
     assert row["apply_url"] == "https://de.jooble.org/desc/42"
+
+
+_AN_JOB = "https://www.arbeitnow.com/jobs/companies/raisin/engineering-lead-81517"
+_AN_APPLY = _AN_JOB + "/apply"
+
+
+async def test_arbeitnow_external_variant_stores_the_apply_deep_link():
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(200, text=(
+            f'<a href="{_AN_APPLY}" target="_blank">'
+            '<button class="apply_button_large">Apply Now</button></a>'))
+
+    async with _client(handler) as client:
+        final, ch = await apply_resolve.resolve(_job(_AN_JOB), client)
+    assert final == _AN_APPLY
+    assert ch.channel == ac.CHANNEL_BOARD and ch.vendor == "Arbeitnow"
+    # robots.txt disallows the /apply route to bots: only the JOB page was
+    # fetched; the deep-link is stored for the human, never requested
+    assert calls == [_AN_JOB]
+
+
+async def test_arbeitnow_join_quick_apply_variant_is_labeled_join():
+    def handler(request):
+        return httpx.Response(200, text=(
+            '<form id="form_job_application" method="POST"></form>'
+            f'<div id="text_issues_with_applying">Try the '
+            f'<a href="{_AN_APPLY}">company portal</a></div>'))
+
+    async with _client(handler) as client:
+        final, ch = await apply_resolve.resolve(_job(_AN_JOB), client)
+    assert final == _AN_APPLY
+    assert ch.channel == ac.CHANNEL_ATS and ch.vendor == "JOIN"
+
+
+async def test_arbeitnow_page_without_the_expected_layout_falls_back():
+    def handler(request):
+        return httpx.Response(200, text="<h1>Some redesigned page</h1>")
+
+    async with _client(handler) as client:
+        final, ch = await apply_resolve.resolve(_job(_AN_JOB), client)
+    assert final == _AN_JOB  # unchanged: no invented deep-link
+    assert ch.channel == ac.CHANNEL_BOARD and ch.vendor == "Arbeitnow"
+
+
+async def test_arbeitnow_fetch_failure_falls_back_to_the_board_label():
+    def handler(request):
+        raise httpx.ConnectError("down")
+
+    async with _client(handler) as client:
+        final, ch = await apply_resolve.resolve(_job(_AN_JOB), client)
+    assert final == _AN_JOB
+    assert ch.channel == ac.CHANNEL_BOARD and ch.vendor == "Arbeitnow"
+
+
+async def test_a_foreign_apply_looking_href_is_not_adopted():
+    # only an arbeitnow-hosted /jobs/…/apply link is the board's own deep-link
+    def handler(request):
+        return httpx.Response(200, text=(
+            '<a href="https://evil.example.com/jobs/x/apply">Apply</a>'))
+
+    async with _client(handler) as client:
+        final, ch = await apply_resolve.resolve(_job(_AN_JOB), client)
+    assert final == _AN_JOB
+    assert ch.channel == ac.CHANNEL_BOARD and ch.vendor == "Arbeitnow"

@@ -9,15 +9,18 @@ or a bulk crawl — then classifies the resolved URL. When the result looks like
 the employer's own site, ONE capped GET inspects the page for ATS vendor
 fingerprints (a CNAME'd career domain hides its vendor from the hostname).
 
-Only Jooble ``/away/`` links are followed today; Arbeitsagentur already captures
-the employer's externeURL at ingestion, and Arbeitnow needs page parsing (a
-later slice). A known e-mail short-circuits without any network call, and any
-follow failure falls back to classifying the original URL. Resolve on demand
-when the user acts on a posting — never in bulk.
+Jooble ``/away/`` links are followed; an Arbeitnow posting gets its JOB page
+parsed instead (see `_resolve_arbeitnow` — the site's robots.txt allows job
+pages but disallows the ``/apply`` route, so that deep-link is only ever
+STORED for the human to open, never fetched); Arbeitsagentur already captures
+the employer's externeURL at ingestion. A known e-mail short-circuits without
+any network call, and any failure falls back to classifying the original URL.
+Resolve on demand when the user acts on a posting — never in bulk.
 """
 
 import asyncio
 import logging
+from html.parser import HTMLParser
 from urllib.parse import urlsplit
 
 import httpx
@@ -38,6 +41,76 @@ def _is_redirector(url: str) -> bool:
     parts = urlsplit(raw)
     host = (parts.hostname or "").lower()
     return host.endswith("jooble.org") and parts.path.startswith("/away/")
+
+
+def _is_arbeitnow_job(url: str) -> bool:
+    """True for an Arbeitnow job page (its feed URLs all point there)."""
+    raw = url if "://" in url else "https://" + url
+    parts = urlsplit(raw)
+    host = (parts.hostname or "").lower()
+    return (host == "arbeitnow.com" or host.endswith(".arbeitnow.com")) \
+        and parts.path.startswith("/jobs/")
+
+
+class _ArbeitnowPage(HTMLParser):
+    """Signals an Arbeitnow job page carries in raw server-rendered HTML:
+    anchor hrefs (one is the ``…/apply`` deep-link) and form ids (the
+    JOIN-powered quick-apply variant embeds ``form_job_application``)."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.hrefs: list[str] = []
+        self.form_ids: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        values = dict(attrs)
+        if tag == "a" and values.get("href"):
+            self.hrefs.append(values["href"])
+        elif tag == "form" and values.get("id"):
+            self.form_ids.append(values["id"])
+
+
+def _arbeitnow_apply_href(hrefs: list[str]) -> str:
+    """The page's own ``…/apply`` deep-link, '' when the layout changed."""
+    for href in hrefs:
+        parts = urlsplit(href)
+        host = (parts.hostname or "").lower()
+        if (host == "www.arbeitnow.com" or host == "arbeitnow.com") \
+                and parts.path.startswith("/jobs/") \
+                and parts.path.rstrip("/").endswith("/apply"):
+            return href
+    return ""
+
+
+async def _resolve_arbeitnow(
+    client: httpx.AsyncClient, url: str
+) -> tuple[str, apply_channel.ApplyChannel] | None:
+    """Resolve an Arbeitnow posting from its JOB page (robots-allowed).
+
+    The board hosts the apply control itself: an ``…/apply`` route that
+    302-redirects to the real destination. robots.txt DISALLOWS that route to
+    bots, so this never fetches it — the deep-link is stored for the HUMAN to
+    open, and the click lands them on the real ATS/company form. The
+    JOIN-powered quick-apply variant is recognizable from the embedded form
+    and labeled as the JOIN ATS. None on any failure -> caller falls back."""
+    page = await netsafe.fetch_text(
+        client, url, max_bytes=_MAX_BYTES, max_redirects=_MAX_REDIRECTS)
+    if not page:
+        return None
+    parser = _ArbeitnowPage()
+    try:
+        parser.feed(page)
+        parser.close()
+    except Exception:  # hostile/odd HTML — no signal, keep the fallback path
+        return None
+    apply_href = _arbeitnow_apply_href(parser.hrefs)
+    if "form_job_application" in parser.form_ids:
+        return apply_href or url, apply_channel.ApplyChannel(
+            apply_channel.CHANNEL_ATS, "JOIN")
+    if apply_href:
+        return apply_href, apply_channel.ApplyChannel(
+            apply_channel.CHANNEL_BOARD, "Arbeitnow")
+    return None
 
 
 async def _follow(client: httpx.AsyncClient, url: str) -> str:
@@ -88,6 +161,10 @@ async def resolve(
     email = (job["contact_email"] or "").strip()
     if email:
         return url, apply_channel.classify(url, email)
+    if url and _is_arbeitnow_job(url):
+        resolved = await _resolve_arbeitnow(client, url)
+        if resolved is not None:
+            return resolved
     final = url
     if url and _is_redirector(url):
         followed = await _follow(client, url)
