@@ -64,7 +64,10 @@ async def test_a_known_email_short_circuits_without_network():
 async def test_a_redirect_to_a_private_host_is_ignored():
     # a poisoned redirect chain to an internal address must not be persisted or
     # navigated to — the resolver drops it and falls back to the original URL
+    calls = []
+
     def handler(request):
+        calls.append(request.url.host)
         if "/away/" in str(request.url):
             return httpx.Response(302, headers={"Location": "http://127.0.0.1:8080/x"})
         return httpx.Response(200)
@@ -73,6 +76,91 @@ async def test_a_redirect_to_a_private_host_is_ignored():
         final, ch = await apply_resolve.resolve(
             _job("https://de.jooble.org/away/6"), client)
     assert final == "https://de.jooble.org/away/6"  # fell back, did not store 127.0.0.1
+    assert ch.channel == ac.CHANNEL_BOARD and ch.vendor == "Jooble"
+    assert calls == ["de.jooble.org"]  # the private hop was never even requested
+
+
+async def test_a_hop_whose_hostname_resolves_private_is_rejected(monkeypatch):
+    # DNS-level SSRF: internal.firma.de is a HOSTNAME resolving to a private
+    # address — the guard must resolve it and refuse before the request fires
+    from jobdeck import netsafe
+
+    async def fake_resolver(host):
+        return ["192.168.1.10"] if host == "internal.firma.de" else ["93.184.216.34"]
+
+    monkeypatch.setattr(netsafe, "_system_resolver", fake_resolver)
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.host)
+        if "/away/" in str(request.url):
+            return httpx.Response(
+                302, headers={"Location": "https://internal.firma.de/admin"})
+        return httpx.Response(200)
+
+    async with _client(handler) as client:
+        final, ch = await apply_resolve.resolve(
+            _job("https://de.jooble.org/away/7"), client)
+    assert final == "https://de.jooble.org/away/7"
+    assert calls == ["de.jooble.org"]  # never requested the private-resolving host
+
+
+async def test_a_mixed_public_private_dns_answer_is_rejected(monkeypatch):
+    # one private record in the answer poisons the whole host (the OS may
+    # connect to any of them) — fail closed
+    from jobdeck import netsafe
+
+    async def fake_resolver(host):
+        if host == "evil.example.com":
+            return ["93.184.216.34", "10.0.0.5"]
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(netsafe, "_system_resolver", fake_resolver)
+
+    def handler(request):
+        if "/away/" in str(request.url):
+            return httpx.Response(
+                302, headers={"Location": "https://evil.example.com/jobs"})
+        return httpx.Response(200)
+
+    async with _client(handler) as client:
+        final, _ = await apply_resolve.resolve(
+            _job("https://de.jooble.org/away/8"), client)
+    assert final == "https://de.jooble.org/away/8"
+
+
+async def test_an_unresolvable_host_falls_back_to_the_original_url(monkeypatch):
+    import socket
+
+    from jobdeck import netsafe
+
+    async def fake_resolver(host):
+        if host == "gone.example.com":
+            raise socket.gaierror("NXDOMAIN")
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(netsafe, "_system_resolver", fake_resolver)
+
+    def handler(request):
+        if "/away/" in str(request.url):
+            return httpx.Response(
+                302, headers={"Location": "https://gone.example.com/x"})
+        return httpx.Response(200)
+
+    async with _client(handler) as client:
+        final, _ = await apply_resolve.resolve(
+            _job("https://de.jooble.org/away/9"), client)
+    assert final == "https://de.jooble.org/away/9"
+
+
+async def test_a_redirect_loop_gives_up_and_falls_back():
+    def handler(request):  # every hop redirects forever
+        return httpx.Response(302, headers={"Location": str(request.url)})
+
+    async with _client(handler) as client:
+        final, ch = await apply_resolve.resolve(
+            _job("https://de.jooble.org/away/10"), client)
+    assert final == "https://de.jooble.org/away/10"
     assert ch.channel == ac.CHANNEL_BOARD and ch.vendor == "Jooble"
 
 
