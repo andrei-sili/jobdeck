@@ -1,8 +1,9 @@
 import httpx
 import pytest
 
+from jobdeck import netsafe
 from jobdeck.sources.arbeitnow import ArbeitnowSource
-from jobdeck.sources.arbeitsagentur import ArbeitsagenturSource
+from jobdeck.sources.arbeitsagentur import MAX_PAGE_TEXT, ArbeitsagenturSource
 from jobdeck.sources.base import SearchQuery, SourceUnavailable, extract_email, looks_remote
 from jobdeck.sources.jooble import JoobleSource
 
@@ -167,6 +168,129 @@ async def test_arbeitsagentur_search_failure_raises_unavailable():
     source = ArbeitsagenturSource(make_client(lambda r: httpx.Response(503)))
     with pytest.raises(SourceUnavailable):
         await source.search(SearchQuery(keywords="Python"))
+
+
+@pytest.mark.parametrize("hostile", [
+    "javascript:alert(1)",
+    "data:text/html,<script>x</script>",
+    "file:///etc/passwd",
+    "httpevil://intranet.firma.de/x",  # startswith("http") once let this through
+])
+async def test_arbeitsagentur_hostile_externe_url_is_dropped_at_ingestion(hostile):
+    """externeURL is employer-supplied: a non-http(s) value must neither become
+    the posting URL nor be fetched — screened at the source, not a later sink."""
+    fetched = []
+
+    def handler(request):
+        fetched.append(str(request.url))
+        if "jobdetails" in str(request.url):
+            return httpx.Response(200, json={
+                "stellenangebotsBeschreibung": "",
+                "externeURL": hostile,
+            })
+        return httpx.Response(200, json=BA_SEARCH)
+
+    source = ArbeitsagenturSource(make_client(handler))
+    postings = await source.search(SearchQuery(keywords="Python"))
+    enriched = await source.fetch_details(postings[0])
+    assert enriched.url == "https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-123"
+    assert enriched.description == ""
+    assert all("rest.arbeitsagentur.de" in url for url in fetched)
+
+
+async def test_arbeitsagentur_schemeless_externe_url_gets_https():
+    def handler(request):
+        url = str(request.url)
+        if "jobdetails" in url:
+            return httpx.Response(200, json={
+                "stellenangebotsBeschreibung": "",
+                "externeURL": "www.beispiel.de/jobs/42",
+            })
+        if request.url.host == "www.beispiel.de":
+            return httpx.Response(200, text="<p>Stellenprofil</p>")
+        return httpx.Response(200, json=BA_SEARCH)
+
+    source = ArbeitsagenturSource(make_client(handler))
+    postings = await source.search(SearchQuery(keywords="Python"))
+    enriched = await source.fetch_details(postings[0])
+    assert enriched.url == "https://www.beispiel.de/jobs/42"
+    assert enriched.description == "Stellenprofil"
+
+
+async def test_arbeitsagentur_external_page_resolving_private_is_not_fetched(monkeypatch):
+    """The SSRF guard runs on the background polling path: an externeURL whose
+    host resolves to a private address is never requested."""
+    async def resolver(host):
+        if host == "intranet.firma.de":
+            return ["192.168.1.10"]
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(netsafe, "_system_resolver", resolver)
+    fetched = []
+
+    def handler(request):
+        fetched.append(request.url.host)
+        if "jobdetails" in str(request.url):
+            return httpx.Response(200, json={
+                "stellenangebotsBeschreibung": "",
+                "externeURL": "https://intranet.firma.de/job",
+            })
+        return httpx.Response(200, json=BA_SEARCH)
+
+    source = ArbeitsagenturSource(make_client(handler))
+    postings = await source.search(SearchQuery(keywords="Python"))
+    enriched = await source.fetch_details(postings[0])
+    assert enriched.description == ""
+    assert "intranet.firma.de" not in fetched
+
+
+async def test_arbeitsagentur_external_redirect_hops_are_screened(monkeypatch):
+    """A public externeURL redirecting to a private-resolving host is cut at
+    that hop — the redirect target's request never fires."""
+    async def resolver(host):
+        if host == "intranet.firma.de":
+            return ["192.168.1.10"]
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(netsafe, "_system_resolver", resolver)
+    fetched = []
+
+    def handler(request):
+        fetched.append(request.url.host)
+        if "jobdetails" in str(request.url):
+            return httpx.Response(200, json={
+                "stellenangebotsBeschreibung": "",
+                "externeURL": "https://karriere.firma.de/job",
+            })
+        if request.url.host == "karriere.firma.de":
+            return httpx.Response(
+                302, headers={"Location": "https://intranet.firma.de/job"})
+        return httpx.Response(200, json=BA_SEARCH)
+
+    source = ArbeitsagenturSource(make_client(handler))
+    postings = await source.search(SearchQuery(keywords="Python"))
+    enriched = await source.fetch_details(postings[0])
+    assert enriched.url == "https://karriere.firma.de/job"
+    assert enriched.description == ""
+    assert "intranet.firma.de" not in fetched
+
+
+async def test_arbeitsagentur_external_page_is_byte_capped():
+    def handler(request):
+        url = str(request.url)
+        if "jobdetails" in url:
+            return httpx.Response(200, json={
+                "stellenangebotsBeschreibung": "",
+                "externeURL": "https://karriere.beispiel.de/big",
+            })
+        if request.url.host == "karriere.beispiel.de":
+            return httpx.Response(200, content=b"x" * 1_000_000)
+        return httpx.Response(200, json=BA_SEARCH)
+
+    source = ArbeitsagenturSource(make_client(handler))
+    postings = await source.search(SearchQuery(keywords="Python"))
+    enriched = await source.fetch_details(postings[0])
+    assert len(enriched.description) == MAX_PAGE_TEXT
 
 
 async def test_jooble_search(monkeypatch):

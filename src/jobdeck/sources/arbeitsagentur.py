@@ -12,6 +12,7 @@ import logging
 
 import httpx
 
+from jobdeck import netsafe
 from jobdeck.sources.base import (
     JobPosting,
     SearchQuery,
@@ -27,6 +28,24 @@ BASE_URL = "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service"
 API_KEY = "jobboerse-jobsuche"  # public static client id used by the Jobsuche app
 PAGE_SIZE = 100
 MAX_PAGE_TEXT = 15_000  # cap for external page text (plenty for LLM drafting)
+MAX_PAGE_BYTES = 400_000  # raw-HTML cap for the guarded external-page GET
+
+
+def _screen_external_url(raw) -> str:
+    """The employer-supplied externeURL normalized, or '' when unusable.
+
+    The field is UNTRUSTED third-party data that becomes the posting URL the
+    UI offers to open and the page the poller fetches — only an http(s) URL
+    with a host may be adopted, so a javascript:/data:/file: value dies here
+    at ingestion, not at a later sink. A bare host form (www.firma.de/jobs,
+    seen in the wild) gets the https scheme it implies."""
+    if not isinstance(raw, str):
+        return ""
+    url = raw.strip()
+    parts = netsafe.split_url(url)
+    if parts is not None and not parts.scheme:
+        url = "https://" + url
+    return url if netsafe.is_openable(url) else ""
 
 
 class ArbeitsagenturSource:
@@ -101,7 +120,8 @@ class ArbeitsagenturSource:
         )
         # Some partner listings have no BA-hosted text at all: the full
         # posting lives on the employer's own page (externeURL).
-        external_url = detail.get("externeURL", "") or detail.get("externeUrl", "") or ""
+        external_url = _screen_external_url(
+            detail.get("externeURL") or detail.get("externeUrl") or "")
         if external_url:
             posting.url = external_url
         if not description and external_url:
@@ -121,16 +141,14 @@ class ArbeitsagenturSource:
     async def _fetch_page_text(self, url: str) -> str:
         """Best-effort text of the employer's public posting page.
 
-        Server-rendered career pages yield usable text; JS-heavy ones come
-        back thin — the UI lets the user paste the posting manually then.
+        The URL is employer-supplied and this runs on the background polling
+        path, so the GET goes through the shared netsafe guard: every redirect
+        hop is SSRF-screened before its request fires and the body is
+        byte-capped. Server-rendered career pages yield usable text; JS-heavy
+        ones come back thin — the UI lets the user paste the posting manually
+        then.
         """
-        if not url.startswith("http"):
-            url = "https://" + url
-        try:
-            resp = await self._client.get(url, follow_redirects=True)
-            resp.raise_for_status()
-        except httpx.HTTPError as ex:
-            log.info("arbeitsagentur: external page unavailable (%s): %s", url, ex)
+        page = await netsafe.fetch_text(self._client, url, max_bytes=MAX_PAGE_BYTES)
+        if not page:
             return ""
-        text = strip_html(resp.text)
-        return text[:MAX_PAGE_TEXT]
+        return strip_html(page)[:MAX_PAGE_TEXT]
