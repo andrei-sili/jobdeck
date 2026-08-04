@@ -74,6 +74,50 @@ async def test_a_redirect_to_a_private_host_reads_nothing():
     assert r["email"] == ""  # SSRF guard: the private-host page is dropped
 
 
+async def test_a_redirect_to_a_private_resolving_hostname_reads_nothing(monkeypatch):
+    # DNS-level SSRF: the redirect target is a HOSTNAME whose records are
+    # private — the guard resolves it and refuses before the GET fires
+    from jobdeck import netsafe
+
+    async def fake_resolver(host):
+        return ["10.1.2.3"] if host == "intern.firma.de" else ["93.184.216.34"]
+
+    monkeypatch.setattr(netsafe, "_system_resolver", fake_resolver)
+    reads = []
+
+    def handler(request):
+        u = str(request.url)
+        if "intern.firma.de" in u:
+            reads.append(u)
+            return httpx.Response(200, text="bewerbung@firma.de")
+        if u.endswith("/impressum"):
+            return httpx.Response(
+                302, headers={"Location": "https://intern.firma.de/x"})
+        return httpx.Response(404)
+
+    async with _client(handler) as client:
+        r = await cl.lookup(_job("https://firma.de/x"), client)
+    assert r["email"] == "" and reads == []
+
+
+async def test_an_employer_host_resolving_private_is_never_fetched(monkeypatch):
+    from jobdeck import netsafe
+
+    async def fake_resolver(host):
+        return ["192.168.0.9"]
+
+    monkeypatch.setattr(netsafe, "_system_resolver", fake_resolver)
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(200, text="bewerbung@intranet-firma.de")
+
+    async with _client(handler) as client:
+        r = await cl.lookup(_job("https://intranet-firma.de/karriere"), client)
+    assert calls == [] and r["email"] == ""
+
+
 def test_extract_domain_from_a_model_answer():
     assert cl._extract_domain("Die offizielle Domain ist firma.de.") == "firma.de"
     assert cl._extract_domain("https://www.firma.de/impressum") == "firma.de"

@@ -8,19 +8,18 @@ per-install toggle in a later commit.
 
 This PROPOSES an address — it never adopts it: the caller/UI shows the proposal
 and the human confirms before it can become a send recipient. Fetches politely
-(honest User-Agent, timeout, capped body), rejects a private/link-local host
-(SSRF), and treats every fetched page as untrusted data.
+(honest User-Agent, timeout, capped body), clears every hop through the shared
+SSRF guard (netsafe: scheme + literal screen + all-resolved-IPs-public DNS
+check), and treats every fetched page as untrusted data.
 """
 
 import asyncio
-import ipaddress
 import logging
 import re
-from urllib.parse import urlsplit
 
 import httpx
 
-from jobdeck import apply_channel, contact_resolve, db
+from jobdeck import apply_channel, contact_resolve, db, netsafe
 from jobdeck.ai import llm
 
 log = logging.getLogger(__name__)
@@ -37,26 +36,11 @@ _PATHS = ("/impressum", "/kontakt", "/karriere", "/impressum/", "/")
 _EMPTY = {"email": "", "dedicated": False, "generic": False, "source_url": ""}
 
 
-def _public_host(url: str) -> str:
-    """Host of a URL, or '' when it is a literal private/loopback/link-local IP."""
-    host = (urlsplit(url if "://" in url else "//" + url).hostname or "").lower()
-    if not host:
-        return ""
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return host  # a hostname
-    if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
-            or ip.is_multicast or ip.is_unspecified):
-        return ""
-    return host
-
-
 def _employer_host(job) -> str:
     """The employer's own host, but only when the apply channel is their own
     site — never a board or an ATS host (which are not the employer's domain)."""
     url = job["apply_url"] or job["url"] or ""
-    host = _public_host(url)
+    host = netsafe.public_literal_host(url)
     if not host:
         return ""
     if apply_channel.classify(url, "").channel == apply_channel.CHANNEL_COMPANY_SITE:
@@ -66,12 +50,11 @@ def _employer_host(job) -> str:
 
 async def _fetch_text(client: httpx.AsyncClient, url: str) -> str:
     """GET a page body (untrusted), or '' on failure. Walks redirects manually
-    so EVERY hop's host is re-checked before the request fires — a redirect
-    chain must not GET a private/link-local address. (A hostname that DNS-
-    resolves to a private IP is still a residual — closing it needs a mockable
-    resolver; tracked for a later slice.)"""
+    so EVERY hop clears the SSRF guard before its request fires — including
+    resolving a hostname and requiring every returned address to be public
+    (the check-then-connect rebinding residual is documented in netsafe)."""
     for _ in range(_MAX_REDIRECTS + 1):
-        if not _public_host(url):
+        if not await netsafe.url_is_safe(url):
             return ""
         try:
             resp = await client.get(url, follow_redirects=False)
