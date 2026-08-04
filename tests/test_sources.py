@@ -1,10 +1,25 @@
+import random
+import re
+import time
+
 import httpx
 import pytest
 
 from jobdeck import netsafe
 from jobdeck.sources.arbeitnow import ArbeitnowSource
-from jobdeck.sources.arbeitsagentur import MAX_PAGE_TEXT, ArbeitsagenturSource
-from jobdeck.sources.base import SearchQuery, SourceUnavailable, extract_email, looks_remote
+from jobdeck.sources.arbeitsagentur import (
+    MAX_PAGE_BYTES,
+    MAX_PAGE_TEXT,
+    ArbeitsagenturSource,
+)
+from jobdeck.sources.base import (
+    EMAIL_RE,
+    SearchQuery,
+    SourceUnavailable,
+    extract_email,
+    looks_remote,
+    strip_html,
+)
 from jobdeck.sources.jooble import JoobleSource
 
 BA_SEARCH = {
@@ -343,3 +358,39 @@ def test_extract_email_and_remote_markers():
     assert extract_email("kein kontakt") == ""
     assert looks_remote("Python Dev (Home Office)")
     assert not looks_remote("Python Dev vor Ort")
+
+
+# --- text extraction: linear rewrites of the two regexes -------------------
+
+def _regex_strip_html(text: str) -> str:
+    """The implementation strip_html replaces — the equivalence contract."""
+    return re.sub(r"<[^>]+>", " ", text or "").replace("&nbsp;", " ").strip()
+
+
+def _regex_extract_email(text: str) -> str:
+    match = EMAIL_RE.search(text or "")
+    return match.group(0).rstrip(".") if match else ""
+
+
+def test_text_extraction_is_identical_to_the_regexes_it_replaces():
+    """Both functions were rewritten for a hostile-input runtime bound, NOT to
+    change behaviour: extract_email's output becomes an application recipient.
+    Fuzzed over markup, addresses and the non-ASCII characters `\\w` accepts."""
+    rng = random.Random(20260804)
+    alphabet = list("<>abc /=\"'@.-_+\n\t&;§ßüöÄ²0123456789") + [
+        "&nbsp;", "<p>", "</p>", "<a href=\"x>y\">", "<>", "<<", ">>",
+        "bewerbung@firma.de", "a.b+c@sub.firma.co.uk", "hr@firma.de.",
+    ]
+    for _ in range(20_000):
+        s = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 30)))
+        assert strip_html(s) == _regex_strip_html(s), s
+        assert extract_email(s) == _regex_extract_email(s), s
+
+
+def test_hostile_markup_and_word_runs_are_processed_in_bounded_time():
+    """A 400 KB body of '<' (424 bytes gzipped on the wire) took ~52 s of CPU
+    through the regex, freezing the whole app from the background poller."""
+    started = time.perf_counter()
+    assert strip_html("<" * MAX_PAGE_BYTES) == "<" * MAX_PAGE_BYTES
+    assert extract_email("a" * MAX_PAGE_BYTES) == ""
+    assert time.perf_counter() - started < 2.0
