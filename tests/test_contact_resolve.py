@@ -72,3 +72,12 @@ def test_no_company_domain_returns_empty():
 
 def test_no_email_on_the_page_returns_empty():
     assert cr.resolve_email("Kein Kontakt hier.", "firma.de")["email"] == ""
+
+
+def test_an_unverifiable_anchor_verifies_nothing():
+    # both sides yield no registrable domain — they must NOT match each other
+    assert cr.registrable_domain("github.io") == ""
+    assert cr.resolve_email("bewerbung@github.io", "github.io")["email"] == ""
+    assert cr.registrable_domain("firma.notarealtld") == ""
+    assert cr.resolve_email(
+        "bewerbung@evil.notarealtld", "firma.notarealtld")["email"] == ""

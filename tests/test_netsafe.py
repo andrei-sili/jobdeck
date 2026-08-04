@@ -91,3 +91,22 @@ async def test_url_gate_checks_the_host_against_dns():
 
     assert not await netsafe.url_is_safe("https://intranet.firma.de/x",
                                          resolver=private)
+
+
+async def test_a_resolver_unicode_error_fails_closed():
+    # getaddrinfo raises UnicodeError (not OSError) while IDNA-encoding a
+    # malformed label; the guard must treat it as unsafe, not propagate it
+    async def idna_reject(host):
+        raise UnicodeEncodeError("idna", host, 0, 1, "label empty")
+
+    assert await netsafe.host_is_safe("firma..de", resolver=idna_reject) is False
+
+
+async def test_a_non_ascii_host_is_refused_without_resolving():
+    # getaddrinfo would IDNA-2003-encode it while httpx sends the IDNA-2008
+    # form: the address checked would not be the address connected to
+    async def resolver(host):
+        raise AssertionError("a non-ASCII host must not be resolved")
+
+    assert await netsafe.host_is_safe("straße.de", resolver=resolver) is False
+    assert await netsafe.url_is_safe("https://straße.de/x", resolver=resolver) is False

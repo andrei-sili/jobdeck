@@ -19,6 +19,7 @@ def _client(handler):
 
 async def test_follows_a_jooble_away_link_to_the_real_ats():
     def handler(request):
+        assert request.method == "HEAD"  # politeness: never download the body
         if "/away/" in str(request.url):
             return httpx.Response(
                 302, headers={"Location": "https://join.com/companies/acme/1-dev"})
@@ -306,3 +307,103 @@ async def test_a_foreign_apply_looking_href_is_not_adopted():
         final, ch = await apply_resolve.resolve(_job(_AN_JOB), client)
     assert final == _AN_JOB
     assert ch.channel == ac.CHANNEL_BOARD and ch.vendor == "Arbeitnow"
+
+
+async def test_an_arbeitnow_posting_with_a_known_email_short_circuits():
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(200, text="x")
+
+    async with _client(handler) as client:
+        final, ch = await apply_resolve.resolve(
+            _job(_AN_JOB, "bewerbung@acme.de"), client)
+    assert ch.channel == ac.CHANNEL_DIRECT_EMAIL
+    assert final == _AN_JOB and calls == []  # a known e-mail wins, no fetch
+
+
+async def test_a_non_http_apply_href_is_never_adopted():
+    # the page is untrusted; a javascript:/data: href must never become a URL
+    # the app hands to the browser
+    poisoned = ("javascript://www.arbeitnow.com" + _AN_JOB.split(".com", 1)[1]
+                + "/apply")
+
+    def handler(request):
+        return httpx.Response(200, text=f'<a href="{poisoned}">Apply</a>')
+
+    async with _client(handler) as client:
+        final, ch = await apply_resolve.resolve(_job(_AN_JOB), client)
+    assert final == _AN_JOB
+    assert ch.channel == ac.CHANNEL_BOARD and ch.vendor == "Arbeitnow"
+
+
+async def test_an_apply_href_for_another_job_is_not_adopted():
+    # a planted anchor earlier in the document must not hijack the deep-link
+    other = "https://www.arbeitnow.com/jobs/companies/evil/other-job-1/apply"
+
+    def handler(request):
+        return httpx.Response(200, text=(
+            f'<a href="{other}">Related</a><a href="{_AN_APPLY}">Apply Now</a>'))
+
+    async with _client(handler) as client:
+        final, _ = await apply_resolve.resolve(_job(_AN_JOB), client)
+    assert final == _AN_APPLY  # this posting's own link, not the first match
+
+
+async def test_a_userinfo_disguised_apply_href_is_not_adopted():
+    disguised = ("https://evil.example.com@www.arbeitnow.com"
+                 + _AN_JOB.split(".com", 1)[1] + "/apply")
+
+    def handler(request):
+        return httpx.Response(200, text=f'<a href="{disguised}">Apply</a>')
+
+    async with _client(handler) as client:
+        final, _ = await apply_resolve.resolve(_job(_AN_JOB), client)
+    assert final == _AN_JOB
+
+
+async def test_a_lookalike_board_host_is_not_treated_as_arbeitnow():
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(200, text="x")
+
+    async with _client(handler) as client:
+        _, ch = await apply_resolve.resolve(
+            _job("https://evil-arbeitnow.com/jobs/companies/x/1"), client)
+    # not the board: it is classified as a company site, and the page fetch
+    # that follows is the company-site inspection, not the board parser
+    assert ch.channel == ac.CHANNEL_COMPANY_SITE
+
+
+async def test_a_company_site_redirect_to_a_private_host_is_never_fetched():
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.host)
+        if request.url.host == "firma.de":
+            return httpx.Response(302, headers={"Location": "http://169.254.169.254/"})
+        return httpx.Response(200, text=(
+            '<form action="https://acme.jobs.personio.de/apply"></form>'))
+
+    async with _client(handler) as client:
+        _, ch = await apply_resolve.resolve(_job("https://firma.de/karriere/1"), client)
+    assert seen == ["firma.de"]  # the metadata endpoint was never requested
+    assert ch.channel == ac.CHANNEL_COMPANY_SITE
+
+
+async def test_an_arbeitnow_page_redirect_to_a_private_host_is_never_fetched():
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.host)
+        if "arbeitnow.com" in request.url.host:
+            return httpx.Response(302, headers={"Location": "http://127.0.0.1:9/x"})
+        return httpx.Response(200, text=f'<a href="{_AN_APPLY}">Apply</a>')
+
+    async with _client(handler) as client:
+        final, ch = await apply_resolve.resolve(_job(_AN_JOB), client)
+    assert seen == ["www.arbeitnow.com"]
+    assert final == _AN_JOB and ch.channel == ac.CHANNEL_BOARD

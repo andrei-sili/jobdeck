@@ -82,6 +82,8 @@ def resolve_email(page_text: str, company: str) -> dict:
     empty = {"email": "", "dedicated": False, "generic": False}
     target = registrable_domain(company)
     if not target:
+        # an unverifiable anchor verifies NOTHING — without this, an address
+        # whose own domain is equally unverifiable would match it ('' == '')
         return empty
     seen, matched = set(), []
     for m in _EMAIL_RE.finditer(page_text or ""):
@@ -89,7 +91,8 @@ def resolve_email(page_text: str, company: str) -> dict:
         if email in seen:
             continue
         seen.add(email)
-        if registrable_domain(email.rsplit("@", 1)[-1]) == target:
+        found = registrable_domain(email.rsplit("@", 1)[-1])
+        if found and found == target:
             matched.append(email)
     if not matched:
         return empty

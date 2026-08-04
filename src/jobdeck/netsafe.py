@@ -89,18 +89,25 @@ def public_literal_host(url: str) -> str:
 
 async def host_is_safe(host: str, *, resolver=None) -> bool:
     """True when a host may be fetched: a public IP literal, or a hostname
-    whose EVERY resolved address is public. No answer / a resolver error is
-    unsafe (fail closed)."""
+    whose EVERY resolved address is public. No answer, a resolver error or a
+    host the resolver cannot even encode is unsafe (fail closed)."""
     if not host:
         return False
     ip = _literal_ip(host)
     if ip is not None:
         return ip_is_public(ip)
+    if not host.isascii():
+        # getaddrinfo IDNA-encodes to a DIFFERENT host than httpx would send,
+        # so the address checked would not be the address connected to
+        return False
     if resolver is None:
         resolver = _system_resolver
     try:
         addresses = await resolver(host)
-    except OSError:  # NXDOMAIN, timeout, no resolver — socket.gaierror is one
+    except (OSError, UnicodeError):
+        # OSError: NXDOMAIN / timeout / no resolver (socket.gaierror is one).
+        # UnicodeError: getaddrinfo IDNA-encodes the host and rejects an empty
+        # or over-long label ("firma..de") — untrusted input must not escape
         return False
     if not addresses:
         return False
@@ -124,23 +131,32 @@ async def fetch_text(client: httpx.AsyncClient, url: str, *,
                      max_bytes: int, max_redirects: int = 10) -> str:
     """GET one untrusted page body, or '' on any failure. Walks redirects
     manually so EVERY hop clears `url_is_safe` before its request fires — a
-    redirect chain must not GET a private address any more than the first
-    URL may be one."""
+    redirect chain must not GET a private address any more than the first URL
+    may be one. Streams the body and STOPS at max_bytes, so a hostile or
+    compressed-bomb response cannot be inflated into memory."""
     for _ in range(max_redirects + 1):
         if not await url_is_safe(url):
             return ""
         try:
-            resp = await client.get(url, follow_redirects=False)
-        except Exception as exc:  # network / timeout — non-fatal
+            async with client.stream("GET", url, follow_redirects=False) as resp:
+                if resp.has_redirect_location:
+                    url = str(resp.next_request.url)
+                    continue
+                if resp.status_code != 200:
+                    return ""
+                chunks, size = [], 0
+                async for chunk in resp.aiter_bytes():
+                    chunks.append(chunk)
+                    size += len(chunk)
+                    if size >= max_bytes:
+                        break
+                body = b"".join(chunks)[:max_bytes]
+                encoding = resp.charset_encoding or "utf-8"
+        except Exception as exc:  # network / timeout / malformed URL — non-fatal
             log.info("netsafe: fetch %s failed: %s", url, exc)
             return ""
-        if resp.is_redirect:
-            loc = resp.headers.get("location")
-            if not loc:
-                return ""
-            url = str(httpx.URL(url).join(loc))
-            continue
-        if resp.status_code != 200:
-            return ""
-        return resp.text[:max_bytes]
+        try:
+            return body.decode(encoding, errors="replace")
+        except LookupError:  # a page declaring a charset Python does not know
+            return body.decode("utf-8", errors="replace")
     return ""  # too many redirects

@@ -131,3 +131,13 @@ def test_hostile_or_malformed_html_never_raises():
     assert ac.detect_ats_from_page("&#x27;<><</form action=<script") is None
     assert ac.detect_ats_from_page("") is None
     assert ac.detect_ats_from_page(None) is None
+
+
+def test_a_vendor_lookalike_suffix_is_not_a_fingerprint():
+    # the suffix must be a DOMAIN boundary, not a substring
+    assert ac.detect_ats_from_page('<form action="https://notjoin.com/x"></form>') is None
+    assert ac.detect_ats_from_page(
+        '<script src="https://evil-personio.de/w.js"></script>') is None
+    # while a real vendor subdomain still matches
+    assert ac.detect_ats_from_page(
+        '<script src="https://cdn.join.com/w.js"></script>').vendor == "JOIN"

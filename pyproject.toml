@@ -34,7 +34,6 @@ dependencies = [
     # upgrades — the version suffix IS the snapshot date
     "publicsuffixlist>=1.0.2.20260726",
     "python-dotenv>=1.0",
-    "publicsuffixlist>=1.0.2.20260726",
 ]
 
 [project.urls]

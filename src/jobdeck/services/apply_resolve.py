@@ -70,14 +70,33 @@ class _ArbeitnowPage(HTMLParser):
             self.form_ids.append(values["id"])
 
 
-def _arbeitnow_apply_href(hrefs: list[str]) -> str:
-    """The page's own ``…/apply`` deep-link, '' when the layout changed."""
+def _parse_arbeitnow_page(page_html: str) -> "_ArbeitnowPage | None":
+    """Parse an untrusted job page off the event loop; None on any hiccup."""
+    parser = _ArbeitnowPage()
+    try:
+        parser.feed(page_html)
+        parser.close()
+    except Exception:  # hostile/odd HTML — no signal, keep the fallback path
+        return None
+    return parser
+
+
+def _arbeitnow_apply_href(hrefs: list[str], page_url: str) -> str:
+    """THIS posting's own ``…/apply`` deep-link, '' when the layout changed.
+
+    The href comes from an UNTRUSTED page, so it is accepted only when it is
+    an https link to the board's own host whose path is exactly this job's
+    path + '/apply' — a planted anchor earlier in the document (employer-
+    supplied description HTML, a 'related jobs' block) must not win, and a
+    non-http scheme must never become a URL the app opens."""
+    want = urlsplit(page_url).path.rstrip("/") + "/apply"
     for href in hrefs:
         parts = urlsplit(href)
         host = (parts.hostname or "").lower()
-        if (host == "www.arbeitnow.com" or host == "arbeitnow.com") \
-                and parts.path.startswith("/jobs/") \
-                and parts.path.rstrip("/").endswith("/apply"):
+        if (parts.scheme in ("http", "https")
+                and host in ("www.arbeitnow.com", "arbeitnow.com")
+                and not parts.username and not parts.password
+                and parts.path.rstrip("/") == want):
             return href
     return ""
 
@@ -97,13 +116,10 @@ async def _resolve_arbeitnow(
         client, url, max_bytes=_MAX_BYTES, max_redirects=_MAX_REDIRECTS)
     if not page:
         return None
-    parser = _ArbeitnowPage()
-    try:
-        parser.feed(page)
-        parser.close()
-    except Exception:  # hostile/odd HTML — no signal, keep the fallback path
+    parser = await asyncio.to_thread(_parse_arbeitnow_page, page)
+    if parser is None:
         return None
-    apply_href = _arbeitnow_apply_href(parser.hrefs)
+    apply_href = _arbeitnow_apply_href(parser.hrefs, url)
     if "form_job_application" in parser.form_ids:
         return apply_href or url, apply_channel.ApplyChannel(
             apply_channel.CHANNEL_ATS, "JOIN")
@@ -148,7 +164,8 @@ async def _inspect_page(
         client, url, max_bytes=_MAX_BYTES, max_redirects=_MAX_REDIRECTS)
     if not page:
         return None
-    return apply_channel.detect_ats_from_page(page)
+    # parsing untrusted HTML is CPU-bound; keep it off the NiceGUI event loop
+    return await asyncio.to_thread(apply_channel.detect_ats_from_page, page)
 
 
 async def resolve(
