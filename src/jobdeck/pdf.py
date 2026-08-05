@@ -8,6 +8,7 @@ per German convention, ideally under 5 MB.
 """
 
 import dataclasses
+import io
 import logging
 import pathlib
 import re
@@ -38,6 +39,14 @@ MIN_COMPRESS_PIXELS = 200_000
 # Only downsample when an image is meaningfully over the target, so a scan
 # already produced at the target dpi is left byte-identical.
 DPI_TOLERANCE = 1.05
+# Re-encode only when the JPEG is a clear win. At parity the original wins:
+# it is the bytes the user's own document already carries.
+MAX_WORTHWHILE_RATIO = 0.9
+# 4:4:4. Pillow defaults to 4:2:0, which halves the COLOUR resolution — on a
+# certificate that is the red Stempel and the blue signature bleeding at their
+# edges. Full chroma costs 153 KB on the real Mappe and leaves it inside every
+# budget, so the legal documents keep their colour detail.
+JPEG_SUBSAMPLING = 0
 
 
 class PdfError(RuntimeError):
@@ -160,16 +169,16 @@ def page_count(pdf_path: pathlib.Path) -> int:
 
 
 def _page_size_inches(page) -> tuple[float, float]:
-    """Page width/height in inches, accounting for /Rotate."""
-    width = float(page.mediabox.width) / 72.0
-    height = float(page.mediabox.height) / 72.0
-    try:
-        rotation = int(page.get("/Rotate", 0) or 0) % 360
-    except (TypeError, ValueError):
-        rotation = 0
-    if rotation in (90, 270):
-        width, height = height, width
-    return width, height
+    """Page width/height in inches.
+
+    /Rotate is deliberately NOT applied. It is a display instruction, while
+    the mediabox and the matrix an image is drawn with both live in unrotated
+    user space, so an image's pixel width maps to the mediabox width either
+    way. Swapping the axes here read a true 300 dpi scan as 424 dpi, and at
+    the floor rung that would have downsampled a 200 dpi scan to 141 —
+    through the one limit this feature promises never to pass.
+    """
+    return float(page.mediabox.width) / 72.0, float(page.mediabox.height) / 72.0
 
 
 def _effective_dpi(px_w: int, px_h: int, page_w_in: float, page_h_in: float) -> float:
@@ -186,12 +195,35 @@ def _effective_dpi(px_w: int, px_h: int, page_w_in: float, page_h_in: float) -> 
     return max(px_w / page_w_in, px_h / page_h_in)
 
 
+def _colourspace_is_plain(colourspace) -> bool:
+    """True for colourspaces JPEG reproduces faithfully: grey and RGB.
+
+    /Indexed is excluded even though pypdf hands back a plain RGB image for
+    it — the palette is what makes those files small and their edges sharp,
+    and JPEG destroys both. CMYK, /Separation and /DeviceN are excluded
+    because the round-trip changes the colour numbers a printer would use.
+    """
+    resolved = (colourspace.get_object()
+                if hasattr(colourspace, "get_object") else colourspace)
+    if isinstance(resolved, list):
+        if not resolved or str(resolved[0]) != "/ICCBased":
+            return False
+        try:  # an ICC profile still wraps grey (N=1), RGB (3) or CMYK (4)
+            return int(resolved[1].get_object().get("/N", 0)) in (1, 3)
+        except Exception:  # noqa: BLE001 - malformed profile, treat as unknown
+            return False
+    return str(resolved) in ("/DeviceRGB", "/DeviceGray", "/CalRGB", "/CalGray")
+
+
 def _skip_reason(image_obj, px_w: int, px_h: int, dpi: float, max_dpi: int) -> str:
     """Why this image must not be re-encoded, or "" if it may be.
 
     Every rule here answers "would re-encoding change what the reader sees,
-    for a saving that does not justify it?" — decided from the object
-    dictionary alone, so a skipped image is never even decoded.
+    for a saving that does not justify it?" — and answers it from the object
+    dictionary, which is the only description of the image that is not
+    already an interpretation. The decoded image is a poor screen: pypdf
+    hands back mode "L" for a 16-bit scan it has silently truncated, and
+    mode "RGB" for an /Indexed one.
     """
     if "/SMask" in image_obj or "/Mask" in image_obj:
         return "transparency"  # JPEG carries no alpha channel
@@ -199,6 +231,13 @@ def _skip_reason(image_obj, px_w: int, px_h: int, dpi: float, max_dpi: int) -> s
         return "stencil"
     if "/Decode" in image_obj:
         return "custom decode array"  # re-encoding would drop the inversion
+    try:
+        if int(image_obj.get("/BitsPerComponent", 8) or 8) != 8:
+            return "not 8-bit per component"
+    except (TypeError, ValueError):
+        return "unreadable bit depth"
+    if not _colourspace_is_plain(image_obj.get("/ColorSpace")):
+        return "colourspace JPEG cannot reproduce"
     if px_w * px_h < MIN_COMPRESS_PIXELS:
         return "small"
     filters = image_obj.get("/Filter")
@@ -248,14 +287,28 @@ def compress_pdf(src: pathlib.Path, out: pathlib.Path, *,
             try:
                 pil = image.image
                 if pil is None or pil.mode not in ("RGB", "L"):
-                    continue  # CMYK, palette and 1-bit survive re-encoding badly
+                    continue  # a decode the dictionary screen did not predict
+                before = len(image.data)
                 if dpi > max_dpi * DPI_TOLERANCE:
                     scale = max_dpi / dpi
                     pil = pil.resize(
-                        (max(1, round(px_w * scale)), max(1, round(px_h * scale))),
+                        (max(1, round(pil.width * scale)),
+                         max(1, round(pil.height * scale))),
                         Image.Resampling.LANCZOS,
                     )
-                image.replace(pil, quality=quality, optimize=True)
+                # Encode once to LOOK, before committing. JPEG is not a
+                # universal win: a line-art or text scan is exactly what Flate
+                # compresses well and JPEG compresses badly — one measured
+                # here grew 17.9x AND gained ringing on every edge. The
+                # file-level "never bigger" guard cannot catch that, because a
+                # page that doubles is invisible next to three that shrink.
+                probe = io.BytesIO()
+                pil.save(probe, "JPEG", quality=quality, optimize=True,
+                         subsampling=JPEG_SUBSAMPLING)
+                if len(probe.getvalue()) > before * MAX_WORTHWHILE_RATIO:
+                    continue
+                image.replace(pil, quality=quality, optimize=True,
+                              subsampling=JPEG_SUBSAMPLING)
             except Exception as exc:  # noqa: BLE001 - any decode/encode failure
                 log.debug("leaving image %s untouched: %s", image.name, exc)
                 continue

@@ -1,9 +1,8 @@
-import io
 import pathlib
 
 import pytest
 from pypdf import PdfReader, PdfWriter
-from pypdf.generic import NameObject, NumberObject
+from pypdf.generic import ArrayObject, ByteStringObject, NameObject, NumberObject
 
 from jobdeck import pdf
 
@@ -165,6 +164,64 @@ def test_compress_pdf_refuses_a_colour_key_masked_image(tmp_path, image_pdf, noi
     assert _payloads(out) == _payloads(src)
 
 
+def test_compress_pdf_refuses_an_image_jpeg_would_make_bigger(
+    tmp_path, image_pdf, line_art_image
+):
+    """JPEG is not a universal win. Line art and text scans are exactly what
+    Flate stores well: one measured here grew 17.9x AND gained ringing on
+    every edge. The file-level guard cannot see it — a page that doubles is
+    invisible beside three that shrink — so the refusal is per image."""
+    src = image_pdf(tmp_path / "src.pdf",
+                    [{"image": line_art_image(1600, 1200), "lossless": True}])
+    out = tmp_path / "out.pdf"
+    assert pdf.compress_pdf(src, out, max_dpi=300, quality=85) == 0
+    assert _payloads(out) == _payloads(src)
+    assert out.stat().st_size <= src.stat().st_size
+
+
+def test_compress_pdf_screens_the_dictionary_not_the_decoded_mode(
+    tmp_path, image_pdf, noisy_image
+):
+    """pypdf reports a 16-bit scan as a mangled 8-bit "L" and an /Indexed one
+    as plain "RGB", so a check on the decoded image lets both through. The
+    palette is what keeps an /Indexed file small and its edges sharp; the
+    16-bit samples are already wrong by the time Pillow sees them."""
+    palette = ArrayObject([
+        NameObject("/Indexed"), NameObject("/DeviceRGB"),
+        NumberObject(255), ByteStringObject(bytes(range(256)) * 3),
+    ])
+    specs = [
+        {"image": noisy_image(1200, 900), "bits": 16,
+         "colourspace": NameObject("/DeviceGray")},
+        {"image": noisy_image(1200, 900), "colourspace": palette},
+        {"image": noisy_image(1200, 900), "colourspace": NameObject("/DeviceCMYK")},
+    ]
+    src = image_pdf(tmp_path / "src.pdf", specs)
+    out = tmp_path / "out.pdf"
+    assert pdf.compress_pdf(src, out, max_dpi=200, quality=80) == 0
+    assert _payloads(out) == _payloads(src)
+
+
+def test_full_chroma_is_kept_for_documents_with_stamps_and_seals(
+    tmp_path, image_pdf, noisy_image
+):
+    """Pillow defaults to 4:2:0, which halves the COLOUR resolution — on a
+    certificate that is the red Stempel and the blue signature bleeding at
+    their edges. Full chroma costs 153 KB on the real Mappe and leaves it
+    inside every budget."""
+    assert pdf.JPEG_SUBSAMPLING == 0  # 4:4:4
+    src = image_pdf(tmp_path / "src.pdf",
+                    [{"image": noisy_image(1200, 900), "lossless": True}])
+    out = tmp_path / "out.pdf"
+    pdf.compress_pdf(src, out, max_dpi=300, quality=85)
+
+    subsampled = tmp_path / "subsampled.jpg"
+    PdfReader(str(out)).pages[0].images[0].image.save(
+        subsampled, "JPEG", quality=85, subsampling=2)
+    written = PdfReader(str(out)).pages[0].images[0].data
+    assert len(written) > subsampled.stat().st_size  # full chroma really costs
+
+
 def test_compress_pdf_merges_images_that_became_identical(
     tmp_path, image_pdf, noisy_image
 ):
@@ -315,18 +372,31 @@ def test_compress_pdf_cleans_up_its_temporary_file(tmp_path, image_pdf, noisy_im
     assert not out.with_suffix(".pdf.part").exists()
 
 
-def test_effective_dpi_accounts_for_page_rotation():
-    # A4 portrait carrying a landscape scan, rotated for display
-    assert pdf._effective_dpi(2480, 3508, 8.27, 11.69) == pytest.approx(300, abs=1)
-    assert pdf._page_size_inches(
-        PdfReader(io.BytesIO(_rotated_a4())).pages[0]
-    ) == pytest.approx((11.69, 8.27), abs=0.01)
+def test_display_rotation_does_not_change_the_measured_resolution(
+    tmp_path, image_pdf, noisy_image
+):
+    """/Rotate turns the page for the READER; the mediabox and the matrix the
+    image is drawn with stay in unrotated space. Swapping the axes read a
+    true 300 dpi scan as 424 and, at the floor rung, would have downsampled a
+    200 dpi scan to 141 — through the limit this feature promises to hold."""
+    scan = noisy_image(1200, 900)
+    upright = image_pdf(tmp_path / "upright.pdf", [{"image": scan}], dpi=300.0)
+    turned = image_pdf(tmp_path / "turned.pdf", [{"image": scan}], dpi=300.0)
+    writer = PdfWriter(clone_from=str(turned))
+    writer.pages[0][NameObject("/Rotate")] = NumberObject(90)
+    with turned.open("wb") as fh:
+        writer.write(fh)
 
+    def measured(path):
+        page = PdfReader(str(path)).pages[0]
+        w_in, h_in = pdf._page_size_inches(page)
+        return pdf._effective_dpi(1200, 900, w_in, h_in)
 
-def _rotated_a4() -> bytes:
-    writer = PdfWriter()
-    page = writer.add_blank_page(width=595, height=842)
-    page[NameObject("/Rotate")] = NumberObject(90)
-    buf = io.BytesIO()
-    writer.write(buf)
-    return buf.getvalue()
+    assert measured(upright) == pytest.approx(300, abs=1)
+    assert measured(turned) == pytest.approx(measured(upright), abs=0.01)
+
+    # …and it survives the whole pipeline: a 300 dpi scan on a rotated page
+    # is NOT downsampled when the budget is 300 dpi.
+    out = tmp_path / "out.pdf"
+    pdf.compress_pdf(turned, out, max_dpi=300, quality=85)
+    assert PdfReader(str(out)).pages[0].images[0].image.size == (1200, 900)

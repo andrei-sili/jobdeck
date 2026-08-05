@@ -4,7 +4,7 @@ import random
 import zlib
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 from pypdf import PdfWriter
 from pypdf.generic import (
     ArrayObject,
@@ -77,9 +77,32 @@ def _noisy(width: int, height: int) -> Image.Image:
     return image
 
 
+def _line_art(width: int, height: int) -> Image.Image:
+    """Flat colour and hard edges — what Flate stores in a few KB and JPEG
+    stores badly. A scanned black-and-white certificate looks like this."""
+    image = Image.new("RGB", (width, height), "white")
+    drawing = ImageDraw.Draw(image)
+    for y in range(0, height, 40):
+        drawing.line((0, y, width, y), fill="black", width=3)
+    return image
+
+
 def _image_xobject(writer: PdfWriter, image: Image.Image, *, lossless: bool,
-                   smask: bool = False) -> EncodedStreamObject:
-    if lossless:
+                   smask: bool = False, bits: int = 8,
+                   colourspace=None) -> EncodedStreamObject:
+    family = str(colourspace[0] if isinstance(colourspace, list) else colourspace)
+    if bits != 8:
+        # 16-bit samples: two bytes per pixel, which pypdf hands back as a
+        # mangled 8-bit "L"
+        data = zlib.compress(image.convert("L").tobytes() * 2, 6)
+        filt = NameObject("/FlateDecode")
+    elif family == "/DeviceCMYK":
+        data = zlib.compress(image.convert("CMYK").tobytes(), 6)
+        filt = NameObject("/FlateDecode")
+    elif family == "/Indexed":
+        data = zlib.compress(image.convert("L").tobytes(), 6)  # one index/pixel
+        filt = NameObject("/FlateDecode")
+    elif lossless:
         data = zlib.compress(image.tobytes(), 9)
         filt = NameObject("/FlateDecode")
     else:
@@ -92,8 +115,8 @@ def _image_xobject(writer: PdfWriter, image: Image.Image, *, lossless: bool,
         NameObject("/Subtype"): NameObject("/Image"),
         NameObject("/Width"): NumberObject(image.width),
         NameObject("/Height"): NumberObject(image.height),
-        NameObject("/ColorSpace"): NameObject("/DeviceRGB"),
-        NameObject("/BitsPerComponent"): NumberObject(8),
+        NameObject("/ColorSpace"): colourspace or NameObject("/DeviceRGB"),
+        NameObject("/BitsPerComponent"): NumberObject(bits),
         NameObject("/Filter"): filt,
     })
     stream._data = data
@@ -126,7 +149,9 @@ def _pdf_with_images(path: pathlib.Path, specs: list[dict], *,
     for index, spec in enumerate(specs):
         stream = _image_xobject(writer, spec["image"],
                                 lossless=spec.get("lossless", True),
-                                smask=spec.get("smask", False))
+                                smask=spec.get("smask", False),
+                                bits=spec.get("bits", 8),
+                                colourspace=spec.get("colourspace"))
         if spec.get("image_mask"):
             stream[NameObject("/ImageMask")] = BooleanObject(True)
         if spec.get("decode"):
@@ -165,3 +190,8 @@ def image_pdf():
 @pytest.fixture()
 def noisy_image():
     return _noisy
+
+
+@pytest.fixture()
+def line_art_image():
+    return _line_art
