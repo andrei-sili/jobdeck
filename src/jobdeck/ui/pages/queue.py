@@ -47,6 +47,21 @@ def _send_status():
         }
 
 
+def _mappe_summary(result: dict) -> str:
+    """Confirmation line for a finished Mappe.
+
+    It names the before/after size when the Mappe was shrunk: the attachment
+    is the one deliverability variable the user cannot otherwise see, and it
+    is the leading suspect whenever an application lands in spam.
+    """
+    size_mb = result["size_bytes"] / 1024 / 1024
+    shrunk = ""
+    if result["compression"]:
+        before_mb = result["size_before_bytes"] / 1024 / 1024
+        shrunk = f" (compressed from {before_mb:.1f} MB)"
+    return f"Mappe ready: {result['pages']} pages, {size_mb:.1f} MB{shrunk} ✓"
+
+
 def _save_draft(job_id: int, values: dict, clear_pdf: bool):
     """Persist editor changes. Returns (draft, error).
 
@@ -311,9 +326,7 @@ async def queue_page():
                         return
                     current["pdf_path"] = result["pdf_path"]
                     pdf_label.set_text(f"Mappe: {result['pdf_path']}")
-                    size_mb = result["size_bytes"] / 1024 / 1024
-                    ui.notify(f"Mappe ready: {result['pages']} pages, "
-                              f"{size_mb:.1f} MB ✓", type="positive")
+                    ui.notify(_mappe_summary(result), type="positive")
                     if result["warning"]:
                         ui.notify(result["warning"], type="warning",
                                   multi_line=True)

@@ -49,7 +49,7 @@ def _error(message: str) -> dict:
             "compression": "", "anlagen": []}
 
 
-def _target_mb(raw: str, fallback: float) -> float:
+def target_mb_setting(raw: str, fallback: float) -> float:
     try:
         value = float(raw)
     except (TypeError, ValueError):
@@ -66,9 +66,9 @@ def _target_bytes(settings: dict, channel: str) -> int:
     for that send.
     """
     if channel in PORTAL_CHANNELS:
-        mb = _target_mb(settings["target_portal_mb"], DEFAULT_PORTAL_TARGET_MB)
+        mb = target_mb_setting(settings["target_portal_mb"], DEFAULT_PORTAL_TARGET_MB)
     else:
-        mb = _target_mb(settings["target_mb"], DEFAULT_TARGET_MB)
+        mb = target_mb_setting(settings["target_mb"], DEFAULT_TARGET_MB)
     return int(mb * 1024 * 1024)
 
 
