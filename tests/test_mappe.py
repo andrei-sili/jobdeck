@@ -63,6 +63,108 @@ def _setup(con, data_dir, with_anlagen=True, **setting_overrides):
     return job_id
 
 
+def _heavy_anlage(image_pdf, noisy_image, anlagen_dir: pathlib.Path,
+                  name: str = "03_scan.pdf") -> pathlib.Path:
+    """An Anlage whose scan is stored losslessly — the shape that actually
+    costs megabytes in the real Mappe."""
+    return image_pdf(anlagen_dir / name,
+                     [{"image": noisy_image(1400, 1000), "lossless": True}])
+
+
+async def test_mappe_compresses_to_the_channel_budget(
+    con, data_dir, image_pdf, noisy_image
+):
+    job_id = _setup(con, data_dir)
+    _heavy_anlage(image_pdf, noisy_image, data_dir / "anlagen")
+    db.set_setting(con, "mappe_target_mb", "0.5")
+    con.commit()
+
+    result = await mappe.create_mappe(job_id)
+    assert result["ok"], result["error"]
+    assert result["size_bytes"] <= 0.5 * 1024 * 1024
+    assert result["size_before_bytes"] > result["size_bytes"]
+    assert "→" in result["compression"]
+    assert result["warning"] == ""
+    assert result["pages"] == 5
+
+
+async def test_mappe_leaves_the_anlagen_folder_byte_identical(
+    con, data_dir, image_pdf, noisy_image
+):
+    """The Anlagen are the user's curated originals. Compression happens on
+    the merged copy in a temp dir; the source files are only ever read."""
+    job_id = _setup(con, data_dir)
+    anlagen_dir = data_dir / "anlagen"
+    _heavy_anlage(image_pdf, noisy_image, anlagen_dir)
+    db.set_setting(con, "mappe_target_mb", "0.5")
+    con.commit()
+    before = {p.name: (p.read_bytes(), p.stat().st_mtime_ns)
+              for p in sorted(anlagen_dir.iterdir())}
+
+    assert (await mappe.create_mappe(job_id))["ok"]
+
+    after = {p.name: (p.read_bytes(), p.stat().st_mtime_ns)
+             for p in sorted(anlagen_dir.iterdir())}
+    assert after == before
+
+
+async def test_mappe_skips_compression_when_it_is_switched_off(
+    con, data_dir, image_pdf, noisy_image
+):
+    job_id = _setup(con, data_dir)
+    _heavy_anlage(image_pdf, noisy_image, data_dir / "anlagen")
+    db.set_setting(con, "mappe_target_mb", "0.5")
+    db.set_setting(con, "mappe_compress", "0")
+    con.commit()
+
+    result = await mappe.create_mappe(job_id)
+    assert result["ok"], result["error"]
+    assert result["compression"] == ""
+    assert result["size_bytes"] == result["size_before_bytes"]
+    assert result["size_bytes"] > 0.5 * 1024 * 1024
+    assert "over the 0.5 MB target" in result["warning"]
+
+
+async def test_mappe_warns_when_the_quality_floor_blocks_the_target(
+    con, data_dir, image_pdf, noisy_image
+):
+    """An unreachable target must not silently ship an illegible Zeugnis."""
+    job_id = _setup(con, data_dir)
+    _heavy_anlage(image_pdf, noisy_image, data_dir / "anlagen")
+    db.set_setting(con, "mappe_target_mb", "0.001")
+    con.commit()
+
+    result = await mappe.create_mappe(job_id)
+    assert result["ok"], result["error"]
+    assert "quality floor" in result["warning"]
+    assert result["size_bytes"] > 0.001 * 1024 * 1024
+
+
+async def test_portal_channels_get_the_tighter_budget(con, data_dir):
+    settings = {"target_mb": "3", "target_portal_mb": "2"}
+    assert mappe._target_bytes(settings, "ats_form") == 2 * 1024 * 1024
+    assert mappe._target_bytes(settings, "board_apply") == 2 * 1024 * 1024
+    assert mappe._target_bytes(settings, "company_site") == 2 * 1024 * 1024
+    # e-mail and an unresolved channel keep the roomier budget: degrading a
+    # scan on a guess is silent, an oversized upload fails in front of the user
+    assert mappe._target_bytes(settings, "direct_email") == 3 * 1024 * 1024
+    assert mappe._target_bytes(settings, "unknown") == 3 * 1024 * 1024
+    assert mappe._target_bytes(settings, "") == 3 * 1024 * 1024
+
+
+async def test_unset_or_broken_size_budgets_fall_back_to_the_defaults(
+    con, data_dir
+):
+    for raw in ("", "   ", "abc", "0", "-4", None):
+        settings = {"target_mb": raw, "target_portal_mb": raw}
+        assert mappe._target_bytes(settings, "direct_email") == int(
+            mappe.DEFAULT_TARGET_MB * 1024 * 1024
+        )
+        assert mappe._target_bytes(settings, "ats_form") == int(
+            mappe.DEFAULT_PORTAL_TARGET_MB * 1024 * 1024
+        )
+
+
 async def test_mappe_renders_merges_and_persists(con, data_dir):
     job_id = _setup(con, data_dir)
 

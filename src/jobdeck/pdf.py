@@ -271,6 +271,20 @@ def compress_pdf(src: pathlib.Path, out: pathlib.Path, *,
     return recoded
 
 
+def install_pdf(src: pathlib.Path, dst: pathlib.Path) -> None:
+    """Copy a finished PDF to its finished location, atomically.
+
+    The draft's stored pdf_path may already point at `dst`, so a torn
+    half-copy there is a broken attachment, not merely a failed build."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp_dst = dst.with_suffix(".pdf.part")
+    try:
+        shutil.copyfile(src, tmp_dst)
+        tmp_dst.replace(dst)
+    finally:
+        tmp_dst.unlink(missing_ok=True)
+
+
 def compress_to_target(src: pathlib.Path, out: pathlib.Path,
                        target_bytes: int) -> Compression:
     """Fit `src` into `target_bytes`, never going below the quality floor.
@@ -285,7 +299,7 @@ def compress_to_target(src: pathlib.Path, out: pathlib.Path,
     """
     original = src.stat().st_size
     if original <= target_bytes:
-        shutil.copyfile(src, out)
+        install_pdf(src, out)
         return Compression(size_bytes=original, original_bytes=original)
 
     best: Compression | None = None
@@ -304,7 +318,7 @@ def compress_to_target(src: pathlib.Path, out: pathlib.Path,
 
     # Nothing gained (or nothing ran): the original is the better artefact.
     if best is None or best.size_bytes >= original:
-        shutil.copyfile(src, out)
+        install_pdf(src, out)
         return Compression(size_bytes=original, original_bytes=original,
                            met_target=original <= target_bytes)
     return best

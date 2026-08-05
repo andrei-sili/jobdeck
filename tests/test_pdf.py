@@ -1,20 +1,9 @@
 import io
 import pathlib
-import random
-import zlib
 
 import pytest
-from PIL import Image
 from pypdf import PdfReader, PdfWriter
-from pypdf.generic import (
-    ArrayObject,
-    BooleanObject,
-    DecodedStreamObject,
-    DictionaryObject,
-    EncodedStreamObject,
-    NameObject,
-    NumberObject,
-)
+from pypdf.generic import NameObject, NumberObject
 
 from jobdeck import pdf
 
@@ -23,92 +12,6 @@ def _blank_pdf(path: pathlib.Path, pages: int = 1) -> pathlib.Path:
     writer = PdfWriter()
     for _ in range(pages):
         writer.add_blank_page(width=595, height=842)  # A4 points
-    with path.open("wb") as fh:
-        writer.write(fh)
-    return path
-
-
-def _noisy(width: int, height: int) -> Image.Image:
-    """Incompressible content — a smooth image would shrink under Flate and
-    make a 'compression saved bytes' assertion pass for the wrong reason."""
-    rng = random.Random(7)
-    image = Image.new("RGB", (width, height))
-    image.putdata([(rng.randrange(256),) * 3 for _ in range(width * height)])
-    return image
-
-
-def _image_xobject(writer: PdfWriter, image: Image.Image, *, lossless: bool,
-                   smask: bool = False) -> EncodedStreamObject:
-    if lossless:
-        data = zlib.compress(image.tobytes(), 9)
-        filt = NameObject("/FlateDecode")
-    else:
-        buf = io.BytesIO()
-        image.save(buf, "JPEG", quality=95)
-        data, filt = buf.getvalue(), NameObject("/DCTDecode")
-    stream = EncodedStreamObject()
-    stream.update({
-        NameObject("/Type"): NameObject("/XObject"),
-        NameObject("/Subtype"): NameObject("/Image"),
-        NameObject("/Width"): NumberObject(image.width),
-        NameObject("/Height"): NumberObject(image.height),
-        NameObject("/ColorSpace"): NameObject("/DeviceRGB"),
-        NameObject("/BitsPerComponent"): NumberObject(8),
-        NameObject("/Filter"): filt,
-    })
-    stream._data = data
-    if smask:
-        mask = EncodedStreamObject()
-        mask.update({
-            NameObject("/Type"): NameObject("/XObject"),
-            NameObject("/Subtype"): NameObject("/Image"),
-            NameObject("/Width"): NumberObject(image.width),
-            NameObject("/Height"): NumberObject(image.height),
-            NameObject("/ColorSpace"): NameObject("/DeviceGray"),
-            NameObject("/BitsPerComponent"): NumberObject(8),
-            NameObject("/Filter"): NameObject("/FlateDecode"),
-        })
-        mask._data = zlib.compress(b"\xff" * (image.width * image.height), 9)
-        stream[NameObject("/SMask")] = writer._add_object(mask)
-    return stream
-
-
-def _pdf_with_images(path: pathlib.Path, specs: list[dict], *,
-                     dpi: float = 300.0, pages: int = 1) -> pathlib.Path:
-    """Pages carrying each spec's image, sized so the FIRST image sits at
-    exactly `dpi` when it covers the page. With `pages` > 1 every page draws
-    the very same image objects, as the CV photo does on Deckblatt and
-    Lebenslauf."""
-    writer = PdfWriter()
-    first = specs[0]["image"]
-    width, height = first.width / dpi * 72, first.height / dpi * 72
-    refs, draw = [], []
-    for index, spec in enumerate(specs):
-        stream = _image_xobject(writer, spec["image"],
-                                lossless=spec.get("lossless", True),
-                                smask=spec.get("smask", False))
-        if spec.get("image_mask"):
-            stream[NameObject("/ImageMask")] = BooleanObject(True)
-        if spec.get("decode"):
-            stream[NameObject("/Decode")] = ArrayObject(
-                [NumberObject(1), NumberObject(0)] * 3
-            )
-        if spec.get("colour_key_mask"):
-            stream[NameObject("/Mask")] = ArrayObject(
-                [NumberObject(0), NumberObject(10)] * 3
-            )
-        refs.append((f"/Im{index}", writer._add_object(stream)))
-        draw.append(f"q {width} 0 0 {height} 0 0 cm /Im{index} Do Q")
-    content = DecodedStreamObject()
-    content.set_data("\n".join(draw).encode("ascii"))
-    content_ref = writer._add_object(content)
-    for _ in range(pages):
-        page = writer.add_blank_page(width=width, height=height)
-        resources = page.setdefault(NameObject("/Resources"), DictionaryObject())
-        xobjects = resources.setdefault(NameObject("/XObject"), DictionaryObject())
-        for name, ref in refs:
-            xobjects[NameObject(name)] = ref
-        page[NameObject("/Contents")] = content_ref
     with path.open("wb") as fh:
         writer.write(fh)
     return path
@@ -196,9 +99,9 @@ def test_collect_anlagen_sorted_and_pdf_only(tmp_path):
         pdf.collect_anlagen(str(tmp_path / "missing"))
 
 
-def test_compress_pdf_recodes_a_lossless_scan_and_keeps_the_page(tmp_path):
-    src = _pdf_with_images(tmp_path / "src.pdf",
-                           [{"image": _noisy(1200, 900), "lossless": True}])
+def test_compress_pdf_recodes_a_lossless_scan_and_keeps_the_page(tmp_path, image_pdf, noisy_image):
+    src = image_pdf(tmp_path / "src.pdf",
+                    [{"image": noisy_image(1200, 900), "lossless": True}])
     out = tmp_path / "out.pdf"
     assert pdf.compress_pdf(src, out, max_dpi=300, quality=85) == 1
     assert out.stat().st_size < src.stat().st_size / 2
@@ -209,20 +112,22 @@ def test_compress_pdf_recodes_a_lossless_scan_and_keeps_the_page(tmp_path):
     assert str(image.indirect_reference.get_object()["/Filter"]) == "/DCTDecode"
 
 
-def test_compress_pdf_leaves_an_already_compressed_scan_byte_identical(tmp_path):
+def test_compress_pdf_leaves_an_already_compressed_scan_byte_identical(
+    tmp_path, image_pdf, noisy_image
+):
     """The rule that pays for itself: a second JPEG pass over a scan already
     within budget costs generation loss and bought 3-8% on the real Mappe."""
-    src = _pdf_with_images(tmp_path / "src.pdf",
-                           [{"image": _noisy(1200, 900), "lossless": False}],
+    src = image_pdf(tmp_path / "src.pdf",
+                    [{"image": noisy_image(1200, 900), "lossless": False}],
                            dpi=200.0)
     out = tmp_path / "out.pdf"
     assert pdf.compress_pdf(src, out, max_dpi=300, quality=85) == 0
     assert _payloads(out) == _payloads(src)
 
 
-def test_compress_pdf_downsamples_a_scan_above_the_target_dpi(tmp_path):
-    src = _pdf_with_images(tmp_path / "src.pdf",
-                           [{"image": _noisy(1200, 900), "lossless": False}],
+def test_compress_pdf_downsamples_a_scan_above_the_target_dpi(tmp_path, image_pdf, noisy_image):
+    src = image_pdf(tmp_path / "src.pdf",
+                    [{"image": noisy_image(1200, 900), "lossless": False}],
                            dpi=600.0)
     out = tmp_path / "out.pdf"
     assert pdf.compress_pdf(src, out, max_dpi=200, quality=80) == 1
@@ -230,28 +135,30 @@ def test_compress_pdf_downsamples_a_scan_above_the_target_dpi(tmp_path):
     assert PdfReader(str(out)).pages[0].images[0].image.size == (400, 300)
 
 
-def test_compress_pdf_refuses_images_it_cannot_re_encode_faithfully(tmp_path):
+def test_compress_pdf_refuses_images_it_cannot_re_encode_faithfully(
+    tmp_path, image_pdf, noisy_image
+):
     """Transparency, stencils and /Decode inversions survive a JPEG pass
     badly, and a logo is too small to be worth the loss."""
     specs = [
-        {"image": _noisy(1200, 900), "lossless": True, "smask": True},
-        {"image": _noisy(1200, 900), "lossless": True, "image_mask": True},
-        {"image": _noisy(1200, 900), "lossless": True, "decode": True},
-        {"image": _noisy(300, 300), "lossless": True},
+        {"image": noisy_image(1200, 900), "lossless": True, "smask": True},
+        {"image": noisy_image(1200, 900), "lossless": True, "image_mask": True},
+        {"image": noisy_image(1200, 900), "lossless": True, "decode": True},
+        {"image": noisy_image(300, 300), "lossless": True},
     ]
-    src = _pdf_with_images(tmp_path / "src.pdf", specs)
+    src = image_pdf(tmp_path / "src.pdf", specs)
     out = tmp_path / "out.pdf"
     assert pdf.compress_pdf(src, out, max_dpi=200, quality=80) == 0
     assert _payloads(out) == _payloads(src)
 
 
-def test_compress_pdf_refuses_a_colour_key_masked_image(tmp_path):
+def test_compress_pdf_refuses_a_colour_key_masked_image(tmp_path, image_pdf, noisy_image):
     """A /Mask array leaves the image itself plain RGB, so the decoded mode
     cannot catch it: re-encoding would drop the mask and paint over whatever
     the mask was hiding."""
-    src = _pdf_with_images(
+    src = image_pdf(
         tmp_path / "src.pdf",
-        [{"image": _noisy(1200, 900), "lossless": True, "colour_key_mask": True}],
+        [{"image": noisy_image(1200, 900), "lossless": True, "colour_key_mask": True}],
     )
     out = tmp_path / "out.pdf"
     assert pdf.compress_pdf(src, out, max_dpi=200, quality=80) == 0
@@ -270,11 +177,11 @@ def test_the_compression_ladder_never_offers_a_rung_below_the_floor():
     )  # best quality first, so the gentlest rung that fits wins
 
 
-def test_compress_pdf_shares_one_object_drawn_on_several_pages(tmp_path):
+def test_compress_pdf_shares_one_object_drawn_on_several_pages(tmp_path, image_pdf, noisy_image):
     """The CV photo sits on the Deckblatt AND the Lebenslauf as one object —
     it must be re-encoded once, not re-encoded on top of itself."""
-    src = _pdf_with_images(tmp_path / "src.pdf",
-                           [{"image": _noisy(1200, 900), "lossless": True}],
+    src = image_pdf(tmp_path / "src.pdf",
+                    [{"image": noisy_image(1200, 900), "lossless": True}],
                            pages=2)
     out = tmp_path / "out.pdf"
     assert pdf.compress_pdf(src, out, max_dpi=300, quality=85) == 1
@@ -285,10 +192,10 @@ def test_compress_pdf_shares_one_object_drawn_on_several_pages(tmp_path):
 
 
 def test_compress_to_target_passes_a_file_already_in_budget_through_untouched(
-    tmp_path,
+    tmp_path, image_pdf, noisy_image
 ):
-    src = _pdf_with_images(tmp_path / "src.pdf",
-                           [{"image": _noisy(1200, 900), "lossless": True}])
+    src = image_pdf(tmp_path / "src.pdf",
+                    [{"image": noisy_image(1200, 900), "lossless": True}])
     out = tmp_path / "out.pdf"
     result = pdf.compress_to_target(src, out, target_bytes=10 * 1024 * 1024)
     assert result.applied is False
@@ -298,9 +205,9 @@ def test_compress_to_target_passes_a_file_already_in_budget_through_untouched(
     assert out.read_bytes() == src.read_bytes()
 
 
-def test_compress_to_target_stops_at_the_gentlest_rung_that_fits(tmp_path):
-    src = _pdf_with_images(tmp_path / "src.pdf",
-                           [{"image": _noisy(1200, 900), "lossless": True}])
+def test_compress_to_target_stops_at_the_gentlest_rung_that_fits(tmp_path, image_pdf, noisy_image):
+    src = image_pdf(tmp_path / "src.pdf",
+                    [{"image": noisy_image(1200, 900), "lossless": True}])
     out = tmp_path / "out.pdf"
     gentlest = pdf.COMPRESSION_LADDER[0]
     probe = tmp_path / "probe.pdf"
@@ -314,11 +221,11 @@ def test_compress_to_target_stops_at_the_gentlest_rung_that_fits(tmp_path):
     assert "→" in result.describe()
 
 
-def test_compress_to_target_never_goes_below_the_quality_floor(tmp_path):
+def test_compress_to_target_never_goes_below_the_quality_floor(tmp_path, image_pdf, noisy_image):
     """An unreachable target must not produce an illegible Zeugnis: the last
     ladder rung is the floor, and the caller is told the target was missed."""
-    src = _pdf_with_images(tmp_path / "src.pdf",
-                           [{"image": _noisy(1200, 900), "lossless": True}])
+    src = image_pdf(tmp_path / "src.pdf",
+                    [{"image": noisy_image(1200, 900), "lossless": True}])
     out = tmp_path / "out.pdf"
     result = pdf.compress_to_target(src, out, target_bytes=1024)
     floor_dpi, floor_quality = pdf.COMPRESSION_LADDER[-1]
@@ -331,13 +238,13 @@ def test_compress_to_target_never_goes_below_the_quality_floor(tmp_path):
 
 
 def test_compress_to_target_keeps_the_original_when_nothing_can_be_gained(
-    tmp_path,
+    tmp_path, image_pdf, noisy_image
 ):
     """Every image is off-limits, so each rung reproduces the input; shipping
     a rewritten-but-no-smaller file would be pure risk."""
-    src = _pdf_with_images(
+    src = image_pdf(
         tmp_path / "src.pdf",
-        [{"image": _noisy(1200, 900), "lossless": True, "smask": True}],
+        [{"image": noisy_image(1200, 900), "lossless": True, "smask": True}],
     )
     out = tmp_path / "out.pdf"
     result = pdf.compress_to_target(src, out, target_bytes=1024)
@@ -347,12 +254,12 @@ def test_compress_to_target_keeps_the_original_when_nothing_can_be_gained(
     assert out.read_bytes() == src.read_bytes()
 
 
-def test_compress_pdf_leaves_an_undecodable_image_alone(tmp_path):
+def test_compress_pdf_leaves_an_undecodable_image_alone(tmp_path, image_pdf, noisy_image):
     """A corrupt image must cost its OWN compression, not the whole page's:
     the healthy scan beside it still has to shrink."""
-    src = _pdf_with_images(tmp_path / "src.pdf", [
-        {"image": _noisy(1200, 900), "lossless": True},
-        {"image": _noisy(1200, 900), "lossless": True},
+    src = image_pdf(tmp_path / "src.pdf", [
+        {"image": noisy_image(1200, 900), "lossless": True},
+        {"image": noisy_image(1200, 900), "lossless": True},
     ])
     writer = PdfWriter(clone_from=str(src))
     corrupt = writer.pages[0].images[0].indirect_reference.get_object()
@@ -367,9 +274,9 @@ def test_compress_pdf_leaves_an_undecodable_image_alone(tmp_path):
     assert len(PdfReader(str(out)).pages) == 1
 
 
-def test_compress_pdf_cleans_up_its_temporary_file(tmp_path):
-    src = _pdf_with_images(tmp_path / "src.pdf",
-                           [{"image": _noisy(1200, 900), "lossless": True}])
+def test_compress_pdf_cleans_up_its_temporary_file(tmp_path, image_pdf, noisy_image):
+    src = image_pdf(tmp_path / "src.pdf",
+                    [{"image": noisy_image(1200, 900), "lossless": True}])
     out = tmp_path / "out.pdf"
     pdf.compress_pdf(src, out, max_dpi=300, quality=85)
     assert not out.with_suffix(".pdf.part").exists()
