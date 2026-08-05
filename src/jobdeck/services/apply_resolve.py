@@ -34,13 +34,28 @@ _MAX_REDIRECTS = 10
 _MAX_BYTES = 400_000
 
 
-def _is_redirector(url: str) -> bool:
-    """True for a Jooble away-link, which 3xx-redirects to the real posting."""
+def _is_robots_disallowed(url: str) -> bool:
+    """True for a Jooble link this app must never request.
+
+    de.jooble.org/robots.txt Disallows /away/ and /desc/ for `User-agent: *`
+    (and /*?ckey=, which every stored /desc/ link carries). Both are exactly
+    the URLs a feed result points at, so the polite thing is also the only
+    thing: never fetch them, and hand the link to the HUMAN instead. Same
+    call as Arbeitnow's disallowed apply route — see _resolve_arbeitnow.
+
+    Following them used to look attractive because /away/ 3xx-redirects to
+    the real posting; it is also Jooble's click-billing endpoint, so fetching
+    it fires a paid click for a visit that never happens.
+    """
     parts = netsafe.split_url(url if "://" in url else "https://" + url)
     if parts is None:
         return False
     host = (parts.hostname or "").lower()
-    return host.endswith("jooble.org") and parts.path.startswith("/away/")
+    if not (host == "jooble.org" or host.endswith(".jooble.org")):
+        return False
+    path = parts.path.lower()
+    return (path.startswith(("/away/", "/desc/", "/m/away/", "/m/desc/"))
+            or "ckey=" in (parts.query or "").lower())
 
 
 def _is_arbeitnow_job(url: str) -> bool:
@@ -135,31 +150,6 @@ async def _resolve_arbeitnow(
     return None
 
 
-async def _follow(client: httpx.AsyncClient, url: str) -> str:
-    """Return the final URL after redirects, or '' on failure or an unsafe hop.
-
-    HEAD-only manual walk: every hop's scheme and host pass the shared SSRF
-    guard (netsafe — literal screen + all-resolved-IPs-public) BEFORE its
-    request fires, so an intermediate redirect can no more touch a private
-    network than the final one."""
-    current = url
-    for _ in range(_MAX_REDIRECTS + 1):
-        if not await netsafe.url_is_safe(current):
-            log.warning("apply-resolve: %s reached an unsafe hop — ignoring", url)
-            return ""
-        try:
-            resp = await client.send(client.build_request("HEAD", current))
-        except Exception as exc:  # network / timeout — non-fatal
-            log.info("apply-resolve: could not follow %s: %s", url, exc)
-            return ""
-        if resp.next_request is None:
-            return current
-        current = str(resp.next_request.url)
-    log.info("apply-resolve: %s redirected more than %d times — giving up",
-             url, _MAX_REDIRECTS)
-    return ""
-
-
 async def _inspect_page(
     client: httpx.AsyncClient, url: str
 ) -> apply_channel.ApplyChannel | None:
@@ -189,10 +179,12 @@ async def resolve(
         if resolved is not None:
             return resolved
     final = url
-    if url and _is_redirector(url):
-        followed = await _follow(client, url)
-        if followed:
-            final = followed
+    if url and _is_robots_disallowed(url):
+        # Nothing is fetched: the board's own link is stored and the user
+        # clicks it. classify() already reads it as board_apply/Jooble, which
+        # is the honest answer anyway — the destination is another job board
+        # about nine times in ten, not the employer.
+        return final, apply_channel.classify(final, email)
     ch = apply_channel.classify(final, email)
     if ch.channel == apply_channel.CHANNEL_COMPANY_SITE:
         detected = await _inspect_page(client, final)
