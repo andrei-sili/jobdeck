@@ -12,6 +12,7 @@ from nicegui import run, ui
 
 from jobdeck import db
 from jobdeck.services import mappe, send
+from jobdeck.ui import helpers
 from jobdeck.ui.helpers import open_in_system, openable_url
 from jobdeck.ui.layout import frame
 
@@ -45,21 +46,6 @@ def _send_status():
             "cap": db.get_setting(con, "daily_send_cap", "15"),
             "sent_today": db.count_outbound_today(con),
         }
-
-
-def _mappe_summary(result: dict) -> str:
-    """Confirmation line for a finished Mappe.
-
-    It names the before/after size when the Mappe was shrunk: the attachment
-    is the one deliverability variable the user cannot otherwise see, and it
-    is the leading suspect whenever an application lands in spam.
-    """
-    size_mb = result["size_bytes"] / 1024 / 1024
-    shrunk = ""
-    if result["compression"]:
-        before_mb = result["size_before_bytes"] / 1024 / 1024
-        shrunk = f" (compressed from {before_mb:.1f} MB)"
-    return f"Mappe ready: {result['pages']} pages, {size_mb:.1f} MB{shrunk} ✓"
 
 
 def _save_draft(job_id: int, values: dict, clear_pdf: bool):
@@ -326,7 +312,7 @@ async def queue_page():
                         return
                     current["pdf_path"] = result["pdf_path"]
                     pdf_label.set_text(f"Mappe: {result['pdf_path']}")
-                    ui.notify(_mappe_summary(result), type="positive")
+                    ui.notify(helpers.mappe_summary(result), type="positive")
                     if result["warning"]:
                         ui.notify(result["warning"], type="warning",
                                   multi_line=True)

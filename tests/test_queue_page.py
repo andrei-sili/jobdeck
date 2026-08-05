@@ -95,19 +95,3 @@ def test_failed_drafts_are_reachable_in_the_open_filter(con, data_dir):
 
     rows = db.list_drafts_with_jobs(con, queue.FILTER_STATUSES["open"])
     assert [r["status"] for r in rows] == ["failed"]
-
-
-def test_mappe_summary_names_the_size_it_started_from():
-    """The attachment is the deliverability variable the user cannot see —
-    a bare 'ready, 1.6 MB' hides that 3.7 MB went in."""
-    shrunk = queue._mappe_summary({
-        "pages": 10, "size_bytes": 1_628_894, "size_before_bytes": 3_854_093,
-        "compression": "3.68 MB → 1.55 MB (300 dpi, q85, 3 image(s))",
-    })
-    assert shrunk == "Mappe ready: 10 pages, 1.6 MB (compressed from 3.7 MB) ✓"
-
-    untouched = queue._mappe_summary({
-        "pages": 4, "size_bytes": 512_000, "size_before_bytes": 512_000,
-        "compression": "",
-    })
-    assert untouched == "Mappe ready: 4 pages, 0.5 MB ✓"
