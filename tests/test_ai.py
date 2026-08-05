@@ -252,7 +252,10 @@ def test_global_hard_tags_reach_the_prompt_section():
         scoring.criteria_from_profile(row, "Festanstellung — kein Ausbildungsplatz")
     )
     assert "Hard requirements" in section
-    assert "score 0 ONLY if the posting clearly violates one" in section
+    assert "knock-out" in section
+    # the distinction that decides 108 real postings: a posting OFFERING the
+    # qualification violates the rule, one REQUIRING it does not
+    assert "already holds" in section
     assert "- Festanstellung — kein Ausbildungsplatz" in section
 
 
@@ -294,27 +297,96 @@ def test_build_user_content_appends_criteria_section():
 
 
 def test_score_zero_is_reserved_for_hard_tag_violations(monkeypatch):
-    def complete_returning(score_value):
+    """The knock-out is applied by CODE from the model's hard_violation flag,
+    never inferred from the number the model chose.
+
+    Measured on 420 real postings: of 108 offering an apprenticeship or a
+    working-student job only 17 came back as 0, and the reasons prove the
+    model had seen them ("Perfekte Übereinstimmung: Die Ausbildungsstelle …",
+    scored 92). It reads the violation reliably; it will not let that outweigh
+    a strong topical match."""
+    def complete_returning(score_value, violation=False, requirement=""):
         def fake_complete(**kwargs):
             return llm.LLMResult(
-                text=f'{{"score": {score_value}, "reason": "Kein Fit."}}',
+                text=(f'{{"hard_violation": {str(violation).lower()}, '
+                      f'"violated_requirement": "{requirement}", '
+                      f'"score": {score_value}, "reason": "Kein Fit."}}'),
                 model="m", input_tokens=1, output_tokens=1, cost_usd=0.0,
             )
         return fake_complete
 
     hard = scoring.MatchCriteria(hard_tags=("#backend",))
 
-    monkeypatch.setattr(llm, "complete", complete_returning(0))
-    # without hard tags a model-returned 0 must not hide the posting
-    assert scoring.score_job(_job(), "profile")[0] == 1
+    # A FLAGGED violation is zeroed even when the model scored it highly —
+    # this is the exact shape of the real failure.
+    monkeypatch.setattr(llm, "complete",
+                        complete_returning(92, violation=True,
+                                           requirement="Festanstellung"))
+    score, reason, _, _ = scoring.score_job(_job(), "profile", hard)
+    assert score == 0
+    assert "Festanstellung" in reason  # the inbox shows only the reason
+
+    # …but only where hard tags exist to violate.
+    assert scoring.score_job(_job(), "profile")[0] == 92
     assert scoring.score_job(
         _job(), "profile", scoring.MatchCriteria(strictness=90)
-    )[0] == 1
-    # with hard tags, a literal 0 is the agreed mismatch signal
-    assert scoring.score_job(_job(), "profile", hard)[0] == 0
+    )[0] == 92
+
+    # An UNFLAGGED 0 must not hide a posting: 0 is the reserved sentinel and
+    # only the flag may produce it.
+    monkeypatch.setattr(llm, "complete", complete_returning(0))
+    assert scoring.score_job(_job(), "profile", hard)[0] == 1
+    assert scoring.score_job(_job(), "profile")[0] == 1
 
     # out-of-range noise must never synthesize the reserved 0 sentinel:
     # the schema cannot forbid negatives, so the clamp maps them to 1
     monkeypatch.setattr(llm, "complete", complete_returning(-5))
     assert scoring.score_job(_job(), "profile", hard)[0] == 1
     assert scoring.score_job(_job(), "profile")[0] == 1
+
+
+def test_the_prompt_separates_an_offered_qualification_from_a_required_one():
+    """The distinction that decides 108 real postings. "Abgeschlossene
+    Ausbildung als Fachinformatiker" is a requirement Andrei MEETS — 74
+    postings mention Ausbildung only that way, and six real applications were
+    sent to such postings. Marking those as violations would hide jobs he
+    should apply to; missing the offered ones put an apprenticeship at the top
+    of his queue with score 92."""
+    prompt = scoring.SYSTEM_PROMPT
+    assert "OFFERS the qualification" in prompt
+    assert "REQUIRES a qualification the candidate already holds" in prompt
+    assert "abgeschlossene Ausbildung" in prompt      # the exact wording to spare
+    assert "wir bilden aus" in prompt                 # the exact wording to catch
+    # the knock-out must be ordered before fit, and immune to a strong match
+    assert "decide these FIRST" in prompt
+    assert "even when the posting otherwise matches the profile perfectly" in prompt
+
+
+def test_a_posting_requiring_a_held_qualification_is_never_hidden(monkeypatch):
+    """The other direction of the same rule: the model says no violation, so
+    the posting keeps its score even though its text is full of "Ausbildung"."""
+    def fake_complete(**kwargs):
+        return llm.LLMResult(
+            text='{"hard_violation": false, "violated_requirement": "", '
+                 '"score": 79, "reason": "Abgeschlossene Ausbildung gefordert."}',
+            model="m", input_tokens=1, output_tokens=1, cost_usd=0.0,
+        )
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    hard = scoring.MatchCriteria(hard_tags=("Festanstellung im Junior-Einstieg",))
+    score, reason, _, _ = scoring.score_job(_job(), "profile", hard)
+    assert score == 79
+    assert reason == "Abgeschlossene Ausbildung gefordert."  # unprefixed
+
+
+def test_the_violated_requirement_is_not_duplicated_into_the_reason(monkeypatch):
+    def fake_complete(**kwargs):
+        return llm.LLMResult(
+            text='{"hard_violation": true, "violated_requirement": "Festanstellung", '
+                 '"score": 80, "reason": "Festanstellung verletzt: Ausbildungsplatz."}',
+            model="m", input_tokens=1, output_tokens=1, cost_usd=0.0,
+        )
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    hard = scoring.MatchCriteria(hard_tags=("Festanstellung",))
+    score, reason, _, _ = scoring.score_job(_job(), "profile", hard)
+    assert score == 0
+    assert reason == "Festanstellung verletzt: Ausbildungsplatz."

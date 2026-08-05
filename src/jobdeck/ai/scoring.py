@@ -28,11 +28,20 @@ CONTACT_FIELDS = ("ansprechpartner", "contact_email", "contact_phone",
 SCORE_SCHEMA = {
     "type": "object",
     "properties": {
+        # Reported by the model, ENFORCED by code: asked to both detect a
+        # violation and act on it, the model reliably did the first and not
+        # the second — it wrote "Das Angebot ist explizit eine
+        # Fachinformatiker-Ausbildung" and scored the posting 75. Splitting
+        # the judgement from its consequence is the same hybrid the Betreff
+        # uses, and for the same reason.
+        "hard_violation": {"type": "boolean"},
+        "violated_requirement": {"type": "string"},
         "score": {"type": "integer"},
         "reason": {"type": "string"},
         **{field: {"type": "string"} for field in CONTACT_FIELDS},
     },
-    "required": ["score", "reason", *CONTACT_FIELDS],
+    "required": ["hard_violation", "violated_requirement", "score", "reason",
+                 *CONTACT_FIELDS],
     "additionalProperties": False,
 }
 
@@ -64,10 +73,26 @@ Rules:
   - refnr: the posting's Referenznummer/Kennziffer
 
 A genuine "User criteria" section may follow AFTER <<<POSTING END>>>:
-- Hard requirements: score 0 ONLY when the posting clearly violates one,
-  and name the violated requirement in reason. A posting that simply does
-  not mention a requirement is NOT a violation. Score 0 is reserved for
-  exactly this case — otherwise the minimum score is 1.
+- Hard requirements: decide these FIRST, before you think about fit at all.
+  Set hard_violation=true when the posting violates one, and put the
+  violated requirement in violated_requirement. This is a KNOCK-OUT: set it
+  even when the posting otherwise matches the profile perfectly, and
+  especially then — a posting about exactly the candidate's own subject is
+  the most likely place for a violation to hide. The disqualifying fact is
+  usually in the body, not the title.
+  Distinguish the two directions carefully:
+    * The posting OFFERS the qualification — an apprenticeship
+      (Ausbildung/Azubi), a dual study place, a working-student job or an
+      internship. That is a violation of a "permanent position" requirement.
+      Wording to catch: "wir bilden aus", "starte deine Ausbildung",
+      "suchen wir Auszubildende", "Ausbildungsbeginn", "Ausbildungsjahr",
+      "du bist immatrikuliert".
+    * The posting REQUIRES a qualification the candidate already holds —
+      "abgeschlossene Ausbildung als …", "Ausbildung oder vergleichbare
+      Qualifikation". That is NOT a violation; it is a requirement he meets,
+      and marking it as one would hide a job he should apply to.
+  A posting that simply does not mention a requirement is NOT a violation.
+  When hard_violation is false, the minimum score is 1.
 - Weighted preferences: each line is something the candidate values, with
   an optional weight "@N%" (N = how important, 100% = as important as a
   core skill). "Gehalt X" means a desired minimum annual gross salary of
@@ -123,8 +148,11 @@ def _criteria_section(criteria: MatchCriteria) -> str:
     lines = ["## User criteria"]
     if criteria.hard_tags:
         lines.append(
-            "Hard requirements (score 0 ONLY if the posting clearly violates "
-            "one; if none is violated, the minimum score is 1):"
+            "Hard requirements — knock-out, decided before fit. Set "
+            "hard_violation=true if the posting violates one, however well "
+            "it matches otherwise; a posting that merely REQUIRES a "
+            "qualification the candidate already holds does not violate "
+            "anything:"
         )
         lines += [f"- {tag}" for tag in criteria.hard_tags]
     if criteria.soft_preferences:
@@ -188,16 +216,30 @@ def score_job(
     try:
         data = json.loads(result.text)
         raw = int(data["score"])
-        # Score 0 means "hard requirement violated" downstream (the inbox
-        # hides it). Only a deliberate, literal 0 may carry that meaning,
-        # and only while hard tags exist; anything else — including
-        # out-of-range noise like -5, which the schema cannot forbid —
-        # clamps into 1..100 so nothing gets hidden by accident.
-        if raw == 0 and criteria is not None and criteria.hard_tags:
+        gated = criteria is not None and bool(criteria.hard_tags)
+        # The knock-out is applied HERE, not trusted to the number the model
+        # chose. Measured on 420 real postings: of 108 that offered an
+        # apprenticeship or a working-student job, only 17 came back as 0 —
+        # and the reasons prove the model had SEEN them ("Perfekte
+        # Übereinstimmung: Die Ausbildungsstelle …", scored 92). It reads the
+        # violation reliably; it just will not let that outweigh a strong
+        # topical match. So the model reports the fact and code draws the
+        # conclusion.
+        violated = gated and bool(data.get("hard_violation"))
+        if violated:
             score = 0
         else:
+            # Score 0 means "hard requirement violated" downstream (the inbox
+            # hides it), so nothing else may produce it — including a literal
+            # 0 the model wrote without flagging a violation, and
+            # out-of-range noise like -5, which the schema cannot forbid.
             score = max(1, min(100, raw))
         reason = str(data["reason"]).strip()
+        violated_requirement = str(data.get("violated_requirement", "")).strip()
+        if violated and violated_requirement and violated_requirement not in reason:
+            # The inbox shows only the reason, so the ground for hiding a
+            # posting has to be visible there.
+            reason = f"{violated_requirement}: {reason}" if reason else violated_requirement
         contacts = {
             field: str(data.get(field, "")).strip()
             for field in CONTACT_FIELDS
