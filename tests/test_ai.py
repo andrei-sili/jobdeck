@@ -390,3 +390,31 @@ def test_the_violated_requirement_is_not_duplicated_into_the_reason(monkeypatch)
     score, reason, _, _ = scoring.score_job(_job(), "profile", hard)
     assert score == 0
     assert reason == "Festanstellung verletzt: Ausbildungsplatz."
+
+
+def test_a_truncated_snippet_is_declared_as_one():
+    """Jooble stores a search fragment where the others store the advert:
+    median 279 characters against the Arbeitsagentur's 2651, and 7 of the
+    user's top 22 jobs were ranked on one. Unflagged, the score punishes the
+    posting for what the fragment had no room to say — and since the hard
+    requirements became a knock-out, the model could also assert a violation
+    it cannot see."""
+    snippet = ("...Deine Mission - Du entwickelst das datengetriebene Herz "
+               "unserer Services. Als Python Developer bist Du der Experte "
+               "für die Konzeption, Entwick...")
+    assert scoring.looks_like_snippet(snippet)
+    content = scoring.build_user_content(_job(description=snippet), "profile")
+    assert "SEARCH-RESULT SNIPPET" in content
+    assert "do not report a hard requirement as violated" in content
+
+
+def test_a_full_posting_is_not_mistaken_for_a_snippet():
+    full = "Wir suchen eine Entwicklerin. " * 40 + "Bewerbung an hr@firma.de..."
+    assert not scoring.looks_like_snippet(full)          # too long to be one
+    assert "SEARCH-RESULT SNIPPET" not in scoring.build_user_content(
+        _job(description=full), "profile")
+
+    short_but_complete = "Kurze Anzeige. Wir suchen eine Python-Entwicklerin."
+    assert not scoring.looks_like_snippet(short_but_complete)  # not elided
+    assert scoring.looks_like_snippet("") is False
+    assert scoring.looks_like_snippet(None) is False

@@ -163,6 +163,27 @@ def _criteria_section(criteria: MatchCriteria) -> str:
 
 
 FENCE_MARKERS = ("<<<POSTING START>>>", "<<<POSTING END>>>")
+# A search-result snippet, not an advert. Jooble supplies one of these instead
+# of a description: measured over 98 stored postings the median is 279
+# characters against 2651 from the Arbeitsagentur, and 97 of them end elided.
+# Detected from the TEXT rather than the source name, so a future board that
+# does the same is covered without this layer learning any board's name.
+SNIPPET_MAX_CHARS = 600
+SNIPPET_ELISIONS = ("...", "…", "..", "… ")
+
+
+def looks_like_snippet(description: str) -> bool:
+    """True when the posting text is a truncated search fragment.
+
+    It matters twice over. The score would otherwise punish a posting for
+    information the fragment never had room for, and — since the hard
+    requirements became a knock-out — the model could assert a violation it
+    cannot actually see, or miss one the elided half describes.
+    """
+    text = (description or "").strip()
+    if not text or len(text) > SNIPPET_MAX_CHARS:
+        return False
+    return text.endswith(SNIPPET_ELISIONS)
 
 
 def fence_posting(description: str) -> str:
@@ -195,6 +216,14 @@ def build_user_content(
         f"Location: {job['location'] or 'n/a'}{remote}\n\n"
         f"{fence_posting(job['description'])}"
     )
+    if looks_like_snippet(job["description"]):
+        content += (
+            "\n\nNote: that text is a truncated SEARCH-RESULT SNIPPET, not the "
+            "full advert — the posting continues where it breaks off. Judge "
+            "only what it actually states: do not treat the missing part as a "
+            "gap in the candidate, and do not report a hard requirement as "
+            "violated unless the snippet itself shows the violation."
+        )
     if criteria is not None:
         content += f"\n\n{_criteria_section(criteria)}"
     return content
