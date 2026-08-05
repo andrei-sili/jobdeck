@@ -182,17 +182,23 @@ def _page_size_inches(page) -> tuple[float, float]:
 
 
 def _effective_dpi(px_w: int, px_h: int, page_w_in: float, page_h_in: float) -> float:
-    """Resolution an image is rendered at, assuming it covers the page.
+    """Lower bound on the resolution an image is rendered at.
 
-    The true value needs the CTM the image is drawn with, which lives in the
-    content stream. Assuming full-page coverage is exact for the scans that
-    actually cost bytes and UNDER-estimates every smaller placement, so the
-    error is always in the safe direction: an image is never downsampled
-    harder than this figure implies.
+    The true figure needs the matrix the image is drawn with, which lives in
+    the content stream; full-page coverage is exact for the scans that
+    actually cost bytes. The two axes are combined with min() rather than
+    max() deliberately: when an image's aspect does not match the page, the
+    smaller of the two readings is the one that cannot cause over-
+    downsampling, and staying above the quality floor matters more here than
+    squeezing out the last kilobyte.
+
+    It is a LOWER bound only for images drawn no larger than the page. One
+    scaled up beyond the page edges reads higher than it truly is — see the
+    residual noted in ROADMAP.
     """
     if page_w_in <= 0 or page_h_in <= 0:
         return 0.0
-    return max(px_w / page_w_in, px_h / page_h_in)
+    return min(px_w / page_w_in, px_h / page_h_in)
 
 
 def _colourspace_is_plain(colourspace) -> bool:
@@ -278,7 +284,11 @@ def compress_pdf(src: pathlib.Path, out: pathlib.Path, *,
                 log.debug("skipping unreadable image %s: %s", index, exc)
                 continue
             key = (ref.idnum, ref.generation)
-            if key in seen:  # one object, drawn on several pages
+            # One object drawn on several pages (the CV photo sits on the
+            # Deckblatt and the Lebenslauf). Skipping it is a saving, not a
+            # correctness guard: a second visit would find it already lossy
+            # and within budget and refuse it anyway.
+            if key in seen:
                 continue
             seen.add(key)
             dpi = _effective_dpi(px_w, px_h, page_w_in, page_h_in)
@@ -369,17 +379,29 @@ def compress_to_target(src: pathlib.Path, out: pathlib.Path,
 
     best: Compression | None = None
     for dpi, quality in COMPRESSION_LADDER:
+        attempt = out.with_suffix(".pdf.rung")
         try:
-            recoded = compress_pdf(src, out, max_dpi=dpi, quality=quality)
+            recoded = compress_pdf(src, attempt, max_dpi=dpi, quality=quality)
         except Exception as exc:  # noqa: BLE001 - compression is best-effort
             log.warning("compressing %s at %s dpi failed: %s", src.name, dpi, exc)
+            attempt.unlink(missing_ok=True)
             break
-        size = out.stat().st_size
-        best = Compression(size_bytes=size, original_bytes=original, dpi=dpi,
-                           quality=quality, images_recoded=recoded,
-                           met_target=size <= target_bytes)
+        size = attempt.stat().st_size
+        result = Compression(size_bytes=size, original_bytes=original, dpi=dpi,
+                             quality=quality, images_recoded=recoded,
+                             met_target=size <= target_bytes)
+        # Keep whichever rung came out smallest, not whichever ran last. The
+        # ladder is monotone for every input I could construct, so this is
+        # defensive: a harsher rung re-encodes MORE images (one the gentler
+        # rung refused as not worth it may pass at a lower quality), and
+        # nothing guarantees that trade always pays.
+        if best is None or size < best.size_bytes:
+            best = result
+            attempt.replace(out)
+        else:
+            attempt.unlink(missing_ok=True)
         if best.met_target:
-            return best
+            break
 
     # Nothing gained (or nothing ran): the original is the better artefact.
     if best is None or best.size_bytes >= original:

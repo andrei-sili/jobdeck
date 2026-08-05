@@ -14,6 +14,7 @@ instead of being blessed as the new draft's PDF.
 
 import asyncio
 import logging
+import math
 import pathlib
 import tempfile
 
@@ -50,11 +51,21 @@ def _error(message: str) -> dict:
 
 
 def target_mb_setting(raw: str, fallback: float) -> float:
+    """A size budget in MB from a settings string, or the default.
+
+    float() accepts "inf" and "1e400", and the infinity that comes back then
+    raises OverflowError on the conversion to bytes — past the build's
+    error handler, so the button just dies. app_settings holds strings in a
+    directory the user is invited to edit, so the value has to be screened
+    for being a real number, not merely for parsing.
+    """
     try:
         value = float(raw)
     except (TypeError, ValueError):
         return fallback
-    return value if value > 0 else fallback
+    if not math.isfinite(value) or value <= 0:
+        return fallback
+    return value
 
 
 def _target_bytes(settings: dict, channel: str) -> int:

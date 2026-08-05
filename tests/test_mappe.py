@@ -155,7 +155,10 @@ async def test_portal_channels_get_the_tighter_budget(con, data_dir):
 async def test_unset_or_broken_size_budgets_fall_back_to_the_defaults(
     con, data_dir
 ):
-    for raw in ("", "   ", "abc", "0", "-4", None):
+    # "inf" and "1e400" parse as a float and then raise OverflowError on the
+    # conversion to bytes — past the build's error handler, so the button
+    # would just die. app_settings is a file the user is invited to edit.
+    for raw in ("", "   ", "abc", "0", "-4", None, "inf", "-inf", "1e400", "nan"):
         settings = {"target_mb": raw, "target_portal_mb": raw}
         assert mappe._target_bytes(settings, "direct_email") == int(
             mappe.DEFAULT_TARGET_MB * 1024 * 1024

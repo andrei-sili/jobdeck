@@ -255,6 +255,28 @@ def test_compress_pdf_merges_images_that_became_identical(
     assert out.stat().st_size < separate.stat().st_size / 2
 
 
+def test_effective_dpi_takes_the_axis_that_cannot_over_downsample():
+    """When an image's aspect does not match its page the two axes disagree.
+    min() is the reading that cannot cause over-downsampling — staying above
+    the quality floor is worth more here than the last kilobyte."""
+    assert pdf._effective_dpi(1200, 900, 4.0, 9.0) == pytest.approx(100)
+    assert pdf._effective_dpi(1200, 900, 12.0, 3.0) == pytest.approx(100)
+    # aspect-matched: both axes agree and the choice cannot show up
+    assert pdf._effective_dpi(1200, 900, 4.0, 3.0) == pytest.approx(300)
+    assert pdf._effective_dpi(1200, 900, 0, 3.0) == 0.0
+
+
+def test_compress_to_target_leaves_no_rung_scratch_file(
+    tmp_path, image_pdf, noisy_image
+):
+    src = image_pdf(tmp_path / "src.pdf",
+                    [{"image": noisy_image(1200, 900), "lossless": True}])
+    out = tmp_path / "out.pdf"
+    pdf.compress_to_target(src, out, target_bytes=1024)  # walks every rung
+    assert sorted(p.name for p in tmp_path.iterdir() if p.suffix != ".pdf") == []
+    assert out.exists()
+
+
 def test_the_compression_ladder_never_offers_a_rung_below_the_floor():
     """200 dpi / q80 is the level Andrei accepted after comparing it with the
     600-dpi original at equal zoom. It is a product decision, not a tunable:
