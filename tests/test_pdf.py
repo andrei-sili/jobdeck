@@ -93,6 +93,10 @@ def _pdf_with_images(path: pathlib.Path, specs: list[dict], *,
             stream[NameObject("/Decode")] = ArrayObject(
                 [NumberObject(1), NumberObject(0)] * 3
             )
+        if spec.get("colour_key_mask"):
+            stream[NameObject("/Mask")] = ArrayObject(
+                [NumberObject(0), NumberObject(10)] * 3
+            )
         refs.append((f"/Im{index}", writer._add_object(stream)))
         draw.append(f"q {width} 0 0 {height} 0 0 cm /Im{index} Do Q")
     content = DecodedStreamObject()
@@ -239,6 +243,31 @@ def test_compress_pdf_refuses_images_it_cannot_re_encode_faithfully(tmp_path):
     out = tmp_path / "out.pdf"
     assert pdf.compress_pdf(src, out, max_dpi=200, quality=80) == 0
     assert _payloads(out) == _payloads(src)
+
+
+def test_compress_pdf_refuses_a_colour_key_masked_image(tmp_path):
+    """A /Mask array leaves the image itself plain RGB, so the decoded mode
+    cannot catch it: re-encoding would drop the mask and paint over whatever
+    the mask was hiding."""
+    src = _pdf_with_images(
+        tmp_path / "src.pdf",
+        [{"image": _noisy(1200, 900), "lossless": True, "colour_key_mask": True}],
+    )
+    out = tmp_path / "out.pdf"
+    assert pdf.compress_pdf(src, out, max_dpi=200, quality=80) == 0
+    assert _payloads(out) == _payloads(src)
+
+
+def test_the_compression_ladder_never_offers_a_rung_below_the_floor():
+    """200 dpi / q80 is the level Andrei accepted after comparing it with the
+    600-dpi original at equal zoom. It is a product decision, not a tunable:
+    a rung below it would silently ship a softer Zeugnis."""
+    assert pdf.COMPRESSION_LADDER[-1] == (200, 80)
+    assert all(dpi >= 200 and quality >= 80
+               for dpi, quality in pdf.COMPRESSION_LADDER)
+    assert list(pdf.COMPRESSION_LADDER) == sorted(
+        pdf.COMPRESSION_LADDER, reverse=True
+    )  # best quality first, so the gentlest rung that fits wins
 
 
 def test_compress_pdf_shares_one_object_drawn_on_several_pages(tmp_path):
