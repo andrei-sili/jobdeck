@@ -507,6 +507,38 @@ def set_apply_channel(
     )
 
 
+def jobs_needing_apply_channel(
+    con: sqlite3.Connection, limit: int, min_score: int = 1
+) -> list[sqlite3.Row]:
+    """Postings still worth acting on whose apply channel is unresolved.
+
+    Best-scored first, because the resolve pass is bounded and the postings he
+    will actually open are the ones at the top. Score 0 is excluded: it means a
+    hard requirement is violated, and resolving where to apply to a job he
+    ruled out is work nobody asked for.
+    """
+    return con.execute(
+        "SELECT * FROM jobs WHERE status='new' AND COALESCE(apply_channel,'')='' "
+        "AND match_score IS NOT NULL AND match_score >= ? "
+        "ORDER BY match_score DESC, id LIMIT ?",
+        (min_score, limit),
+    ).fetchall()
+
+
+def count_jobs_needing_apply_channel(
+    con: sqlite3.Connection, min_score: int = 1
+) -> int:
+    """How many postings are still waiting — the TRUE total, not one page of
+    them. A bounded fetch would answer at most `limit`, and telling the user
+    "61 pending" when 219 are is worse than not telling them."""
+    return con.execute(
+        "SELECT COUNT(*) FROM jobs WHERE status='new' "
+        "AND COALESCE(apply_channel,'')='' "
+        "AND match_score IS NOT NULL AND match_score >= ?",
+        (min_score,),
+    ).fetchone()[0]
+
+
 def set_contact_email(
     con: sqlite3.Connection, job_id: int, email: str, source: str
 ) -> None:

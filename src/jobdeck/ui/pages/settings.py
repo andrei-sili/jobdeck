@@ -5,7 +5,7 @@ import asyncio
 from nicegui import run, ui
 
 from jobdeck import backup, config, db, gmail
-from jobdeck.services import mappe, polling, scoring
+from jobdeck.services import apply_resolve, mappe, polling, scoring
 from jobdeck.ui.helpers import open_in_system
 from jobdeck.ui.layout import frame
 
@@ -383,8 +383,25 @@ async def settings_page():
                         type="positive" if not counters["failed"] else "warning",
                     )
 
+                async def resolve_channels_now():
+                    ui.notify("Resolving where to apply…")
+                    r = await apply_resolve.resolve_pending()
+                    if not r["resolved"] and not r["failed"]:
+                        ui.notify("Every scored posting already knows its "
+                                  "channel ✓", type="positive")
+                        return
+                    breakdown = " · ".join(
+                        f"{n}× {c}" for c, n in sorted(
+                            r["channels"].items(), key=lambda kv: -kv[1]))
+                    tail = (f" — {r['remaining']} still pending, click again"
+                            if r["remaining"] else "")
+                    ui.notify(f"Resolved {r['resolved']}{tail}\n{breakdown}",
+                              type="positive", multi_line=True)
+
                 ui.button("Backup now", icon="save", on_click=backup_now) \
                     .props("outline")
+                ui.button("Resolve apply channels", icon="alt_route",
+                          on_click=resolve_channels_now).props("outline")
                 ui.button("Poll all profiles now", icon="refresh", on_click=poll_now) \
                     .props("outline")
                 ui.button("Score new jobs now", icon="grade", on_click=score_now) \

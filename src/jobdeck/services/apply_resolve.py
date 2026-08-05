@@ -203,6 +203,69 @@ def _store(job_id: int, ch: apply_channel.ApplyChannel, apply_url: str) -> None:
         db.set_apply_channel(con, job_id, ch.channel, ch.vendor, apply_url)
 
 
+BATCH_LIMIT = 60           # one pass; a second click continues the backlog
+BATCH_PAUSE_S = 0.4        # between postings — this walks other people's sites
+
+
+def _pending(limit: int):
+    with db.db() as con:
+        return [dict(r) for r in db.jobs_needing_apply_channel(con, limit)]
+
+
+def _pending_count() -> int:
+    with db.db() as con:
+        return db.count_jobs_needing_apply_channel(con)
+
+
+async def resolve_pending(limit: int = BATCH_LIMIT,
+                          client: httpx.AsyncClient | None = None) -> dict:
+    """Resolve the apply channel for a batch of postings, best-scored first.
+
+    The per-job button is the right shape for one posting and the wrong shape
+    for a backlog: of 287 scored postings only 8 had a channel, and the rest
+    meant that many individual clicks. Most resolve from the URL alone with no
+    request at all; the ones that do fetch are spaced out, run one at a time
+    and go through the same netsafe guard as every other outbound call — this
+    is a batch, so it must be gentler than a human clicking, not faster.
+
+    Returns counters plus a channel breakdown. Never raises: one bad posting
+    must not end the pass. `client` is injectable so a test can drive the whole
+    pass through a MockTransport rather than the network.
+    """
+    jobs = await asyncio.to_thread(_pending, limit)
+    counts: dict[str, int] = {}
+    resolved = failed = 0
+    if not jobs:
+        return {"resolved": 0, "failed": 0, "remaining": 0, "channels": counts}
+    owned = client is None
+    if owned:
+        client = httpx.AsyncClient(
+            headers={"User-Agent": _USER_AGENT}, timeout=_TIMEOUT,
+            max_redirects=_MAX_REDIRECTS,
+        )
+    try:
+        for index, job in enumerate(jobs):
+            if index:
+                await asyncio.sleep(BATCH_PAUSE_S)
+            try:
+                final, ch = await resolve(job, client)
+                await asyncio.to_thread(_store, job["id"], ch, final)
+            except Exception as exc:  # noqa: BLE001 - one posting, not the pass
+                log.warning("apply-resolve: job %s failed: %s", job["id"], exc)
+                failed += 1
+                continue
+            resolved += 1
+            counts[ch.channel] = counts.get(ch.channel, 0) + 1
+    finally:
+        if owned:
+            await client.aclose()
+    remaining = await asyncio.to_thread(_pending_count)
+    log.info("apply-resolve batch: %s resolved, %s failed, %s still pending",
+             resolved, failed, remaining)
+    return {"resolved": resolved, "failed": failed, "remaining": remaining,
+            "channels": counts}
+
+
 async def resolve_and_store(job_id: int) -> dict:
     """Resolve one posting's apply channel and persist it. On-demand only."""
     job = await asyncio.to_thread(_load_job, job_id)

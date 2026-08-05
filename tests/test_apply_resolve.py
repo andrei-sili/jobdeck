@@ -432,3 +432,128 @@ def test_the_robots_disallow_list_matches_what_jooble_publishes():
     ]
     for url in allowed:
         assert not apply_resolve._is_robots_disallowed(url), url
+
+
+def _seed(con, rows):
+    from jobdeck import db
+    ids = []
+    for r in rows:
+        jid = db.insert_job_if_new(con, {
+            "source": "stub", "external_id": r["ext"], "title": "Dev",
+            "company": r.get("company", "Firma"), "url": r["url"],
+            "description": "d", "contact_email": r.get("email", ""),
+        })
+        con.execute("UPDATE jobs SET match_score=? WHERE id=?", (r["score"], jid))
+        if r.get("channel"):
+            db.set_apply_channel(con, jid, r["channel"], "", r["url"])
+        ids.append(jid)
+    con.commit()
+    return ids
+
+
+async def test_resolve_pending_walks_the_backlog_best_scored_first(con, data_dir):
+    """The per-job button is the right shape for one posting and the wrong one
+    for a backlog: of 287 scored postings only 8 had a channel, so the rest
+    meant that many individual clicks."""
+    _seed(con, [
+        {"ext": "a", "url": "https://acme.jobs.personio.de/job/1", "score": 90},
+        {"ext": "b", "url": "https://de.jooble.org/desc/2", "score": 80},
+        {"ext": "c", "url": "https://firma.de/karriere", "score": 70,
+         "email": "jobs@firma.de"},
+        {"ext": "d", "url": "https://x.de/j", "score": 60, "channel": "ats_form"},
+    ])
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(200, text="<h1>Karriere</h1>")
+
+    async with _client(handler) as client:
+        res = await apply_resolve.resolve_pending(limit=10, client=client)
+
+    assert res["resolved"] == 3          # the already-resolved one is skipped
+    assert res["failed"] == 0
+    assert res["remaining"] == 0
+    stored = {r["external_id"]: r["apply_channel"]
+              for r in con.execute("SELECT external_id, apply_channel FROM jobs")}
+    assert stored["a"] == ac.CHANNEL_ATS
+    assert stored["b"] == ac.CHANNEL_BOARD
+    assert stored["c"] == ac.CHANNEL_DIRECT_EMAIL   # a known e-mail is decisive
+    assert stored["d"] == "ats_form"                # untouched
+
+
+async def test_resolve_pending_skips_postings_ruled_out_by_a_hard_requirement(
+    con, data_dir
+):
+    """Score 0 means a hard requirement is violated. Resolving where to apply
+    to a job he already ruled out is work nobody asked for — and after today's
+    scoring fix there are 129 of them."""
+    _seed(con, [
+        {"ext": "zero", "url": "https://acme.jobs.personio.de/job/9", "score": 0},
+        {"ext": "one", "url": "https://acme.jobs.personio.de/job/8", "score": 1},
+    ])
+    res = await apply_resolve.resolve_pending(limit=10)
+    assert res["resolved"] == 1
+    row = con.execute(
+        "SELECT apply_channel FROM jobs WHERE external_id='zero'").fetchone()
+    assert (row["apply_channel"] or "") == ""
+
+
+async def test_one_failing_posting_does_not_end_the_pass(con, data_dir, monkeypatch):
+    """A backlog pass walks other people's sites; something WILL raise. The
+    remaining postings must still get resolved, and the failure must be
+    counted rather than swallowed."""
+    _seed(con, [
+        {"ext": "boom", "url": "https://acme.jobs.personio.de/job/1", "score": 90},
+        {"ext": "fine", "url": "https://acme.jobs.personio.de/job/2", "score": 80},
+    ])
+    real = apply_resolve.resolve
+
+    async def exploding(job, client):
+        if job["external_id"] == "boom":
+            raise RuntimeError("transport exploded")
+        return await real(job, client)
+
+    monkeypatch.setattr(apply_resolve, "resolve", exploding)
+    res = await apply_resolve.resolve_pending(limit=10)
+    assert res["failed"] == 1
+    assert res["resolved"] == 1          # the pass carried on
+    stored = {r["external_id"]: (r["apply_channel"] or "") for r in con.execute(
+        "SELECT external_id, apply_channel FROM jobs")}
+    assert stored["fine"] == ac.CHANNEL_ATS
+    assert stored["boom"] == ""          # left unresolved, not half-written
+
+
+def test_the_batch_is_gentler_than_a_human_clicking():
+    """It walks other people's sites in a loop, so it must be slower than the
+    button it replaces, not faster."""
+    assert apply_resolve.BATCH_PAUSE_S >= 0.25
+    assert apply_resolve.BATCH_LIMIT <= 100
+
+
+async def test_a_bounded_pass_takes_the_best_scored_first(con, data_dir):
+    """The batch is bounded, so WHICH postings it resolves is a real decision.
+    He opens the top of his inbox, so that is what must know its channel after
+    one click — not whichever happened to be inserted first."""
+    _seed(con, [
+        {"ext": "low", "url": "https://acme.jobs.personio.de/job/1", "score": 10},
+        {"ext": "top", "url": "https://acme.jobs.personio.de/job/2", "score": 95},
+        {"ext": "mid", "url": "https://acme.jobs.personio.de/job/3", "score": 50},
+    ])
+    res = await apply_resolve.resolve_pending(limit=2)
+    assert res["resolved"] == 2
+    assert res["remaining"] == 1
+    resolved = {r["external_id"] for r in con.execute(
+        "SELECT external_id FROM jobs WHERE COALESCE(apply_channel,'')<>''")}
+    assert resolved == {"top", "mid"}      # the 10-scorer waits its turn
+
+
+async def test_remaining_is_the_true_backlog_not_one_page_of_it(con, data_dir):
+    """Found on his real data: after resolving 60 of 279 the pass reported "61
+    still pending" because it counted with a LIMITed fetch. Telling him 61 when
+    219 are left is worse than telling him nothing."""
+    _seed(con, [{"ext": f"j{i}", "url": f"https://acme.jobs.personio.de/job/{i}",
+                 "score": 50} for i in range(7)])
+    res = await apply_resolve.resolve_pending(limit=2)
+    assert res["resolved"] == 2
+    assert res["remaining"] == 5      # not min(remaining, limit+1) == 3
