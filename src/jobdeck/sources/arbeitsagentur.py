@@ -28,6 +28,12 @@ log = logging.getLogger(__name__)
 BASE_URL = "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service"
 API_KEY = "jobboerse-jobsuche"  # public static client id used by the Jobsuche app
 PAGE_SIZE = 100
+# Search moved to v6 (v4 and v5 answer 404); the DETAIL route did not move and
+# has no v6 — every v6/v5/v2/v1 jobdetails path answers 403 as an unregistered
+# route. Verified live 2026-08-05, and it matches bundesAPI/jobsuche-api.
+SEARCH_PATH = "/pc/v6/jobs"
+DETAIL_PATH = "/pc/v4/jobdetails"
+HOME_COUNTRY = "DEUTSCHLAND"
 MAX_PAGE_TEXT = 15_000  # cap for external page text (plenty for LLM drafting)
 MAX_PAGE_BYTES = 400_000  # raw-HTML cap for the guarded external-page GET
 
@@ -55,6 +61,29 @@ def _screen_external_url(raw) -> str:
     return url
 
 
+def _place(item) -> str:
+    """City of the first work location, with the country when it is not
+    Germany.
+
+    v6 replaced the single `arbeitsort` with a `stellenlokationen` LIST whose
+    entries carry `adresse.land`. Both of this adapter's known data bugs live
+    here: Austrian AMS listings leaked into a nationwide GERMAN search looking
+    exactly like domestic ones. They are not dropped — he may still want a
+    Vienna job — but the country now travels with the location, so the user
+    and the scorer both see what they are looking at instead of reading
+    "Wien" as a German city.
+    """
+    locations = item.get("stellenlokationen")
+    if not isinstance(locations, list) or not locations:
+        return ""
+    address = (locations[0] or {}).get("adresse") or {}
+    city = str(address.get("ort") or "").strip()
+    country = str(address.get("land") or "").strip()
+    if city and country and country.upper() != HOME_COUNTRY:
+        return f"{city}, {country}"
+    return city
+
+
 class ArbeitsagenturSource:
     name = "arbeitsagentur"
 
@@ -69,7 +98,7 @@ class ArbeitsagenturSource:
                 params["umkreis"] = query.radius_km
         try:
             resp = await self._client.get(
-                f"{BASE_URL}/pc/v4/jobs",
+                f"{BASE_URL}{SEARCH_PATH}",
                 params=params,
                 headers={"X-API-Key": API_KEY},
             )
@@ -79,23 +108,39 @@ class ArbeitsagenturSource:
             raise SourceUnavailable(self.name, str(ex)) from ex
 
         postings: list[JobPosting] = []
-        for item in payload.get("stellenangebote", []) or []:
+        # v6 renamed the envelope key, and omits it entirely on zero hits
+        # rather than sending an empty list.
+        for item in payload.get("ergebnisliste") or []:
             try:
-                refnr = item.get("refnr", "")
+                refnr = item.get("referenznummer", "")
                 if not refnr:
                     continue
-                title = item.get("titel") or item.get("beruf") or ""
-                ort = (item.get("arbeitsort") or {}).get("ort") or ""
+                # `stellenangebotsTitel` is the EMPLOYER'S title;
+                # `hauptberuf`/`alleBerufe` are standardised BERUFENET labels.
+                # The old fallback to the profession label is what stored 18
+                # postings as the generic "Fachinformatiker/in -
+                # Anwendungsentwicklung" — losing the one line that says what
+                # the job actually is, and feeding that loss straight into the
+                # match score. There is deliberately no fallback now: the
+                # field was populated in 1600 of 1600 sampled items, and a
+                # posting with no title of its own is better skipped than
+                # stored under a label that misdescribes it.
+                title = item.get("stellenangebotsTitel") or ""
+                if not title:
+                    continue
                 postings.append(
                     JobPosting(
                         source=self.name,
                         external_id=refnr,
                         title=title,
-                        company=item.get("arbeitgeber", "") or "",
-                        location=ort,
-                        remote=looks_remote(title),
+                        company=item.get("firma", "") or "",
+                        location=_place(item),
+                        # v6 exposes the home-office flag at search level; v4
+                        # only had it on the detail payload.
+                        remote=bool(item.get("homeofficemoeglich"))
+                        or looks_remote(title),
                         url=f"https://www.arbeitsagentur.de/jobsuche/jobdetail/{refnr}",
-                        published_at=item.get("aktuelleVeroeffentlichungsdatum", "") or "",
+                        published_at=item.get("datumErsteVeroeffentlichung", "") or "",
                         raw=item,
                     )
                 )
@@ -107,7 +152,7 @@ class ArbeitsagenturSource:
         encoded = base64.urlsafe_b64encode(posting.external_id.encode()).decode()
         try:
             resp = await self._client.get(
-                f"{BASE_URL}/pc/v4/jobdetails/{encoded}",
+                f"{BASE_URL}{DETAIL_PATH}/{encoded}",
                 headers={"X-API-Key": API_KEY},
             )
             resp.raise_for_status()
@@ -157,7 +202,10 @@ class ArbeitsagenturSource:
             or looks_remote(posting.title, description)
         )
         if not posting.company:
-            posting.company = detail.get("arbeitgeber", "") or detail.get("firma", "") or ""
+            # `arbeitgeber` no longer exists in either payload — the old line
+            # survived only because of this fallback. `firma` is the sole
+            # employer-name source now.
+            posting.company = detail.get("firma", "") or ""
         return posting
 
     async def _fetch_page_text(self, url: str) -> str:

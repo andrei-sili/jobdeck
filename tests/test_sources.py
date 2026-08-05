@@ -18,29 +18,34 @@ from jobdeck.sources.base import (
 )
 from jobdeck.sources.jooble import JoobleSource
 
+# v6 search shape, observed live 2026-08-05: the envelope key is
+# `ergebnisliste`, and none of the v4 item names survive.
 BA_SEARCH = {
-    "stellenangebote": [
+    "ergebnisliste": [
         {
-            "refnr": "10001-123",
-            "titel": "Python Entwickler (m/w/d)",
-            "arbeitgeber": "Eurogard GmbH",
-            "arbeitsort": {"ort": "Herzogenrath"},
-            "aktuelleVeroeffentlichungsdatum": "2026-07-10",
+            "referenznummer": "10001-123",
+            "stellenangebotsTitel": "Python Entwickler (m/w/d)",
+            "hauptberuf": "Softwareentwickler/in",  # BERUFENET label, NOT a title
+            "firma": "Eurogard GmbH",
+            "stellenlokationen": [
+                {"adresse": {"ort": "Herzogenrath", "land": "DEUTSCHLAND"}}
+            ],
+            "datumErsteVeroeffentlichung": "2026-07-10",
         },
         {"kaputt": True},  # malformed item: must be skipped, not fatal
         {
-            "refnr": "10001-456",
-            "beruf": "Fachinformatiker",
-            "arbeitgeber": "ncsolution GmbH",
-            "arbeitsort": None,
+            "referenznummer": "10001-456",
+            "stellenangebotsTitel": "Fachinformatiker Anwendungsentwicklung",
+            "firma": "ncsolution GmbH",
+            "stellenlokationen": None,
         },
     ]
 }
 
 BA_DETAILS = {
-    # real key observed live (July 2026)
+    # real key observed live (July 2026, still current on the v4 detail route)
     "stellenangebotsBeschreibung": "Wir suchen... Bewerbung an hr@eurogard.de. Remote möglich.",
-    "arbeitgeber": "Eurogard GmbH",
+    "firma": "Eurogard GmbH",
 }
 
 BA_DETAILS_LEGACY_KEY = {
@@ -106,7 +111,11 @@ async def test_arbeitsagentur_search_defensive():
     assert postings[0].external_id == "10001-123"
     assert postings[0].company == "Eurogard GmbH"
     assert "jobdetail/10001-123" in postings[0].url
-    assert postings[1].title == "Fachinformatiker"  # beruf fallback, arbeitsort None
+    assert postings[1].title == "Fachinformatiker Anwendungsentwicklung"
+    assert postings[1].location == ""  # stellenlokationen None must not raise
+    # the employer's own title wins over the standardised profession label
+    assert postings[0].title == "Python Entwickler (m/w/d)"
+    assert postings[0].location == "Herzogenrath"  # German: no country suffix
 
 
 async def test_arbeitsagentur_details_enrich():
@@ -505,3 +514,77 @@ def test_extract_email_and_remote_markers():
     assert extract_email("kein kontakt") == ""
     assert looks_remote("Python Dev (Home Office)")
     assert not looks_remote("Python Dev vor Ort")
+
+
+async def test_arbeitsagentur_never_stores_the_profession_label_as_the_title():
+    """18 stored postings carried the generic BERUFENET label
+    "Fachinformatiker/in - Anwendungsentwicklung" as their title instead of
+    the employer's own, losing the one line that says what the job is — and
+    feeding that loss straight into the match score. v4's `beruf` fallback is
+    what did it, so there is deliberately no fallback now."""
+    payload = {"ergebnisliste": [
+        {
+            "referenznummer": "1-a",
+            "stellenangebotsTitel": "Junior Backend Developer Python (m/w/d)",
+            "hauptberuf": "Fachinformatiker/in - Anwendungsentwicklung",
+            "alleBerufe": ["Fachinformatiker/in - Anwendungsentwicklung"],
+            "firma": "Echte Firma GmbH",
+        },
+        {   # no title of its own: skipped rather than stored mislabelled
+            "referenznummer": "1-b",
+            "hauptberuf": "Fachinformatiker/in - Anwendungsentwicklung",
+            "alleBerufe": ["Fachinformatiker/in - Anwendungsentwicklung"],
+            "firma": "Andere Firma GmbH",
+        },
+    ]}
+    source = ArbeitsagenturSource(
+        make_client(lambda r: httpx.Response(200, json=payload)))
+    postings = await source.search(SearchQuery(keywords="Python"))
+    assert [p.title for p in postings] == ["Junior Backend Developer Python (m/w/d)"]
+
+
+async def test_arbeitsagentur_marks_a_posting_outside_germany():
+    """Austrian AMS listings leaked into a nationwide GERMAN search looking
+    exactly like domestic ones — same rows as the generic-title bug. They are
+    kept, but the country travels with the location so nobody reads "Wien" as
+    a German city."""
+    payload = {"ergebnisliste": [
+        {"referenznummer": "at-1", "stellenangebotsTitel": "Entwickler",
+         "firma": "AT GmbH",
+         "stellenlokationen": [{"adresse": {"ort": "Wien", "land": "OESTERREICH"}}]},
+        {"referenznummer": "de-1", "stellenangebotsTitel": "Entwickler",
+         "firma": "DE GmbH",
+         "stellenlokationen": [{"adresse": {"ort": "Köln", "land": "DEUTSCHLAND"}}]},
+    ]}
+    source = ArbeitsagenturSource(
+        make_client(lambda r: httpx.Response(200, json=payload)))
+    postings = await source.search(SearchQuery(keywords="Entwickler"))
+    assert [p.location for p in postings] == ["Wien, OESTERREICH", "Köln"]
+
+
+async def test_arbeitsagentur_search_uses_v6_and_details_stay_on_v4():
+    """The search route moved to v6; the DETAIL route did not and has no v6 —
+    every v6/v5/v2/v1 jobdetails path answers 403 as an unregistered route.
+    Pinning both stops a well-meant "upgrade everything" from breaking detail."""
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        if "jobdetails" in str(request.url):
+            return httpx.Response(200, json=BA_DETAILS)
+        return httpx.Response(200, json=BA_SEARCH)
+
+    source = ArbeitsagenturSource(make_client(handler))
+    postings = await source.search(SearchQuery(keywords="Python"))
+    await source.fetch_details(postings[0])
+    assert "/pc/v6/jobs" in seen[0]
+    assert "/pc/v4/jobdetails/" in seen[1]
+
+
+async def test_arbeitsagentur_zero_hits_omit_the_result_key():
+    """v6 drops `ergebnisliste` entirely on a no-hit query instead of sending
+    an empty list, so a plain .get(key, []) would still work but .get(key) or []
+    is what survives the None the API actually sends for some shapes."""
+    source = ArbeitsagenturSource(make_client(
+        lambda r: httpx.Response(200, json={"maxErgebnisse": 0, "page": 1, "size": 5})))
+    assert await source.search(SearchQuery(keywords="nichts")) == []
