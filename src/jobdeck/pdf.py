@@ -67,17 +67,20 @@ class Compression:
     quality: int | None = None
     images_recoded: int = 0
     met_target: bool = True
+    lossless: bool = False
 
     @property
     def applied(self) -> bool:
-        return self.dpi is not None
+        return self.dpi is not None or self.lossless
 
     def describe(self) -> str:
         if not self.applied:
             return ""
-        return (f"{self.original_bytes / 1024 / 1024:.2f} MB → "
-                f"{self.size_bytes / 1024 / 1024:.2f} MB "
-                f"({self.dpi} dpi, q{self.quality}, "
+        span = (f"{self.original_bytes / 1024 / 1024:.2f} MB → "
+                f"{self.size_bytes / 1024 / 1024:.2f} MB")
+        if self.lossless:
+            return f"{span} (lossless — no image re-encoded)"
+        return (f"{span} ({self.dpi} dpi, q{self.quality}, "
                 f"{self.images_recoded} image(s))")
 
 
@@ -323,13 +326,19 @@ def compress_pdf(src: pathlib.Path, out: pathlib.Path, *,
                 log.debug("leaving image %s untouched: %s", image.name, exc)
                 continue
             recoded += 1
-    # Lossless, and on a merged Mappe it is worth more than a whole ladder
-    # rung: certificates from one issuer share a background image, and once
-    # re-encoded those become byte-identical objects. Measured on the real
-    # Mappe it removed 496 KB — 23% — at no quality cost, which is what lets
-    # both budgets be met by the GENTLEST rung.
-    # remove_unreferenced stays OFF: it added nothing on that corpus, and
-    # dropping an object pypdf's reachability analysis missed is a torn PDF.
+    _write_deduplicated(writer, out)
+    return recoded
+
+
+def _write_deduplicated(writer: PdfWriter, out: pathlib.Path) -> None:
+    """Write `writer` to `out` with byte-identical objects merged, atomically.
+
+    The merge is lossless and on a merged Mappe it is the single biggest
+    saving available: certificates from one issuer carry the same background
+    scan, and concatenating their PDFs stores that scan once per file.
+    remove_unreferenced stays OFF — it added nothing measurable, and dropping
+    an object pypdf's reachability analysis missed is a torn PDF.
+    """
     try:
         writer.compress_identical_objects(remove_duplicates=True,
                                           remove_unreferenced=False)
@@ -343,7 +352,15 @@ def compress_pdf(src: pathlib.Path, out: pathlib.Path, *,
         tmp_out.replace(out)
     finally:
         tmp_out.unlink(missing_ok=True)
-    return recoded
+
+
+def repack_pdf(src: pathlib.Path, out: pathlib.Path) -> None:
+    """Rewrite a PDF, merging duplicate objects. Nothing is re-encoded.
+
+    Every page comes out pixel-identical, so this is always worth trying
+    before any lossy rung.
+    """
+    _write_deduplicated(PdfWriter(clone_from=str(src)), out)
 
 
 def install_pdf(src: pathlib.Path, dst: pathlib.Path) -> None:
@@ -376,6 +393,20 @@ def compress_to_target(src: pathlib.Path, out: pathlib.Path,
     if original <= target_bytes:
         install_pdf(src, out)
         return Compression(size_bytes=original, original_bytes=original)
+
+    # Always try the lossless rung first. On the real Mappe it alone lands at
+    # 2.11 MB, inside the e-mail budget — so the document that actually goes
+    # to a company keeps every page pixel-identical to the original, and no
+    # scan is re-encoded at all. Degrading further than the target demands
+    # would be a choice, not a necessity.
+    try:
+        repack_pdf(src, out)
+        size = out.stat().st_size
+        if size <= target_bytes and size < original:
+            return Compression(size_bytes=size, original_bytes=original,
+                               lossless=True, met_target=True)
+    except Exception as exc:  # noqa: BLE001 - compression is best-effort
+        log.warning("repacking %s failed: %s", src.name, exc)
 
     best: Compression | None = None
     for dpi, quality in COMPRESSION_LADDER:

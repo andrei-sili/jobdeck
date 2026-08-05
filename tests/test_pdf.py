@@ -255,6 +255,107 @@ def test_compress_pdf_merges_images_that_became_identical(
     assert out.stat().st_size < separate.stat().st_size / 2
 
 
+def test_compress_to_target_prefers_the_lossless_rung(
+    tmp_path, image_pdf, noisy_image
+):
+    """Merging a Mappe stores one issuer's shared background once per file.
+    Removing those duplicates is lossless, and on the real Mappe it alone
+    lands inside the e-mail budget — so the document that goes to a company
+    keeps every page pixel-identical and no scan is re-encoded at all."""
+    shared = noisy_image(1200, 900)
+    src = image_pdf(tmp_path / "src.pdf",
+                    [{"image": shared, "lossless": True}] * 3)
+    out = tmp_path / "out.pdf"
+
+    result = pdf.compress_to_target(src, out, target_bytes=src.stat().st_size // 2)
+    assert result.lossless is True
+    assert result.met_target is True
+    assert result.images_recoded == 0
+    assert result.dpi is None and result.quality is None
+    assert "lossless" in result.describe()
+    # the proof it is lossless: every image survives byte for byte, still
+    # Flate — the saving comes from storing it once, not from re-encoding
+    assert _payloads(out) == _payloads(src)
+    images = PdfReader(str(out)).pages[0].images
+    assert all(str(i.indirect_reference.get_object()["/Filter"]) == "/FlateDecode"
+               for i in images)
+    assert len({i.indirect_reference.idnum for i in images}) == 1
+    assert out.stat().st_size < src.stat().st_size
+
+
+def test_compress_to_target_falls_through_to_lossy_when_lossless_is_not_enough(
+    tmp_path, image_pdf, noisy_image
+):
+    src = image_pdf(tmp_path / "src.pdf",
+                    [{"image": noisy_image(1200, 900), "lossless": True}])
+    out = tmp_path / "out.pdf"
+    # A single image has no duplicate to merge, so the lossless rung cannot
+    # help; aim just under what the gentlest lossy rung produces.
+    probe = tmp_path / "probe.pdf"
+    gentlest = pdf.COMPRESSION_LADDER[0]
+    pdf.compress_pdf(src, probe, max_dpi=gentlest[0], quality=gentlest[1])
+
+    result = pdf.compress_to_target(src, out, target_bytes=probe.stat().st_size)
+    assert result.lossless is False
+    assert result.images_recoded == 1
+    assert (result.dpi, result.quality) == gentlest
+
+
+def test_compress_to_target_uses_the_ladder_it_publishes(
+    tmp_path, image_pdf, noisy_image, monkeypatch
+):
+    """The floor is only a floor if the rungs are what actually reach the
+    encoder — otherwise the quality could be hardcoded anywhere."""
+    seen = []
+    real = pdf.compress_pdf
+
+    def spy(src, out, *, max_dpi, quality):
+        seen.append((max_dpi, quality))
+        return real(src, out, max_dpi=max_dpi, quality=quality)
+
+    monkeypatch.setattr(pdf, "compress_pdf", spy)
+    src = image_pdf(tmp_path / "src.pdf",
+                    [{"image": noisy_image(1200, 900), "lossless": True}])
+    pdf.compress_to_target(src, tmp_path / "out.pdf", target_bytes=1024)
+    assert seen == list(pdf.COMPRESSION_LADDER)
+
+
+def test_install_pdf_publishes_atomically(tmp_path, monkeypatch):
+    """The draft's stored pdf_path may already point at the destination, so a
+    torn half-copy there is a broken attachment, not a failed build."""
+    src = _blank_pdf(tmp_path / "src.pdf")
+    dst = tmp_path / "out" / "mappe.pdf"
+    dst.parent.mkdir()
+    dst.write_bytes(b"%PDF-old but readable")
+
+    real_copy = pdf.shutil.copyfile
+
+    def failing_copy(a, b, **kw):
+        real_copy(a, b, **kw)
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pdf.shutil, "copyfile", failing_copy)
+    with pytest.raises(OSError):
+        pdf.install_pdf(src, dst)
+    assert dst.read_bytes() == b"%PDF-old but readable"  # never half-written
+    assert not dst.with_suffix(".pdf.part").exists()
+
+
+def test_an_smask_is_refused_by_the_dictionary_screen_alone(
+    tmp_path, image_pdf, noisy_image
+):
+    """pypdf merges an /SMask into RGBA, so the decoded-mode check happens to
+    catch it too. Pin the dictionary rule directly, so the invariant does not
+    quietly come to rest on a Pillow implementation detail."""
+    assert pdf._skip_reason({"/SMask": object()}, 9999, 9999, 300, 200) == (
+        "transparency")
+    src = image_pdf(tmp_path / "src.pdf",
+                    [{"image": noisy_image(1200, 900), "lossless": True,
+                      "smask": True}])
+    out = tmp_path / "out.pdf"
+    assert pdf.compress_pdf(src, out, max_dpi=200, quality=80) == 0
+
+
 def test_effective_dpi_takes_the_axis_that_cannot_over_downsample():
     """When an image's aspect does not match its page the two axes disagree.
     min() is the reading that cannot cause over-downsampling — staying above

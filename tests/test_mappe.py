@@ -123,6 +123,10 @@ async def test_mappe_skips_compression_when_it_is_switched_off(
     assert result["size_bytes"] == result["size_before_bytes"]
     assert result["size_bytes"] > 0.5 * 1024 * 1024
     assert "over the 0.5 MB target" in result["warning"]
+    # the reason must be the one that applies: pointing at the quality floor
+    # sends the user hunting for a limit instead of the switch they flipped
+    assert "switched off in Settings" in result["warning"]
+    assert "quality floor" not in result["warning"]
 
 
 async def test_mappe_warns_when_the_quality_floor_blocks_the_target(

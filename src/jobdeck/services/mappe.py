@@ -185,9 +185,15 @@ def _build_mappe(job_id: int) -> dict:
                    f"convention; remove or pre-shrink an Anlage")
         log.warning("mappe for job %s: %s", job_id, warning)
     elif not compression.met_target:
+        # Name the reason that actually applies: telling someone the quality
+        # floor is in the way, when they simply switched shrinking off, sends
+        # them looking for a limit instead of a switch.
+        reason = ("the quality floor stops further compression"
+                  if settings["compress"] == "1"
+                  else "shrinking is switched off in Settings")
         warning = (f"Mappe is {size / 1024 / 1024:.1f} MB — over the "
                    f"{target_bytes / 1024 / 1024:.1f} MB target for this "
-                   f"channel; the quality floor stops further compression")
+                   f"channel; {reason}")
         log.warning("mappe for job %s: %s", job_id, warning)
 
     with db.db() as con:
