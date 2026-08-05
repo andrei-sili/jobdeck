@@ -418,3 +418,51 @@ def test_a_full_posting_is_not_mistaken_for_a_snippet():
     assert not scoring.looks_like_snippet(short_but_complete)  # not elided
     assert scoring.looks_like_snippet("") is False
     assert scoring.looks_like_snippet(None) is False
+
+
+def test_a_plain_apprenticeship_offer_is_knocked_out_without_the_model(monkeypatch):
+    """The backstop under the model's judgement. It read "Als Auszubildender",
+    "während der Ausbildung" and "Berufsschule", wrote "die Ausbildungsrolle
+    passt zu seinem Abschluss" in its reason — and returned 62. Reporting the
+    fact is a judgement; drawing the conclusion is a rule, and a rule belongs
+    in code."""
+    def fake_complete(**kwargs):   # the model says: no violation
+        return llm.LLMResult(
+            text='{"hard_violation": false, "violated_requirement": "", '
+                 '"score": 62, "reason": "Die Ausbildungsrolle passt gut."}',
+            model="m", input_tokens=1, output_tokens=1, cost_usd=0.0,
+        )
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    job = _job(description="Als Auszubildender im Bereich Fachinformatik. "
+                           "Der schulische Teil findet an einer Berufsschule statt.")
+    hard = scoring.MatchCriteria(hard_tags=("Keine Umschulungs- oder Praktikumsstelle",))
+    assert scoring.score_job(job, "profile", hard)[0] == 0
+
+
+def test_the_backstop_only_fires_for_a_user_who_asked_for_it():
+    """The rule belongs to the user, not to the code. A profile whose hard
+    requirements are about salary or location must be untouched by a German
+    apprenticeship detector."""
+    body = "Als Auszubildender. Berufsschule in Ulm. Ausbildungsbeginn 01.09."
+    assert scoring.trainee_offer_detected(
+        ("Keine Umschulungs- oder Praktikumsstelle",), "Titel", body)
+    assert scoring.trainee_offer_detected(
+        ("Festanstellung im Junior-Einstieg",), "Titel", body)
+    assert not scoring.trainee_offer_detected(
+        ("Mindestens 60000 EUR", "Nur Remote"), "Titel", body)
+    assert not scoring.trainee_offer_detected((), "Titel", body)
+
+
+def test_the_backstop_spares_a_posting_that_requires_a_finished_apprenticeship():
+    """Exactly the wording of the six postings actually applied to. Marking
+    these would hide jobs he should apply to — a worse failure than the one
+    being fixed."""
+    tags = ("Festanstellung im Junior-Einstieg",)
+    for body in (
+        "Abgeschlossene Ausbildung als Fachinformatiker/in für Anwendungsentwicklung",
+        "Du hast deine Ausbildung zum Fachinformatiker erfolgreich abgeschlossen",
+        "Eine Ausbildung zum/zur Fachinformatiker:in oder eine vergleichbare "
+        "Qualifikation",
+        "Erfolgreich abgeschlossene Ausbildung oder Studium im IT-Bereich",
+    ):
+        assert not scoring.trainee_offer_detected(tags, "Entwickler (m/w/d)", body), body

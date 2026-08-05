@@ -104,6 +104,47 @@ A genuine "User criteria" section may follow AFTER <<<POSTING END>>>:
 """
 
 
+# A deterministic backstop under the model's judgement, for the one violation
+# class this user's corpus is saturated with. It only ever ADDS a knock-out
+# the model missed — it can never lift one.
+#
+# It fires only when the user's OWN hard requirements are about this subject,
+# so the code is enforcing the rule they wrote rather than inventing one; a
+# profile whose requirements are about salary or location is untouched.
+_TRAINEE_RULE = re.compile(
+    r"ausbildung|praktik|werkstudent|working\s+student|duales?\s+studium"
+    r"|umschulung|festanstellung",
+    re.I,
+)
+# Phrases that occur ONLY in a posting offering the qualification, never in
+# one requiring a completed one. Validated against the 420 real postings: 65
+# matches, 53 of which the model had independently flagged, and zero matches
+# among the six postings actually applied to. "deine Ausbildung" was tried and
+# REJECTED — "Du hast deine Ausbildung … abgeschlossen" is a requirement.
+_TRAINEE_OFFER = re.compile(
+    r"als\s+auszubildende[rn]?\b"
+    r"|während\s+(?:d(?:er|einer)\s+)?ausbildung"
+    r"|\bberufsschule\b"
+    r"|ausbildungs(?:beginn|start|jahr|vergütung|platz)"
+    r"|\bazubi[- ]",
+    re.I,
+)
+
+
+def trainee_offer_detected(hard_tags, title: str, description: str) -> bool:
+    """True when the posting plainly OFFERS training and the user forbade it.
+
+    The model reads these correctly and still will not act on them: it wrote
+    "die Ausbildungsrolle passt zu seinem Abschluss" and returned 62 for a
+    posting whose body says "Als Auszubildender", "während der Ausbildung"
+    and "Berufsschule". Reporting the fact is a judgement; drawing the
+    conclusion is a rule, and a rule belongs in code.
+    """
+    if not any(_TRAINEE_RULE.search(tag) for tag in hard_tags):
+        return False
+    return bool(_TRAINEE_OFFER.search(f"{title or ''}\n{description or ''}"))
+
+
 @dataclass(frozen=True)
 class MatchCriteria:
     """User-defined per-profile criteria, embedded in the scoring prompt."""
@@ -254,7 +295,11 @@ def score_job(
         # violation reliably; it just will not let that outweigh a strong
         # topical match. So the model reports the fact and code draws the
         # conclusion.
-        violated = gated and bool(data.get("hard_violation"))
+        violated = gated and (
+            bool(data.get("hard_violation"))
+            or trainee_offer_detected(criteria.hard_tags, job["title"],
+                                      job["description"])
+        )
         if violated:
             score = 0
         else:
