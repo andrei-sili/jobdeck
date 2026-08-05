@@ -10,6 +10,7 @@ import pytest
 from nicegui import ui
 from nicegui.elements.markdown import prepare_content
 
+from jobdeck.ui import helpers
 from jobdeck.ui.helpers import openable_url, posting_markdown
 from jobdeck.ui.pages import jobs
 
@@ -221,3 +222,39 @@ def test_ordinary_markdown_still_renders():
     assert "<strong>Aufgaben</strong>" in html
     assert '<a href="https://firma.de/blog">hier</a>' in html
     assert "<li>Python</li>" in html
+
+
+def test_mappe_summary_names_the_size_it_started_from():
+    """The attachment is the deliverability variable the user cannot see —
+    a bare 'ready, 1.6 MB' hides that 3.7 MB went in. Shared by the queue and
+    the job inbox, because the inbox used to report the bare size only."""
+    shrunk = helpers.mappe_summary({
+        "pages": 10, "size_bytes": 1_628_894, "size_before_bytes": 3_854_093,
+        "compression": "3.68 MB → 1.55 MB (300 dpi, q85, 3 image(s))",
+        "anlagen": ["01_zeugnis.pdf"],
+    })
+    assert shrunk == "Mappe ready: 10 pages, 1.6 MB (compressed from 3.7 MB) ✓"
+
+    untouched = helpers.mappe_summary({
+        "pages": 4, "size_bytes": 512_000, "size_before_bytes": 512_000,
+        "compression": "", "anlagen": [],
+    })
+    assert untouched == "Mappe ready: 4 pages, 0.5 MB ✓"
+
+
+def test_mappe_summary_lists_the_anlagen_for_the_job_inbox():
+    with_anlagen = helpers.mappe_summary({
+        "pages": 10, "size_bytes": 1_628_894, "size_before_bytes": 3_854_093,
+        "compression": "3.68 MB → 1.55 MB (300 dpi, q85, 3 image(s))",
+        "anlagen": ["01_zeugnis.pdf", "02_zertifikat.pdf"],
+    }, with_anlagen=True)
+    assert with_anlagen == (
+        "Mappe ready: 10 pages, 1.6 MB (compressed from 3.7 MB) · "
+        "Anlagen: 01_zeugnis.pdf, 02_zertifikat.pdf ✓"
+    )
+
+    none = helpers.mappe_summary({
+        "pages": 1, "size_bytes": 100_000, "size_before_bytes": 100_000,
+        "compression": "", "anlagen": [],
+    }, with_anlagen=True)
+    assert none == "Mappe ready: 1 pages, 0.1 MB · no Anlagen ✓"

@@ -6,7 +6,12 @@ from nicegui import run, ui
 
 from jobdeck import apply_channel, db
 from jobdeck.services import apply_resolve, contact_lookup, drafting, mappe
-from jobdeck.ui.helpers import open_in_system, openable_url, posting_markdown
+from jobdeck.ui import helpers
+from jobdeck.ui.helpers import (
+    open_in_system,
+    openable_url,
+    posting_markdown,
+)
 from jobdeck.ui.layout import frame
 
 FILTERS = ["new", "portal", "duplicate", "skipped", "applied", "all"]
@@ -171,13 +176,9 @@ async def jobs_page():
                             ui.notify(result["error"], type="warning",
                                       multi_line=True)
                             return
-                        size_mb = result["size_bytes"] / 1024 / 1024
                         pdf_label.set_text(f"Mappe: {result['pdf_path']}")
-                        anlagen = (" · Anlagen: " + ", ".join(result["anlagen"])
-                                   if result["anlagen"] else " · no Anlagen")
                         ui.notify(
-                            f"Mappe ready: {result['pages']} pages, "
-                            f"{size_mb:.1f} MB{anlagen} ✓",
+                            helpers.mappe_summary(result, with_anlagen=True),
                             type="positive", multi_line=True,
                         )
                         if result["warning"]:

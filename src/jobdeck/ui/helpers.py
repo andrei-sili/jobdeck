@@ -17,6 +17,28 @@ def openable_url(url: str) -> str:
     return url if netsafe.is_openable(url or "") else ""
 
 
+def mappe_summary(result: dict, *, with_anlagen: bool = False) -> str:
+    """Confirmation line for a finished Mappe, for every page that builds one.
+
+    It names the size the Mappe started from whenever it was shrunk: the
+    attachment is the one deliverability variable the user cannot otherwise
+    see, and it is the first suspect whenever an application lands in spam.
+    Shared rather than written per page — the job inbox used to report a bare
+    size and quietly hid that the document had been recompressed at all.
+    """
+    size_mb = result["size_bytes"] / 1024 / 1024
+    shrunk = ""
+    if result["compression"]:
+        before_mb = result["size_before_bytes"] / 1024 / 1024
+        shrunk = f" (compressed from {before_mb:.1f} MB)"
+    anlagen = ""
+    if with_anlagen:
+        anlagen = (" · Anlagen: " + ", ".join(result["anlagen"])
+                   if result["anlagen"] else " · no Anlagen")
+    return (f"Mappe ready: {result['pages']} pages, "
+            f"{size_mb:.1f} MB{shrunk}{anlagen} ✓")
+
+
 def posting_markdown(text: str) -> str:
     """Posting text made safe to render as Markdown.
 

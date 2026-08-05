@@ -12,6 +12,7 @@ from nicegui import run, ui
 
 from jobdeck import db
 from jobdeck.services import mappe, send
+from jobdeck.ui import helpers
 from jobdeck.ui.helpers import open_in_system, openable_url
 from jobdeck.ui.layout import frame
 
@@ -311,9 +312,7 @@ async def queue_page():
                         return
                     current["pdf_path"] = result["pdf_path"]
                     pdf_label.set_text(f"Mappe: {result['pdf_path']}")
-                    size_mb = result["size_bytes"] / 1024 / 1024
-                    ui.notify(f"Mappe ready: {result['pages']} pages, "
-                              f"{size_mb:.1f} MB ✓", type="positive")
+                    ui.notify(helpers.mappe_summary(result), type="positive")
                     if result["warning"]:
                         ui.notify(result["warning"], type="warning",
                                   multi_line=True)

@@ -5,7 +5,7 @@ import asyncio
 from nicegui import run, ui
 
 from jobdeck import backup, config, db, gmail
-from jobdeck.services import polling, scoring
+from jobdeck.services import mappe, polling, scoring
 from jobdeck.ui.helpers import open_in_system
 from jobdeck.ui.layout import frame
 
@@ -22,6 +22,16 @@ def _get_settings():
             "template_path": db.get_setting(con, "template_path", ""),
             "anlagen_dir": db.get_setting(con, "anlagen_dir", ""),
             "email_signature": db.get_setting(con, "email_signature", ""),
+            "mappe_compress": db.get_setting(con, "mappe_compress", "1"),
+            # Parsed the same way the builder parses it, so a hand-edited or
+            # unset value shows the budget that will actually be used instead
+            # of breaking the page on float("").
+            "mappe_target_mb": mappe.target_mb_setting(
+                db.get_setting(con, "mappe_target_mb", ""),
+                mappe.DEFAULT_TARGET_MB),
+            "mappe_target_portal_mb": mappe.target_mb_setting(
+                db.get_setting(con, "mappe_target_portal_mb", ""),
+                mappe.DEFAULT_PORTAL_TARGET_MB),
             "global_hard_tags": db.get_setting(con, "global_hard_tags", ""),
             "real_send_enabled": db.get_setting(con, "real_send_enabled", "0"),
             "test_recipient": db.get_setting(con, "test_recipient", ""),
@@ -156,6 +166,25 @@ async def settings_page():
                 "Anlagen are appended in filename order — prefix them "
                 "01_, 02_, … to control the sequence."
             ).classes("text-xs text-gray-500")
+            compress = ui.switch(
+                "Shrink the Mappe to fit the application channel",
+                value=settings["mappe_compress"] == "1",
+            )
+            with ui.row().classes("items-center gap-4"):
+                target_mb = ui.number("E-mail target (MB)",
+                                      value=settings["mappe_target_mb"],
+                                      min=0.5, max=20, step=0.5).classes("w-48")
+                portal_mb = ui.number(
+                    "Portal upload target (MB)",
+                    value=settings["mappe_target_portal_mb"],
+                    min=0.5, max=20, step=0.5,
+                ).classes("w-48")
+            ui.label(
+                "Your Anlagen are never modified — only the merged copy that "
+                "gets attached. Scans are downsampled no further than 200 dpi; "
+                "if a target needs more than that, the Mappe stays larger and "
+                "says so rather than going out unreadable."
+            ).classes("text-xs text-gray-500")
             email_signature = ui.textarea(
                 "E-mail signature (contact block under every application e-mail)",
                 value=settings["email_signature"],
@@ -178,6 +207,14 @@ async def settings_page():
                                    anlagen_dir.value.strip())
                 await run.io_bound(_set_setting, "email_signature",
                                    (email_signature.value or "").strip())
+                await run.io_bound(_set_setting, "mappe_compress",
+                                   "1" if compress.value else "0")
+                await run.io_bound(
+                    _set_setting, "mappe_target_mb",
+                    str(target_mb.value or mappe.DEFAULT_TARGET_MB))
+                await run.io_bound(
+                    _set_setting, "mappe_target_portal_mb",
+                    str(portal_mb.value or mappe.DEFAULT_PORTAL_TARGET_MB))
                 ui.notify("Saved", type="positive")
 
             ui.button("Save", on_click=save_application)

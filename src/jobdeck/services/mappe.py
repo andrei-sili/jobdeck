@@ -14,10 +14,11 @@ instead of being blessed as the new draft's PDF.
 
 import asyncio
 import logging
+import math
 import pathlib
 import tempfile
 
-from jobdeck import config, db, pdf, templates
+from jobdeck import apply_channel, config, db, pdf, templates
 from jobdeck.ai import drafting as ai_drafting
 from jobdeck.dates import heute_de
 from jobdeck.services.drafting import resolve_refnr
@@ -31,10 +32,55 @@ _lock = asyncio.Lock()  # double-clicks must not race Chrome on one output file
 # be possible to get one back without un-approving first.
 EDITABLE_STATUS = ("ready", "approved")
 
+# Size budgets, in MB. E-mail: 2-3 MB is the deliverability sweet spot and
+# corporate gateways start rejecting well below the 5 MB convention.
+DEFAULT_TARGET_MB = 3.0
+# Upload forms cap lower — frequently 2 MB, sometimes per file.
+DEFAULT_PORTAL_TARGET_MB = 2.0
+PORTAL_CHANNELS = frozenset({
+    apply_channel.CHANNEL_ATS,
+    apply_channel.CHANNEL_BOARD,
+    apply_channel.CHANNEL_COMPANY_SITE,
+})
+
 
 def _error(message: str) -> dict:
     return {"ok": False, "error": message, "pdf_path": "", "warning": "",
-            "pages": 0, "size_bytes": 0, "anlagen": []}
+            "pages": 0, "size_bytes": 0, "size_before_bytes": 0,
+            "compression": "", "anlagen": []}
+
+
+def target_mb_setting(raw: str, fallback: float) -> float:
+    """A size budget in MB from a settings string, or the default.
+
+    float() accepts "inf" and "1e400", and the infinity that comes back then
+    raises OverflowError on the conversion to bytes — past the build's
+    error handler, so the button just dies. app_settings holds strings in a
+    directory the user is invited to edit, so the value has to be screened
+    for being a real number, not merely for parsing.
+    """
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return fallback
+    if not math.isfinite(value) or value <= 0:
+        return fallback
+    return value
+
+
+def _target_bytes(settings: dict, channel: str) -> int:
+    """Size budget for the channel this Mappe will travel through.
+
+    An unresolved channel gets the e-mail budget rather than the tighter
+    portal one: an oversized upload fails loudly in front of the user, who
+    can rebuild, whereas needlessly degrading a scan is silent and permanent
+    for that send.
+    """
+    if channel in PORTAL_CHANNELS:
+        mb = target_mb_setting(settings["target_portal_mb"], DEFAULT_PORTAL_TARGET_MB)
+    else:
+        mb = target_mb_setting(settings["target_mb"], DEFAULT_TARGET_MB)
+    return int(mb * 1024 * 1024)
 
 
 def _build_mappe(job_id: int) -> dict:
@@ -47,6 +93,9 @@ def _build_mappe(job_id: int) -> dict:
             "applicant_ort": db.get_setting(con, "applicant_ort", "").strip(),
             "template_path": db.get_setting(con, "template_path", "").strip(),
             "anlagen_dir": db.get_setting(con, "anlagen_dir", "").strip(),
+            "compress": db.get_setting(con, "mappe_compress", "1"),
+            "target_mb": db.get_setting(con, "mappe_target_mb", ""),
+            "target_portal_mb": db.get_setting(con, "mappe_target_portal_mb", ""),
         }
     if job is None:
         return _error("posting not found")
@@ -103,19 +152,48 @@ def _build_mappe(job_id: int) -> dict:
         out_path = (pathlib.Path(config.OUTPUT_DIR) / f"job_{job_id}"
                     / f"{out_name}.pdf")
 
+        target_bytes = _target_bytes(settings, job["apply_channel"] or "")
         with tempfile.TemporaryDirectory(prefix="jobdeck_mappe_") as tmp:
             letter_pdf = pathlib.Path(tmp) / "anschreiben.pdf"
             pdf.html_to_pdf(letter_html, letter_pdf)
-            pdf.merge_pdfs([letter_pdf, *anlagen], out_path)
+            # Merged in the temp dir, then fitted to the budget on the way
+            # out: the Anlagen the user curated are only ever READ, and the
+            # compression works on the same bytes that will be attached.
+            merged = pathlib.Path(tmp) / "mappe.pdf"
+            pdf.merge_pdfs([letter_pdf, *anlagen], merged)
+            if settings["compress"] == "1":
+                compression = pdf.compress_to_target(merged, out_path,
+                                                     target_bytes)
+            else:
+                pdf.install_pdf(merged, out_path)
+                merged_size = merged.stat().st_size
+                compression = pdf.Compression(
+                    size_bytes=merged_size, original_bytes=merged_size,
+                    met_target=merged_size <= target_bytes,
+                )
         size = out_path.stat().st_size
         pages = pdf.page_count(out_path)
     except (templates.TemplateError, pdf.PdfError) as exc:
         return _error(str(exc))
 
+    if compression.applied:
+        log.info("mappe for job %s compressed: %s", job_id,
+                 compression.describe())
     warning = ""
     if size > pdf.MAX_MAPPE_BYTES:
         warning = (f"Mappe is {size / 1024 / 1024:.1f} MB — over the 5 MB "
-                   f"convention; consider compressing the Anlagen")
+                   f"convention; remove or pre-shrink an Anlage")
+        log.warning("mappe for job %s: %s", job_id, warning)
+    elif not compression.met_target:
+        # Name the reason that actually applies: telling someone the quality
+        # floor is in the way, when they simply switched shrinking off, sends
+        # them looking for a limit instead of a switch.
+        reason = ("the quality floor stops further compression"
+                  if settings["compress"] == "1"
+                  else "shrinking is switched off in Settings")
+        warning = (f"Mappe is {size / 1024 / 1024:.1f} MB — over the "
+                   f"{target_bytes / 1024 / 1024:.1f} MB target for this "
+                   f"channel; {reason}")
         log.warning("mappe for job %s: %s", job_id, warning)
 
     with db.db() as con:
@@ -134,6 +212,8 @@ def _build_mappe(job_id: int) -> dict:
         db.upsert_draft(con, job_id, {"pdf_path": str(out_path)})
     return {"ok": True, "error": "", "pdf_path": str(out_path),
             "warning": warning, "pages": pages, "size_bytes": size,
+            "size_before_bytes": compression.original_bytes,
+            "compression": compression.describe(),
             "anlagen": [p.name for p in anlagen]}
 
 
@@ -141,6 +221,6 @@ async def create_mappe(job_id: int) -> dict:
     """Build the application PDF for a job's ready draft.
 
     Returns {"ok", "error", "pdf_path", "warning", "pages", "size_bytes",
-    "anlagen"}."""
+    "size_before_bytes", "compression", "anlagen"}."""
     async with _lock:  # serialize concurrent Create PDF clicks
         return await asyncio.to_thread(_build_mappe, job_id)
