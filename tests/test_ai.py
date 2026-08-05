@@ -114,6 +114,17 @@ def test_complete_raises_on_truncation_but_keeps_usage(monkeypatch):
         llm.complete(system="s", user_content="u")
     assert "truncated" in str(excinfo.value)
     assert excinfo.value.usage is not None  # the billed call stays meterable
+    # typed, so the drafting retry can tell "the cap bit" from "the sample was
+    # bad" without matching on a message that is free to be reworded
+    assert excinfo.value.truncated is True
+
+
+def test_only_a_truncation_carries_the_truncated_flag(monkeypatch):
+    stub = StubClient(_response("", stop_reason="refusal"))
+    monkeypatch.setattr(llm, "client", lambda: stub)
+    with pytest.raises(llm.LLMError) as excinfo:
+        llm.complete(system="s", user_content="u")
+    assert excinfo.value.truncated is False
 
 
 def test_complete_wraps_api_errors(monkeypatch):

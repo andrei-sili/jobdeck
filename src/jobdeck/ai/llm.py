@@ -45,11 +45,18 @@ class LLMError(RuntimeError):
     `usage` carries the token/cost accounting when the API call itself
     succeeded (e.g. refusal, unparseable output) — those tokens were still
     paid for and must be metered by the caller.
+
+    `truncated` marks the one failure a fresh sample cannot fix: the response
+    ran into max_tokens. Re-rolling the identical request at the identical cap
+    is the one retry guaranteed to fail again, so callers need to tell this
+    case apart rather than matching on the message text.
     """
 
-    def __init__(self, message: str, usage: "LLMResult | None" = None):
+    def __init__(self, message: str, usage: "LLMResult | None" = None,
+                 truncated: bool = False):
         super().__init__(message)
         self.usage = usage
+        self.truncated = truncated
 
 
 @dataclass(frozen=True)
@@ -128,10 +135,14 @@ def complete(
     if response.stop_reason == "max_tokens":
         # A truncated structured-output response is unusable JSON — fail closed
         # so a half-written draft is never parsed, recorded or sent.
+        # NOTE max_tokens bounds THINKING PLUS the visible answer. A model that
+        # thinks hard about an awkward posting can exhaust the cap before it
+        # writes a word, so a truncation here often means "the budget was too
+        # small", not "the model rambled".
         log.warning("LLM response truncated at max_tokens=%d", max_tokens)
         raise LLMError(
             f"response truncated at max_tokens={max_tokens} — the output is "
-            f"incomplete; raise max_tokens", usage=result
+            f"incomplete; raise max_tokens", usage=result, truncated=True
         )
     return result
 

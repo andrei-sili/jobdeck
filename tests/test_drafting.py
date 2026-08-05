@@ -242,19 +242,25 @@ def test_draft_application_rejects_unusable_response(monkeypatch, text):
     assert excinfo.value.usage.cost_usd == pytest.approx(0.001 * ai_drafting.DRAFT_ATTEMPTS)
 
 
-def test_draft_application_retries_a_truncated_attempt_and_meters_all(monkeypatch):
-    """Sonnet occasionally truncates; a retry lands, and every billed attempt
-    (the failed one included) is metered so the cost is not under-reported."""
-    good = _draft_text()  # a clean, parseable draft that signs off properly
-    calls = []
+def test_a_truncated_attempt_is_retried_with_MORE_ROOM(monkeypatch):
+    """max_tokens bounds adaptive thinking plus the letter, and the letter is
+    the small half — one real posting produced a finished ~1000-token draft
+    after ~8300 tokens of thinking. So a truncation means the budget was too
+    small, and the retry has to raise it: re-rolling the identical request at
+    the identical cap is the one retry guaranteed to fail again.
+
+    Every billed attempt is still metered so the cost is not under-reported."""
+    good = _draft_text()
+    caps = []
 
     def fake_complete(**kwargs):
-        calls.append(1)
-        if len(calls) == 1:  # first attempt truncates (fails closed, still billed)
+        caps.append(kwargs["max_tokens"])
+        if len(caps) == 1:
             raise llm.LLMError(
-                "response truncated at max_tokens=8000",
+                "response truncated at max_tokens=12000",
                 usage=llm.LLMResult(text="", model="m", input_tokens=100,
-                                    output_tokens=8000, cost_usd=0.12),
+                                    output_tokens=12000, cost_usd=0.12),
+                truncated=True,
             )
         return llm.LLMResult(text=good, model="m", input_tokens=100,
                              output_tokens=300, cost_usd=0.006)
@@ -262,33 +268,57 @@ def test_draft_application_retries_a_truncated_attempt_and_meters_all(monkeypatc
     monkeypatch.setattr(llm, "complete", fake_complete)
     anschreiben, _, stellen, usage = ai_drafting.draft_application(_job(), "profil")
     assert anschreiben.startswith("Anrede,") and stellen == "Dev"
-    assert len(calls) == 2  # one truncated attempt, then a good one
-    # both attempts metered — the truncated one was billed too
-    assert usage.output_tokens == 8000 + 300
+    assert caps == [ai_drafting.DRAFT_MAX_TOKENS, ai_drafting.DRAFT_MAX_TOKENS * 2]
+    assert usage.output_tokens == 12000 + 300
     assert usage.cost_usd == pytest.approx(0.12 + 0.006)
 
 
-def test_draft_application_exhausts_retries_on_repeated_truncation(monkeypatch):
-    """Every attempt truncating (llm.complete raises) fails closed after the
-    cap, with usage summing all billed attempts — a stuck loop never ships a
-    half-written draft and never under-reports cost."""
-    calls = []
+def test_a_failure_a_fresh_sample_CAN_fix_is_retried_at_the_same_cap(monkeypatch):
+    """The other half of the rule: an unparseable response is randomness, not
+    the cap, so it gets another roll at the same budget rather than a bigger
+    bill."""
+    caps = []
 
     def fake_complete(**kwargs):
-        calls.append(1)
+        caps.append(kwargs["max_tokens"])
+        if len(caps) == 1:
+            return llm.LLMResult(text="kein Marker", model="m", input_tokens=10,
+                                 output_tokens=20, cost_usd=0.001)
+        return llm.LLMResult(text=_draft_text(), model="m", input_tokens=10,
+                             output_tokens=20, cost_usd=0.001)
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    ai_drafting.draft_application(_job(), "profil")
+    assert caps == [ai_drafting.DRAFT_MAX_TOKENS, ai_drafting.DRAFT_MAX_TOKENS]
+
+
+def test_repeated_truncation_stops_at_the_ceiling_instead_of_burning_attempts(
+    monkeypatch
+):
+    """A one-page letter that will not fit in the ceiling is pathological, and
+    paying twice more to confirm it is the bug being fixed: one real posting
+    burned 4 attempts, 225 s and $0.3955 producing nothing — more than the five
+    successful drafts of that run cost together. It fails closed, having
+    escalated once, and every billed attempt is still metered."""
+    caps = []
+
+    def fake_complete(**kwargs):
+        caps.append(kwargs["max_tokens"])
         raise llm.LLMError(
-            "response truncated at max_tokens=5000",
+            f"response truncated at max_tokens={kwargs['max_tokens']}",
             usage=llm.LLMResult(text="", model="m", input_tokens=50,
                                 output_tokens=5000, cost_usd=0.08),
+            truncated=True,
         )
 
     monkeypatch.setattr(llm, "complete", fake_complete)
     with pytest.raises(llm.LLMError) as excinfo:
         ai_drafting.draft_application(_job(), "profil")
-    assert len(calls) == ai_drafting.DRAFT_ATTEMPTS
-    assert "after" in str(excinfo.value)  # "failed after N attempts"
-    assert excinfo.value.usage.output_tokens == 5000 * ai_drafting.DRAFT_ATTEMPTS
-    assert excinfo.value.usage.cost_usd == pytest.approx(0.08 * ai_drafting.DRAFT_ATTEMPTS)
+    assert caps == [ai_drafting.DRAFT_MAX_TOKENS, ai_drafting.DRAFT_MAX_TOKENS_CEILING]
+    assert len(caps) < ai_drafting.DRAFT_ATTEMPTS  # stopped early, on purpose
+    assert "after" in str(excinfo.value)
+    assert excinfo.value.usage.output_tokens == 5000 * len(caps)
+    assert excinfo.value.usage.cost_usd == pytest.approx(0.08 * len(caps))
 
 
 def test_draft_application_retries_an_email_without_a_closing(monkeypatch):
@@ -740,3 +770,25 @@ async def test_abandoned_claim_is_reclaimed(
     result = await drafting.draft_for_job(job_id)
     assert result["ok"]
     assert db.get_draft_by_job(con, job_id)["status"] == "ready"
+
+
+def test_the_drafting_budget_leaves_room_for_thinking():
+    """Not a style preference — a measurement. On the posting that used to
+    fail, the finished draft was ~1000 tokens and arrived after ~8300 tokens of
+    thinking, for 9285 output tokens in total. The old 12000 was chosen to
+    clear that with margin; the ceiling is the one escalation above it.
+
+    Raising the cap is free: billing is on tokens actually produced, not on the
+    cap, so the five drafts that already succeed at ~2000 cost exactly what
+    they did before."""
+    assert ai_drafting.DRAFT_MAX_TOKENS >= 10000
+    assert ai_drafting.DRAFT_MAX_TOKENS_CEILING >= ai_drafting.DRAFT_MAX_TOKENS * 2
+
+
+def test_a_truncation_is_typed_not_matched_on_its_message():
+    """Callers must tell 'the cap bit' from 'the sample was bad' without
+    string-matching an error message that is free to be reworded."""
+    plain = llm.LLMError("something else")
+    assert plain.truncated is False
+    cut = llm.LLMError("response truncated at max_tokens=12000", truncated=True)
+    assert cut.truncated is True

@@ -19,6 +19,7 @@ and the applicant name — the ID and the name must be exact (HR matches on the
 Refnr) and no reviewer reliably spots a mistyped one.
 """
 
+import logging
 import re
 
 from jobdeck import config
@@ -33,12 +34,23 @@ from jobdeck.ai.scoring import (  # noqa: F401 — re-exported for callers/tests
 # comfortably holds the thinking + analysis + Stellenbezeichnung + Anschreiben +
 # e-mail; a truncated draft is a hard error (llm.complete), never a silently
 # half-written one. The longer timeout covers a slow Sonnet call.
-DRAFT_MAX_TOKENS = 5000
+# max_tokens bounds ADAPTIVE THINKING PLUS the letter, and the letter is the
+# small half: measured on the posting that used to fail, a finished draft of
+# ~1000 tokens came after ~8300 tokens of thinking. 5000 cut that off mid-
+# thought every single time. Raising the ceiling is free — billing is on tokens
+# actually produced, not on the cap — so this only ever buys room.
+log = logging.getLogger(__name__)
+
+DRAFT_MAX_TOKENS = 12000
+# One escalation for a draft that needs more room than that. Beyond it, a
+# one-page letter is pathological and more budget is just a bigger bill.
+DRAFT_MAX_TOKENS_CEILING = 24000
 DRAFT_TIMEOUT_S = 240.0
-# Sonnet can still degenerate into a raw-newline loop and truncate at max_tokens
-# (a hard error in llm.complete), so DRAFT_ATTEMPTS retries the whole draft — a
-# fresh sample almost always lands — with a moderate bound so a looping attempt
-# fails fast and cheap.
+# Retries are for what a fresh SAMPLE can fix — an unparseable or cut-off
+# response. A truncation is not that: it is the cap biting, and re-rolling the
+# identical request at the identical cap is the one retry guaranteed to fail
+# again. Measured: one posting burned 4 attempts, 225 s and $0.3955 producing
+# nothing, more than the five successful drafts of that run cost together.
 DRAFT_ATTEMPTS = 4
 
 # The drafting response is delimited PLAIN TEXT, not JSON. Constrained JSON
@@ -343,21 +355,29 @@ def draft_application(
     user_content = build_user_content(job, profile_text, refnr, applicant_name)
     billed: list[llm.LLMResult] = []
     last_error = "drafting produced no usable response"
+    max_tokens = DRAFT_MAX_TOKENS
     for _ in range(DRAFT_ATTEMPTS):
         try:
             result = llm.complete(
                 system=SYSTEM_PROMPT,
                 user_content=user_content,
-                max_tokens=DRAFT_MAX_TOKENS,
+                max_tokens=max_tokens,
                 model=model,
                 timeout=DRAFT_TIMEOUT_S,
             )
         except llm.LLMError as exc:
             # A truncated attempt fails closed in llm.complete but was still
-            # billed — keep its usage and try a fresh sample.
+            # billed — keep its usage.
             if exc.usage is not None:
                 billed.append(exc.usage)
             last_error = str(exc)
+            if exc.truncated:
+                # The cap bit, so a fresh sample at the same cap cannot help.
+                # Give it room once; past the ceiling, stop paying to find out.
+                if max_tokens >= DRAFT_MAX_TOKENS_CEILING:
+                    break
+                max_tokens = min(max_tokens * 2, DRAFT_MAX_TOKENS_CEILING)
+                log.info("drafting retry with max_tokens=%d", max_tokens)
             continue
         billed.append(result)
         sections = parse_draft_sections(result.text)
