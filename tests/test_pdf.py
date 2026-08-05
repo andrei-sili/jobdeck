@@ -165,6 +165,39 @@ def test_compress_pdf_refuses_a_colour_key_masked_image(tmp_path, image_pdf, noi
     assert _payloads(out) == _payloads(src)
 
 
+def test_compress_pdf_merges_images_that_became_identical(
+    tmp_path, image_pdf, noisy_image
+):
+    """Certificates from one issuer carry the same background, and after
+    re-encoding those become byte-identical objects. Merging them is lossless
+    and on the real Mappe it was worth more than a whole ladder rung."""
+    shared = noisy_image(1200, 900)
+    src = image_pdf(tmp_path / "src.pdf", [
+        {"image": shared, "lossless": True},
+        {"image": shared, "lossless": True},
+        {"image": shared, "lossless": True},
+    ])
+    out = tmp_path / "out.pdf"
+    assert pdf.compress_pdf(src, out, max_dpi=300, quality=85) == 3
+
+    images = PdfReader(str(out)).pages[0].images
+    assert len(images) == 3  # still drawn three times…
+    refs = {(i.indirect_reference.idnum, i.indirect_reference.generation)
+            for i in images}
+    assert len(refs) == 1  # …but stored once
+
+    separate = tmp_path / "separate.pdf"
+    pdf.compress_pdf(
+        image_pdf(tmp_path / "distinct.pdf", [
+            {"image": noisy_image(1200, 900), "lossless": True},
+            {"image": noisy_image(1201, 900), "lossless": True},
+            {"image": noisy_image(1202, 900), "lossless": True},
+        ]),
+        separate, max_dpi=300, quality=85,
+    )
+    assert out.stat().st_size < separate.stat().st_size / 2
+
+
 def test_the_compression_ladder_never_offers_a_rung_below_the_floor():
     """200 dpi / q80 is the level Andrei accepted after comparing it with the
     600-dpi original at equal zoom. It is a product decision, not a tunable:
