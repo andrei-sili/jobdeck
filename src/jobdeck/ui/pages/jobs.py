@@ -210,8 +210,9 @@ async def jobs_page():
             remote = " · remote" if job["remote"] else ""
             head = (f"{job['title']}  —  {job['company']}"
                     f" ({job['location'] or 'n/a'}{remote}{_score_line(job)})")
-            if siblings:
-                head += f"  +{len(siblings)}"
+            others = job.get("company_count", 1) - 1
+            if others > 0:
+                head += f"  +{others}"
             with ui.expansion(head).classes("w-full border rounded"):
                 ui.label(f"Source: {job['source']} · found {job['fetched_at'][:16]} · "
                          f"status: {job['status']}").classes("text-xs text-gray-500")
@@ -265,9 +266,12 @@ async def jobs_page():
             """The postings this row stands in front of: same company, lower
             rank. Titles and scores only — one application per company means
             these are context for choosing, not rows to act on."""
+            others = job.get("company_count", 1) - 1
+            shown = ("" if others <= len(siblings)
+                     else f" (die {len(siblings)} bestbewerteten)")
             with ui.column().classes("gap-0 pl-3 border-l"):
                 ui.label(
-                    f"{len(siblings)} weitere Stellen bei {job['company']} — "
+                    f"{others} weitere Stellen bei {job['company']}{shown} — "
                     "eine Bewerbung pro Firma, deshalb steht hier die "
                     "bestbewertete."
                 ).classes("text-xs text-gray-500")

@@ -451,13 +451,20 @@ def list_job_groups(
     gone: str = "include",
     offset: int = 0,
 ) -> list[sqlite3.Row]:
-    """One row per company: its best-ranked posting, plus `company_count`."""
+    """One row per company: its best-ranked posting, plus `company_count`.
+
+    Companies are ordered exactly as `list_jobs` orders postings — including
+    the "all statuses" view's id ordering, so switching the grouping toggle
+    never silently reorders the page under the user. Only the ranking WITHIN a
+    company is always by score, because something has to choose which posting
+    represents it."""
     where, params = _job_filters(status, mismatches, gone)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
+    order = _JOB_ORDER_SQL if status else "id DESC"
     return con.execute(
         f"{_ranked_jobs_cte(where_sql)}"
         f"SELECT * FROM ranked WHERE rank_in_company=1 "
-        f"ORDER BY {_JOB_ORDER_SQL} LIMIT ? OFFSET ?",
+        f"ORDER BY {order} LIMIT ? OFFSET ?",
         (*params, limit, offset),
     ).fetchall()
 
@@ -478,17 +485,23 @@ def count_job_groups(
     ).fetchone()[0]
 
 
+SIBLINGS_PER_COMPANY = 10
+
+
 def list_company_siblings(
     con: sqlite3.Connection,
     company_keys: list[str],
     status: str | None = None,
     mismatches: str = "include",
     gone: str = "include",
+    per_company: int = SIBLINGS_PER_COMPANY,
 ) -> list[sqlite3.Row]:
     """The postings a grouped row stands in front of, best-ranked first.
 
-    Asked only for the companies on the current page, so the query stays as
-    bounded as the page is."""
+    Asked only for the companies on the current page, and capped per company:
+    one employer posting fifty near-identical roles must not decide how much a
+    page renders. The caller has `company_count` to say how many there really
+    are."""
     if not company_keys:
         return []
     where, params = _job_filters(status, mismatches, gone)
@@ -497,9 +510,10 @@ def list_company_siblings(
     return con.execute(
         f"{_ranked_jobs_cte(where_sql)}"
         f"SELECT * FROM ranked WHERE rank_in_company>1 "
+        f"AND rank_in_company<=? "
         f"AND company_key IN ({placeholders}) "
         f"ORDER BY company_key, rank_in_company",
-        (*params, *company_keys),
+        (*params, per_company + 1, *company_keys),
     ).fetchall()
 
 

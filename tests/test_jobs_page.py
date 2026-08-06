@@ -444,3 +444,29 @@ def test_grouping_respects_the_hidden_piles(con, data_dir):
     assert [r["id"] for r in
             jobs._load_jobs("new", jobs.PILE_MISMATCHES, 0)["rows"]] == [mismatch]
     assert db.count_job_groups(con, "new") == 1
+
+
+def test_one_employer_cannot_decide_how_much_a_page_renders(con, data_dir):
+    from jobdeck import db
+    for n in range(30):
+        _company_job(con, f"m{n}", "Massenposter GmbH", 90 - n)
+    con.commit()
+    view = jobs._load_jobs("new", jobs.PILE_NONE, 0)
+    assert view["total"] == 1
+    head = view["rows"][0]
+    assert head["company_count"] == 30            # the truth is still reported
+    siblings = view["siblings"][head["company_key"]]
+    assert len(siblings) == db.SIBLINGS_PER_COMPANY   # but the render is bounded
+    assert [r["match_score"] for r in siblings] == list(range(89, 79, -1))
+
+
+def test_the_grouping_toggle_never_reorders_the_all_statuses_view(con, data_dir):
+    # 'all' mixes statuses and is ordered newest-first; flipping the toggle must
+    # not silently switch the page to a score ordering
+    a = _company_job(con, "z1", "Alpha", 10)
+    b = _company_job(con, "z2", "Beta", 90)
+    con.commit()
+    flat = jobs._load_jobs("all", jobs.PILE_NONE, 0, collapse=False)
+    grouped = jobs._load_jobs("all", jobs.PILE_NONE, 0)
+    assert [r["id"] for r in flat["rows"]] == [b, a]
+    assert [r["id"] for r in grouped["rows"]] == [b, a]
