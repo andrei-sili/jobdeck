@@ -71,8 +71,12 @@ def _score_line(job: dict) -> str:
     return f" · match {score}{aged}"
 
 
-def _load_jobs(status: str, pile: str, page: int) -> dict:
+def _load_jobs(status: str, pile: str, page: int, collapse: bool = True) -> dict:
     """One page of the current view, with everything needed to describe it.
+
+    Collapsed, a row stands for a COMPANY — its best-ranked posting, with the
+    others listed beneath it. The count and the page therefore both count
+    companies, so the printed range stays true to what is on screen.
 
     The page number is clamped HERE, against the total this very query saw: a
     filter change or a background poll can shrink the result set under the
@@ -81,13 +85,21 @@ def _load_jobs(status: str, pile: str, page: int) -> dict:
     with db.db() as con:
         status_arg = None if status == "all" else status
         filters = _PILE_FILTERS[pile]
-        total = db.count_jobs(con, status_arg, **filters)
+        count = db.count_job_groups if collapse else db.count_jobs
+        total = count(con, status_arg, **filters)
         pages = max(1, -(-total // PAGE_SIZE))
         page = min(max(page, 0), pages - 1)
-        rows = db.list_jobs(con, status_arg, limit=PAGE_SIZE,
-                            offset=page * PAGE_SIZE, **filters)
+        listing = db.list_job_groups if collapse else db.list_jobs
+        rows = [dict(r) for r in listing(
+            con, status_arg, limit=PAGE_SIZE, offset=page * PAGE_SIZE, **filters)]
+        siblings: dict[str, list[dict]] = {}
+        if collapse:
+            keys = [r["company_key"] for r in rows if r["company_count"] > 1]
+            for row in db.list_company_siblings(con, keys, status_arg, **filters):
+                siblings.setdefault(row["company_key"], []).append(dict(row))
         return {
-            "rows": [dict(r) for r in rows],
+            "rows": rows,
+            "siblings": siblings,
             "mismatches": db.count_mismatches(con, status_arg),
             "dead": db.count_gone_jobs(con, status_arg),
             "total": total,
@@ -148,6 +160,7 @@ async def jobs_page():
     with frame("Job inbox"):
         status_filter = {"value": "new"}
         pile = {"value": PILE_NONE}
+        collapse = {"value": True}
         page = {"value": 0}
         refresh_gen = {"n": 0}  # rapid filter/switch flips: last request wins
         container = ui.column().classes("w-full gap-2")
@@ -157,7 +170,8 @@ async def jobs_page():
             refresh_gen["n"] += 1
             gen = refresh_gen["n"]
             view = await run.io_bound(
-                _load_jobs, status_filter["value"], pile["value"], page["value"]
+                _load_jobs, status_filter["value"], pile["value"], page["value"],
+                collapse["value"],
             )
             if gen != refresh_gen["n"]:
                 return  # superseded — a newer refresh already owns the view
@@ -169,7 +183,7 @@ async def jobs_page():
                 if not view["rows"]:
                     ui.label(_EMPTY_VIEW[pile["value"]]).classes("text-gray-500")
                 for job in view["rows"]:
-                    render_job(job)
+                    render_job(job, view["siblings"].get(job.get("company_key"), []))
             render_pager(view)
 
         def render_pager(view: dict):
@@ -192,10 +206,12 @@ async def jobs_page():
             page["value"] += step
             await refresh()
 
-        def render_job(job: dict):
+        def render_job(job: dict, siblings: list[dict] = ()):
             remote = " · remote" if job["remote"] else ""
             head = (f"{job['title']}  —  {job['company']}"
                     f" ({job['location'] or 'n/a'}{remote}{_score_line(job)})")
+            if siblings:
+                head += f"  +{len(siblings)}"
             with ui.expansion(head).classes("w-full border rounded"):
                 ui.label(f"Source: {job['source']} · found {job['fetched_at'][:16]} · "
                          f"status: {job['status']}").classes("text-xs text-gray-500")
@@ -217,6 +233,8 @@ async def jobs_page():
                 channel_line = _apply_line(job)
                 if channel_line:
                     ui.label(channel_line).classes("text-sm text-blue-700")
+                if siblings:
+                    render_siblings(job, siblings)
                 description = job["description"] or "(no description available)"
                 ui.markdown(posting_markdown(description[:4000])).classes("text-sm")
                 with ui.row().classes("gap-2"):
@@ -242,6 +260,28 @@ async def jobs_page():
                         ui.button("I applied — record it", icon="check",
                                   on_click=lambda j=job: confirm_applied(j)) \
                             .props("color=positive")
+
+        def render_siblings(job: dict, siblings: list[dict]):
+            """The postings this row stands in front of: same company, lower
+            rank. Titles and scores only — one application per company means
+            these are context for choosing, not rows to act on."""
+            with ui.column().classes("gap-0 pl-3 border-l"):
+                ui.label(
+                    f"{len(siblings)} weitere Stellen bei {job['company']} — "
+                    "eine Bewerbung pro Firma, deshalb steht hier die "
+                    "bestbewertete."
+                ).classes("text-xs text-gray-500")
+                for other in siblings:
+                    with ui.row().classes("items-center gap-2"):
+                        ui.label(f"{other['title']}{_score_line(other)}") \
+                            .classes("text-xs")
+                        other_url = _openable_url(other)
+                        if other_url:
+                            ui.button(
+                                icon="open_in_new",
+                                on_click=lambda u=other_url:
+                                    ui.navigate.to(u, new_tab=True),
+                            ).props("flat dense")
 
         def show_draft(draft_row: dict, job: dict):
             with ui.dialog() as dialog, ui.card().classes("w-[720px] max-w-full"):
@@ -404,7 +444,18 @@ async def jobs_page():
                 on_change=lambda e: set_pile(PILE_DEAD, e.value),
             ).tooltip("Show the hidden pile: postings whose ad the board says "
                       "is gone — hidden, never deleted")
+            ui.switch(
+                "Group by company",
+                value=True,
+                on_change=lambda e: set_collapse(e.value),
+            ).tooltip("One row per company, showing its best-scored posting — "
+                      "only one application per company is possible anyway")
             hidden_label = ui.label().classes("text-xs text-gray-500")
+
+        async def set_collapse(value: bool):
+            collapse["value"] = value
+            page["value"] = 0  # companies and postings are not the same count
+            await refresh()
 
         async def set_filter(value: str):
             status_filter["value"] = value

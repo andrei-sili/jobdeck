@@ -318,7 +318,7 @@ def test_every_posting_is_reachable_by_paging(con, data_dir):
     _seed_scored(con, 120)
     seen, page = [], 0
     while True:
-        view = jobs._load_jobs("new", jobs.PILE_NONE, page)
+        view = jobs._load_jobs("new", jobs.PILE_NONE, page, collapse=False)
         assert view["total"] == 120
         seen += [r["id"] for r in view["rows"]]
         if page + 1 >= view["pages"]:
@@ -331,16 +331,16 @@ def test_every_posting_is_reachable_by_paging(con, data_dir):
 def test_a_page_past_the_end_shows_the_last_one_instead_of_nothing(con, data_dir):
     # a filter change or a background poll can shrink the list under the user
     _seed_scored(con, 60)
-    view = jobs._load_jobs("new", jobs.PILE_NONE, 99)
+    view = jobs._load_jobs("new", jobs.PILE_NONE, 99, collapse=False)
     assert view["page"] == 1 and len(view["rows"]) == 10
-    empty = jobs._load_jobs("applied", jobs.PILE_NONE, 99)
+    empty = jobs._load_jobs("applied", jobs.PILE_NONE, 99, collapse=False)
     assert empty["page"] == 0 and empty["rows"] == [] and empty["total"] == 0
 
 
 def test_paging_does_not_skip_or_repeat_a_row_at_the_boundary(con, data_dir):
     _seed_scored(con, 51)
-    first = jobs._load_jobs("new", jobs.PILE_NONE, 0)
-    second = jobs._load_jobs("new", jobs.PILE_NONE, 1)
+    first = jobs._load_jobs("new", jobs.PILE_NONE, 0, collapse=False)
+    second = jobs._load_jobs("new", jobs.PILE_NONE, 1, collapse=False)
     assert len(first["rows"]) == 50 and len(second["rows"]) == 1
     assert set(r["id"] for r in first["rows"]).isdisjoint(
         r["id"] for r in second["rows"])
@@ -360,3 +360,87 @@ def test_the_range_line_says_where_in_the_pipeline_this_page_sits(
     page, total, shown, expected
 ):
     assert jobs._range_line(page, total, shown) == expected
+
+
+def _company_job(con, ext, company, score, published_on=""):
+    from jobdeck import db
+    job_id = db.insert_job_if_new(con, {
+        "source": "arbeitsagentur", "external_id": ext, "title": f"Dev {ext}",
+        "company": company, "url": f"https://firma.de/{ext}",
+    })
+    con.execute("UPDATE jobs SET match_score=?, published_on=? WHERE id=?",
+                (score, published_on, job_id))
+    return job_id
+
+
+def test_a_company_takes_one_row_and_its_best_posting_represents_it(con, data_dir):
+    # 36 companies held 83 of his 237 no-email postings, and only one
+    # application per company is possible — 47 rows could never become one
+    best = _company_job(con, "a1", "Sigtronic GmbH", 88)
+    _company_job(con, "a2", "sigtronic gmbh ", 70)   # same company, spelled loosely
+    _company_job(con, "a3", "SIGTRONIC GMBH", 60)
+    other = _company_job(con, "b1", "Andere AG", 75)
+    con.commit()
+
+    view = jobs._load_jobs("new", jobs.PILE_NONE, 0)
+    assert view["total"] == 2                     # companies, not postings
+    assert [r["id"] for r in view["rows"]] == [best, other]
+    head = view["rows"][0]
+    assert head["company_count"] == 3
+    siblings = view["siblings"][head["company_key"]]
+    assert [r["match_score"] for r in siblings] == [70, 60]   # best-ranked first
+
+    flat = jobs._load_jobs("new", jobs.PILE_NONE, 0, collapse=False)
+    assert flat["total"] == 4 and flat["siblings"] == {}
+
+
+def test_a_blank_company_never_groups_with_another(con, data_dir):
+    # an empty employer field is missing data, not a company they share
+    first = _company_job(con, "x1", "", 80)
+    second = _company_job(con, "x2", "   ", 70)
+    con.commit()
+    view = jobs._load_jobs("new", jobs.PILE_NONE, 0)
+    assert view["total"] == 2
+    assert [r["company_count"] for r in view["rows"]] == [1, 1]
+    assert [r["id"] for r in view["rows"]] == [first, second]
+
+
+def test_the_group_that_represents_a_company_is_chosen_by_the_aged_score(
+    con, data_dir
+):
+    import datetime
+    today = datetime.date.today()
+    stale_star = _company_job(con, "s1", "Firma", 92,
+                              (today - datetime.timedelta(days=150)).isoformat())
+    fresh_good = _company_job(con, "s2", "Firma", 78,
+                              (today - datetime.timedelta(days=1)).isoformat())
+    con.commit()
+    view = jobs._load_jobs("new", jobs.PILE_NONE, 0)
+    # 92 aged to 72 loses to a fresh 78: the row that represents the company is
+    # the one the ordering actually prefers, not the one with the raw high score
+    assert [r["id"] for r in view["rows"]] == [fresh_good]
+    assert [r["id"] for r in view["siblings"][view["rows"][0]["company_key"]]] \
+        == [stale_star]
+
+
+def test_grouping_respects_the_hidden_piles(con, data_dir):
+    from jobdeck import db
+    keep = _company_job(con, "g1", "Firma", 80)
+    mismatch = _company_job(con, "g2", "Firma", 0)
+    dead = _company_job(con, "g3", "Firma", 90)
+    con.execute("UPDATE jobs SET liveness='gone' WHERE id=?", (dead,))
+    con.commit()
+
+    view = jobs._load_jobs("new", jobs.PILE_NONE, 0)
+    # the 90 is offline and the 0 violates a hard requirement: neither may
+    # represent the company, and neither may be counted as one of its postings
+    assert [r["id"] for r in view["rows"]] == [keep]
+    assert view["rows"][0]["company_count"] == 1
+    assert view["siblings"] == {}
+
+    # each pile stays reachable as its own grouped view
+    assert [r["id"] for r in jobs._load_jobs("new", jobs.PILE_DEAD, 0)["rows"]] \
+        == [dead]
+    assert [r["id"] for r in
+            jobs._load_jobs("new", jobs.PILE_MISMATCHES, 0)["rows"]] == [mismatch]
+    assert db.count_job_groups(con, "new") == 1

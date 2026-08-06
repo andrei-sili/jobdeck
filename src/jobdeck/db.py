@@ -406,6 +406,103 @@ def _job_filters(
     return where, params
 
 
+# Postings are grouped by company because `find_duplicate_bewerbung` allows
+# exactly ONE application per company: 36 companies held 83 of his 237 no-email
+# postings, so 47 of those rows could never become an application and were only
+# taking up places. An empty company name groups with nothing (its own id is the
+# key) — a blank field is missing data, not a company they share.
+_COMPANY_KEY_SQL = (
+    "CASE WHEN trim(company)='' THEN 'job:'||id ELSE lower(trim(company)) END"
+)
+_JOB_ORDER_SQL = "effective_score DESC NULLS LAST, published_on DESC, id DESC"
+
+
+def _ranked_jobs_cte(where_sql: str) -> str:
+    """`ranked`: the filtered postings, each with its age-adjusted score, its
+    company key, its rank inside that company and how many that company holds.
+    One definition shared by the group list, its count and its siblings — three
+    hand-written copies of this ranking would disagree about which posting
+    represents a company."""
+    return (
+        "WITH filtered AS ("
+        f" SELECT *, {freshness.AGE_SQL} AS age_days,"
+        f" {freshness.effective_score_sql()} AS effective_score,"
+        f" {_COMPANY_KEY_SQL} AS company_key"
+        f" FROM jobs{where_sql}"
+        "), ranked AS ("
+        " SELECT *, ROW_NUMBER() OVER ranking AS rank_in_company,"
+        # COUNT over the RANKING window would be a running total: a window with
+        # an ORDER BY frames rows up to the current one, so the best-ranked row
+        # of every company would report a count of 1. The count needs a window
+        # with no ordering, which frames the whole partition.
+        " COUNT(*) OVER company AS company_count"
+        " FROM filtered"
+        f" WINDOW ranking AS (PARTITION BY company_key ORDER BY {_JOB_ORDER_SQL}),"
+        " company AS (PARTITION BY company_key)"
+        ") "
+    )
+
+
+def list_job_groups(
+    con: sqlite3.Connection,
+    status: str | None = None,
+    limit: int = 500,
+    mismatches: str = "include",
+    gone: str = "include",
+    offset: int = 0,
+) -> list[sqlite3.Row]:
+    """One row per company: its best-ranked posting, plus `company_count`."""
+    where, params = _job_filters(status, mismatches, gone)
+    where_sql = f" WHERE {' AND '.join(where)}" if where else ""
+    return con.execute(
+        f"{_ranked_jobs_cte(where_sql)}"
+        f"SELECT * FROM ranked WHERE rank_in_company=1 "
+        f"ORDER BY {_JOB_ORDER_SQL} LIMIT ? OFFSET ?",
+        (*params, limit, offset),
+    ).fetchall()
+
+
+def count_job_groups(
+    con: sqlite3.Connection,
+    status: str | None = None,
+    mismatches: str = "include",
+    gone: str = "include",
+) -> int:
+    """How many companies the grouped view holds."""
+    where, params = _job_filters(status, mismatches, gone)
+    where_sql = f" WHERE {' AND '.join(where)}" if where else ""
+    return con.execute(
+        f"{_ranked_jobs_cte(where_sql)}"
+        "SELECT COUNT(*) FROM ranked WHERE rank_in_company=1",
+        params,
+    ).fetchone()[0]
+
+
+def list_company_siblings(
+    con: sqlite3.Connection,
+    company_keys: list[str],
+    status: str | None = None,
+    mismatches: str = "include",
+    gone: str = "include",
+) -> list[sqlite3.Row]:
+    """The postings a grouped row stands in front of, best-ranked first.
+
+    Asked only for the companies on the current page, so the query stays as
+    bounded as the page is."""
+    if not company_keys:
+        return []
+    where, params = _job_filters(status, mismatches, gone)
+    where_sql = f" WHERE {' AND '.join(where)}" if where else ""
+    placeholders = ",".join("?" * len(company_keys))
+    return con.execute(
+        f"{_ranked_jobs_cte(where_sql)}"
+        f"SELECT * FROM ranked WHERE rank_in_company>1 "
+        f"AND company_key IN ({placeholders}) "
+        f"ORDER BY company_key, rank_in_company",
+        (*params, *company_keys),
+    ).fetchall()
+
+
 def count_jobs(
     con: sqlite3.Connection,
     status: str | None = None,
@@ -441,8 +538,7 @@ def list_jobs(
     # copies of that rule would drift (see freshness.py).
     derived = (f"{freshness.AGE_SQL} AS age_days, "
                f"{freshness.effective_score_sql()} AS effective_score")
-    order = ("effective_score DESC NULLS LAST, published_on DESC, id DESC"
-             if status else "id DESC")
+    order = _JOB_ORDER_SQL if status else "id DESC"
     return con.execute(
         f"SELECT *, {derived} FROM jobs{where_sql} "
         f"ORDER BY {order} LIMIT ? OFFSET ?",
