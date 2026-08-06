@@ -406,12 +406,28 @@ def _job_filters(
     return where, params
 
 
+def count_jobs(
+    con: sqlite3.Connection,
+    status: str | None = None,
+    mismatches: str = "include",
+    gone: str = "include",
+) -> int:
+    """How many postings a `list_jobs` call with the same filters would have,
+    ignoring its page limit — the total a paged view has to print."""
+    where, params = _job_filters(status, mismatches, gone)
+    where_sql = f" WHERE {' AND '.join(where)}" if where else ""
+    return con.execute(
+        f"SELECT COUNT(*) FROM jobs{where_sql}", params
+    ).fetchone()[0]
+
+
 def list_jobs(
     con: sqlite3.Connection,
     status: str | None = None,
     limit: int = 500,
     mismatches: str = "include",
     gone: str = "include",
+    offset: int = 0,
 ) -> list[sqlite3.Row]:
     """List postings. mismatches: 'include' (default), 'exclude' (hide the
     score-0 rows, NULL-safe so unscored postings stay visible) or 'only'
@@ -428,8 +444,9 @@ def list_jobs(
     order = ("effective_score DESC NULLS LAST, published_on DESC, id DESC"
              if status else "id DESC")
     return con.execute(
-        f"SELECT *, {derived} FROM jobs{where_sql} ORDER BY {order} LIMIT ?",
-        (*params, limit),
+        f"SELECT *, {derived} FROM jobs{where_sql} "
+        f"ORDER BY {order} LIMIT ? OFFSET ?",
+        (*params, limit, offset),
     ).fetchall()
 
 

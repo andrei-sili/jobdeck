@@ -300,3 +300,63 @@ def test_the_score_line_shows_what_age_cost(job, expected):
     # the arrow appears only when age actually took points off, and both numbers
     # come from the row the query returned — the one that decided the position
     assert jobs._score_line(job) == expected
+
+
+def _seed_scored(con, count):
+    from jobdeck import db
+    for n in range(count):
+        job_id = db.insert_job_if_new(con, {
+            "source": "arbeitsagentur", "external_id": f"j{n}", "title": "Dev",
+            "company": f"Firma {n}", "url": f"https://firma.de/{n}",
+        })
+        con.execute("UPDATE jobs SET match_score=? WHERE id=?", (n + 1, job_id))
+    con.commit()
+
+
+def test_every_posting_is_reachable_by_paging(con, data_dir):
+    # the old hard limit of 100 left 187 of his 287 open postings unreachable
+    _seed_scored(con, 120)
+    seen, page = [], 0
+    while True:
+        view = jobs._load_jobs("new", jobs.PILE_NONE, page)
+        assert view["total"] == 120
+        seen += [r["id"] for r in view["rows"]]
+        if page + 1 >= view["pages"]:
+            break
+        page += 1
+    assert len(seen) == 120 and len(set(seen)) == 120
+    assert page == 2 and view["pages"] == 3  # 50 + 50 + 20
+
+
+def test_a_page_past_the_end_shows_the_last_one_instead_of_nothing(con, data_dir):
+    # a filter change or a background poll can shrink the list under the user
+    _seed_scored(con, 60)
+    view = jobs._load_jobs("new", jobs.PILE_NONE, 99)
+    assert view["page"] == 1 and len(view["rows"]) == 10
+    empty = jobs._load_jobs("applied", jobs.PILE_NONE, 99)
+    assert empty["page"] == 0 and empty["rows"] == [] and empty["total"] == 0
+
+
+def test_paging_does_not_skip_or_repeat_a_row_at_the_boundary(con, data_dir):
+    _seed_scored(con, 51)
+    first = jobs._load_jobs("new", jobs.PILE_NONE, 0)
+    second = jobs._load_jobs("new", jobs.PILE_NONE, 1)
+    assert len(first["rows"]) == 50 and len(second["rows"]) == 1
+    assert set(r["id"] for r in first["rows"]).isdisjoint(
+        r["id"] for r in second["rows"])
+    # best score first across the page break, not only inside a page
+    assert first["rows"][0]["match_score"] == 51
+    assert second["rows"][0]["match_score"] == 1
+
+
+@pytest.mark.parametrize("page, total, shown, expected", [
+    (0, 287, 50, "1–50 von 287"),
+    (1, 287, 50, "51–100 von 287"),
+    (5, 287, 37, "251–287 von 287"),
+    (0, 3, 3, "1–3 von 3"),
+    (0, 0, 0, ""),
+])
+def test_the_range_line_says_where_in_the_pipeline_this_page_sits(
+    page, total, shown, expected
+):
+    assert jobs._range_line(page, total, shown) == expected

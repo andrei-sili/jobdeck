@@ -15,7 +15,12 @@ from jobdeck.ui.helpers import (
 from jobdeck.ui.layout import frame
 
 FILTERS = ["new", "portal", "duplicate", "skipped", "applied", "all"]
-PAGE_LIMIT = 100
+
+# One page of postings. It used to be a hard limit of 100 with no way past it,
+# which left 187 of his 287 open postings unreachable in the UI entirely — and
+# no number on screen said so. Quasar renders an expansion's content EAGERLY, so
+# a page is a real cost: pages plus a printed total beat one long list.
+PAGE_SIZE = 50
 
 # Two piles are hidden from the working inbox, on the same terms: a score-0
 # mismatch violates a stated hard requirement, and a 'gone' posting's ad is no
@@ -66,17 +71,37 @@ def _score_line(job: dict) -> str:
     return f" · match {score}{aged}"
 
 
-def _load_jobs(status: str, pile: str):
-    """Inbox rows for the current view, plus the size of each hidden pile."""
+def _load_jobs(status: str, pile: str, page: int) -> dict:
+    """One page of the current view, with everything needed to describe it.
+
+    The page number is clamped HERE, against the total this very query saw: a
+    filter change or a background poll can shrink the result set under the
+    user's feet, and asking for page 5 of a two-page list must show the last
+    page rather than an empty one."""
     with db.db() as con:
         status_arg = None if status == "all" else status
-        rows = db.list_jobs(con, status_arg, limit=PAGE_LIMIT,
-                            **_PILE_FILTERS[pile])
-        return (
-            [dict(r) for r in rows],
-            db.count_mismatches(con, status_arg),
-            db.count_gone_jobs(con, status_arg),
-        )
+        filters = _PILE_FILTERS[pile]
+        total = db.count_jobs(con, status_arg, **filters)
+        pages = max(1, -(-total // PAGE_SIZE))
+        page = min(max(page, 0), pages - 1)
+        rows = db.list_jobs(con, status_arg, limit=PAGE_SIZE,
+                            offset=page * PAGE_SIZE, **filters)
+        return {
+            "rows": [dict(r) for r in rows],
+            "mismatches": db.count_mismatches(con, status_arg),
+            "dead": db.count_gone_jobs(con, status_arg),
+            "total": total,
+            "page": page,
+            "pages": pages,
+        }
+
+
+def _range_line(page: int, total: int, shown: int) -> str:
+    """'51–100 von 287' — where in the pipeline this page sits."""
+    if not total:
+        return ""
+    first = page * PAGE_SIZE + 1
+    return f"{first}–{first + shown - 1} von {total}"
 
 
 def _set_status(job_id: int, status: str):
@@ -123,24 +148,49 @@ async def jobs_page():
     with frame("Job inbox"):
         status_filter = {"value": "new"}
         pile = {"value": PILE_NONE}
+        page = {"value": 0}
         refresh_gen = {"n": 0}  # rapid filter/switch flips: last request wins
         container = ui.column().classes("w-full gap-2")
+        pager = ui.row().classes("items-center gap-2")
 
         async def refresh():
             refresh_gen["n"] += 1
             gen = refresh_gen["n"]
-            jobs, mismatches, dead = await run.io_bound(
-                _load_jobs, status_filter["value"], pile["value"]
+            view = await run.io_bound(
+                _load_jobs, status_filter["value"], pile["value"], page["value"]
             )
             if gen != refresh_gen["n"]:
                 return  # superseded — a newer refresh already owns the view
+            page["value"] = view["page"]  # the loader clamped it to what exists
             container.clear()
-            hidden_label.set_text(_hidden_line(pile["value"], mismatches, dead))
+            hidden_label.set_text(
+                _hidden_line(pile["value"], view["mismatches"], view["dead"]))
             with container:
-                if not jobs:
+                if not view["rows"]:
                     ui.label(_EMPTY_VIEW[pile["value"]]).classes("text-gray-500")
-                for job in jobs:
+                for job in view["rows"]:
                     render_job(job)
+            render_pager(view)
+
+        def render_pager(view: dict):
+            pager.clear()
+            with pager:
+                ui.label(_range_line(view["page"], view["total"],
+                                     len(view["rows"]))) \
+                    .classes("text-xs text-gray-500")
+                if view["pages"] <= 1:
+                    return
+                ui.button(icon="chevron_left", on_click=lambda: turn_page(-1)) \
+                    .props("flat dense").set_enabled(view["page"] > 0)
+                ui.label(f"Seite {view['page'] + 1}/{view['pages']}") \
+                    .classes("text-xs text-gray-500")
+                ui.button(icon="chevron_right", on_click=lambda: turn_page(1)) \
+                    .props("flat dense") \
+                    .set_enabled(view["page"] + 1 < view["pages"])
+
+        async def turn_page(step: int):
+            page["value"] += step
+            await refresh()
 
         def render_job(job: dict):
             remote = " · remote" if job["remote"] else ""
@@ -358,6 +408,7 @@ async def jobs_page():
 
         async def set_filter(value: str):
             status_filter["value"] = value
+            page["value"] = 0  # a different list: page 3 of it means nothing
             await refresh()
 
         async def set_pile(name: str, on: bool):
@@ -370,6 +421,7 @@ async def jobs_page():
                 pile["value"] = PILE_NONE
             else:
                 return  # closed by us to open the other pile: nothing to do
+            page["value"] = 0
             for other, switch in pile_switches.items():
                 wanted = pile["value"] == other
                 if switch.value != wanted:
