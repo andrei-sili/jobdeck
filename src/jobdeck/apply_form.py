@@ -18,11 +18,9 @@ from dataclasses import dataclass
 from jobdeck.ai.drafting import clean_title
 
 # Applicant facts, held as settings because they are personal data: they live in
-# his database, never in this repository. `applicant_name` and `applicant_ort`
-# already existed for the letter and the Deckblatt — the rest are new here, and
-# the Settings card is the single place they are entered.
-# ONE source of truth for the keys AND the words: the Settings card renders these
-# labels, and the cockpit rows below reuse them, so adding a field is one edit.
+# his database, never in this repository. ONE source of truth for the keys AND
+# the words — the Settings card renders these labels and the cockpit rows reuse
+# them, so adding a field is one edit.
 APPLICANT_LABELS = {
     "applicant_name": "Name (Vor- und Nachname)",
     "applicant_email": "E-Mail",
@@ -83,6 +81,19 @@ def personal_fields(settings: dict) -> list[Field]:
     return rows
 
 
+# Draft states whose text is an ANSWER. A discarded draft was rejected and a
+# failed one was never finished, so offering either as the Anschreiben would put
+# words he threw away into someone's form.
+USABLE_DRAFT_STATUS = ("ready", "approved", "sent")
+
+
+def usable(draft: dict | None) -> dict | None:
+    """The draft if its text may be offered as an answer, else None."""
+    if draft and str(draft.get("status") or "") in USABLE_DRAFT_STATUS:
+        return draft
+    return None
+
+
 # What the board is called when a form asks "Wie haben Sie von uns erfahren?" —
 # a question German application forms ask constantly, and the adapter's internal
 # name is not an answer.
@@ -95,6 +106,9 @@ SOURCE_LABELS = {
 
 def posting_fields(job: dict, draft: dict | None) -> list[Field]:
     """The posting half: what THIS employer's form needs about THIS role.
+
+    `draft` is whatever the caller judged usable — `fields()` passes it through
+    `usable()` so a discarded or failed draft answers nothing.
 
     The Stellenbezeichnung is cleaned deterministically from the stored title
     rather than parsed back out of the draft's Betreff — HR matches on the exact
@@ -125,7 +139,7 @@ def posting_fields(job: dict, draft: dict | None) -> list[Field]:
 def fields(job: dict, draft: dict | None, settings: dict) -> list[Field]:
     """Every row the cockpit shows, applicant first: the personal block is the
     part he types into every form, so it belongs where his hand starts."""
-    return personal_fields(settings) + posting_fields(job, draft)
+    return personal_fields(settings) + posting_fields(job, usable(draft))
 
 
 def missing(rows: list[Field]) -> list[Field]:

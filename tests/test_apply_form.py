@@ -23,6 +23,7 @@ _JOB = {
     "ansprechpartner": "Frau Georg",
 }
 _DRAFT = {
+    "status": "ready",
     "betreff": "Bewerbung als Fullstack-Entwickler Python/Django (m/w/d), "
                "10001-1003387672-S – Andrei Sili",
     "anschreiben_body": "Sehr geehrte Frau Georg,\n\n" + "Absatz. " * 40,
@@ -121,7 +122,8 @@ def test_nothing_raises_on_an_empty_posting_or_odd_types():
     assert all(not row.ready for row in rows)
     # a wrong-typed field from a feed must not blow up a page
     odd = apply_form.fields({"title": None, "refnr": 12345, "source": None},
-                            {"betreff": 7}, {"applicant_name": None})
+                            {"status": "ready", "betreff": 7},
+                            {"applicant_name": None})
     assert _by_label(odd)["Referenznummer"].value == "12345"
     assert _by_label(odd)["Betreff"].value == "7"
 
@@ -162,3 +164,23 @@ def test_the_settings_page_offers_every_field_the_cockpit_needs():
     assert source.count("applicant_name = ui.input(") == 1
     assert 'if key == "applicant_name":' in source, (
         "the Bewerbungsdaten card must skip the name the Application card owns")
+
+
+@pytest.mark.parametrize("status, offered", [
+    ("ready", True),
+    ("approved", True),
+    ("sent", True),
+    ("discarded", False),   # he threw those words away
+    ("failed", False),      # they were never finished
+    ("generating", False),
+    ("", False),
+])
+def test_only_a_usable_draft_answers_the_form(status, offered):
+    """Job 18's draft is discarded because the ad is gone. Offering its text as
+    the Anschreiben would put words he rejected into someone's form."""
+    rows = _by_label(apply_form.fields(_JOB, {**_DRAFT, "status": status}, {}))
+    assert rows["Anschreiben"].ready is offered
+    assert rows["Betreff"].ready is offered
+    assert rows["Bewerbungsmappe (PDF)"].ready is offered
+    if not offered:
+        assert rows["Anschreiben"].hint  # and it says what to do instead
