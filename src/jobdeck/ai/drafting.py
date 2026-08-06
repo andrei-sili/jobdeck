@@ -266,6 +266,20 @@ def append_signature(email_body: str, signature: str) -> str:
     return f"{body}\n\n{block}"
 
 
+def resolve_refnr(job) -> str:
+    """The Referenznummer this posting really carries, '' when it has none.
+
+    Extracted value first; an Arbeitsagentur external_id IS the Refnr, which is
+    why the column is empty on 186 of his 209 postings from that source. Every
+    screen that shows a Refnr must go through here, or the same posting says
+    "none stated" in one place and prints it in another."""
+    if (job["refnr"] or "").strip():
+        return job["refnr"].strip()
+    if job["source"] == "arbeitsagentur":
+        return job["external_id"] or ""
+    return ""
+
+
 def build_betreff(title: str, refnr: str = "", applicant_name: str = "") -> str:
     """Subject line: `Bewerbung als [clean title], [Refnr] – [Name]`.
 

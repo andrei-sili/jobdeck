@@ -20,6 +20,7 @@ import logging
 from jobdeck import config, db
 from jobdeck.ai import drafting as ai_drafting
 from jobdeck.ai import llm, profile
+from jobdeck.ai.drafting import resolve_refnr  # noqa: F401 — re-exported
 
 log = logging.getLogger(__name__)
 
@@ -106,15 +107,6 @@ def _finish(job_id: int, values: dict, usage: llm.LLMResult | None) -> dict | No
         draft_id = db.upsert_draft(con, job_id, values)
         row = db.get_draft(con, draft_id)
         return dict(row) if row is not None else None
-
-
-def resolve_refnr(job) -> str:
-    """Extracted Referenznummer first; Arbeitsagentur ids ARE the Refnr."""
-    if (job["refnr"] or "").strip():
-        return job["refnr"].strip()
-    if job["source"] == "arbeitsagentur":
-        return job["external_id"]
-    return ""
 
 
 async def draft_for_job(job_id: int) -> dict:
