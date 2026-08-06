@@ -31,8 +31,9 @@ def _status(code):
 
 
 async def _probe(job, handler):
+    """The verdict alone — the date a probe may also carry has its own tests."""
     async with _client(handler) as client:
-        return await liveness.probe(job, client)
+        return (await liveness.probe(job, client)).verdict
 
 
 async def test_the_ba_api_404_is_what_makes_a_posting_gone():
@@ -146,7 +147,8 @@ async def test_a_pass_records_every_verdict_and_hides_nothing_else(con, data_dir
     async with _client(handler) as client:
         res = await liveness.check_pending(limit=10, client=client)
 
-    assert res == {"checked": 3, "alive": 1, "gone": 1, "unknown": 1}
+    assert res == {"checked": 3, "alive": 1, "gone": 1, "unknown": 1,
+                   "redated": 0}
     stored = {r["external_id"]: (r["liveness"], bool(r["liveness_checked_at"]),
                                  r["status"])
               for r in con.execute("SELECT * FROM jobs")}
@@ -191,7 +193,8 @@ async def test_one_failing_posting_does_not_end_the_pass(con, data_dir, monkeypa
     async with _client(_status(200)) as client:
         res = await liveness.check_pending(limit=10, client=client)
 
-    assert res == {"checked": 2, "alive": 1, "gone": 0, "unknown": 1}
+    assert res == {"checked": 2, "alive": 1, "gone": 0, "unknown": 1,
+                   "redated": 0}
     stored = {r["external_id"]: r["liveness"]
               for r in con.execute("SELECT external_id, liveness FROM jobs")}
     assert stored["fine"] == "alive"
@@ -248,3 +251,83 @@ def test_gone_postings_are_counted_per_inbox_view(con, data_dir):
     ])
     assert db.count_gone_jobs(con) == 2
     assert db.count_gone_jobs(con, "new") == 1
+
+
+_DETAIL = {
+    "stellenangebotsBeschreibung": "Wir suchen…",
+    # the two dates the API states, and they mean different things
+    "datumErsteVeroeffentlichung": "2025-01-28",
+    "veroeffentlichungszeitraum": {"von": "2026-07-08"},
+}
+
+
+async def test_a_live_ba_answer_also_corrects_the_age_of_the_ad():
+    """The answer that proves an ad is alive says when its CURRENT version went
+    up. One of his own postings reads 555 days old by first publication while
+    the ad in front of him is 29 days old."""
+    def handler(request):
+        return httpx.Response(200, json=_DETAIL)
+
+    async with _client(handler) as client:
+        result = await liveness.probe(_BA_JOB, client)
+    assert result.verdict == liveness.LIVENESS_ALIVE
+    assert result.published_raw == "2026-07-08"   # not 2025-01-28
+
+
+async def test_a_dead_or_mute_answer_never_carries_a_date():
+    # nothing may be inferred about an ad that did not answer
+    for code in (404, 410, 500):
+        async with _client(_status(code)) as client:
+            assert (await liveness.probe(_BA_JOB, client)).published_raw == ""
+
+
+async def test_a_detail_payload_without_the_period_falls_back_and_never_raises():
+    def only_first(request):
+        return httpx.Response(200, json={"datumErsteVeroeffentlichung": "2025-01-28"})
+
+    def junk(request):
+        return httpx.Response(200, json={"veroeffentlichungszeitraum": "kaputt"})
+
+    def not_json(request):
+        return httpx.Response(200, text="<html>maintenance</html>")
+
+    async with _client(only_first) as client:
+        assert (await liveness.probe(_BA_JOB, client)).published_raw == "2025-01-28"
+    for handler in (junk, not_json):
+        async with _client(handler) as client:
+            result = await liveness.probe(_BA_JOB, client)
+        # the shape has changed before: liveness still stands, the date does not
+        assert result.verdict == liveness.LIVENESS_ALIVE
+        assert result.published_raw == ""
+
+
+async def test_the_pass_stores_the_corrected_date_and_counts_it(con, data_dir,
+                                                               monkeypatch):
+    monkeypatch.setattr(liveness, "BATCH_PAUSE_S", 0)
+    ids = _seed(con, [{"source": "arbeitsagentur", "ext": "old",
+                       "url": _BA_JOB["url"]}])
+    con.execute("UPDATE jobs SET published_at='2025-01-28', "
+                "published_on='2025-01-28' WHERE id=?", (ids["old"],))
+    con.commit()
+
+    def handler(request):
+        return httpx.Response(200, json=_DETAIL)
+
+    async with _client(handler) as client:
+        res = await liveness.check_pending(limit=10, client=client)
+
+    assert res["alive"] == 1 and res["redated"] == 1
+    row = con.execute("SELECT * FROM jobs").fetchone()
+    assert row["published_on"] == "2026-07-08"
+    # the raw value stays as the SEARCH payload sent it, so the backfill's
+    # fill-blanks-only rule still holds and the two remain comparable
+    assert row["published_at"] == "2025-01-28"
+
+
+def test_refreshing_a_date_reports_whether_anything_moved(con, data_dir):
+    ids = _seed(con, [{"source": "arbeitsagentur", "ext": "j", "url": _BA_JOB["url"]}])
+    job_id = ids["j"]
+    assert db.refresh_job_published_on(con, job_id, "2026-07-08") is True
+    assert db.refresh_job_published_on(con, job_id, "2026-07-08") is False
+    assert db.refresh_job_published_on(con, job_id, "irgendwann") is False
+    assert db.get_job(con, job_id)["published_on"] == "2026-07-08"

@@ -72,6 +72,31 @@ def detail_url(external_id: str) -> str:
     return f"{BASE_URL}{DETAIL_PATH}/{encoded}"
 
 
+def publication_start(payload) -> str:
+    """When the CURRENT version of this ad went up, '' when unstated.
+
+    The API states two dates and they mean different things.
+    `datumErsteVeroeffentlichung` is when the posting FIRST appeared, ever;
+    `veroeffentlichungszeitraum.von` is when the current publication period
+    began. Employers re-publish constantly — 32 of 100 fresh search results
+    disagree between the two, and one of his own postings reads as 555 days old
+    by first publication while its current ad went up 29 days ago. Freshness
+    must use the ad in front of him, or it buries live postings for the age of
+    an ad that was replaced.
+
+    Present in both the search and the detail payload, and `bis` is never sent,
+    so there is no expiry date to read here — that is what liveness is for."""
+    if not isinstance(payload, dict):
+        return ""
+    period = payload.get("veroeffentlichungszeitraum")
+    if isinstance(period, dict):
+        start = period.get("von")
+        if isinstance(start, str) and start.strip():
+            return start.strip()
+    first = payload.get("datumErsteVeroeffentlichung")
+    return first.strip() if isinstance(first, str) else ""
+
+
 def _place(item) -> str:
     """City of the first work location, with the country when it is not
     Germany.
@@ -151,7 +176,7 @@ class ArbeitsagenturSource:
                         remote=bool(item.get("homeofficemoeglich"))
                         or looks_remote(title),
                         url=f"https://www.arbeitsagentur.de/jobsuche/jobdetail/{refnr}",
-                        published_at=item.get("datumErsteVeroeffentlichung", "") or "",
+                        published_at=publication_start(item),
                         raw=item,
                     )
                 )

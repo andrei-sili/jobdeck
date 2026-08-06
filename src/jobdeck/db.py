@@ -675,6 +675,28 @@ def set_job_liveness(
     )
 
 
+def refresh_job_published_on(
+    con: sqlite3.Connection, job_id: int, raw: str
+) -> bool:
+    """Correct a posting's DERIVED publication date from a fresher statement by
+    the source, returning whether anything changed.
+
+    Only `published_on` moves. The raw `published_at` stays as the search
+    payload sent it, so the backfill's "fill blanks only" rule still holds and
+    the two values can always be compared. Used by the liveness pass, where the
+    answer that proves an ad is alive also says when its current version went
+    up — an ad re-published last week is fresh however long ago it first
+    appeared."""
+    iso = dates.posting_date_iso(raw)
+    if not iso:
+        return False
+    cur = con.execute(
+        "UPDATE jobs SET published_on=? WHERE id=? AND published_on<>?",
+        (iso, job_id, iso),
+    )
+    return cur.rowcount > 0
+
+
 def jobs_needing_liveness_check(
     con: sqlite3.Connection,
     limit: int,

@@ -28,6 +28,7 @@ touches its status, and never touches a draft or an application built from it.
 
 import asyncio
 import logging
+from dataclasses import dataclass
 
 import httpx
 
@@ -38,6 +39,17 @@ log = logging.getLogger(__name__)
 
 LIVENESS_ALIVE = "alive"
 LIVENESS_GONE = "gone"
+
+
+@dataclass(frozen=True)
+class Probe:
+    """What one probe learned. `verdict` is 'alive', 'gone', or None for "the
+    server did not answer the question". `published_raw` carries a publication
+    date the source volunteered in the same response — freshness is only as
+    honest as that date, and this is the one request that already has it."""
+
+    verdict: str | None
+    published_raw: str = ""
 
 # "This posting is not here." Both are used in the wild: the BA API answers 404,
 # Arbeitnow answers 410 Gone for a withdrawn ad.
@@ -63,15 +75,19 @@ def _verdict(status: int | None) -> str | None:
     return None  # 3xx exhausted, 401/403/405, 5xx — no statement either way
 
 
-async def _probe_arbeitsagentur(job, client: httpx.AsyncClient) -> str | None:
+async def _probe_arbeitsagentur(job, client: httpx.AsyncClient) -> Probe:
     """Ask the BA API whether the Referenznummer still resolves.
 
     A first-party endpoint of ours with a fixed host, so it goes direct like
     every other call in the adapter; netsafe guards board-DERIVED URLs, and this
-    one is built from a constant plus an id."""
+    one is built from a constant plus an id.
+
+    A live answer also carries the current publication period, so this pass
+    corrects the posting's age for free: a re-published ad is fresh however long
+    ago it first appeared (see arbeitsagentur.publication_start)."""
     external_id = (job["external_id"] or "").strip()
     if not external_id:
-        return None
+        return Probe(None)
     try:
         resp = await client.get(
             arbeitsagentur.detail_url(external_id),
@@ -79,21 +95,30 @@ async def _probe_arbeitsagentur(job, client: httpx.AsyncClient) -> str | None:
         )
     except httpx.HTTPError as exc:
         log.info("liveness: arbeitsagentur %s unreachable: %s", external_id, exc)
-        return None
-    return _verdict(resp.status_code)
+        return Probe(None)
+    verdict = _verdict(resp.status_code)
+    if verdict != LIVENESS_ALIVE:
+        return Probe(verdict)
+    try:
+        payload = resp.json()
+    except ValueError:  # the endpoint has changed shape before — liveness stands
+        return Probe(verdict)
+    return Probe(verdict, arbeitsagentur.publication_start(payload))
 
 
-async def _probe_arbeitnow(job, client: httpx.AsyncClient) -> str | None:
+async def _probe_arbeitnow(job, client: httpx.AsyncClient) -> Probe:
     """HEAD the job page — the one route of theirs robots.txt allows.
 
     Deliberately the stored `url` and not the resolved `apply_url`: resolution
     may have turned the latter into the `…/apply` deep-link, which robots.txt
-    disallows and which this app must never request."""
+    disallows and which this app must never request. A HEAD carries no
+    publication date, and the feed's own `created_at` is already read at
+    ingestion."""
     url = (job["url"] or "").strip()
     if not apply_channel.is_arbeitnow_job(url):
-        return None
-    return _verdict(await netsafe.probe_status(
-        client, url, max_redirects=_MAX_REDIRECTS))
+        return Probe(None)
+    return Probe(_verdict(await netsafe.probe_status(
+        client, url, max_redirects=_MAX_REDIRECTS)))
 
 
 _PROBES = {
@@ -108,11 +133,12 @@ def is_probeable(source: str) -> bool:
     return source in _PROBES
 
 
-async def probe(job, client: httpx.AsyncClient) -> str | None:
-    """One posting's liveness, or None when nothing can be said about it."""
+async def probe(job, client: httpx.AsyncClient) -> Probe:
+    """What one posting's source says about it. An unaskable source answers
+    with an empty Probe rather than a guess."""
     prober = _PROBES.get(job["source"])
     if prober is None:
-        return None
+        return Probe(None)
     return await prober(job, client)
 
 
@@ -122,9 +148,11 @@ def _pending(limit: int):
             con, limit, sources=tuple(_PROBES), recheck_after_h=RECHECK_AFTER_H)]
 
 
-def _store(job_id: int, verdict: str | None) -> None:
+def _store(job_id: int, result: Probe) -> None:
     with db.db() as con:
-        db.set_job_liveness(con, job_id, verdict)
+        db.set_job_liveness(con, job_id, result.verdict)
+        if result.published_raw:
+            db.refresh_job_published_on(con, job_id, result.published_raw)
 
 
 async def check_pending(limit: int = BATCH_LIMIT,
@@ -136,11 +164,16 @@ async def check_pending(limit: int = BATCH_LIMIT,
     `RECHECK_AFTER_H`. Never raises — one unreachable posting must not end the
     pass. `client` is injectable so a test drives the whole pass through a
     MockTransport rather than the network.
+
+    A source that volunteers a publication date in the same answer also gets the
+    posting's age corrected, which is how existing rows stop being judged by the
+    date their ad FIRST appeared.
     """
     jobs = await asyncio.to_thread(_pending, limit)
     counts = {LIVENESS_ALIVE: 0, LIVENESS_GONE: 0, "unknown": 0}
     if not jobs:
-        return {"checked": 0, **counts}
+        return {"checked": 0, **counts, "redated": 0}
+    redated = 0
     owned = client is None
     if owned:
         client = httpx.AsyncClient(
@@ -152,19 +185,20 @@ async def check_pending(limit: int = BATCH_LIMIT,
             if index:
                 await asyncio.sleep(BATCH_PAUSE_S)
             try:
-                verdict = await probe(job, client)
+                result = await probe(job, client)
             except Exception as exc:  # noqa: BLE001 - one posting, not the pass
                 log.warning("liveness: job %s failed: %s", job["id"], exc)
-                verdict = None
-            counts["unknown" if verdict is None else verdict] += 1
+                result = Probe(None)
+            counts["unknown" if result.verdict is None else result.verdict] += 1
+            redated += bool(result.published_raw)
             # an unanswered probe is still recorded as an ATTEMPT: without the
             # timestamp a permanently unreachable posting sits at the head of
             # the queue (oldest check first) and starves every other one
-            await asyncio.to_thread(_store, job["id"], verdict)
+            await asyncio.to_thread(_store, job["id"], result)
     finally:
         if owned:
             await client.aclose()
-    log.info("liveness batch: %s checked, %s alive, %s gone, %s unanswered",
-             len(jobs), counts[LIVENESS_ALIVE], counts[LIVENESS_GONE],
-             counts["unknown"])
-    return {"checked": len(jobs), **counts}
+    log.info("liveness batch: %s checked, %s alive, %s gone, %s unanswered, "
+             "%s dates refreshed", len(jobs), counts[LIVENESS_ALIVE],
+             counts[LIVENESS_GONE], counts["unknown"], redated)
+    return {"checked": len(jobs), **counts, "redated": redated}

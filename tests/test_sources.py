@@ -30,7 +30,10 @@ BA_SEARCH = {
             "stellenlokationen": [
                 {"adresse": {"ort": "Herzogenrath", "land": "DEUTSCHLAND"}}
             ],
-            "datumErsteVeroeffentlichung": "2026-07-10",
+            # the API states both dates: this ad first appeared long ago and
+            # was re-published, so only the current period says how old it is
+            "datumErsteVeroeffentlichung": "2025-01-28",
+            "veroeffentlichungszeitraum": {"von": "2026-07-10"},
         },
         {"kaputt": True},  # malformed item: must be skipped, not fatal
         {
@@ -116,6 +119,28 @@ async def test_arbeitsagentur_search_defensive():
     # the employer's own title wins over the standardised profession label
     assert postings[0].title == "Python Entwickler (m/w/d)"
     assert postings[0].location == "Herzogenrath"  # German: no country suffix
+    # the CURRENT publication period, not the first-ever appearance: employers
+    # re-publish constantly and freshness must judge the ad in front of him
+    assert postings[0].published_at == "2026-07-10"
+    assert postings[1].published_at == ""  # neither date stated: unknown, not today
+
+
+@pytest.mark.parametrize("payload, expected", [
+    ({"veroeffentlichungszeitraum": {"von": "2026-07-08"},
+      "datumErsteVeroeffentlichung": "2025-01-28"}, "2026-07-08"),
+    ({"datumErsteVeroeffentlichung": "2025-01-28"}, "2025-01-28"),
+    ({"veroeffentlichungszeitraum": {"von": "  2026-07-08  "}}, "2026-07-08"),
+    ({"veroeffentlichungszeitraum": {"von": ""},
+      "datumErsteVeroeffentlichung": "2025-01-28"}, "2025-01-28"),
+    ({"veroeffentlichungszeitraum": "kaputt"}, ""),
+    ({"veroeffentlichungszeitraum": {"von": 20260708}}, ""),  # wrong type
+    ({}, ""),
+    ("not a payload", ""),
+    (None, ""),
+])
+def test_publication_start_prefers_the_current_period(payload, expected):
+    from jobdeck.sources.arbeitsagentur import publication_start
+    assert publication_start(payload) == expected
 
 
 async def test_arbeitsagentur_details_enrich():
