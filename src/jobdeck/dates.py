@@ -124,7 +124,13 @@ def parse_posting_date(raw) -> datetime.date | None:
     posting nothing downstream, while a wrong date silently reorders the inbox.
     """
     if isinstance(raw, int | float) and not isinstance(raw, bool):
-        raw = str(int(raw))
+        try:
+            raw = str(int(raw))
+        except (ValueError, OverflowError):
+            # nan and inf: int() refuses them, and this helper is called from
+            # inside the job INSERT — raising here would abort the whole poll
+            # over one malformed feed value
+            return None
     if not isinstance(raw, str):
         return None
     text = raw.strip()

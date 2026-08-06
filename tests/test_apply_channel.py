@@ -173,3 +173,25 @@ def test_a_malformed_marker_url_is_skipped_instead_of_raising():
 
 def test_a_malformed_posting_url_classifies_as_unknown():
     assert ac.classify("http://[::1").channel == ac.CHANNEL_UNKNOWN
+
+
+@pytest.mark.parametrize("url, disallowed", [
+    ("https://www.arbeitnow.com/jobs/companies/acme/dev-1", False),
+    ("https://www.arbeitnow.com/jobs/companies/acme/dev-1/apply", True),
+    ("https://www.arbeitnow.co.uk/jobs/companies/acme/dev-1/apply", True),
+    ("https://www.arbeitnow.co.uk/jobs/companies/acme/dev-1/apply/", True),
+    ("https://de.jooble.org/away/1", True),
+    ("https://de.jooble.org/jdp/5?ckey=x", True),
+    ("https://de.jooble.org/", False),
+    ("https://firma.de/jobs/companies/x/apply", False),  # not one of the boards
+])
+def test_one_rule_for_every_route_the_boards_forbid(url, disallowed):
+    # three consumers now share it: the resolver, the liveness probe, and every
+    # redirect hop either of them walks
+    assert ac.is_robots_disallowed(url) is disallowed
+
+
+def test_the_disallowed_apply_route_is_not_a_fetchable_job_page():
+    # every caller of is_arbeitnow_job goes on to FETCH what it approves
+    assert ac.is_arbeitnow_job("https://www.arbeitnow.com/jobs/companies/x/y")
+    assert not ac.is_arbeitnow_job("https://www.arbeitnow.com/jobs/companies/x/y/apply")

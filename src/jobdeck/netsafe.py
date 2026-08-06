@@ -284,8 +284,8 @@ async def fetch_text(client: httpx.AsyncClient, url: str, *, max_bytes: int,
 
 
 async def probe_status(client: httpx.AsyncClient, url: str, *,
-                       max_redirects: int = 10,
-                       deadline: float = 20.0) -> int | None:
+                       max_redirects: int = 10, deadline: float = 20.0,
+                       refuse=None) -> int | None:
     """The final HTTP status of a HEAD to an untrusted URL, None on any failure.
 
     HEAD only, deliberately: this exists to ask "is that ad still there?", and
@@ -294,20 +294,28 @@ async def probe_status(client: httpx.AsyncClient, url: str, *,
     are walked manually so EVERY hop clears `url_is_safe` first, exactly as in
     `fetch_text`.
 
+    `refuse` is an optional per-hop predicate for policy the SSRF guard knows
+    nothing about — a robots.txt Disallow, say. It is checked on every hop
+    because a 3xx into a forbidden route is still a request to a forbidden
+    route, and a redirect target is chosen by the server, not by us.
+
     None means "no answer": a refused hop, a transport error, a timeout or a
     redirect loop. Callers must treat it as UNKNOWN and change nothing — a
     server that refuses HEAD with 405 is not a posting that was taken down."""
     try:
         async with asyncio.timeout(deadline):
-            return await _probe_status(client, url, max_redirects)
+            return await _probe_status(client, url, max_redirects, refuse)
     except TimeoutError:
         log.info("netsafe: probe %s exceeded %gs — giving up", url, deadline)
         return None
 
 
 async def _probe_status(client: httpx.AsyncClient, url: str,
-                        max_redirects: int) -> int | None:
+                        max_redirects: int, refuse=None) -> int | None:
     for _ in range(max_redirects + 1):
+        if refuse is not None and refuse(url):
+            log.info("netsafe: probe refused by policy: %s", url)
+            return None
         if not await url_is_safe(url):
             return None
         try:

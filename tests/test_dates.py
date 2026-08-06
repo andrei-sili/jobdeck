@@ -60,6 +60,9 @@ def test_parse_posting_date_reads_every_shape_the_boards_send(raw, expected, why
     "1784-03-22",      # a real ISO date, but no board publishes in 1784
     "1970-01-02",      # an epoch-shaped mistake already turned into a date
     "999999999999999",  # far past any plausible epoch
+    # int() REFUSES these outright, and this parser runs inside the job INSERT:
+    # raising here would abort a whole poll over one malformed feed value
+    float("nan"), float("inf"), float("-inf"),
     "١٧٨٤٠٣٢٢٢٨",       # Arabic-Indic digits: str.isdigit() says yes, int() agrees
 ])
 def test_an_unreadable_date_is_unknown_rather_than_wrong(raw):

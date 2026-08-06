@@ -6,6 +6,7 @@ so a slow run never stacks up behind itself.
 
 import datetime
 import logging
+import zoneinfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -15,13 +16,18 @@ log = logging.getLogger(__name__)
 
 _scheduler: AsyncIOScheduler | None = None
 
+# Auto-send's business hours are Europe/Berlin, so the whole scheduler runs in
+# it; every datetime handed to APScheduler is built in that zone rather than
+# left naive, which would silently mean "the machine's zone" instead.
+TIMEZONE = zoneinfo.ZoneInfo("Europe/Berlin")
+
 
 def create_scheduler() -> AsyncIOScheduler:
     """Build (once) and return the application scheduler."""
     global _scheduler
     if _scheduler is not None:
         return _scheduler
-    scheduler = AsyncIOScheduler(timezone="Europe/Berlin")
+    scheduler = AsyncIOScheduler(timezone=TIMEZONE)
     scheduler.add_job(
         polling.poll_all_profiles,
         "interval",
@@ -47,7 +53,8 @@ def create_scheduler() -> AsyncIOScheduler:
         # after launch instead, and the per-posting recheck window
         # (RECHECK_AFTER_H) is what keeps repeated restarts from re-probing
         # anything: the batch is bounded by that, not by the tick.
-        next_run_time=datetime.datetime.now() + datetime.timedelta(seconds=90),
+        next_run_time=(datetime.datetime.now(TIMEZONE)
+                       + datetime.timedelta(seconds=90)),
         id="check_liveness",
         coalesce=True,
         max_instances=1,

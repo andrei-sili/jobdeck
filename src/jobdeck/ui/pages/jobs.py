@@ -269,9 +269,10 @@ async def jobs_page():
             others = job.get("company_count", 1) - 1
             shown = ("" if others <= len(siblings)
                      else f" (die {len(siblings)} bestbewerteten)")
+            stellen = "weitere Stelle" if others == 1 else "weitere Stellen"
             with ui.column().classes("gap-0 pl-3 border-l"):
                 ui.label(
-                    f"{others} weitere Stellen bei {job['company']}{shown} — "
+                    f"{others} {stellen} bei {job['company']}{shown} — "
                     "eine Bewerbung pro Firma, deshalb steht hier die "
                     "bestbewertete."
                 ).classes("text-xs text-gray-500")

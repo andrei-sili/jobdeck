@@ -13,7 +13,7 @@ from pathlib import Path
 
 from jobdeck import backup, config, dates, freshness, migrations
 from jobdeck.constants import EMAIL_OUTBOUND, EMAIL_OUTBOUND_TEST, STATUS_RANK
-from jobdeck.dedupe import find_duplicate_bewerbung
+from jobdeck.dedupe import find_duplicate_bewerbung, norm
 
 
 def _now() -> str:
@@ -37,6 +37,12 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
     # create their database through this function for the same reason.
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA foreign_keys=ON")
+    # The duplicate gate compares companies in Python with str.casefold(),
+    # because SQLite's own lower() folds ASCII only (see dedupe.py). SQL that
+    # groups by company must use the SAME function or it would tell the user
+    # "one application per company" while disagreeing with the gate that
+    # enforces it — and would miss "MÜLLER" vs "Müller" while doing so.
+    con.create_function("jd_norm", 1, norm, deterministic=True)
     return con
 
 
@@ -390,7 +396,14 @@ def _job_filters(
     status: str | None, mismatches: str, gone: str
 ) -> tuple[list[str], list]:
     """WHERE fragments + bound values shared by the list and the count, so a
-    page can never be filtered differently from the total printed beside it."""
+    page can never be filtered differently from the total printed beside it.
+
+    An unrecognised filter value raises rather than being ignored: silently
+    falling through would SHOW a pile the caller asked to hide, and a hidden
+    pile exists precisely because its rows should not be acted on."""
+    for name, value in (("mismatches", mismatches), ("gone", gone)):
+        if value not in ("include", "exclude", "only"):
+            raise ValueError(f"{name}={value!r}: expected include/exclude/only")
     where, params = [], []
     if status:
         where.append("status=?")
@@ -411,8 +424,13 @@ def _job_filters(
 # postings, so 47 of those rows could never become an application and were only
 # taking up places. An empty company name groups with nothing (its own id is the
 # key) — a blank field is missing data, not a company they share.
+# `jd_norm` is dedupe.norm itself (registered in connect()), so a grouped row's
+# claim "one application per company" is judged by the very function that
+# enforces it. The two branches are namespaced so a company literally called
+# "job:7" cannot land in a blank row's group.
 _COMPANY_KEY_SQL = (
-    "CASE WHEN trim(company)='' THEN 'job:'||id ELSE lower(trim(company)) END"
+    "CASE WHEN jd_norm(company)='' THEN 'job:'||id "
+    "ELSE 'firma:'||jd_norm(company) END"
 )
 _JOB_ORDER_SQL = "effective_score DESC NULLS LAST, published_on DESC, id DESC"
 

@@ -309,3 +309,15 @@ def test_list_jobs_filters_the_two_piles_independently(con):
     assert ids(mismatches="only") == sorted([both, mismatch])
     # a row in both piles is reachable from either view, and hidden by default
     assert both in ids(gone="only") and both in ids(mismatches="only")
+
+
+def test_an_unknown_filter_value_raises_instead_of_showing_a_hidden_pile(con):
+    import pytest
+    _gone_job(con, "hidden", "gone")
+    for bad in ({"mismatches": "excluded"}, {"gone": "yes"}, {"gone": ""}):
+        with pytest.raises(ValueError):
+            db.list_jobs(con, status="new", **bad)
+        with pytest.raises(ValueError):
+            db.count_jobs(con, status="new", **bad)
+        with pytest.raises(ValueError):
+            db.count_job_groups(con, status="new", **bad)

@@ -113,13 +113,41 @@ def arbeitnow_site(host: str) -> str:
 
 
 def is_arbeitnow_job(url: str) -> bool:
-    """True for an Arbeitnow JOB page — the one route of theirs robots.txt
-    allows a bot to request (the `…/apply` deep-link is disallowed)."""
+    """True for an Arbeitnow JOB page — the one route of theirs a bot may
+    request. The `…/apply` deep-link is explicitly excluded: it is
+    robots-disallowed, and every caller of this function goes on to FETCH."""
     parts = netsafe.split_url(url if "://" in url else "https://" + url)
     if parts is None:
         return False
-    return bool(arbeitnow_site(parts.hostname or "")) \
-        and parts.path.startswith("/jobs/")
+    return (bool(arbeitnow_site(parts.hostname or ""))
+            and parts.path.startswith("/jobs/")
+            and not is_robots_disallowed(url))
+
+
+def is_robots_disallowed(url: str) -> bool:
+    """True for a URL this app must never request, per the boards' robots.txt.
+
+    ONE definition, because the rule now has three consumers: the apply-channel
+    resolver, the liveness probe, and every redirect hop either of them walks. A
+    3xx into a disallowed route is still a request to a disallowed route.
+
+    * de.jooble.org Disallows /away/, /desc/, /m/away/, /m/desc/ and /*?ckey= —
+      exactly the URLs a feed result points at. Following /away/ also fires
+      Jooble's click-billing endpoint for a visit that never happens.
+    * arbeitnow (both markets) Disallows /jobs/companies/*/apply — the deep-link
+      is STORED for the human to click and never fetched.
+    """
+    parts = netsafe.split_url(url if "://" in url else "https://" + url)
+    if parts is None:
+        return False
+    host = (parts.hostname or "").lower()
+    path = parts.path.lower()
+    if host == "jooble.org" or host.endswith(".jooble.org"):
+        return (path.startswith(("/away/", "/desc/", "/m/away/", "/m/desc/"))
+                or "ckey=" in (parts.query or "").lower())
+    if arbeitnow_site(host):
+        return path.rstrip("/").endswith("/apply")
+    return False
 
 
 def _hostname(url: str) -> tuple[str, str]:

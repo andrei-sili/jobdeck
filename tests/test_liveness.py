@@ -331,3 +331,34 @@ def test_refreshing_a_date_reports_whether_anything_moved(con, data_dir):
     assert db.refresh_job_published_on(con, job_id, "2026-07-08") is False
     assert db.refresh_job_published_on(con, job_id, "irgendwann") is False
     assert db.get_job(con, job_id)["published_on"] == "2026-07-08"
+
+
+async def test_a_redirect_into_the_disallowed_apply_route_is_refused():
+    """robots.txt Disallows /jobs/companies/*/apply. A 3xx into it is the
+    board's choice and still our request, so the rule is checked per hop."""
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        if request.url.path.endswith("/apply"):
+            return httpx.Response(200)   # must never be reached
+        return httpx.Response(302, headers={"Location": _AN_JOB["url"] + "/apply"})
+
+    async with _client(handler) as client:
+        result = await liveness.probe(_AN_JOB, client)
+    assert seen == [_AN_JOB["url"]]      # the disallowed hop never fired
+    assert result.verdict is None        # and no verdict was invented from it
+
+
+async def test_a_stored_apply_url_is_not_probeable_at_all():
+    # defence in depth: if that deep-link ever reached the `url` column, the
+    # probe must refuse it rather than fetch a disallowed route
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx.Response(200)
+
+    job = {**_AN_JOB, "url": _AN_JOB["url"] + "/apply"}
+    assert (await _probe(job, handler)) is None
+    assert seen == []

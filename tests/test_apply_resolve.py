@@ -468,7 +468,7 @@ def test_the_robots_disallow_list_matches_what_jooble_publishes():
         "de.jooble.org/away/7",                      # scheme-less, as stored in the wild
     ]
     for url in disallowed:
-        assert apply_resolve._is_robots_disallowed(url), url
+        assert ac.is_robots_disallowed(url), url
 
     allowed = [
         "https://de.jooble.org/",                    # the site root is not disallowed
@@ -478,7 +478,7 @@ def test_the_robots_disallow_list_matches_what_jooble_publishes():
         "",
     ]
     for url in allowed:
-        assert not apply_resolve._is_robots_disallowed(url), url
+        assert not ac.is_robots_disallowed(url), url
 
 
 def _seed(con, rows):

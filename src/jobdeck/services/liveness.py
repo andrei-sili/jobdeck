@@ -62,6 +62,12 @@ _MAX_REDIRECTS = 10
 BATCH_LIMIT = 200          # the whole probeable corpus fits in one pass today
 BATCH_PAUSE_S = 0.5        # between postings — this walks other people's sites
 RECHECK_AFTER_H = 20       # once a day per posting, whatever the tick interval
+PROBE_DEADLINE_S = 25.0    # per posting, wall clock
+
+# A module-level lock makes passes single-flight, like the scoring service's:
+# the Settings button would otherwise overlap the scheduled run and ask other
+# people's servers the same 200 questions twice at once.
+_lock = asyncio.Lock()
 
 
 def _verdict(status: int | None) -> str | None:
@@ -111,14 +117,16 @@ async def _probe_arbeitnow(job, client: httpx.AsyncClient) -> Probe:
 
     Deliberately the stored `url` and not the resolved `apply_url`: resolution
     may have turned the latter into the `…/apply` deep-link, which robots.txt
-    disallows and which this app must never request. A HEAD carries no
-    publication date, and the feed's own `created_at` is already read at
-    ingestion."""
+    disallows and which this app must never request. The same rule is handed to
+    the probe as a per-hop refusal, because a redirect into that route would be
+    the board's choice and still our request. A HEAD carries no publication
+    date, and the feed's own `created_at` is already read at ingestion."""
     url = (job["url"] or "").strip()
     if not apply_channel.is_arbeitnow_job(url):
         return Probe(None)
     return Probe(_verdict(await netsafe.probe_status(
-        client, url, max_redirects=_MAX_REDIRECTS)))
+        client, url, max_redirects=_MAX_REDIRECTS,
+        refuse=apply_channel.is_robots_disallowed)))
 
 
 _PROBES = {
@@ -159,45 +167,61 @@ async def check_pending(limit: int = BATCH_LIMIT,
                         client: httpx.AsyncClient | None = None) -> dict:
     """Probe a batch of postings, best-scored first, and record what came back.
 
-    Bounded three ways so this can run unattended: `limit` postings per pass,
-    one at a time with a pause between them, and nothing re-probed inside
-    `RECHECK_AFTER_H`. Never raises — one unreachable posting must not end the
-    pass. `client` is injectable so a test drives the whole pass through a
-    MockTransport rather than the network.
+    Bounded five ways so this can run unattended: one pass at a time, `limit`
+    postings per pass, one posting at a time with a pause between them,
+    `PROBE_DEADLINE_S` of wall clock per posting, and nothing re-probed inside
+    `RECHECK_AFTER_H`. Never raises, and never lets one posting end the pass —
+    not the probe, and not the write that records it. `client` is injectable so
+    a test drives the whole pass through a MockTransport rather than the network.
 
     A source that volunteers a publication date in the same answer also gets the
     posting's age corrected, which is how existing rows stop being judged by the
     date their ad FIRST appeared.
     """
-    jobs = await asyncio.to_thread(_pending, limit)
     counts = {LIVENESS_ALIVE: 0, LIVENESS_GONE: 0, "unknown": 0}
-    if not jobs:
+    if _lock.locked():
+        # Not a queue: a second pass would ask the same servers the same
+        # questions at the same time, and the first one is already asking.
+        log.info("liveness: a pass is already running — skipping this one")
         return {"checked": 0, **counts, "redated": 0}
-    redated = 0
-    owned = client is None
-    if owned:
-        client = httpx.AsyncClient(
-            headers={"User-Agent": _USER_AGENT}, timeout=_TIMEOUT,
-            max_redirects=_MAX_REDIRECTS,
-        )
-    try:
-        for index, job in enumerate(jobs):
-            if index:
-                await asyncio.sleep(BATCH_PAUSE_S)
-            try:
-                result = await probe(job, client)
-            except Exception as exc:  # noqa: BLE001 - one posting, not the pass
-                log.warning("liveness: job %s failed: %s", job["id"], exc)
-                result = Probe(None)
-            counts["unknown" if result.verdict is None else result.verdict] += 1
-            redated += bool(result.published_raw)
-            # an unanswered probe is still recorded as an ATTEMPT: without the
-            # timestamp a permanently unreachable posting sits at the head of
-            # the queue (oldest check first) and starves every other one
-            await asyncio.to_thread(_store, job["id"], result)
-    finally:
+    async with _lock:
+        jobs = await asyncio.to_thread(_pending, limit)
+        if not jobs:
+            return {"checked": 0, **counts, "redated": 0}
+        redated = 0
+        owned = client is None
         if owned:
-            await client.aclose()
+            client = httpx.AsyncClient(
+                headers={"User-Agent": _USER_AGENT}, timeout=_TIMEOUT,
+                max_redirects=_MAX_REDIRECTS,
+            )
+        try:
+            for index, job in enumerate(jobs):
+                if index:
+                    await asyncio.sleep(BATCH_PAUSE_S)
+                try:
+                    # an httpx timeout is per-operation and bounds neither a
+                    # redirect chain nor a server trickling one byte at a time;
+                    # this job is max_instances=1, so one such posting would
+                    # hold the only slot indefinitely
+                    async with asyncio.timeout(PROBE_DEADLINE_S):
+                        result = await probe(job, client)
+                except Exception as exc:  # noqa: BLE001 - one posting, not the pass
+                    log.warning("liveness: job %s failed: %s", job["id"], exc)
+                    result = Probe(None)
+                counts["unknown" if result.verdict is None else result.verdict] += 1
+                redated += bool(result.published_raw)
+                # an unanswered probe is still recorded as an ATTEMPT: without
+                # the timestamp a permanently unreachable posting sits at the
+                # head of the queue (oldest check first) and starves the rest
+                try:
+                    await asyncio.to_thread(_store, job["id"], result)
+                except Exception as exc:  # noqa: BLE001 - a locked DB, one row
+                    log.warning("liveness: storing job %s failed: %s",
+                                job["id"], exc)
+        finally:
+            if owned:
+                await client.aclose()
     log.info("liveness batch: %s checked, %s alive, %s gone, %s unanswered, "
              "%s dates refreshed", len(jobs), counts[LIVENESS_ALIVE],
              counts[LIVENESS_GONE], counts["unknown"], redated)

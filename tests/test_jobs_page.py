@@ -470,3 +470,37 @@ def test_the_grouping_toggle_never_reorders_the_all_statuses_view(con, data_dir)
     grouped = jobs._load_jobs("all", jobs.PILE_NONE, 0)
     assert [r["id"] for r in flat["rows"]] == [b, a]
     assert [r["id"] for r in grouped["rows"]] == [b, a]
+
+
+def test_companies_group_the_way_the_duplicate_gate_compares_them(con, data_dir):
+    """dedupe.py exists because SQLite's lower() folds ASCII only. The grouped
+    view claims "one application per company", so it must group by the very
+    function that enforces that — otherwise it shows two rows for one company
+    and the second application is refused after he has written it."""
+    from jobdeck.dedupe import find_duplicate_bewerbung
+    best = _company_job(con, "u1", "MÜLLER Software GmbH", 88)
+    _company_job(con, "u2", "Müller Software GmbH", 70)
+    con.commit()
+
+    view = jobs._load_jobs("new", jobs.PILE_NONE, 0)
+    assert view["total"] == 1
+    assert view["rows"][0]["id"] == best
+    assert view["rows"][0]["company_count"] == 2
+
+    # and the claim is true: the gate really does treat them as one company
+    from jobdeck import db
+    db.add_bewerbung(con, {"gesendet_am": "2026-08-01",
+                           "firma": "MÜLLER Software GmbH", "email": "",
+                           "kanal": "E-Mail", "status": "Gesendet"})
+    assert find_duplicate_bewerbung(con, "Müller Software GmbH", "") is not None
+
+
+def test_a_company_literally_named_like_a_blank_key_stays_its_own_group(con,
+                                                                       data_dir):
+    blank = _company_job(con, "k1", "", 80)
+    named = _company_job(con, "k2", f"job:{blank}", 70)
+    con.commit()
+    view = jobs._load_jobs("new", jobs.PILE_NONE, 0)
+    assert view["total"] == 2
+    assert [r["id"] for r in view["rows"]] == [blank, named]
+    assert [r["company_count"] for r in view["rows"]] == [1, 1]
