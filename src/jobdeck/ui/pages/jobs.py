@@ -297,9 +297,12 @@ async def jobs_page():
                                   on_click=lambda j=job:
                                       ui.navigate.to(f"/cockpit/{j['id']}")) \
                             .props("outline")
-                    if job["status"] == "new":
+                    if job["status"] in ("new", "portal"):
+                        # also at the form stage: the cockpit's own gaps tell him
+                        # to draft, and opening a form moves the posting here
                         ui.button("Draft application", icon="edit_note",
                                   on_click=lambda j=job: draft(j)).props("outline")
+                    if job["status"] == "new":
                         ui.button("Apply via portal", icon="language",
                                   on_click=lambda j=job: mark_portal(j)).props("outline")
                         if not job["contact_email"]:

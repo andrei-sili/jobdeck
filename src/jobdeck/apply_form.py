@@ -15,7 +15,7 @@ can see.
 
 from dataclasses import dataclass
 
-from jobdeck.ai.drafting import clean_title
+from jobdeck.ai.drafting import clean_title, resolve_refnr
 
 # Applicant facts, held as settings because they are personal data: they live in
 # his database, never in this repository. ONE source of truth for the keys AND
@@ -104,6 +104,18 @@ SOURCE_LABELS = {
 }
 
 
+class _row:
+    """`resolve_refnr` indexes its argument like a sqlite3.Row; the cockpit holds
+    plain dicts, and a missing key must read as absent rather than raise."""
+
+    def __init__(self, data: dict):
+        self._data = data or {}
+
+    def __getitem__(self, key):
+        value = self._data.get(key)
+        return "" if value is None else str(value)
+
+
 def posting_fields(job: dict, draft: dict | None) -> list[Field]:
     """The posting half: what THIS employer's form needs about THIS role.
 
@@ -121,7 +133,11 @@ def posting_fields(job: dict, draft: dict | None) -> list[Field]:
     return [
         Field("Stellenbezeichnung", clean_title(get("title")),
               "the posting has no title stored"),
-        Field("Referenznummer", get("refnr"),
+        # through the app's own resolver: an Arbeitsagentur external_id IS the
+        # Refnr, and the column is empty on 186 of his 209 postings from that
+        # source — reading it raw would say "none stated" while the Betreff row
+        # two lines down prints it
+        Field("Referenznummer", resolve_refnr(_row(job)),
               "this posting states no Referenznummer"),
         Field("Ansprechpartner", get("ansprechpartner"),
               "none named in the posting"),

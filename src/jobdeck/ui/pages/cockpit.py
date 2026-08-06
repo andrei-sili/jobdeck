@@ -10,9 +10,12 @@ It only makes his own answers instant to hand over, and it records the
 application when he says he sent it.
 """
 
+import pathlib
+
 from nicegui import run, ui
 
 from jobdeck import apply_channel, apply_form, db
+from jobdeck.constants import LIVENESS_GONE
 from jobdeck.ui.helpers import open_in_system, openable_url
 from jobdeck.ui.layout import frame
 
@@ -34,9 +37,16 @@ def _load(job_id: int) -> dict | None:
 
 
 def _mark_portal(job_id: int) -> None:
+    """Move a posting to 'portal' when he opens its form — and only from 'new':
+    a posting already applied to or skipped must not be dragged back."""
     with db.db() as con:
-        if db.get_job(con, job_id)["status"] == "new":
-            db.set_job_status(con, job_id, "portal")
+        job = db.get_job(con, job_id)   # it can be gone by the time he clicks
+        if job is not None and job["status"] == "new":
+            db.set_job_status(con, job_id, JOB_NEW_STATUS)
+
+
+JOB_NEW_STATUS = "portal"       # where a form application lives while unconfirmed
+RECORDABLE_STATUS = ("new", "portal")   # what "Beworben — eintragen" may finish
 
 
 def _record(job_id: int, kanal: str):
@@ -90,7 +100,7 @@ async def cockpit_page(job_id: int):
             ui.notify("Application recorded ✓", type="positive")
             ui.navigate.to("/jobs")
 
-        if job["liveness"] == "gone":
+        if job["liveness"] == LIVENESS_GONE:
             checked = (job["liveness_checked_at"] or "")[:10]
             ui.label(f"⚠ Die Anzeige war am {checked} nicht mehr online — vor "
                      "dem Ausfüllen prüfen.").classes("text-sm text-red-700")
@@ -128,9 +138,17 @@ async def cockpit_page(job_id: int):
         with ui.row().classes("items-center gap-2 mt-2"):
             if pdf_field is not None and pdf_field.ready:
                 ui.button("Mappe-Ordner öffnen", icon="folder_open",
-                          on_click=lambda: open_in_system(pdf_field.value)) \
-                    .props("outline").tooltip("Zum Anhängen im Formular")
-            ui.button("Beworben — eintragen", icon="check",
-                      on_click=record_applied).props("color=positive")
+                          on_click=lambda: open_in_system(
+                              str(pathlib.Path(pdf_field.value).parent))) \
+                    .props("outline") \
+                    .tooltip("Der Ordner, damit die Datei greifbar ist")
+            if job["status"] in RECORDABLE_STATUS:
+                ui.button("Beworben — eintragen", icon="check",
+                          on_click=record_applied).props("color=positive")
+            else:
+                # already applied, skipped or a duplicate: a second recording
+                # would make this posting a 'duplicate' of its own application
+                ui.label(f"Status: {job['status']} — nichts mehr einzutragen.") \
+                    .classes("text-sm text-gray-500")
             ui.button("Zurück zum Inbox", icon="arrow_back",
                       on_click=lambda: ui.navigate.to("/jobs")).props("flat")

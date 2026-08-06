@@ -31,13 +31,13 @@ _DRAFT = {
 }
 _SETTINGS = {
     "applicant_name": "Andrei Sili",
-    "applicant_email": "a@example.de",
-    "applicant_phone": "+49 151 000",
-    "applicant_strasse": "Musterweg 1",
-    "applicant_plz_ort": "52062 Aachen",
-    "applicant_linkedin": "linkedin.com/in/muster",
-    "applicant_github": "github.com/muster",
-    "applicant_website": "muster.dev",
+    "applicant_email": "bewerbung@example.org",
+    "applicant_phone": "+49 000 0000000",
+    "applicant_strasse": "Musterstraße 1",
+    "applicant_plz_ort": "12345 Musterstadt",
+    "applicant_linkedin": "linkedin.com/in/mustermann",
+    "applicant_github": "github.com/mustermann",
+    "applicant_website": "mustermann.example.org",
     "applicant_availability": "ab sofort",
     "applicant_salary": "45.000 EUR",
 }
@@ -184,3 +184,161 @@ def test_only_a_usable_draft_answers_the_form(status, offered):
     assert rows["Bewerbungsmappe (PDF)"].ready is offered
     if not offered:
         assert rows["Anschreiben"].hint  # and it says what to do instead
+
+
+# ---------------------------------------------------------------------------
+# The cockpit page's own helpers. Everything above tests the pure module or the
+# source text; these EXECUTE the functions the page calls, which is what the
+# review found missing — the status guard and the recorded Kanal could both be
+# broken with the suite green.
+# ---------------------------------------------------------------------------
+def _seed_job(con, **over):
+    from jobdeck import db
+    values = {"source": "arbeitsagentur", "external_id": "10001-999-S",
+              "title": "Python Entwickler (m/w/d)", "company": "Formular GmbH",
+              "url": "https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-999-S"}
+    values.update(over)
+    return db.insert_job_if_new(con, values)
+
+
+def test_load_reads_the_draft_of_THIS_posting(con, data_dir):
+    """A draft looked up by the wrong id would offer another company's
+    Anschreiben into this employer's form."""
+    from jobdeck import db
+    mine = _seed_job(con)
+    other = _seed_job(con, external_id="other", company="Andere AG")
+    db.upsert_draft(con, other, {"status": "ready", "betreff": "FALSCH",
+                                 "anschreiben_body": "Sehr geehrte Andere AG,",
+                                 "email_body": "x", "pdf_path": "/tmp/other.pdf"})
+    db.upsert_draft(con, mine, {"status": "ready", "betreff": "RICHTIG",
+                                "anschreiben_body": "Sehr geehrte Formular GmbH,",
+                                "email_body": "x", "pdf_path": "/tmp/mine.pdf"})
+    con.commit()
+
+    view = cockpit._load(mine)
+    assert view["job"]["id"] == mine
+    assert view["draft"]["betreff"] == "RICHTIG"
+    rows = _by_label(apply_form.fields(view["job"], view["draft"], view["settings"]))
+    assert "Formular GmbH" in rows["Anschreiben"].value
+    assert cockpit._load(999999) is None          # a vanished posting, not a crash
+
+
+def test_load_collects_exactly_the_applicant_settings(con, data_dir):
+    from jobdeck import db
+    job_id = _seed_job(con)
+    db.set_setting(con, "applicant_phone", "+49 000 0000000")
+    db.set_setting(con, "unrelated_setting", "must not appear")
+    con.commit()
+    view = cockpit._load(job_id)
+    assert set(view["settings"]) == set(apply_form.APPLICANT_SETTINGS)
+    assert view["settings"]["applicant_phone"] == "+49 000 0000000"
+
+
+@pytest.mark.parametrize("start, expected", [
+    ("new", "portal"),        # opening the form is the start of applying
+    ("portal", "portal"),     # already there, unchanged
+    ("skipped", "skipped"),   # a posting he ruled out is not dragged back
+    ("applied", "applied"),   # nor one already sent
+])
+def test_opening_the_form_moves_only_a_new_posting(con, data_dir, start, expected):
+    from jobdeck import db
+    job_id = _seed_job(con)
+    con.execute("UPDATE jobs SET status=? WHERE id=?", (start, job_id))
+    con.commit()
+    cockpit._mark_portal(job_id)
+    assert db.get_job(con, job_id)["status"] == expected
+
+
+def test_marking_a_vanished_posting_does_not_raise(con, data_dir):
+    # the row can be gone by the time the click lands
+    cockpit._mark_portal(999999)
+
+
+def test_recording_goes_through_the_one_application_per_company_gate(con, data_dir):
+    from jobdeck import db
+    job_id = _seed_job(con)
+    con.execute("UPDATE jobs SET status='portal' WHERE id=?", (job_id,))
+    con.commit()
+
+    bewerbung_id = cockpit._record(job_id, "Online-Portal")
+    assert bewerbung_id is not None
+    app = db.get_bewerbung(con, bewerbung_id)
+    assert app["firma"] == "Formular GmbH"
+    assert app["kanal"] == "Online-Portal"        # a form application, not e-mail
+    assert db.get_job(con, job_id)["status"] == "applied"
+
+    # a second posting at the same company is refused by the gate, not recorded
+    twin = _seed_job(con, external_id="twin")
+    con.commit()
+    assert cockpit._record(twin, "Online-Portal") is None
+    assert db.get_job(con, twin)["status"] == "duplicate"
+
+
+def test_the_record_button_is_offered_only_where_recording_finishes_something():
+    # its second press on an applied posting would make the posting a
+    # 'duplicate' of its own application
+    assert cockpit.RECORDABLE_STATUS == ("new", "portal")
+    source = pathlib.Path(cockpit.__file__).read_text()
+    assert 'if job["status"] in RECORDABLE_STATUS:' in source
+
+
+@pytest.mark.parametrize("channel, vendor, expected", [
+    ("direct_email", "", "Direkt per E-Mail"),
+    ("ats_form", "JOIN", "Formular bei JOIN"),
+    ("board_apply", "Arbeitnow", "Formular bei Arbeitnow"),
+    ("ats_form", "", "Formular in einem Portal"),
+    ("company_site", "", "Formular auf der Firmen-Website"),
+    ("", "", "Kanal noch nicht ermittelt"),
+])
+def test_the_channel_line_names_where_the_application_goes(channel, vendor,
+                                                          expected):
+    line = cockpit._channel_line({"apply_channel": channel, "ats_vendor": vendor})
+    assert line.startswith(expected)
+
+
+def test_the_cockpit_never_reaches_the_employers_page_itself():
+    """Portals are never automated. The page may open the form in HIS browser
+    and nothing else — no fetch, no submit, no client."""
+    source = pathlib.Path(cockpit.__file__).read_text()
+    for forbidden in ("httpx", "netsafe.fetch", "probe_status", "requests",
+                      "urlopen", "AsyncClient"):
+        assert forbidden not in source, f"the cockpit reaches the network: {forbidden}"
+
+
+def test_the_cockpit_route_is_registered_by_the_app():
+    """Dropping the import would 404 the whole feature with the suite green."""
+    import inspect
+
+    from jobdeck.ui import app as ui_app
+    assert "cockpit" in inspect.getsource(ui_app)
+    assert any('"/cockpit/{job_id}"' in line
+               for line in pathlib.Path(cockpit.__file__).read_text().splitlines())
+
+
+def test_the_inbox_offers_the_cockpit_exactly_where_a_form_is_filled():
+    from jobdeck.ui.pages import jobs as jobs_page
+    source = pathlib.Path(jobs_page.__file__).read_text()
+    assert 'ui.navigate.to(f"/cockpit/{j[\'id\']}")' in source
+    # offered while applying is possible, and drafting stays reachable there —
+    # the cockpit's own gaps tell him to draft
+    assert source.count('if job["status"] in ("new", "portal"):') == 2
+
+
+@pytest.mark.parametrize("job, expected, why", [
+    ({"source": "arbeitsagentur", "external_id": "10001-1003292975-S", "refnr": ""},
+     "10001-1003292975-S",
+     "186 of his 209 Arbeitsagentur postings have an EMPTY refnr column, and the "
+     "external_id IS the Referenznummer — reading the column raw would say "
+     "'none stated' while the Betreff row two lines down prints it"),
+    ({"source": "arbeitsagentur", "external_id": "10001-999-S", "refnr": "REF-42"},
+     "REF-42", "an extracted value wins over the id"),
+    ({"source": "jooble", "external_id": "987654", "refnr": ""},
+     "", "a Jooble id is NOT a Referenznummer and must not be offered as one"),
+    ({"source": "arbeitnow", "external_id": "acme-dev-1", "refnr": ""},
+     "", "nor an Arbeitnow slug"),
+])
+def test_the_referenznummer_row_uses_the_apps_own_resolver(job, expected, why):
+    rows = _by_label(apply_form.posting_fields({**_JOB, **job}, None))
+    assert rows["Referenznummer"].value == expected, why
+    if not expected:
+        assert rows["Referenznummer"].hint  # says so rather than inventing one
