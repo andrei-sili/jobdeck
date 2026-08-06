@@ -792,3 +792,61 @@ def test_a_truncation_is_typed_not_matched_on_its_message():
     assert plain.truncated is False
     cut = llm.LLMError("response truncated at max_tokens=12000", truncated=True)
     assert cut.truncated is True
+
+
+@pytest.mark.parametrize("body, expected, why", [
+    ("Sehr geehrte Damen und Herren,\n\nText.\n\nMit freundlichen Grüßen\nMax Muster",
+     "Sehr geehrte Damen und Herren,\n\nText.",
+     "the real shape: the template adds the closing, so the PDF carried it twice"),
+    ("Text.\n\nMit freundlichen Grüßen,\nMax Muster\n\n", "Text.",
+     "a trailing comma and blank lines"),
+    ("Text.\n\nBeste Grüße", "Text.", "a closing with no name under it"),
+    ("Text.\n\nMit freundlichen Grüßen\n\nMax Muster", "Text.",
+     "a blank line between closing and name"),
+    ("Text.", "Text.", "nothing to strip"),
+    ("Viele Grüße aus Aachen erreichten mich.\n\nDer Rest.",
+     "Viele Grüße aus Aachen erreichten mich.\n\nDer Rest.",
+     "a greeting INSIDE prose is not a sign-off and must survive"),
+    ("Sehr geehrter Herr Muster,\n\nMax Muster hat mir von Ihnen erzählt.",
+     "Sehr geehrter Herr Muster,\n\nMax Muster hat mir von Ihnen erzählt.",
+     "the applicant's name inside a sentence is not a signature line"),
+    ("", "", "an empty body"),
+    (None, "", "no body at all"),
+])
+def test_a_closing_the_template_supplies_is_stripped_once(body, expected, why):
+    assert ai_drafting.strip_letter_closing(body, "Max Muster") == expected, why
+
+
+def test_the_closing_strip_survives_the_sharp_s():
+    """str.casefold() expands ß to ss, so a literal containing ß can never match
+    a casefolded input — the first version of this guard silently did nothing."""
+    assert ai_drafting.strip_letter_closing(
+        "Text.\n\nMIT FREUNDLICHEN GRÜSSEN\nMax Muster", "Max Muster") == "Text."
+    assert ai_drafting.strip_letter_closing(
+        "Text.\n\nmit freundlichen grüßen", "") == "Text."
+
+
+def test_the_draft_path_removes_a_closing_the_model_wrote_anyway(monkeypatch):
+    """The prompt forbids a closing formula in the Anschreiben because the letter
+    TEMPLATE supplies one — job 41's real Mappe carried "Mit freundlichen Grüßen
+    / Andrei Sili" twice on the page. The prompt asks; this proves the code
+    enforces, and that the e-mail keeps the closing it is supposed to have."""
+    def fake_complete(**kwargs):
+        return llm.LLMResult(
+            text=_draft_text(
+                analysis="x",
+                stellenbezeichnung="Backend Developer (m/w/d)",
+                anschreiben_body=("Sehr geehrter Herr Pott,\n\nAbsatz.\n\n"
+                                  "Mit freundlichen Grüßen\nAndrei Sili"),
+                email_body="Guten Tag,\n\nMit freundlichen Grüßen\nAndrei Sili",
+            ),
+            model="m", input_tokens=1, output_tokens=1, cost_usd=0.0,
+        )
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    anschreiben, email_body, _, _ = ai_drafting.draft_application(
+        _job(), "profil", applicant_name="Andrei Sili")
+    assert anschreiben == "Sehr geehrter Herr Pott,\n\nAbsatz."
+    assert "Grüßen" not in anschreiben
+    # the E-MAIL closing is not the template's job and must stay
+    assert email_body.endswith("Mit freundlichen Grüßen\nAndrei Sili")

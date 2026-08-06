@@ -341,6 +341,40 @@ def build_user_content(
     )
 
 
+# The letter TEMPLATE supplies "Mit freundlichen Grüßen" and the name, and the
+# prompt says not to write one — but the model occasionally does anyway, and then
+# the PDF carries the closing twice. Job 41's real Mappe did. The prompt asks;
+# the code enforces, the same split as the code-injected Refnr.
+# Written as German and casefolded on BOTH sides: str.casefold() expands ß to
+# ss, so a literal containing ß can never match a casefolded input.
+_CLOSINGS = frozenset(c.casefold() for c in (
+    "Mit freundlichen Grüßen", "Mit freundlichen Gruessen",
+    "Freundliche Grüße", "Beste Grüße", "Herzliche Grüße",
+    "Mit besten Grüßen", "Viele Grüße",
+))
+
+
+def strip_letter_closing(body: str, applicant_name: str = "") -> str:
+    """The Anschreiben body without a closing formula the template will add.
+
+    Only a TRAILING one is removed, together with the name line under it: a
+    "Grüße aus Stolberg" inside a paragraph is prose, not a sign-off. Anything
+    that is not a closing is left exactly as written — this must never eat a
+    sentence of his letter."""
+    lines = (body or "").rstrip().splitlines()
+    name = (applicant_name or "").strip().casefold()
+    while lines:
+        tail = lines[-1].strip().rstrip(",").casefold()
+        if not tail:
+            lines.pop()
+            continue
+        if tail in _CLOSINGS or (name and tail == name):
+            lines.pop()
+            continue
+        break
+    return "\n".join(lines).rstrip()
+
+
 def _combined_usage(model: str, chunks: list[llm.LLMResult]) -> llm.LLMResult:
     """Sum tokens and cost across every attempt so a retried draft is metered
     in full — a truncated attempt was billed too."""
@@ -398,7 +432,8 @@ def draft_application(
         if sections is None:
             last_error = f"unparseable drafting response: {result.text!r}"
             continue
-        anschreiben = sections["anschreiben_body"]
+        anschreiben = strip_letter_closing(
+            sections["anschreiben_body"], applicant_name)
         email_body = sections["email_body"]
         stellenbezeichnung = sections["stellenbezeichnung"]
         if not anschreiben or not email_body:
