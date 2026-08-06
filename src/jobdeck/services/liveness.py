@@ -33,12 +33,10 @@ from dataclasses import dataclass
 import httpx
 
 from jobdeck import apply_channel, db, netsafe
+from jobdeck.constants import LIVENESS_ALIVE, LIVENESS_GONE
 from jobdeck.sources import arbeitsagentur
 
 log = logging.getLogger(__name__)
-
-LIVENESS_ALIVE = "alive"
-LIVENESS_GONE = "gone"
 
 
 @dataclass(frozen=True)
@@ -50,6 +48,7 @@ class Probe:
 
     verdict: str | None
     published_raw: str = ""
+
 
 # "This posting is not here." Both are used in the wild: the BA API answers 404,
 # Arbeitnow answers 410 Gone for a withdrawn ad.

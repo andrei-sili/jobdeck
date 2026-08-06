@@ -312,7 +312,12 @@ def test_a_posting_he_has_acted_on_is_never_hidden_from_its_own_view(con, data_d
     ({"match_score": 92, "effective_score": 72, "age_days": 61},
      " · match 92 → 72 · 61 Tage alt"),
     ({"match_score": 78, "effective_score": 78, "age_days": 1},
-     " · match 78 · 1 Tage alt"),
+     " · match 78 · 1 Tag alt"),
+    ({"match_score": 70, "effective_score": 70, "age_days": 0},
+     " · match 70 · heute"),
+    # the boards state no timezone, so a posting can legitimately read as -1
+    ({"match_score": 70, "effective_score": 70, "age_days": -1},
+     " · match 70 · heute"),
     ({"match_score": 80, "effective_score": 80, "age_days": None},
      " · match 80 · Datum unbekannt"),
     ({"match_score": None, "effective_score": None, "age_days": 3}, ""),

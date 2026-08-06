@@ -82,7 +82,14 @@ def _score_line(job: dict) -> str:
         return ""
     age = job["age_days"]
     effective = job["effective_score"]
-    aged = f" · {age} Tage alt" if age is not None else " · Datum unbekannt"
+    if age is None:
+        aged = " · Datum unbekannt"
+    elif age <= 0:
+        # today, or a date in the future: the boards state no timezone, so a
+        # posting can legitimately read as -1 days. "vor -1 Tagen" is nonsense.
+        aged = " · heute"
+    else:
+        aged = f" · {age} {'Tag' if age == 1 else 'Tage'} alt"
     if effective != score:
         return f" · match {score} → {effective}{aged}"
     return f" · match {score}{aged}"

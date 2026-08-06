@@ -12,7 +12,12 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from jobdeck import backup, config, dates, freshness, migrations
-from jobdeck.constants import EMAIL_OUTBOUND, EMAIL_OUTBOUND_TEST, STATUS_RANK
+from jobdeck.constants import (
+    EMAIL_OUTBOUND,
+    EMAIL_OUTBOUND_TEST,
+    LIVENESS_GONE,
+    STATUS_RANK,
+)
 from jobdeck.dedupe import find_duplicate_bewerbung, norm
 
 
@@ -389,7 +394,7 @@ MISMATCH_SQL = "match_score=0"
 # A posting whose ad the source says is no longer there (services/liveness.py).
 # Hidden by default for the same reason and with the same promise: a 404 is a
 # fact, not a judgement — it hides the row, it never deletes it.
-GONE_SQL = "liveness='gone'"
+GONE_SQL = f"liveness='{LIVENESS_GONE}'"
 
 
 def _job_filters(
@@ -761,8 +766,8 @@ def jobs_needing_liveness_check(
            AND source IN ({placeholders})
            AND (match_score IS NULL OR match_score>=?)
            AND (liveness_checked_at=''
-                OR (liveness='gone' AND liveness_checked_at<?)
-                OR (liveness<>'gone' AND liveness_checked_at<?))
+                OR ({GONE_SQL} AND liveness_checked_at<?)
+                OR (NOT ({GONE_SQL}) AND liveness_checked_at<?))
          ORDER BY liveness_checked_at ASC,
                   match_score DESC NULLS LAST, id DESC
          LIMIT ?
