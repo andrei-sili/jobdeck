@@ -920,7 +920,12 @@ def list_drafts_with_jobs(
         SELECT d.*, j.title AS job_title, j.company AS job_company,
                j.url AS job_url, j.match_score AS job_score,
                j.location AS job_location, j.status AS job_status,
-               j.contact_email AS job_contact_email
+               j.contact_email AS job_contact_email,
+               -- the queue is the last place before a Bewerbung leaves: one
+               -- draft (job 18) was written and a 2.1 MB Mappe built for an ad
+               -- that had been gone forty days
+               j.liveness AS job_liveness,
+               j.liveness_checked_at AS job_liveness_checked_at
         FROM drafts d JOIN jobs j ON j.id = d.job_id
         WHERE d.status IN ({placeholders})
         ORDER BY d.updated_at DESC, d.id DESC
