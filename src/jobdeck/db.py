@@ -386,16 +386,11 @@ MISMATCH_SQL = "match_score=0"
 GONE_SQL = "liveness='gone'"
 
 
-def list_jobs(
-    con: sqlite3.Connection,
-    status: str | None = None,
-    limit: int = 500,
-    mismatches: str = "include",
-) -> list[sqlite3.Row]:
-    """List postings. mismatches: 'include' (default), 'exclude' (hide the
-    score-0 rows, NULL-safe so unscored postings stay visible) or 'only'
-    (just the hidden pile — keeps mismatches reachable regardless of how
-    many better-scored rows fill the page limit)."""
+def _job_filters(
+    status: str | None, mismatches: str, gone: str
+) -> tuple[list[str], list]:
+    """WHERE fragments + bound values shared by the list and the count, so a
+    page can never be filtered differently from the total printed beside it."""
     where, params = [], []
     if status:
         where.append("status=?")
@@ -404,6 +399,26 @@ def list_jobs(
         where.append("(match_score IS NULL OR match_score<>0)")
     elif mismatches == "only":
         where.append(MISMATCH_SQL)
+    if gone == "exclude":
+        where.append(f"NOT ({GONE_SQL})")
+    elif gone == "only":
+        where.append(GONE_SQL)
+    return where, params
+
+
+def list_jobs(
+    con: sqlite3.Connection,
+    status: str | None = None,
+    limit: int = 500,
+    mismatches: str = "include",
+    gone: str = "include",
+) -> list[sqlite3.Row]:
+    """List postings. mismatches: 'include' (default), 'exclude' (hide the
+    score-0 rows, NULL-safe so unscored postings stay visible) or 'only'
+    (just the hidden pile — keeps mismatches reachable regardless of how
+    many better-scored rows fill the page limit). `gone` takes the same three
+    values over postings whose ad the source says is no longer there."""
+    where, params = _job_filters(status, mismatches, gone)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     order = "match_score DESC NULLS LAST, id DESC" if status else "id DESC"
     return con.execute(

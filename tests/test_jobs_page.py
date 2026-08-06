@@ -258,3 +258,30 @@ def test_mappe_summary_lists_the_anlagen_for_the_job_inbox():
         "compression": "", "anlagen": [],
     }, with_anlagen=True)
     assert none == "Mappe ready: 1 pages, 0.1 MB · no Anlagen ✓"
+
+
+def test_the_working_inbox_hides_both_piles_and_each_view_shows_one():
+    # a mismatch violates a stated hard requirement, a dead posting's ad is
+    # gone: both are facts about the posting, so both hide it — and opening one
+    # pile is a separate VIEW, not a filter stacked on the other
+    assert jobs._PILE_FILTERS[jobs.PILE_NONE] == {
+        "mismatches": "exclude", "gone": "exclude"}
+    assert jobs._PILE_FILTERS[jobs.PILE_MISMATCHES]["mismatches"] == "only"
+    assert jobs._PILE_FILTERS[jobs.PILE_DEAD]["gone"] == "only"
+    assert set(jobs._PILE_FILTERS) == set(jobs._EMPTY_VIEW)
+
+
+@pytest.mark.parametrize("pile, mismatches, dead, expected", [
+    (jobs.PILE_NONE, 129, 14, "129 mismatches hidden · 14 dead hidden"),
+    (jobs.PILE_NONE, 0, 14, "14 dead hidden"),
+    (jobs.PILE_NONE, 129, 0, "129 mismatches hidden"),
+    (jobs.PILE_NONE, 0, 0, ""),
+    # the pile on screen is not "hidden" any more; the other one still is
+    (jobs.PILE_MISMATCHES, 129, 14, "14 dead hidden"),
+    (jobs.PILE_DEAD, 129, 14, "129 mismatches hidden"),
+])
+def test_the_hidden_line_states_each_pile_separately(pile, mismatches, dead,
+                                                     expected):
+    # never a total: a posting can be both a mismatch and offline, so adding
+    # the two would double-count it
+    assert jobs._hidden_line(pile, mismatches, dead) == expected

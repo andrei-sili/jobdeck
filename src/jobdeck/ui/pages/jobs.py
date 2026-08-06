@@ -5,7 +5,7 @@ import pathlib
 from nicegui import run, ui
 
 from jobdeck import apply_channel, db
-from jobdeck.services import apply_resolve, contact_lookup, drafting, mappe
+from jobdeck.services import apply_resolve, contact_lookup, drafting, liveness, mappe
 from jobdeck.ui import helpers
 from jobdeck.ui.helpers import (
     open_in_system,
@@ -17,21 +17,49 @@ from jobdeck.ui.layout import frame
 FILTERS = ["new", "portal", "duplicate", "skipped", "applied", "all"]
 PAGE_LIMIT = 100
 
+# Two piles are hidden from the working inbox, on the same terms: a score-0
+# mismatch violates a stated hard requirement, and a 'gone' posting's ad is no
+# longer online. Both are FACTS about the posting, so they hide it — and neither
+# ever deletes it. Opening a pile is a separate VIEW of just that pile, not a
+# filter that stacks with the other: mixing either back into the list would
+# leave it unreachable once better-scored rows fill the page.
+PILE_NONE, PILE_MISMATCHES, PILE_DEAD = "", "mismatches", "dead"
+_PILE_FILTERS = {
+    PILE_NONE: {"mismatches": "exclude", "gone": "exclude"},
+    PILE_MISMATCHES: {"mismatches": "only", "gone": "include"},
+    PILE_DEAD: {"mismatches": "include", "gone": "only"},
+}
 
-def _load_jobs(status: str, show_mismatches: bool):
-    """Inbox rows plus how many score-0 mismatches the filter is hiding.
 
-    The mismatch view lists ONLY the hidden pile: mixing mismatches into the
-    normal list would leave them unreachable once better-scored rows fill
-    PAGE_LIMIT (score 0 sorts last)."""
+_EMPTY_VIEW = {
+    PILE_NONE: "Nothing here. Run a search profile to discover jobs.",
+    PILE_MISMATCHES: "No mismatches — nothing is hidden.",
+    PILE_DEAD: "No dead postings — every ad checked so far is still online.",
+}
+
+
+def _hidden_line(pile: str, mismatches: int, dead: int) -> str:
+    """What the current view is NOT showing. Two independent statements, never
+    a total: a posting can be both a mismatch and offline."""
+    parts = []
+    if pile != PILE_MISMATCHES and mismatches:
+        parts.append(f"{mismatches} mismatches hidden")
+    if pile != PILE_DEAD and dead:
+        parts.append(f"{dead} dead hidden")
+    return " · ".join(parts)
+
+
+def _load_jobs(status: str, pile: str):
+    """Inbox rows for the current view, plus the size of each hidden pile."""
     with db.db() as con:
         status_arg = None if status == "all" else status
-        rows = db.list_jobs(
-            con, status_arg, limit=PAGE_LIMIT,
-            mismatches="only" if show_mismatches else "exclude",
+        rows = db.list_jobs(con, status_arg, limit=PAGE_LIMIT,
+                            **_PILE_FILTERS[pile])
+        return (
+            [dict(r) for r in rows],
+            db.count_mismatches(con, status_arg),
+            db.count_gone_jobs(con, status_arg),
         )
-        hidden = 0 if show_mismatches else db.count_mismatches(con, status_arg)
-        return [dict(r) for r in rows], hidden
 
 
 def _set_status(job_id: int, status: str):
@@ -77,27 +105,23 @@ def _openable_url(job: dict) -> str:
 async def jobs_page():
     with frame("Job inbox"):
         status_filter = {"value": "new"}
-        show_mismatches = {"value": False}
+        pile = {"value": PILE_NONE}
         refresh_gen = {"n": 0}  # rapid filter/switch flips: last request wins
         container = ui.column().classes("w-full gap-2")
 
         async def refresh():
             refresh_gen["n"] += 1
             gen = refresh_gen["n"]
-            jobs, hidden = await run.io_bound(
-                _load_jobs, status_filter["value"], show_mismatches["value"]
+            jobs, mismatches, dead = await run.io_bound(
+                _load_jobs, status_filter["value"], pile["value"]
             )
             if gen != refresh_gen["n"]:
                 return  # superseded — a newer refresh already owns the view
             container.clear()
-            hidden_label.set_text(f"{hidden} mismatches hidden" if hidden else "")
+            hidden_label.set_text(_hidden_line(pile["value"], mismatches, dead))
             with container:
                 if not jobs:
-                    empty = ("No mismatches — nothing is hidden."
-                             if show_mismatches["value"]
-                             else "Nothing here. Run a search profile to "
-                                  "discover jobs.")
-                    ui.label(empty).classes("text-gray-500")
+                    ui.label(_EMPTY_VIEW[pile["value"]]).classes("text-gray-500")
                 for job in jobs:
                     render_job(job)
 
@@ -116,6 +140,11 @@ async def jobs_page():
                     )
                 if job["contact_email"]:
                     ui.label(f"Contact: {job['contact_email']}").classes("text-sm")
+                if job["liveness"] == liveness.LIVENESS_GONE:
+                    checked = (job["liveness_checked_at"] or "")[:10]
+                    ui.label(f"⚠ Anzeige offline — beim letzten Abruf am "
+                             f"{checked} nicht mehr vorhanden.") \
+                        .classes("text-sm text-red-700")
                 if job["duplicate_of"]:
                     ui.label("⚠ You already applied at this company — see Applications.") \
                         .classes("text-sm text-amber-700")
@@ -290,26 +319,45 @@ async def jobs_page():
                 ui.notify("Application recorded ✓", type="positive")
             await refresh()
 
+        pile_switches: dict[str, ui.switch] = {}
         with ui.row().classes("items-center gap-4"):
             ui.toggle(
                 FILTERS,
                 value="new",
                 on_change=lambda e: set_filter(e.value),
             )
-            ui.switch(
+            pile_switches[PILE_MISMATCHES] = ui.switch(
                 "Show mismatches",
                 value=False,
-                on_change=lambda e: set_mismatches(e.value),
+                on_change=lambda e: set_pile(PILE_MISMATCHES, e.value),
             ).tooltip("Show the hidden pile: postings scored 0 for violating "
                       "a hard requirement — hidden, never deleted")
+            pile_switches[PILE_DEAD] = ui.switch(
+                "Show dead postings",
+                value=False,
+                on_change=lambda e: set_pile(PILE_DEAD, e.value),
+            ).tooltip("Show the hidden pile: postings whose ad the board says "
+                      "is gone — hidden, never deleted")
             hidden_label = ui.label().classes("text-xs text-gray-500")
 
         async def set_filter(value: str):
             status_filter["value"] = value
             await refresh()
 
-        async def set_mismatches(value: bool):
-            show_mismatches["value"] = value
+        async def set_pile(name: str, on: bool):
+            """Open or close one hidden pile. The two are separate views, so
+            opening one closes the other — and the switch this turns off calls
+            straight back in, which the second branch absorbs."""
+            if on:
+                pile["value"] = name
+            elif pile["value"] == name:
+                pile["value"] = PILE_NONE
+            else:
+                return  # closed by us to open the other pile: nothing to do
+            for other, switch in pile_switches.items():
+                wanted = pile["value"] == other
+                if switch.value != wanted:
+                    switch.value = wanted
             await refresh()
 
         await refresh()

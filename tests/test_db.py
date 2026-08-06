@@ -282,3 +282,30 @@ def test_delete_bewerbung_clears_the_link_a_send_wrote(con):
     assert db.get_bewerbung(con, bewerbung_id) is None
     assert db.get_draft(con, draft_id)["bewerbung_id"] is None
     assert db.get_draft(con, draft_id)["status"] == "sent"  # history survives
+
+
+def _gone_job(con, ext, liveness, score=80):
+    job_id = db.insert_job_if_new(con, {
+        "source": "arbeitnow", "external_id": ext, "title": "Dev",
+        "company": "Firma", "url": f"https://www.arbeitnow.com/jobs/x/{ext}",
+    })
+    con.execute("UPDATE jobs SET match_score=?, liveness=? WHERE id=?",
+                (score, liveness, job_id))
+    return job_id
+
+
+def test_list_jobs_filters_the_two_piles_independently(con):
+    live = _gone_job(con, "live", "alive")
+    dead = _gone_job(con, "dead", "gone")
+    both = _gone_job(con, "both", "gone", score=0)
+    mismatch = _gone_job(con, "mismatch", "", score=0)
+
+    def ids(**kw):
+        return sorted(r["id"] for r in db.list_jobs(con, status="new", **kw))
+
+    assert ids() == sorted([live, dead, both, mismatch])   # both default to include
+    assert ids(mismatches="exclude", gone="exclude") == [live]
+    assert ids(gone="only") == sorted([dead, both])
+    assert ids(mismatches="only") == sorted([both, mismatch])
+    # a row in both piles is reachable from either view, and hidden by default
+    assert both in ids(gone="only") and both in ids(mismatches="only")

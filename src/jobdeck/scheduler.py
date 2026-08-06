@@ -4,11 +4,12 @@ One scheduler instance per process; jobs are coalesced and single-flight
 so a slow run never stacks up behind itself.
 """
 
+import datetime
 import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from jobdeck.services import autosend, polling, scoring
+from jobdeck.services import autosend, liveness, polling, scoring
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +35,20 @@ def create_scheduler() -> AsyncIOScheduler:
         "interval",
         minutes=10,  # no-op while unconfigured or when nothing is unscored
         id="score_jobs",
+        coalesce=True,
+        max_instances=1,
+    )
+    scheduler.add_job(
+        liveness.check_pending,
+        "interval",
+        hours=6,
+        # An interval job first fires one interval in, and his sessions are
+        # shorter than six hours — the pass would never run. It starts shortly
+        # after launch instead, and the per-posting recheck window
+        # (RECHECK_AFTER_H) is what keeps repeated restarts from re-probing
+        # anything: the batch is bounded by that, not by the tick.
+        next_run_time=datetime.datetime.now() + datetime.timedelta(seconds=90),
+        id="check_liveness",
         coalesce=True,
         max_instances=1,
     )
