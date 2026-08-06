@@ -49,6 +49,23 @@ def _hidden_line(pile: str, mismatches: int, dead: int) -> str:
     return " · ".join(parts)
 
 
+def _score_line(job: dict) -> str:
+    """The score, and what its age did to it: ' · match 92 → 72 · 61 Tage alt'.
+
+    Both numbers come from the row the query returned, so the one shown is the
+    one that decided the position (see freshness.py). Showing the arrow only
+    when age actually cost something keeps a fresh posting's line quiet."""
+    score = job["match_score"]
+    if score is None:
+        return ""
+    age = job["age_days"]
+    effective = job["effective_score"]
+    aged = f" · {age} Tage alt" if age is not None else " · Datum unbekannt"
+    if effective != score:
+        return f" · match {score} → {effective}{aged}"
+    return f" · match {score}{aged}"
+
+
 def _load_jobs(status: str, pile: str):
     """Inbox rows for the current view, plus the size of each hidden pile."""
     with db.db() as con:
@@ -126,10 +143,9 @@ async def jobs_page():
                     render_job(job)
 
         def render_job(job: dict):
-            score = f" · match {job['match_score']}" if job["match_score"] is not None else ""
             remote = " · remote" if job["remote"] else ""
             head = (f"{job['title']}  —  {job['company']}"
-                    f" ({job['location'] or 'n/a'}{remote}{score})")
+                    f" ({job['location'] or 'n/a'}{remote}{_score_line(job)})")
             with ui.expansion(head).classes("w-full border rounded"):
                 ui.label(f"Source: {job['source']} · found {job['fetched_at'][:16]} · "
                          f"status: {job['status']}").classes("text-xs text-gray-500")

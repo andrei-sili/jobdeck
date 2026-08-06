@@ -11,7 +11,7 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-from jobdeck import backup, config, dates, migrations
+from jobdeck import backup, config, dates, freshness, migrations
 from jobdeck.constants import EMAIL_OUTBOUND, EMAIL_OUTBOUND_TEST, STATUS_RANK
 from jobdeck.dedupe import find_duplicate_bewerbung
 
@@ -420,9 +420,15 @@ def list_jobs(
     values over postings whose ad the source says is no longer there."""
     where, params = _job_filters(status, mismatches, gone)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
-    order = "match_score DESC NULLS LAST, id DESC" if status else "id DESC"
+    # The age-adjusted score is SELECTED as well as ordered on, so the number
+    # the UI prints is the very number that decided the row's position — two
+    # copies of that rule would drift (see freshness.py).
+    derived = (f"{freshness.AGE_SQL} AS age_days, "
+               f"{freshness.effective_score_sql()} AS effective_score")
+    order = ("effective_score DESC NULLS LAST, published_on DESC, id DESC"
+             if status else "id DESC")
     return con.execute(
-        f"SELECT * FROM jobs{where_sql} ORDER BY {order} LIMIT ?",
+        f"SELECT *, {derived} FROM jobs{where_sql} ORDER BY {order} LIMIT ?",
         (*params, limit),
     ).fetchall()
 

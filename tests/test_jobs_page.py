@@ -285,3 +285,18 @@ def test_the_hidden_line_states_each_pile_separately(pile, mismatches, dead,
     # never a total: a posting can be both a mismatch and offline, so adding
     # the two would double-count it
     assert jobs._hidden_line(pile, mismatches, dead) == expected
+
+
+@pytest.mark.parametrize("job, expected", [
+    ({"match_score": 92, "effective_score": 72, "age_days": 61},
+     " · match 92 → 72 · 61 Tage alt"),
+    ({"match_score": 78, "effective_score": 78, "age_days": 1},
+     " · match 78 · 1 Tage alt"),
+    ({"match_score": 80, "effective_score": 80, "age_days": None},
+     " · match 80 · Datum unbekannt"),
+    ({"match_score": None, "effective_score": None, "age_days": 3}, ""),
+])
+def test_the_score_line_shows_what_age_cost(job, expected):
+    # the arrow appears only when age actually took points off, and both numbers
+    # come from the row the query returned — the one that decided the position
+    assert jobs._score_line(job) == expected
