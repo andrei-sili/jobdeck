@@ -189,6 +189,84 @@ def test_migrate_adds_contact_columns_to_pre_v3_jobs(tmp_path):
     con.close()
 
 
+def test_migrate_derives_published_on_from_every_source_format(tmp_path):
+    """A pre-v6 jobs table gains the freshness columns, and the derived ISO
+    date is filled from whatever shape each board sent."""
+    path = tmp_path / "v5.db"
+    con = sqlite3.connect(path)
+    con.row_factory = sqlite3.Row
+    con.execute(
+        """
+        CREATE TABLE jobs (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            source       TEXT NOT NULL,
+            external_id  TEXT NOT NULL,
+            published_at TEXT NOT NULL DEFAULT '',
+            fetched_at   TEXT NOT NULL,
+            status       TEXT NOT NULL DEFAULT 'new',
+            match_score  INTEGER,
+            UNIQUE (source, external_id)
+        )
+        """
+    )
+    rows = [
+        ("arbeitsagentur", "a1", "2026-06-09", "2026-06-09"),
+        ("arbeitnow", "n1", "1785897635", "2026-08-05"),
+        ("jooble", "j1", "2026-07-13T00:00:00.0000000", "2026-07-13"),
+        ("stub", "s1", "", ""),           # nothing to derive from
+        ("stub", "s2", "irgendwann", ""),  # unreadable stays unknown
+    ]
+    for source, external_id, published_at, _ in rows:
+        con.execute(
+            "INSERT INTO jobs (source, external_id, published_at, fetched_at) "
+            "VALUES (?, ?, ?, ?)",
+            (source, external_id, published_at, "2026-08-06T10:00:00"),
+        )
+    con.execute("PRAGMA user_version = 5")
+    con.commit()
+
+    migrations.migrate(con)
+
+    stored = {
+        r["external_id"]: (r["published_at"], r["published_on"], r["liveness"],
+                           r["liveness_checked_at"])
+        for r in con.execute("SELECT * FROM jobs")
+    }
+    for source, external_id, published_at, expected in rows:
+        raw, derived, liveness, checked = stored[external_id]
+        assert raw == published_at, f"{source}: the board's own value is kept"
+        assert derived == expected, f"{source}: derived ISO date"
+        assert liveness == "" and checked == ""  # nothing observed yet
+    assert (con.execute("PRAGMA user_version").fetchone()[0]
+            == migrations.SCHEMA_VERSION)
+    migrations.migrate(con)  # idempotent — the second pass finds nothing to fill
+    assert con.execute(
+        "SELECT published_on FROM jobs WHERE external_id='n1'"
+    ).fetchone()[0] == "2026-08-05"
+    con.close()
+
+
+def test_migrate_never_overwrites_a_published_on_it_already_has(tmp_path):
+    """The backfill fills blanks only: a date corrected by hand (or by a later
+    parser) must survive every subsequent start."""
+    path = tmp_path / "v6.db"
+    con = db.connect(path)
+    migrations.migrate(con)
+    con.execute(
+        "INSERT INTO jobs (source, external_id, published_at, published_on, "
+        "fetched_at) VALUES ('stub', 'x', '1785897635', '2020-01-01', ?)",
+        ("2026-08-06T10:00:00",),
+    )
+    con.commit()
+
+    migrations.migrate(con)
+
+    assert con.execute(
+        "SELECT published_on FROM jobs WHERE external_id='x'"
+    ).fetchone()[0] == "2020-01-01"
+    con.close()
+
+
 def test_migrate_adds_sending_test_to_pre_v4_drafts(tmp_path):
     """A pre-v4 drafts table gains sending_test defaulting to 0 — an
     existing draft must never look like an in-flight test send."""

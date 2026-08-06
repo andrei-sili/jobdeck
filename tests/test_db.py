@@ -51,6 +51,17 @@ def test_insert_job_if_new_is_idempotent(con):
     assert _add_job(con, external_id="REF-2") is not None
 
 
+def test_insert_derives_published_on_and_keeps_the_raw_value(con):
+    # the epoch string is what Arbeitnow sends; the derived column is what SQL
+    # can order on, and the raw one stays readable for a re-derivation later
+    job_id = _add_job(con, source="arbeitnow", published_at="1785897635")
+    job = db.get_job(con, job_id)
+    assert job["published_at"] == "1785897635"
+    assert job["published_on"] == "2026-08-05"
+    unknown = _add_job(con, external_id="REF-9", published_at="irgendwann")
+    assert db.get_job(con, unknown)["published_on"] == ""
+
+
 def test_apply_job_creates_application_and_links(con):
     job_id = _add_job(con)
     bewerbung_id = db.apply_job(con, job_id, kanal="Online-Portal")

@@ -11,7 +11,7 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-from jobdeck import backup, config, migrations
+from jobdeck import backup, config, dates, migrations
 from jobdeck.constants import EMAIL_OUTBOUND, EMAIL_OUTBOUND_TEST, STATUS_RANK
 from jobdeck.dedupe import find_duplicate_bewerbung
 
@@ -340,9 +340,9 @@ def insert_job_if_new(con: sqlite3.Connection, values: dict) -> int | None:
             """
             INSERT INTO jobs
                 (profile_id, source, external_id, title, company, location, remote,
-                 url, description, contact_email, published_at, fetched_at, status,
-                 duplicate_of)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 url, description, contact_email, published_at, published_on,
+                 fetched_at, status, duplicate_of)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 values.get("profile_id"),
@@ -356,6 +356,10 @@ def insert_job_if_new(con: sqlite3.Connection, values: dict) -> int | None:
                 values.get("description", ""),
                 values.get("contact_email", ""),
                 values.get("published_at", ""),
+                # the board's raw value is kept verbatim; the ISO form beside
+                # it is what SQL can order on (three source formats, one of
+                # them Unix epoch — see dates.parse_posting_date)
+                dates.posting_date_iso(values.get("published_at", "")),
                 _now(),
                 values.get("status", "new"),
                 values.get("duplicate_of"),
