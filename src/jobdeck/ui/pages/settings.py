@@ -4,7 +4,7 @@ import asyncio
 
 from nicegui import run, ui
 
-from jobdeck import backup, config, db, gmail
+from jobdeck import apply_form, backup, config, db, gmail
 from jobdeck.services import apply_resolve, liveness, mappe, polling, scoring
 from jobdeck.ui.helpers import open_in_system
 from jobdeck.ui.layout import frame
@@ -19,6 +19,9 @@ def _get_settings():
             "web_contact_search": db.get_setting(con, "web_contact_search", "0"),
             "applicant_name": db.get_setting(con, "applicant_name", ""),
             "applicant_ort": db.get_setting(con, "applicant_ort", ""),
+            # the apply-cockpit fields, one entry per APPLICANT_LABELS key
+            **{key: db.get_setting(con, key, "")
+               for key in apply_form.APPLICANT_SETTINGS},
             "template_path": db.get_setting(con, "template_path", ""),
             "anlagen_dir": db.get_setting(con, "anlagen_dir", ""),
             "email_signature": db.get_setting(con, "email_signature", ""),
@@ -218,6 +221,31 @@ async def settings_page():
                 ui.notify("Saved", type="positive")
 
             ui.button("Save", on_click=save_application)
+
+        with ui.card().classes("w-full"):
+            ui.label("Bewerbungsdaten (für Formulare)").classes("font-bold")
+            ui.label(
+                "What portal and ATS forms ask for, every time. Filled in once "
+                "here, one click away in the apply cockpit — the app never "
+                "types into anyone else's form, it only stops you retyping "
+                "your own address. Your name comes from the card above."
+            ).classes("text-xs text-gray-500")
+            form_inputs = {}
+            with ui.row().classes("w-full gap-4 flex-wrap"):
+                for key, label in apply_form.APPLICANT_LABELS.items():
+                    if key == "applicant_name":
+                        continue  # owned by the Application card, one input only
+                    form_inputs[key] = ui.input(
+                        label, value=settings.get(key, "")
+                    ).classes("w-72")
+
+            async def save_apply_profile():
+                for key, field in form_inputs.items():
+                    await run.io_bound(_set_setting, key,
+                                       (field.value or "").strip())
+                ui.notify("Saved", type="positive")
+
+            ui.button("Save", on_click=save_apply_profile)
 
         with ui.card().classes("w-full"):
             ui.label("Sending").classes("font-bold")

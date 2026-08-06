@@ -289,6 +289,14 @@ async def jobs_page():
                     if not job["apply_channel"]:
                         ui.button("Kanal ermitteln", icon="travel_explore",
                                   on_click=lambda j=job: resolve_channel(j)).props("outline")
+                    if job["status"] in ("new", "portal"):
+                        # the cockpit is where a FORM application actually
+                        # happens; it opens the employer's page itself and
+                        # keeps every field one click away beside it
+                        ui.button("Formular ausfüllen", icon="assignment",
+                                  on_click=lambda j=job:
+                                      ui.navigate.to(f"/cockpit/{j['id']}")) \
+                            .props("outline")
                     if job["status"] == "new":
                         ui.button("Draft application", icon="edit_note",
                                   on_click=lambda j=job: draft(j)).props("outline")
