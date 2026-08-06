@@ -275,10 +275,20 @@ async def test_a_live_ba_answer_also_corrects_the_age_of_the_ad():
 
 
 async def test_a_dead_or_mute_answer_never_carries_a_date():
-    # nothing may be inferred about an ad that did not answer
-    for code in (404, 410, 500):
-        async with _client(_status(code)) as client:
-            assert (await liveness.probe(_BA_JOB, client)).published_raw == ""
+    """Nothing may be inferred about an ad that did not answer — and the body is
+    a FULL detail payload, so the guard is what stops the date rather than the
+    absence of anything to read."""
+    status = {"code": 0}
+
+    def handler(request):
+        return httpx.Response(status["code"], json=_DETAIL)
+
+    for code in (404, 410, 403, 500, 503):
+        status["code"] = code
+        async with _client(handler) as client:
+            result = await liveness.probe(_BA_JOB, client)
+        assert result.published_raw == "", code
+        assert result.verdict != liveness.LIVENESS_ALIVE, code
 
 
 async def test_a_detail_payload_without_the_period_falls_back_and_never_raises():
@@ -415,3 +425,70 @@ async def test_the_lock_is_released_even_when_a_pass_blows_up(con, data_dir,
     monkeypatch.setattr(liveness, "_pending", real_pending)
     async with _client(_status(200)) as client:
         assert (await liveness.check_pending(limit=10, client=client))["checked"] == 1
+
+
+async def test_only_an_arbeitnow_job_url_is_ever_fetched_for_an_arbeitnow_row():
+    """The `url` comes verbatim from a third-party feed, so the screen in front
+    of the fetch is the load-bearing part. A row whose source says arbeitnow but
+    whose URL points anywhere else must produce no request at all."""
+    asked = []
+
+    def handler(request):
+        asked.append(str(request.url))
+        return httpx.Response(200)
+
+    foreign = [
+        "https://de.jooble.org/away/123",              # robots-disallowed elsewhere
+        "https://evil.example/jobs/companies/x/y",     # a lookalike path, wrong host
+        "https://www.arbeitnow.com/companies/x/y",     # right host, not a job route
+        "https://www.arbeitnow.com/jobs/companies/x/y/apply",   # the forbidden route
+        "http://[::1",                                 # malformed must not raise
+        "",
+    ]
+    for url in foreign:
+        async with _client(handler) as client:
+            result = await liveness.probe({**_AN_JOB, "url": url}, client)
+        assert result.verdict is None, url
+    assert asked == []
+
+
+def test_a_posting_he_has_committed_to_is_still_asked_about(con, data_dir):
+    """'portal' means he opened the form and has not confirmed yet — the exact
+    moment "the ad is gone" is worth five minutes of his time, and the status the
+    review queue's pre-send warning depends on. 'skipped'/'applied'/'duplicate'
+    are finished business."""
+    _seed(con, [
+        {"source": "arbeitnow", "ext": "working", "url": _AN_JOB["url"], "score": 80},
+        {"source": "arbeitnow", "ext": "at-the-form", "url": _AN_JOB["url"] + "2",
+         "score": 90, "status": "portal"},
+        {"source": "arbeitnow", "ext": "given-up", "url": _AN_JOB["url"] + "3",
+         "score": 95, "status": "skipped"},
+        {"source": "arbeitnow", "ext": "sent", "url": _AN_JOB["url"] + "4",
+         "score": 99, "status": "applied"},
+    ])
+    queued = [r["external_id"] for r in db.jobs_needing_liveness_check(
+        con, limit=10, sources=("arbeitnow",), recheck_after_h=20)]
+    assert queued == ["at-the-form", "working"]   # best-scored first among these
+
+
+async def test_the_pre_send_warning_survives_pressing_apply_via_portal(
+    con, data_dir, monkeypatch
+):
+    """The queue warning added for the job-18 incident must not be switched off
+    by the very button the branch encourages him to press."""
+    monkeypatch.setattr(liveness, "BATCH_PAUSE_S", 0)
+    ids = _seed(con, [{"source": "arbeitnow", "ext": "j", "url": _AN_JOB["url"],
+                       "status": "portal"}])
+    db.upsert_draft(con, ids["j"], {"status": "ready", "recipient": "hr@firma.de",
+                                    "betreff": "B", "email_body": "e",
+                                    "anschreiben_body": "a",
+                                    "pdf_path": "/tmp/m.pdf"})
+    con.commit()
+
+    async with _client(_status(410)) as client:
+        res = await liveness.check_pending(limit=10, client=client)
+
+    assert res["gone"] == 1
+    row = db.list_drafts_with_jobs(con, ["ready"])[0]
+    assert row["job_liveness"] == "gone"      # the warning can still fire
+    assert row["job_status"] == "portal"      # and nothing about his work moved

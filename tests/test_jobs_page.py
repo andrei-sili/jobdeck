@@ -490,14 +490,21 @@ def test_one_employer_cannot_decide_how_much_a_page_renders(con, data_dir):
 
 def test_the_grouping_toggle_never_reorders_the_all_statuses_view(con, data_dir):
     # 'all' mixes statuses and is ordered newest-first; flipping the toggle must
-    # not silently switch the page to a score ordering
-    a = _company_job(con, "z1", "Alpha", 10)
-    b = _company_job(con, "z2", "Beta", 90)
+    # not silently switch the page to a score ordering. The scores DISAGREE with
+    # the ids on purpose — with them aligned the test could not fail.
+    best = _company_job(con, "z1", "Alpha", 95)     # oldest row, highest score
+    middle = _company_job(con, "z2", "Beta", 10)
+    newest = _company_job(con, "z3", "Gamma", 50)   # newest row, middling score
     con.commit()
+    by_id = [newest, middle, best]                  # id DESC
     flat = jobs._load_jobs("all", jobs.PILE_NONE, 0, collapse=False)
     grouped = jobs._load_jobs("all", jobs.PILE_NONE, 0)
-    assert [r["id"] for r in flat["rows"]] == [b, a]
-    assert [r["id"] for r in grouped["rows"]] == [b, a]
+    assert [r["id"] for r in flat["rows"]] == by_id
+    assert [r["id"] for r in grouped["rows"]] == by_id
+    # and the 'new' view DOES order on the aged score, so the two are not the
+    # same query with a different name
+    assert [r["id"] for r in jobs._load_jobs("new", jobs.PILE_NONE, 0)["rows"]] \
+        == [best, newest, middle]
 
 
 def test_companies_group_the_way_the_duplicate_gate_compares_them(con, data_dir):
@@ -532,3 +539,74 @@ def test_a_company_literally_named_like_a_blank_key_stays_its_own_group(con,
     assert view["total"] == 2
     assert [r["id"] for r in view["rows"]] == [blank, named]
     assert [r["company_count"] for r in view["rows"]] == [1, 1]
+
+
+def test_grouped_paging_walks_companies_without_skipping_or_repeating(con, data_dir):
+    """Grouped mode has its own query, so it needs its own paging test: the flat
+    tests above cannot see an OFFSET missing from list_job_groups."""
+    for n in range(120):
+        _company_job(con, f"gp{n}", f"Firma {n:03d}", n + 1)
+        _company_job(con, f"gp{n}b", f"Firma {n:03d}", 1)   # a sibling each
+    con.commit()
+
+    seen, page = [], 0
+    while True:
+        view = jobs._load_jobs("new", jobs.PILE_NONE, page)
+        assert view["total"] == 120                 # companies, not the 240 rows
+        seen += [r["company"] for r in view["rows"]]
+        if page + 1 >= view["pages"]:
+            break
+        page += 1
+    assert page == 2 and view["pages"] == 3
+    assert len(seen) == 120 and len(set(seen)) == 120   # no repeat, none skipped
+    # and the page really is a slice of the ordering, not the head of it twice
+    first = jobs._load_jobs("new", jobs.PILE_NONE, 0)["rows"]
+    second = jobs._load_jobs("new", jobs.PILE_NONE, 1)["rows"]
+    assert first[0]["match_score"] == 120 and second[0]["match_score"] == 70
+
+
+def test_a_hidden_pile_never_leaks_in_as_a_sibling(con, data_dir):
+    """The sibling query is a THIRD consumer of the filters. If it ignored them,
+    the rows the working list hides would reappear underneath a company."""
+    keep = _company_job(con, "s1", "Firma", 90)
+    visible_sibling = _company_job(con, "s2", "Firma", 80)
+    mismatch = _company_job(con, "s3", "Firma", 0)
+    dead = _company_job(con, "s4", "Firma", 85)
+    con.execute("UPDATE jobs SET liveness='gone' WHERE id=?", (dead,))
+    con.commit()
+
+    view = jobs._load_jobs("new", jobs.PILE_NONE, 0)
+    head = view["rows"][0]
+    assert head["id"] == keep
+    assert head["company_count"] == 2               # not 4
+    siblings = view["siblings"][head["company_key"]]
+    assert [r["id"] for r in siblings] == [visible_sibling]
+    assert mismatch not in [r["id"] for r in siblings]
+    assert dead not in [r["id"] for r in siblings]
+
+    # each hidden row is still reachable from its own pile, with its siblings
+    dead_view = jobs._load_jobs("new", jobs.PILE_DEAD, 0)
+    assert [r["id"] for r in dead_view["rows"]] == [dead]
+
+
+def test_no_handler_writes_another_control_on_the_server():
+    """Mutual exclusion between two switches means the handler writes the OTHER
+    switch — and NiceGUI fires that server-side write as a background task, so
+    two clicks read in one socket turn make the two echo each other into an
+    endless refresh loop. The page uses one value for the three views instead;
+    this pins that nothing reintroduces a cross-write."""
+    source = pathlib.Path(jobs.__file__).read_text()
+    tree = ast.parse(source)
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            # `element.value = x` on anything that is not our own state dict
+            if (isinstance(target, ast.Attribute) and target.attr == "value"
+                    and not isinstance(target.value, ast.Subscript)):
+                offenders.append(f"{jobs.__name__}:{node.lineno}")
+    assert offenders == [], (
+        f"a server-side control write at {offenders}: NiceGUI dispatches it as a "
+        f"background task, which is how two switches echo each other forever"
+    )

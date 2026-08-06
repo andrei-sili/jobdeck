@@ -35,6 +35,17 @@ _PILE_FILTERS = {
     PILE_DEAD: {"mismatches": "include", "gone": "only"},
 }
 
+# ONE control for the three views, deliberately not two switches. Mutual
+# exclusion between two switches means the handler writes the OTHER switch, and
+# NiceGUI fires that server-side write as a background task — so two clicks read
+# in one socket turn make the two switches echo each other into an endless
+# refresh loop. A single value cannot disagree with itself.
+PILE_LABELS = {
+    PILE_NONE: "Arbeitsliste",
+    PILE_MISMATCHES: "Mismatches",
+    PILE_DEAD: "Dead ads",
+}
+
 
 _EMPTY_VIEW = {
     PILE_NONE: "Nothing here. Run a search profile to discover jobs.",
@@ -461,25 +472,19 @@ async def jobs_page():
                 ui.notify("Application recorded ✓", type="positive")
             await refresh()
 
-        pile_switches: dict[str, ui.switch] = {}
         with ui.row().classes("items-center gap-4"):
             ui.toggle(
                 FILTERS,
                 value="new",
                 on_change=lambda e: set_filter(e.value),
             )
-            pile_switches[PILE_MISMATCHES] = ui.switch(
-                "Show mismatches",
-                value=False,
-                on_change=lambda e: set_pile(PILE_MISMATCHES, e.value),
-            ).tooltip("Show the hidden pile: postings scored 0 for violating "
-                      "a hard requirement — hidden, never deleted")
-            pile_switches[PILE_DEAD] = ui.switch(
-                "Show dead postings",
-                value=False,
-                on_change=lambda e: set_pile(PILE_DEAD, e.value),
-            ).tooltip("Show the hidden pile: postings whose ad the board says "
-                      "is gone — hidden, never deleted")
+            ui.toggle(
+                PILE_LABELS,
+                value=PILE_NONE,
+                on_change=lambda e: set_pile(e.value),
+            ).tooltip("The two hidden piles: postings scored 0 for violating a "
+                      "hard requirement, and postings whose ad the board says "
+                      "is gone. Hidden from the working list, never deleted.")
             ui.switch(
                 "Group by company",
                 value=True,
@@ -498,21 +503,13 @@ async def jobs_page():
             page["value"] = 0  # a different list: page 3 of it means nothing
             await refresh()
 
-        async def set_pile(name: str, on: bool):
-            """Open or close one hidden pile. The two are separate views, so
-            opening one closes the other — and the switch this turns off calls
-            straight back in, which the second branch absorbs."""
-            if on:
-                pile["value"] = name
-            elif pile["value"] == name:
-                pile["value"] = PILE_NONE
-            else:
-                return  # closed by us to open the other pile: nothing to do
-            page["value"] = 0
-            for other, switch in pile_switches.items():
-                wanted = pile["value"] == other
-                if switch.value != wanted:
-                    switch.value = wanted
+        async def set_pile(value: str):
+            """Switch between the working list and one of the hidden piles.
+
+            One assignment and one refresh: nothing here writes another control,
+            so no handler can be echoed back into this one."""
+            pile["value"] = value or PILE_NONE
+            page["value"] = 0  # a different list: page 3 of it means nothing
             await refresh()
 
         await refresh()

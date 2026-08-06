@@ -734,6 +734,14 @@ def refresh_job_published_on(
     return cur.rowcount > 0
 
 
+# A posting is worth asking about while he might still act on it. 'portal' is
+# the OPPOSITE of ruled out — he opened its form and has not confirmed yet, so
+# that is precisely when "the ad is gone" is worth five minutes of his time, and
+# it is the status the review queue's pre-send warning depends on. 'skipped',
+# 'duplicate' and 'applied' are finished business.
+LIVENESS_STATUSES = ("new", "portal", "drafted")
+
+
 def jobs_needing_liveness_check(
     con: sqlite3.Connection,
     limit: int,
@@ -741,12 +749,13 @@ def jobs_needing_liveness_check(
     recheck_after_h: int,
     recheck_gone_after_h: int = 168,
     min_score: int = 1,
+    statuses: tuple[str, ...] = LIVENESS_STATUSES,
 ) -> list[sqlite3.Row]:
     """Postings worth asking about, longest-unchecked first.
 
     Restricted to sources that can be asked at all (Jooble's URLs are all
-    robots-disallowed, so probing it is not an option) and to postings still in
-    the inbox above the mismatch floor — resolving the fate of a posting he
+    robots-disallowed, so probing it is not an option) and to postings he may
+    still act on, above the mismatch floor — resolving the fate of a posting he
     ruled out is work nobody asked for.
 
     A posting already seen `gone` is re-asked far more rarely rather than never:
@@ -754,15 +763,16 @@ def jobs_needing_liveness_check(
     board answering 404 to everything for an hour) heal itself instead of
     hiding real postings forever.
     """
-    if not sources:
+    if not sources or not statuses:
         return []
     placeholders = ",".join("?" * len(sources))
+    status_places = ",".join("?" * len(statuses))
     cutoff = _hours_ago(recheck_after_h)
     gone_cutoff = _hours_ago(recheck_gone_after_h)
     return con.execute(
         f"""
         SELECT * FROM jobs
-         WHERE status='new'
+         WHERE status IN ({status_places})
            AND source IN ({placeholders})
            AND (match_score IS NULL OR match_score>=?)
            AND (liveness_checked_at=''
@@ -772,7 +782,7 @@ def jobs_needing_liveness_check(
                   match_score DESC NULLS LAST, id DESC
          LIMIT ?
         """,
-        (*sources, min_score, gone_cutoff, cutoff, limit),
+        (*statuses, *sources, min_score, gone_cutoff, cutoff, limit),
     ).fetchall()
 
 

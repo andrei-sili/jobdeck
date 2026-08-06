@@ -14,6 +14,7 @@ classifies — no network, no side effects, no actions. Following aggregator
 redirects (jooble/arbeitnow) and web e-mail lookup are later slices.
 """
 
+import posixpath
 import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -146,7 +147,14 @@ def is_robots_disallowed(url: str) -> bool:
         return (path.startswith(("/away/", "/desc/", "/m/away/", "/m/desc/"))
                 or "ckey=" in (parts.query or "").lower())
     if arbeitnow_site(host):
-        return path.rstrip("/").endswith("/apply")
+        # Judged BOTH as written and as httpx will send it. A client removes dot
+        # segments before the request goes on the wire (RFC 3986), so
+        # `…/apply/.` and `…/apply/x/..` are the forbidden route on the wire
+        # while ending in something else on paper — the slice-#4 lesson that a
+        # screen must judge the value the way its CONSUMER will. Refusing on
+        # either reading is strictly stricter than either alone.
+        return any(candidate.rstrip("/").endswith("/apply")
+                   for candidate in (path, posixpath.normpath(path)))
     return False
 
 

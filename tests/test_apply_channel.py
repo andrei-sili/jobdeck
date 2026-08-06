@@ -195,3 +195,20 @@ def test_the_disallowed_apply_route_is_not_a_fetchable_job_page():
     # every caller of is_arbeitnow_job goes on to FETCH what it approves
     assert ac.is_arbeitnow_job("https://www.arbeitnow.com/jobs/companies/x/y")
     assert not ac.is_arbeitnow_job("https://www.arbeitnow.com/jobs/companies/x/y/apply")
+
+
+@pytest.mark.parametrize("url", [
+    "https://www.arbeitnow.com/jobs/companies/acme/dev-1/apply/.",
+    "https://www.arbeitnow.com/jobs/companies/acme/dev-1/apply/x/..",
+    "https://www.arbeitnow.com/jobs/companies/acme/dev-1/apply/./deeper/..",
+    "https://www.arbeitnow.com/jobs/../jobs/companies/acme/dev-1/apply",
+    "https://www.arbeitnow.co.uk/jobs/companies/acme/dev-1/apply/.",
+])
+def test_a_dot_segment_cannot_smuggle_the_apply_route_past_the_screen(url):
+    """An HTTP client removes dot segments before the request goes on the wire
+    (RFC 3986), so these paths ARE the forbidden route on the wire while ending
+    in something else on paper. Proven against httpx itself below."""
+    import httpx
+    assert httpx.URL(url).path.endswith("/apply"), "premise: this is what is sent"
+    assert ac.is_robots_disallowed(url)
+    assert not ac.is_arbeitnow_job(url)
