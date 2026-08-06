@@ -362,3 +362,56 @@ async def test_a_stored_apply_url_is_not_probeable_at_all():
     job = {**_AN_JOB, "url": _AN_JOB["url"] + "/apply"}
     assert (await _probe(job, handler)) is None
     assert seen == []
+
+
+async def test_two_passes_never_run_at_once(con, data_dir, monkeypatch):
+    """The pass is reachable from the scheduler AND the Settings button. Two of
+    them would ask other people's servers the same 200 questions at once."""
+    import asyncio
+    monkeypatch.setattr(liveness, "BATCH_PAUSE_S", 0)
+    _seed(con, [{"source": "arbeitnow", "ext": f"j{n}", "url": _AN_JOB["url"] + str(n)}
+                for n in range(3)])
+    started = 0
+
+    async def slow_probe(job, client):
+        nonlocal started
+        started += 1
+        await asyncio.sleep(0.05)
+        return liveness.Probe(liveness.LIVENESS_ALIVE)
+
+    monkeypatch.setattr(liveness, "probe", slow_probe)
+    async with _client(_status(200)) as client:
+        first, second = await asyncio.gather(
+            liveness.check_pending(limit=10, client=client),
+            liveness.check_pending(limit=10, client=client),
+        )
+
+    ran, skipped = sorted((first, second), key=lambda r: -r["checked"])
+    assert ran["checked"] == 3 and ran["alive"] == 3
+    assert skipped["checked"] == 0        # not queued behind it — skipped
+    assert started == 3                  # every posting asked exactly once
+
+
+async def test_the_lock_is_released_even_when_a_pass_blows_up(con, data_dir,
+                                                             monkeypatch):
+    # a lock held after a crash would silence the pass for the whole process
+    monkeypatch.setattr(liveness, "BATCH_PAUSE_S", 0)
+    _seed(con, [{"source": "arbeitnow", "ext": "j", "url": _AN_JOB["url"]}])
+
+    real_pending = liveness._pending
+
+    def exploding(limit):
+        raise RuntimeError("the database is on fire")
+
+    # restored by hand rather than with monkeypatch.undo(), which would also
+    # undo the data_dir fixture and point the service at the REAL database
+    monkeypatch.setattr(liveness, "_pending", exploding)
+    try:
+        await liveness.check_pending(limit=10)
+    except RuntimeError:
+        pass
+    assert not liveness._lock.locked()
+
+    monkeypatch.setattr(liveness, "_pending", real_pending)
+    async with _client(_status(200)) as client:
+        assert (await liveness.check_pending(limit=10, client=client))["checked"] == 1
