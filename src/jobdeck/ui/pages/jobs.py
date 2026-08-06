@@ -5,7 +5,7 @@ import pathlib
 from nicegui import run, ui
 
 from jobdeck import apply_channel, db
-from jobdeck.services import apply_resolve, contact_lookup, drafting, mappe
+from jobdeck.services import apply_resolve, contact_lookup, drafting, liveness, mappe
 from jobdeck.ui import helpers
 from jobdeck.ui.helpers import (
     open_in_system,
@@ -15,23 +15,147 @@ from jobdeck.ui.helpers import (
 from jobdeck.ui.layout import frame
 
 FILTERS = ["new", "portal", "duplicate", "skipped", "applied", "all"]
-PAGE_LIMIT = 100
+
+# One page of postings. It used to be a hard limit of 100 with no way past it,
+# which left 187 of his 287 open postings unreachable in the UI entirely — and
+# no number on screen said so. Quasar renders an expansion's content EAGERLY, so
+# a page is a real cost: pages plus a printed total beat one long list.
+PAGE_SIZE = 50
+
+# Two piles are hidden from the working inbox, on the same terms: a score-0
+# mismatch violates a stated hard requirement, and a 'gone' posting's ad is no
+# longer online. Both are FACTS about the posting, so they hide it — and neither
+# ever deletes it. Opening a pile is a separate VIEW of just that pile, not a
+# filter that stacks with the other: mixing either back into the list would
+# leave it unreachable once better-scored rows fill the page.
+PILE_NONE, PILE_MISMATCHES, PILE_DEAD = "", "mismatches", "dead"
+_PILE_FILTERS = {
+    PILE_NONE: {"mismatches": "exclude", "gone": "exclude"},
+    PILE_MISMATCHES: {"mismatches": "only", "gone": "include"},
+    PILE_DEAD: {"mismatches": "include", "gone": "only"},
+}
+
+# ONE control for the three views, deliberately not two switches. Mutual
+# exclusion between two switches means the handler writes the OTHER switch, and
+# NiceGUI fires that server-side write as a background task — so two clicks read
+# in one socket turn make the two switches echo each other into an endless
+# refresh loop. A single value cannot disagree with itself.
+PILE_LABELS = {
+    PILE_NONE: "Arbeitsliste",
+    PILE_MISMATCHES: "Mismatches",
+    PILE_DEAD: "Dead ads",
+}
 
 
-def _load_jobs(status: str, show_mismatches: bool):
-    """Inbox rows plus how many score-0 mismatches the filter is hiding.
+_EMPTY_VIEW = {
+    PILE_NONE: "Nothing here. Run a search profile to discover jobs.",
+    PILE_MISMATCHES: "No mismatches — nothing is hidden.",
+    PILE_DEAD: "No dead postings — every ad checked so far is still online.",
+}
 
-    The mismatch view lists ONLY the hidden pile: mixing mismatches into the
-    normal list would leave them unreachable once better-scored rows fill
-    PAGE_LIMIT (score 0 sorts last)."""
+
+def _view_filters(pile: str, status: str) -> dict:
+    """The pile filters this view really uses.
+
+    Hiding is for the WORKING list. Once he has acted on a posting — opened its
+    portal, applied, skipped it — its row carries the action that finishes the
+    job ("I applied — record it"), so hiding it would hide that button. Only the
+    `new` view hides; every other filter shows what it contains."""
+    if pile == PILE_NONE and status != "new":
+        return {"mismatches": "include", "gone": "include"}
+    return _PILE_FILTERS[pile]
+
+
+def _hidden_line(filters: dict, mismatches: int, dead: int) -> str:
+    """What this view is not showing, derived from the filters it actually used
+    so the label cannot contradict the list. Two independent statements, never
+    a total: a posting can be both a mismatch and offline."""
+    parts = []
+    if filters["mismatches"] == "exclude" and mismatches:
+        parts.append(f"{mismatches} mismatches hidden")
+    elif filters["mismatches"] == "only":
+        parts.append(f"{mismatches} mismatches — hard requirement violated")
+    if filters["gone"] == "exclude" and dead:
+        parts.append(f"{dead} dead hidden")
+    elif filters["gone"] == "only":
+        parts.append(f"{dead} postings whose ad is gone")
+    return " · ".join(parts)
+
+
+def _score_line(job: dict) -> str:
+    """The score, and what its age did to it: ' · match 92 → 72 · 61 Tage alt'.
+
+    Both numbers come from the row the query returned, so the one shown is the
+    one that decided the position (see freshness.py). Showing the arrow only
+    when age actually cost something keeps a fresh posting's line quiet."""
+    score = job["match_score"]
+    if score is None:
+        return ""
+    age = job["age_days"]
+    effective = job["effective_score"]
+    if age is None:
+        aged = " · Datum unbekannt"
+    elif age <= 0:
+        # today, or a date in the future: the boards state no timezone, so a
+        # posting can legitimately read as -1 days. "vor -1 Tagen" is nonsense.
+        aged = " · heute"
+    else:
+        aged = f" · {age} {'Tag' if age == 1 else 'Tage'} alt"
+    if effective != score:
+        return f" · match {score} → {effective}{aged}"
+    return f" · match {score}{aged}"
+
+
+def _load_jobs(status: str, pile: str, page: int, collapse: bool = True) -> dict:
+    """One page of the current view, with everything needed to describe it.
+
+    Collapsed, a row stands for a COMPANY — its best-ranked posting, with the
+    others listed beneath it. The count and the page therefore both count
+    companies, so the printed range stays true to what is on screen.
+
+    The page number is clamped HERE, against the total this very query saw: a
+    filter change or a background poll can shrink the result set under the
+    user's feet, and asking for page 5 of a two-page list must show the last
+    page rather than an empty one."""
     with db.db() as con:
         status_arg = None if status == "all" else status
-        rows = db.list_jobs(
-            con, status_arg, limit=PAGE_LIMIT,
-            mismatches="only" if show_mismatches else "exclude",
-        )
-        hidden = 0 if show_mismatches else db.count_mismatches(con, status_arg)
-        return [dict(r) for r in rows], hidden
+        filters = _view_filters(pile, status)
+        count = db.count_job_groups if collapse else db.count_jobs
+        total = count(con, status_arg, **filters)
+        pages = max(1, -(-total // PAGE_SIZE))
+        page = min(max(page, 0), pages - 1)
+        listing = db.list_job_groups if collapse else db.list_jobs
+        rows = [dict(r) for r in listing(
+            con, status_arg, limit=PAGE_SIZE, offset=page * PAGE_SIZE, **filters)]
+        siblings: dict[str, list[dict]] = {}
+        if collapse:
+            keys = [r["company_key"] for r in rows if r["company_count"] > 1]
+            for row in db.list_company_siblings(con, keys, status_arg, **filters):
+                siblings.setdefault(row["company_key"], []).append(dict(row))
+        return {
+            "rows": rows,
+            "siblings": siblings,
+            "filters": filters,
+            "collapse": collapse,
+            "mismatches": db.count_mismatches(con, status_arg),
+            "dead": db.count_gone_jobs(con, status_arg),
+            "total": total,
+            "page": page,
+            "pages": pages,
+        }
+
+
+def _range_line(page: int, total: int, shown: int, collapse: bool) -> str:
+    """'51–100 von 266 Firmen' — where in the pipeline this page sits.
+
+    The unit is named because it changes with the grouping toggle: a grouped
+    page counts companies while the hidden-pile counts beside it are postings,
+    and an unlabelled pair of numbers invites comparing them."""
+    if not total:
+        return ""
+    first = page * PAGE_SIZE + 1
+    unit = "Firmen" if collapse else "Stellen"
+    return f"{first}–{first + shown - 1} von {total} {unit}"
 
 
 def _set_status(job_id: int, status: str):
@@ -77,35 +201,60 @@ def _openable_url(job: dict) -> str:
 async def jobs_page():
     with frame("Job inbox"):
         status_filter = {"value": "new"}
-        show_mismatches = {"value": False}
+        pile = {"value": PILE_NONE}
+        collapse = {"value": True}
+        page = {"value": 0}
         refresh_gen = {"n": 0}  # rapid filter/switch flips: last request wins
         container = ui.column().classes("w-full gap-2")
+        pager = ui.row().classes("items-center gap-2")
 
         async def refresh():
             refresh_gen["n"] += 1
             gen = refresh_gen["n"]
-            jobs, hidden = await run.io_bound(
-                _load_jobs, status_filter["value"], show_mismatches["value"]
+            view = await run.io_bound(
+                _load_jobs, status_filter["value"], pile["value"], page["value"],
+                collapse["value"],
             )
             if gen != refresh_gen["n"]:
                 return  # superseded — a newer refresh already owns the view
+            page["value"] = view["page"]  # the loader clamped it to what exists
             container.clear()
-            hidden_label.set_text(f"{hidden} mismatches hidden" if hidden else "")
+            hidden_label.set_text(
+                _hidden_line(view["filters"], view["mismatches"], view["dead"]))
             with container:
-                if not jobs:
-                    empty = ("No mismatches — nothing is hidden."
-                             if show_mismatches["value"]
-                             else "Nothing here. Run a search profile to "
-                                  "discover jobs.")
-                    ui.label(empty).classes("text-gray-500")
-                for job in jobs:
-                    render_job(job)
+                if not view["rows"]:
+                    ui.label(_EMPTY_VIEW[pile["value"]]).classes("text-gray-500")
+                for job in view["rows"]:
+                    render_job(job, view["siblings"].get(job.get("company_key"), []))
+            render_pager(view)
 
-        def render_job(job: dict):
-            score = f" · match {job['match_score']}" if job["match_score"] is not None else ""
+        def render_pager(view: dict):
+            pager.clear()
+            with pager:
+                ui.label(_range_line(view["page"], view["total"],
+                                     len(view["rows"]), view["collapse"])) \
+                    .classes("text-xs text-gray-500")
+                if view["pages"] <= 1:
+                    return
+                ui.button(icon="chevron_left", on_click=lambda: turn_page(-1)) \
+                    .props("flat dense").set_enabled(view["page"] > 0)
+                ui.label(f"Seite {view['page'] + 1}/{view['pages']}") \
+                    .classes("text-xs text-gray-500")
+                ui.button(icon="chevron_right", on_click=lambda: turn_page(1)) \
+                    .props("flat dense") \
+                    .set_enabled(view["page"] + 1 < view["pages"])
+
+        async def turn_page(step: int):
+            page["value"] += step
+            await refresh()
+
+        def render_job(job: dict, siblings: list[dict] = ()):
             remote = " · remote" if job["remote"] else ""
             head = (f"{job['title']}  —  {job['company']}"
-                    f" ({job['location'] or 'n/a'}{remote}{score})")
+                    f" ({job['location'] or 'n/a'}{remote}{_score_line(job)})")
+            others = job.get("company_count", 1) - 1
+            if others > 0:
+                head += f"  +{others}"
             with ui.expansion(head).classes("w-full border rounded"):
                 ui.label(f"Source: {job['source']} · found {job['fetched_at'][:16]} · "
                          f"status: {job['status']}").classes("text-xs text-gray-500")
@@ -116,12 +265,19 @@ async def jobs_page():
                     )
                 if job["contact_email"]:
                     ui.label(f"Contact: {job['contact_email']}").classes("text-sm")
+                if job["liveness"] == liveness.LIVENESS_GONE:
+                    checked = (job["liveness_checked_at"] or "")[:10]
+                    ui.label(f"⚠ Anzeige offline — beim letzten Abruf am "
+                             f"{checked} nicht mehr vorhanden.") \
+                        .classes("text-sm text-red-700")
                 if job["duplicate_of"]:
                     ui.label("⚠ You already applied at this company — see Applications.") \
                         .classes("text-sm text-amber-700")
                 channel_line = _apply_line(job)
                 if channel_line:
                     ui.label(channel_line).classes("text-sm text-blue-700")
+                if siblings:
+                    render_siblings(job, siblings)
                 description = job["description"] or "(no description available)"
                 ui.markdown(posting_markdown(description[:4000])).classes("text-sm")
                 with ui.row().classes("gap-2"):
@@ -147,6 +303,32 @@ async def jobs_page():
                         ui.button("I applied — record it", icon="check",
                                   on_click=lambda j=job: confirm_applied(j)) \
                             .props("color=positive")
+
+        def render_siblings(job: dict, siblings: list[dict]):
+            """The postings this row stands in front of: same company, lower
+            rank. Titles and scores only — one application per company means
+            these are context for choosing, not rows to act on."""
+            others = job.get("company_count", 1) - 1
+            shown = ("" if others <= len(siblings)
+                     else f" (die {len(siblings)} bestbewerteten)")
+            stellen = "weitere Stelle" if others == 1 else "weitere Stellen"
+            with ui.column().classes("gap-0 pl-3 border-l"):
+                ui.label(
+                    f"{others} {stellen} bei {job['company']}{shown} — "
+                    "eine Bewerbung pro Firma, deshalb steht hier die "
+                    "bestbewertete."
+                ).classes("text-xs text-gray-500")
+                for other in siblings:
+                    with ui.row().classes("items-center gap-2"):
+                        ui.label(f"{other['title']}{_score_line(other)}") \
+                            .classes("text-xs")
+                        other_url = _openable_url(other)
+                        if other_url:
+                            ui.button(
+                                icon="open_in_new",
+                                on_click=lambda u=other_url:
+                                    ui.navigate.to(u, new_tab=True),
+                            ).props("flat dense")
 
         def show_draft(draft_row: dict, job: dict):
             with ui.dialog() as dialog, ui.card().classes("w-[720px] max-w-full"):
@@ -296,20 +478,38 @@ async def jobs_page():
                 value="new",
                 on_change=lambda e: set_filter(e.value),
             )
+            ui.toggle(
+                PILE_LABELS,
+                value=PILE_NONE,
+                on_change=lambda e: set_pile(e.value),
+            ).tooltip("The two hidden piles: postings scored 0 for violating a "
+                      "hard requirement, and postings whose ad the board says "
+                      "is gone. Hidden from the working list, never deleted.")
             ui.switch(
-                "Show mismatches",
-                value=False,
-                on_change=lambda e: set_mismatches(e.value),
-            ).tooltip("Show the hidden pile: postings scored 0 for violating "
-                      "a hard requirement — hidden, never deleted")
+                "Group by company",
+                value=True,
+                on_change=lambda e: set_collapse(e.value),
+            ).tooltip("One row per company, showing its best-scored posting — "
+                      "only one application per company is possible anyway")
             hidden_label = ui.label().classes("text-xs text-gray-500")
+
+        async def set_collapse(value: bool):
+            collapse["value"] = value
+            page["value"] = 0  # companies and postings are not the same count
+            await refresh()
 
         async def set_filter(value: str):
             status_filter["value"] = value
+            page["value"] = 0  # a different list: page 3 of it means nothing
             await refresh()
 
-        async def set_mismatches(value: bool):
-            show_mismatches["value"] = value
+        async def set_pile(value: str):
+            """Switch between the working list and one of the hidden piles.
+
+            One assignment and one refresh: nothing here writes another control,
+            so no handler can be echoed back into this one."""
+            pile["value"] = value or PILE_NONE
+            page["value"] = 0  # a different list: page 3 of it means nothing
             await refresh()
 
         await refresh()

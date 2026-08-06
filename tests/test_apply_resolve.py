@@ -211,6 +211,53 @@ async def test_arbeitnow_external_variant_stores_the_apply_deep_link():
     assert calls == [_AN_JOB]
 
 
+_AN_UK_JOB = "https://www.arbeitnow.co.uk/jobs/companies/carbonchain/junior-data-engineer-1"
+_AN_UK_APPLY = _AN_UK_JOB + "/apply"
+
+
+async def test_a_uk_posting_resolves_through_the_board_parser_not_a_site_fetch():
+    # 13 real postings live on the .co.uk market; before it was registered they
+    # read as the employer's own site and earned a company-site page inspection
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(200, text=f'<a href="{_AN_UK_APPLY}">Apply Now</a>')
+
+    async with _client(handler) as client:
+        final, ch = await apply_resolve.resolve(_job(_AN_UK_JOB), client)
+    assert final == _AN_UK_APPLY
+    assert ch.channel == ac.CHANNEL_BOARD and ch.vendor == "Arbeitnow"
+    assert calls == [_AN_UK_JOB]  # the job page only — never the /apply route
+
+
+async def test_an_apply_href_on_the_other_market_is_not_adopted():
+    # the two TLDs are separate sites: a .com link on a .co.uk page is exactly
+    # the shape a planted anchor takes, and the path check alone would pass it
+    crossed = "https://www.arbeitnow.com" + _AN_UK_JOB.split(".co.uk", 1)[1] + "/apply"
+
+    def handler(request):
+        return httpx.Response(200, text=f'<a href="{crossed}">Apply</a>')
+
+    async with _client(handler) as client:
+        final, ch = await apply_resolve.resolve(_job(_AN_UK_JOB), client)
+    assert final == _AN_UK_JOB  # no deep-link invented, honest board fallback
+    assert ch.channel == ac.CHANNEL_BOARD and ch.vendor == "Arbeitnow"
+
+
+async def test_the_www_variant_of_the_same_market_still_matches():
+    # the feed spells the page host with 'www.'; an absolute href without it is
+    # the same site and must not be refused
+    bare_page = _AN_JOB.replace("www.arbeitnow.com", "arbeitnow.com")
+
+    def handler(request):
+        return httpx.Response(200, text=f'<a href="{_AN_APPLY}">Apply</a>')
+
+    async with _client(handler) as client:
+        final, _ = await apply_resolve.resolve(_job(bare_page), client)
+    assert final == _AN_APPLY
+
+
 async def test_arbeitnow_join_quick_apply_variant_is_labeled_join():
     def handler(request):
         return httpx.Response(200, text=(
@@ -421,7 +468,7 @@ def test_the_robots_disallow_list_matches_what_jooble_publishes():
         "de.jooble.org/away/7",                      # scheme-less, as stored in the wild
     ]
     for url in disallowed:
-        assert apply_resolve._is_robots_disallowed(url), url
+        assert ac.is_robots_disallowed(url), url
 
     allowed = [
         "https://de.jooble.org/",                    # the site root is not disallowed
@@ -431,7 +478,7 @@ def test_the_robots_disallow_list_matches_what_jooble_publishes():
         "",
     ]
     for url in allowed:
-        assert not apply_resolve._is_robots_disallowed(url), url
+        assert not ac.is_robots_disallowed(url), url
 
 
 def _seed(con, rows):

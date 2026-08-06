@@ -7,7 +7,9 @@ legacy `bewerbungen` table keeps its exact shape so the historical data
 
 import sqlite3
 
-SCHEMA_VERSION = 5
+from jobdeck import dates
+
+SCHEMA_VERSION = 6
 
 # Legacy table, exactly as the previous tracker created it.
 BEWERBUNGEN_SQL = """
@@ -71,6 +73,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     contact_plz_ort  TEXT NOT NULL DEFAULT '',
     contact_source   TEXT NOT NULL DEFAULT '',
     refnr            TEXT NOT NULL DEFAULT '',
+    published_on        TEXT NOT NULL DEFAULT '',
+    liveness            TEXT NOT NULL DEFAULT '',
+    liveness_checked_at TEXT NOT NULL DEFAULT '',
     UNIQUE (source, external_id)
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
@@ -179,6 +184,49 @@ def _ensure_apply_channel_columns(con: sqlite3.Connection) -> None:
             con.execute(f"ALTER TABLE jobs ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
 
 
+def _ensure_freshness_columns(con: sqlite3.Connection) -> None:
+    """Freshness/liveness columns added in schema v6 (additive only).
+
+    `published_on` is the ISO date DERIVED from the source's own
+    `published_at`, which stays exactly as the board sent it (three formats,
+    one of them Unix epoch — see dates.parse_posting_date). The derived column
+    is what SQL can order and compare; keeping both means a re-read of the raw
+    value is always possible.
+
+    `liveness` is '', 'alive' or 'gone' as last observed, with the timestamp of
+    that observation. A posting whose ad is gone is HIDDEN by default and never
+    deleted."""
+    existing = [row[1] for row in con.execute("PRAGMA table_info(jobs)")]
+    for col in ("published_on", "liveness", "liveness_checked_at"):
+        if col not in existing:
+            con.execute(f"ALTER TABLE jobs ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+
+
+def _backfill_published_on(con: sqlite3.Connection) -> None:
+    """Derive `published_on` for every posting that still lacks one.
+
+    Runs on every migration rather than once at v6: it only ever fills a blank
+    from data already in the row, so it is both idempotent and self-healing —
+    a posting whose format the parser learns to read later gets its date on the
+    next start, with no second migration."""
+    existing = [row[1] for row in con.execute("PRAGMA table_info(jobs)")]
+    if "published_at" not in existing:
+        # a jobs table old enough to predate the column (nothing adds it —
+        # only fresh databases get the full definition); there is no raw value
+        # to derive from, so there is nothing to do
+        return
+    rows = con.execute(
+        "SELECT id, published_at FROM jobs "
+        "WHERE published_on='' AND published_at<>''"
+    ).fetchall()
+    for job_id, published_at in rows:
+        iso = dates.posting_date_iso(published_at)
+        if iso:
+            con.execute(
+                "UPDATE jobs SET published_on=? WHERE id=?", (iso, job_id)
+            )
+
+
 def _ensure_draft_columns(con: sqlite3.Connection) -> None:
     """Send-tracking columns added in schema v4 (additive only).
 
@@ -200,7 +248,9 @@ def migrate(con: sqlite3.Connection) -> None:
     _ensure_search_profile_columns(con)
     _ensure_job_contact_columns(con)
     _ensure_apply_channel_columns(con)
+    _ensure_freshness_columns(con)
     _ensure_draft_columns(con)
+    _backfill_published_on(con)
     if version < 2:
         # v2 reserves match_score 0 for hard-criteria violations and hides
         # such rows by default. Under v1 semantics 0 just meant "very bad

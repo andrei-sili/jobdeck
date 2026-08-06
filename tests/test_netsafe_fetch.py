@@ -192,3 +192,62 @@ async def test_streaming_stops_pulling_once_the_cap_is_reached():
     body = await _fetch(handler, max_bytes=2048)
     assert len(body) == 2048
     assert len(pulled) <= 4  # stopped early instead of draining the response
+
+
+async def _probe(handler, url="https://www.arbeitnow.com/jobs/companies/x/y", **kw):
+    async with _client(handler) as client:
+        return await netsafe.probe_status(client, url, **kw)
+
+
+async def test_probe_reports_the_status_and_asks_for_no_body():
+    # the question is "is that ad still there?"; a body would be a document
+    # nobody reads, downloaded past the cap fetch_text has and this does not
+    methods = []
+
+    def handler(request):
+        methods.append(request.method)
+        return httpx.Response(410, text="Gone" * 10_000)
+
+    assert await _probe(handler) == 410
+    assert methods == ["HEAD"]
+
+
+async def test_probe_follows_redirects_and_reports_where_it_lands():
+    def handler(request):
+        if request.url.path.endswith("/y"):
+            return httpx.Response(301, headers={"Location": "/jobs/companies/x/z"})
+        return httpx.Response(200)
+
+    assert await _probe(handler) == 200
+
+
+async def test_probe_gates_every_hop_before_its_request_fires():
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.host)
+        if request.url.host == "www.arbeitnow.com":
+            return httpx.Response(302, headers={"Location": "http://127.0.0.1:9/x"})
+        return httpx.Response(200)
+
+    assert await _probe(handler) is None  # no answer, not "alive"
+    assert seen == ["www.arbeitnow.com"]
+
+
+async def test_probe_answers_none_on_a_transport_error_and_a_redirect_loop():
+    def broken(request):
+        raise httpx.ConnectError("no route to host")
+
+    def loop(request):
+        return httpx.Response(302, headers={"Location": "/jobs/companies/x/y"})
+
+    assert await _probe(broken) is None
+    assert await _probe(loop, max_redirects=2) is None
+
+
+async def test_probe_gives_up_on_a_slow_server_without_hanging_the_pass():
+    async def handler(request):
+        await asyncio.sleep(5)
+        return httpx.Response(200)
+
+    assert await _probe(handler, deadline=0.2) is None

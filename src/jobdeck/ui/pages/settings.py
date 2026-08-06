@@ -5,7 +5,7 @@ import asyncio
 from nicegui import run, ui
 
 from jobdeck import backup, config, db, gmail
-from jobdeck.services import apply_resolve, mappe, polling, scoring
+from jobdeck.services import apply_resolve, liveness, mappe, polling, scoring
 from jobdeck.ui.helpers import open_in_system
 from jobdeck.ui.layout import frame
 
@@ -398,10 +398,26 @@ async def settings_page():
                     ui.notify(f"Resolved {r['resolved']}{tail}\n{breakdown}",
                               type="positive", multi_line=True)
 
+                async def check_liveness_now():
+                    ui.notify("Checking whether the ads are still online…")
+                    r = await liveness.check_pending()
+                    if not r["checked"]:
+                        ui.notify("Every posting was checked within the last "
+                                  "day ✓", type="positive")
+                        return
+                    ui.notify(
+                        f"Checked {r['checked']}: {r['gone']} gone, "
+                        f"{r['alive']} still online, {r['unknown']} no answer",
+                        type="warning" if r["gone"] else "positive",
+                        multi_line=True,
+                    )
+
                 ui.button("Backup now", icon="save", on_click=backup_now) \
                     .props("outline")
                 ui.button("Resolve apply channels", icon="alt_route",
                           on_click=resolve_channels_now).props("outline")
+                ui.button("Check postings still online", icon="wifi_tethering",
+                          on_click=check_liveness_now).props("outline")
                 ui.button("Poll all profiles now", icon="refresh", on_click=poll_now) \
                     .props("outline")
                 ui.button("Score new jobs now", icon="grade", on_click=score_now) \

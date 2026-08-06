@@ -35,6 +35,8 @@ def test_known_ats_hosts_are_named(url, vendor):
     ("https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1003292975-S", "Arbeitsagentur"),
     ("https://de.jooble.org/away/12345", "Jooble"),
     ("https://www.arbeitnow.com/jobs/companies/x/y", "Arbeitnow"),
+    # the board's UK market — same site, second TLD
+    ("https://www.arbeitnow.co.uk/jobs/companies/x/y", "Arbeitnow"),
     ("https://www.xing.com/jobs/osnabrueck-ki-154887444", "XING"),
     ("https://jobs.ams.at/public/emps/jobs/abc", "AMS"),
     ("https://www.get-in-it.de/jobsuche/p12345", "get in IT"),
@@ -54,6 +56,8 @@ def test_known_boards_are_labelled(url, label):
     "https://evilgermantechjobs.de/x",
     "https://get-in-it.de.evil.com/jobsuche/p1",
     "https://studyflix.de.attacker.test/jobs/detail/1",
+    "https://arbeitnow.co.uk.evil.com/jobs/companies/x/y",
+    "https://evil-arbeitnow.co.uk/jobs/companies/x/y",
 ])
 def test_board_suffix_anchors_reject_lookalike_hosts(lookalike):
     # without the '$' anchor a foreign host inherits a board's trusted label
@@ -169,3 +173,42 @@ def test_a_malformed_marker_url_is_skipped_instead_of_raising():
 
 def test_a_malformed_posting_url_classifies_as_unknown():
     assert ac.classify("http://[::1").channel == ac.CHANNEL_UNKNOWN
+
+
+@pytest.mark.parametrize("url, disallowed", [
+    ("https://www.arbeitnow.com/jobs/companies/acme/dev-1", False),
+    ("https://www.arbeitnow.com/jobs/companies/acme/dev-1/apply", True),
+    ("https://www.arbeitnow.co.uk/jobs/companies/acme/dev-1/apply", True),
+    ("https://www.arbeitnow.co.uk/jobs/companies/acme/dev-1/apply/", True),
+    ("https://de.jooble.org/away/1", True),
+    ("https://de.jooble.org/jdp/5?ckey=x", True),
+    ("https://de.jooble.org/", False),
+    ("https://firma.de/jobs/companies/x/apply", False),  # not one of the boards
+])
+def test_one_rule_for_every_route_the_boards_forbid(url, disallowed):
+    # three consumers now share it: the resolver, the liveness probe, and every
+    # redirect hop either of them walks
+    assert ac.is_robots_disallowed(url) is disallowed
+
+
+def test_the_disallowed_apply_route_is_not_a_fetchable_job_page():
+    # every caller of is_arbeitnow_job goes on to FETCH what it approves
+    assert ac.is_arbeitnow_job("https://www.arbeitnow.com/jobs/companies/x/y")
+    assert not ac.is_arbeitnow_job("https://www.arbeitnow.com/jobs/companies/x/y/apply")
+
+
+@pytest.mark.parametrize("url", [
+    "https://www.arbeitnow.com/jobs/companies/acme/dev-1/apply/.",
+    "https://www.arbeitnow.com/jobs/companies/acme/dev-1/apply/x/..",
+    "https://www.arbeitnow.com/jobs/companies/acme/dev-1/apply/./deeper/..",
+    "https://www.arbeitnow.com/jobs/../jobs/companies/acme/dev-1/apply",
+    "https://www.arbeitnow.co.uk/jobs/companies/acme/dev-1/apply/.",
+])
+def test_a_dot_segment_cannot_smuggle_the_apply_route_past_the_screen(url):
+    """An HTTP client removes dot segments before the request goes on the wire
+    (RFC 3986), so these paths ARE the forbidden route on the wire while ending
+    in something else on paper. Proven against httpx itself below."""
+    import httpx
+    assert httpx.URL(url).path.endswith("/apply"), "premise: this is what is sent"
+    assert ac.is_robots_disallowed(url)
+    assert not ac.is_arbeitnow_job(url)

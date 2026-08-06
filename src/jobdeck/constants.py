@@ -50,6 +50,13 @@ STATUS_RANK = {
 # Lifecycle of a discovered job posting
 JOB_STATUS = ["new", "duplicate", "skipped", "portal", "drafted", "applied"]
 
+# What the last liveness probe observed about a posting's ad ('' = never asked).
+# Here rather than in services/liveness.py because db.py builds SQL from these
+# values and cannot import a service: a magic string in a query that has to
+# match a Python constant elsewhere is how the two drift apart.
+LIVENESS_ALIVE = "alive"
+LIVENESS_GONE = "gone"
+
 # Lifecycle of an AI-generated application draft
 DRAFT_STATUS = ["generating", "ready", "failed", "approved", "sending", "sent", "discarded"]
 

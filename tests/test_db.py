@@ -51,6 +51,17 @@ def test_insert_job_if_new_is_idempotent(con):
     assert _add_job(con, external_id="REF-2") is not None
 
 
+def test_insert_derives_published_on_and_keeps_the_raw_value(con):
+    # the epoch string is what Arbeitnow sends; the derived column is what SQL
+    # can order on, and the raw one stays readable for a re-derivation later
+    job_id = _add_job(con, source="arbeitnow", published_at="1785897635")
+    job = db.get_job(con, job_id)
+    assert job["published_at"] == "1785897635"
+    assert job["published_on"] == "2026-08-05"
+    unknown = _add_job(con, external_id="REF-9", published_at="irgendwann")
+    assert db.get_job(con, unknown)["published_on"] == ""
+
+
 def test_apply_job_creates_application_and_links(con):
     job_id = _add_job(con)
     bewerbung_id = db.apply_job(con, job_id, kanal="Online-Portal")
@@ -271,3 +282,42 @@ def test_delete_bewerbung_clears_the_link_a_send_wrote(con):
     assert db.get_bewerbung(con, bewerbung_id) is None
     assert db.get_draft(con, draft_id)["bewerbung_id"] is None
     assert db.get_draft(con, draft_id)["status"] == "sent"  # history survives
+
+
+def _gone_job(con, ext, liveness, score=80):
+    job_id = db.insert_job_if_new(con, {
+        "source": "arbeitnow", "external_id": ext, "title": "Dev",
+        "company": "Firma", "url": f"https://www.arbeitnow.com/jobs/x/{ext}",
+    })
+    con.execute("UPDATE jobs SET match_score=?, liveness=? WHERE id=?",
+                (score, liveness, job_id))
+    return job_id
+
+
+def test_list_jobs_filters_the_two_piles_independently(con):
+    live = _gone_job(con, "live", "alive")
+    dead = _gone_job(con, "dead", "gone")
+    both = _gone_job(con, "both", "gone", score=0)
+    mismatch = _gone_job(con, "mismatch", "", score=0)
+
+    def ids(**kw):
+        return sorted(r["id"] for r in db.list_jobs(con, status="new", **kw))
+
+    assert ids() == sorted([live, dead, both, mismatch])   # both default to include
+    assert ids(mismatches="exclude", gone="exclude") == [live]
+    assert ids(gone="only") == sorted([dead, both])
+    assert ids(mismatches="only") == sorted([both, mismatch])
+    # a row in both piles is reachable from either view, and hidden by default
+    assert both in ids(gone="only") and both in ids(mismatches="only")
+
+
+def test_an_unknown_filter_value_raises_instead_of_showing_a_hidden_pile(con):
+    import pytest
+    _gone_job(con, "hidden", "gone")
+    for bad in ({"mismatches": "excluded"}, {"gone": "yes"}, {"gone": ""}):
+        with pytest.raises(ValueError):
+            db.list_jobs(con, status="new", **bad)
+        with pytest.raises(ValueError):
+            db.count_jobs(con, status="new", **bad)
+        with pytest.raises(ValueError):
+            db.count_job_groups(con, status="new", **bad)

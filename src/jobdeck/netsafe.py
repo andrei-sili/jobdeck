@@ -19,8 +19,9 @@ connect tier): a rebinding authoritative server could answer public at check
 time and private at connect time; closing that needs per-hop IP pinning via a
 custom transport — future hardening, not this slice.
 
-``fetch_text`` is the one sanctioned way to GET an untrusted page: the manual
-redirect walk clears every hop through the guard before its request fires.
+``fetch_text`` is the one sanctioned way to GET an untrusted page, and
+``probe_status`` the one way to ask only for its status: both walk redirects
+manually so every hop clears the guard before its request fires.
 """
 
 import asyncio
@@ -280,6 +281,54 @@ async def fetch_text(client: httpx.AsyncClient, url: str, *, max_bytes: int,
     except TimeoutError:
         log.info("netsafe: fetch %s exceeded %gs — giving up", url, deadline)
         return ""
+
+
+async def probe_status(client: httpx.AsyncClient, url: str, *,
+                       max_redirects: int = 10, deadline: float = 20.0,
+                       refuse=None) -> int | None:
+    """The final HTTP status of a HEAD to an untrusted URL, None on any failure.
+
+    HEAD only, deliberately: this exists to ask "is that ad still there?", and
+    the answer is in the status line — reading a body would need the byte cap
+    `fetch_text` has and would download a document nobody looks at. Redirects
+    are walked manually so EVERY hop clears `url_is_safe` first, exactly as in
+    `fetch_text`.
+
+    `refuse` is an optional per-hop predicate for policy the SSRF guard knows
+    nothing about — a robots.txt Disallow, say. It is checked on every hop
+    because a 3xx into a forbidden route is still a request to a forbidden
+    route, and a redirect target is chosen by the server, not by us.
+
+    None means "no answer": a refused hop, a transport error, a timeout or a
+    redirect loop. Callers must treat it as UNKNOWN and change nothing — a
+    server that refuses HEAD with 405 is not a posting that was taken down."""
+    try:
+        async with asyncio.timeout(deadline):
+            return await _probe_status(client, url, max_redirects, refuse)
+    except TimeoutError:
+        log.info("netsafe: probe %s exceeded %gs — giving up", url, deadline)
+        return None
+
+
+async def _probe_status(client: httpx.AsyncClient, url: str,
+                        max_redirects: int, refuse=None) -> int | None:
+    for _ in range(max_redirects + 1):
+        if refuse is not None and refuse(url):
+            log.info("netsafe: probe refused by policy: %s", url)
+            return None
+        if not await url_is_safe(url):
+            return None
+        try:
+            resp = await client.request("HEAD", url, follow_redirects=False)
+        except Exception as exc:  # network / timeout / malformed URL — no answer
+            log.info("netsafe: probe %s failed: %s", url, exc)
+            return None
+        if not resp.has_redirect_location:
+            return resp.status_code
+        if resp.next_request is None:  # a Location the client cannot resolve
+            return resp.status_code
+        url = str(resp.next_request.url)
+    return None  # too many redirects
 
 
 async def _fetch_text(client: httpx.AsyncClient, url: str,

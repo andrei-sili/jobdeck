@@ -34,40 +34,6 @@ _MAX_REDIRECTS = 10
 _MAX_BYTES = 400_000
 
 
-def _is_robots_disallowed(url: str) -> bool:
-    """True for a Jooble link this app must never request.
-
-    de.jooble.org/robots.txt Disallows /away/ and /desc/ for `User-agent: *`
-    (and /*?ckey=, which every stored /desc/ link carries). Both are exactly
-    the URLs a feed result points at, so the polite thing is also the only
-    thing: never fetch them, and hand the link to the HUMAN instead. Same
-    call as Arbeitnow's disallowed apply route — see _resolve_arbeitnow.
-
-    Following them used to look attractive because /away/ 3xx-redirects to
-    the real posting; it is also Jooble's click-billing endpoint, so fetching
-    it fires a paid click for a visit that never happens.
-    """
-    parts = netsafe.split_url(url if "://" in url else "https://" + url)
-    if parts is None:
-        return False
-    host = (parts.hostname or "").lower()
-    if not (host == "jooble.org" or host.endswith(".jooble.org")):
-        return False
-    path = parts.path.lower()
-    return (path.startswith(("/away/", "/desc/", "/m/away/", "/m/desc/"))
-            or "ckey=" in (parts.query or "").lower())
-
-
-def _is_arbeitnow_job(url: str) -> bool:
-    """True for an Arbeitnow job page (its feed URLs all point there)."""
-    parts = netsafe.split_url(url if "://" in url else "https://" + url)
-    if parts is None:
-        return False
-    host = (parts.hostname or "").lower()
-    return (host == "arbeitnow.com" or host.endswith(".arbeitnow.com")) \
-        and parts.path.startswith("/jobs/")
-
-
 class _ArbeitnowPage(HTMLParser):
     """Signals an Arbeitnow job page carries in raw server-rendered HTML:
     anchor hrefs (one is the ``…/apply`` deep-link) and form ids (the
@@ -101,21 +67,24 @@ def _arbeitnow_apply_href(hrefs: list[str], page_url: str) -> str:
     """THIS posting's own ``…/apply`` deep-link, '' when the layout changed.
 
     The href comes from an UNTRUSTED page, so it is accepted only when it is
-    an https link to the board's own host whose path is exactly this job's
-    path + '/apply' — a planted anchor earlier in the document (employer-
-    supplied description HTML, a 'related jobs' block) must not win, and a
-    non-http scheme must never become a URL the app opens."""
+    an https link to the SAME Arbeitnow site as the page it was read from,
+    whose path is exactly this job's path + '/apply' — a planted anchor earlier
+    in the document (employer-supplied description HTML, a 'related jobs'
+    block) must not win, and a non-http scheme must never become a URL the app
+    opens."""
     page_parts = netsafe.split_url(page_url)
     if page_parts is None:
+        return ""
+    site = apply_channel.arbeitnow_site(page_parts.hostname or "")
+    if not site:
         return ""
     want = page_parts.path.rstrip("/") + "/apply"
     for href in hrefs:
         parts = netsafe.split_url(href)  # a poisoned href must not raise
         if parts is None:
             continue
-        host = (parts.hostname or "").lower()
         if (parts.scheme in ("http", "https")
-                and host in ("www.arbeitnow.com", "arbeitnow.com")
+                and apply_channel.arbeitnow_site(parts.hostname or "") == site
                 and not parts.username and not parts.password
                 and parts.path.rstrip("/") == want):
             return href
@@ -174,12 +143,12 @@ async def resolve(
     email = (job["contact_email"] or "").strip()
     if email:
         return url, apply_channel.classify(url, email)
-    if url and _is_arbeitnow_job(url):
+    if url and apply_channel.is_arbeitnow_job(url):
         resolved = await _resolve_arbeitnow(client, url)
         if resolved is not None:
             return resolved
     final = url
-    if url and _is_robots_disallowed(url):
+    if url and apply_channel.is_robots_disallowed(url):
         # Nothing is fetched: the board's own link is stored and the user
         # clicks it. classify() already reads it as board_apply/Jooble, which
         # is the honest answer anyway — the destination is another job board

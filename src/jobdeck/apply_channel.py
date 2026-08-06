@@ -14,6 +14,7 @@ classifies — no network, no side effects, no actions. Following aggregator
 redirects (jooble/arbeitnow) and web e-mail lookup are later slices.
 """
 
+import posixpath
 import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -76,7 +77,11 @@ _ATS_RULES = tuple(
 _BOARDS = (
     ("Arbeitsagentur", r"(?:^|\.)arbeitsagentur\.de$"),
     ("Jooble", r"(?:^|\.)jooble\.org$"),
-    ("Arbeitnow", r"(?:^|\.)arbeitnow\.com$"),
+    # Arbeitnow serves its UK listings from a second TLD whose pages, markup and
+    # robots.txt are identical to the .com one (byte-identical robots, verified
+    # 2026-08-06). Without it 13 of his postings read as the employer's own site
+    # and earn a page inspection the board never needed.
+    ("Arbeitnow", r"(?:^|\.)arbeitnow\.(?:com|co\.uk)$"),
     # aggregators the Arbeitsagentur feed points at via externeURL — without an
     # entry they classify as company_site and earn a pointless page inspection
     ("get in IT", r"(?:^|\.)get-in-it\.de$"),
@@ -91,6 +96,66 @@ _BOARDS = (
     ("AMS", r"(?:^|\.)jobs\.ams\.at$"),
 )
 _BOARD_RULES = tuple((label, re.compile(h, re.I)) for label, h in _BOARDS)
+
+
+# The board runs one site per market — its UK listings live on .co.uk, with the
+# same markup, the same `…/apply` route and a byte-identical robots.txt.
+_ARBEITNOW_SITES = ("arbeitnow.com", "arbeitnow.co.uk")
+
+
+def arbeitnow_site(host: str) -> str:
+    """Which Arbeitnow site a host belongs to, '' when it is not one.
+
+    Collapses the `www.` variant so a page and its own apply link compare equal
+    however the feed spelled them, while keeping the two markets distinct: a
+    .co.uk page must not adopt an apply link pointing at .com."""
+    host = (host or "").lower().removeprefix("www.")
+    return host if host in _ARBEITNOW_SITES else ""
+
+
+def is_arbeitnow_job(url: str) -> bool:
+    """True for an Arbeitnow JOB page — the one route of theirs a bot may
+    request. The `…/apply` deep-link is explicitly excluded: it is
+    robots-disallowed, and every caller of this function goes on to FETCH."""
+    parts = netsafe.split_url(url if "://" in url else "https://" + url)
+    if parts is None:
+        return False
+    return (bool(arbeitnow_site(parts.hostname or ""))
+            and parts.path.startswith("/jobs/")
+            and not is_robots_disallowed(url))
+
+
+def is_robots_disallowed(url: str) -> bool:
+    """True for a URL this app must never request, per the boards' robots.txt.
+
+    ONE definition, because the rule now has three consumers: the apply-channel
+    resolver, the liveness probe, and every redirect hop either of them walks. A
+    3xx into a disallowed route is still a request to a disallowed route.
+
+    * de.jooble.org Disallows /away/, /desc/, /m/away/, /m/desc/ and /*?ckey= —
+      exactly the URLs a feed result points at. Following /away/ also fires
+      Jooble's click-billing endpoint for a visit that never happens.
+    * arbeitnow (both markets) Disallows /jobs/companies/*/apply — the deep-link
+      is STORED for the human to click and never fetched.
+    """
+    parts = netsafe.split_url(url if "://" in url else "https://" + url)
+    if parts is None:
+        return False
+    host = (parts.hostname or "").lower()
+    path = parts.path.lower()
+    if host == "jooble.org" or host.endswith(".jooble.org"):
+        return (path.startswith(("/away/", "/desc/", "/m/away/", "/m/desc/"))
+                or "ckey=" in (parts.query or "").lower())
+    if arbeitnow_site(host):
+        # Judged BOTH as written and as httpx will send it. A client removes dot
+        # segments before the request goes on the wire (RFC 3986), so
+        # `…/apply/.` and `…/apply/x/..` are the forbidden route on the wire
+        # while ending in something else on paper — the slice-#4 lesson that a
+        # screen must judge the value the way its CONSUMER will. Refusing on
+        # either reading is strictly stricter than either alone.
+        return any(candidate.rstrip("/").endswith("/apply")
+                   for candidate in (path, posixpath.normpath(path)))
+    return False
 
 
 def _hostname(url: str) -> tuple[str, str]:

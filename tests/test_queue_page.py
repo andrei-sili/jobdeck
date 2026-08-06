@@ -95,3 +95,21 @@ def test_failed_drafts_are_reachable_in_the_open_filter(con, data_dir):
 
     rows = db.list_drafts_with_jobs(con, queue.FILTER_STATUSES["open"])
     assert [r["status"] for r in rows] == ["failed"]
+
+
+def test_the_queue_carries_the_liveness_of_the_posting_it_would_send_to(con,
+                                                                       data_dir):
+    """The queue is the last screen before a Bewerbung leaves. One real draft
+    (job 18) was written and a 2.1 MB Mappe built for an ad gone forty days."""
+    job_id = _job_with_draft(con)
+    con.execute("UPDATE jobs SET liveness='gone', "
+                "liveness_checked_at='2026-08-06T13:09:39' WHERE id=?", (job_id,))
+    con.commit()
+    row = db.list_drafts_with_jobs(con, ["ready"])[0]
+    assert row["job_liveness"] == "gone"
+    assert row["job_liveness_checked_at"].startswith("2026-08-06")
+
+    # and a live posting says so rather than saying nothing
+    con.execute("UPDATE jobs SET liveness='alive' WHERE id=?", (job_id,))
+    con.commit()
+    assert db.list_drafts_with_jobs(con, ["ready"])[0]["job_liveness"] == "alive"

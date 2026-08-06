@@ -11,7 +11,7 @@ import pathlib
 from nicegui import run, ui
 
 from jobdeck import db
-from jobdeck.services import mappe, send
+from jobdeck.services import liveness, mappe, send
 from jobdeck.ui import helpers
 from jobdeck.ui.helpers import open_in_system, openable_url
 from jobdeck.ui.layout import frame
@@ -128,6 +128,11 @@ async def queue_page():
                          f"updated {row['updated_at'][:16]}") \
                     .classes("text-xs text-gray-500")
                 ui.label(row["betreff"]).classes("text-sm")
+                if row["job_liveness"] == liveness.LIVENESS_GONE:
+                    checked = (row["job_liveness_checked_at"] or "")[:10]
+                    ui.label(f"⚠ Die Anzeige war am {checked} nicht mehr "
+                             "online — vor dem Versand prüfen.") \
+                        .classes("text-sm text-red-700")
                 if row["pdf_path"]:
                     ui.label(f"Mappe: {row['pdf_path']}") \
                         .classes("text-xs text-gray-600")

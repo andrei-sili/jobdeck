@@ -258,3 +258,399 @@ def test_mappe_summary_lists_the_anlagen_for_the_job_inbox():
         "compression": "", "anlagen": [],
     }, with_anlagen=True)
     assert none == "Mappe ready: 1 pages, 0.1 MB · no Anlagen ✓"
+
+
+def test_the_working_inbox_hides_both_piles_and_each_view_shows_one():
+    # a mismatch violates a stated hard requirement, a dead posting's ad is
+    # gone: both are facts about the posting, so both hide it — and opening one
+    # pile is a separate VIEW, not a filter stacked on the other
+    assert jobs._PILE_FILTERS[jobs.PILE_NONE] == {
+        "mismatches": "exclude", "gone": "exclude"}
+    assert jobs._PILE_FILTERS[jobs.PILE_MISMATCHES]["mismatches"] == "only"
+    assert jobs._PILE_FILTERS[jobs.PILE_DEAD]["gone"] == "only"
+    assert set(jobs._PILE_FILTERS) == set(jobs._EMPTY_VIEW)
+
+
+@pytest.mark.parametrize("pile, status, mismatches, dead, expected", [
+    (jobs.PILE_NONE, "new", 129, 58, "129 mismatches hidden · 58 dead hidden"),
+    (jobs.PILE_NONE, "new", 0, 58, "58 dead hidden"),
+    (jobs.PILE_NONE, "new", 129, 0, "129 mismatches hidden"),
+    (jobs.PILE_NONE, "new", 0, 0, ""),
+    # a pile view INCLUDES the other pile, so it must not claim to hide it — the
+    # label is derived from the filters the query really used
+    (jobs.PILE_MISMATCHES, "new", 129, 58,
+     "129 mismatches — hard requirement violated"),
+    (jobs.PILE_DEAD, "new", 129, 58, "58 postings whose ad is gone"),
+    # a view of postings he has already acted on hides nothing at all
+    (jobs.PILE_NONE, "portal", 129, 58, ""),
+    (jobs.PILE_NONE, "applied", 129, 58, ""),
+])
+def test_the_hidden_line_can_never_contradict_the_list(pile, status, mismatches,
+                                                       dead, expected):
+    # never a total either: a posting can be both a mismatch and offline, so
+    # adding the two would double-count it
+    filters = jobs._view_filters(pile, status)
+    assert jobs._hidden_line(filters, mismatches, dead) == expected
+
+
+def test_a_posting_he_has_acted_on_is_never_hidden_from_its_own_view(con, data_dir):
+    """The row of a posting in `portal` carries the button that finishes the job
+    ("I applied — record it"). Hiding it for being offline would hide that."""
+    from jobdeck import db
+    job_id = _company_job(con, "p1", "Firma", 90)
+    con.execute("UPDATE jobs SET status='portal', liveness='gone' WHERE id=?",
+                (job_id,))
+    con.commit()
+    portal = jobs._load_jobs("portal", jobs.PILE_NONE, 0)
+    assert [r["id"] for r in portal["rows"]] == [job_id]
+    assert portal["filters"] == {"mismatches": "include", "gone": "include"}
+    # while the working inbox still hides it
+    assert db.count_jobs(con, "new", gone="exclude") == 0
+
+
+@pytest.mark.parametrize("job, expected", [
+    ({"match_score": 92, "effective_score": 72, "age_days": 61},
+     " · match 92 → 72 · 61 Tage alt"),
+    ({"match_score": 78, "effective_score": 78, "age_days": 1},
+     " · match 78 · 1 Tag alt"),
+    ({"match_score": 70, "effective_score": 70, "age_days": 0},
+     " · match 70 · heute"),
+    # the boards state no timezone, so a posting can legitimately read as -1
+    ({"match_score": 70, "effective_score": 70, "age_days": -1},
+     " · match 70 · heute"),
+    ({"match_score": 80, "effective_score": 80, "age_days": None},
+     " · match 80 · Datum unbekannt"),
+    ({"match_score": None, "effective_score": None, "age_days": 3}, ""),
+])
+def test_the_score_line_shows_what_age_cost(job, expected):
+    # the arrow appears only when age actually took points off, and both numbers
+    # come from the row the query returned — the one that decided the position
+    assert jobs._score_line(job) == expected
+
+
+def _seed_scored(con, count):
+    from jobdeck import db
+    for n in range(count):
+        job_id = db.insert_job_if_new(con, {
+            "source": "arbeitsagentur", "external_id": f"j{n}", "title": "Dev",
+            "company": f"Firma {n}", "url": f"https://firma.de/{n}",
+        })
+        con.execute("UPDATE jobs SET match_score=? WHERE id=?", (n + 1, job_id))
+    con.commit()
+
+
+def test_every_posting_is_reachable_by_paging(con, data_dir):
+    # the old hard limit of 100 left 187 of his 287 open postings unreachable
+    _seed_scored(con, 120)
+    seen, page = [], 0
+    while True:
+        view = jobs._load_jobs("new", jobs.PILE_NONE, page, collapse=False)
+        assert view["total"] == 120
+        seen += [r["id"] for r in view["rows"]]
+        if page + 1 >= view["pages"]:
+            break
+        page += 1
+    assert len(seen) == 120 and len(set(seen)) == 120
+    assert page == 2 and view["pages"] == 3  # 50 + 50 + 20
+
+
+def test_a_page_past_the_end_shows_the_last_one_instead_of_nothing(con, data_dir):
+    # a filter change or a background poll can shrink the list under the user
+    _seed_scored(con, 60)
+    view = jobs._load_jobs("new", jobs.PILE_NONE, 99, collapse=False)
+    assert view["page"] == 1 and len(view["rows"]) == 10
+    empty = jobs._load_jobs("applied", jobs.PILE_NONE, 99, collapse=False)
+    assert empty["page"] == 0 and empty["rows"] == [] and empty["total"] == 0
+
+
+def test_paging_does_not_skip_or_repeat_a_row_at_the_boundary(con, data_dir):
+    _seed_scored(con, 51)
+    first = jobs._load_jobs("new", jobs.PILE_NONE, 0, collapse=False)
+    second = jobs._load_jobs("new", jobs.PILE_NONE, 1, collapse=False)
+    assert len(first["rows"]) == 50 and len(second["rows"]) == 1
+    assert set(r["id"] for r in first["rows"]).isdisjoint(
+        r["id"] for r in second["rows"])
+    # best score first across the page break, not only inside a page
+    assert first["rows"][0]["match_score"] == 51
+    assert second["rows"][0]["match_score"] == 1
+
+
+@pytest.mark.parametrize("page, total, shown, collapse, expected", [
+    (0, 266, 50, True, "1–50 von 266 Firmen"),
+    (1, 266, 50, True, "51–100 von 266 Firmen"),
+    (0, 287, 50, False, "1–50 von 287 Stellen"),
+    (5, 287, 37, False, "251–287 von 287 Stellen"),
+    (0, 3, 3, True, "1–3 von 3 Firmen"),
+    (0, 0, 0, True, ""),
+])
+def test_the_range_line_names_the_unit_it_counts(page, total, shown, collapse,
+                                                 expected):
+    # the unit changes with the grouping toggle while the pile counts beside it
+    # stay postings; an unlabelled pair of numbers invites comparing them
+    assert jobs._range_line(page, total, shown, collapse) == expected
+
+
+def _company_job(con, ext, company, score, published_on=""):
+    from jobdeck import db
+    job_id = db.insert_job_if_new(con, {
+        "source": "arbeitsagentur", "external_id": ext, "title": f"Dev {ext}",
+        "company": company, "url": f"https://firma.de/{ext}",
+    })
+    con.execute("UPDATE jobs SET match_score=?, published_on=? WHERE id=?",
+                (score, published_on, job_id))
+    return job_id
+
+
+def test_a_company_takes_one_row_and_its_best_posting_represents_it(con, data_dir):
+    # 36 companies held 83 of his 237 no-email postings, and only one
+    # application per company is possible — 47 rows could never become one
+    best = _company_job(con, "a1", "Sigtronic GmbH", 88)
+    _company_job(con, "a2", "sigtronic gmbh ", 70)   # same company, spelled loosely
+    _company_job(con, "a3", "SIGTRONIC GMBH", 60)
+    other = _company_job(con, "b1", "Andere AG", 75)
+    con.commit()
+
+    view = jobs._load_jobs("new", jobs.PILE_NONE, 0)
+    assert view["total"] == 2                     # companies, not postings
+    assert [r["id"] for r in view["rows"]] == [best, other]
+    head = view["rows"][0]
+    assert head["company_count"] == 3
+    siblings = view["siblings"][head["company_key"]]
+    assert [r["match_score"] for r in siblings] == [70, 60]   # best-ranked first
+
+    flat = jobs._load_jobs("new", jobs.PILE_NONE, 0, collapse=False)
+    assert flat["total"] == 4 and flat["siblings"] == {}
+
+
+def test_a_blank_company_never_groups_with_another(con, data_dir):
+    # an empty employer field is missing data, not a company they share
+    first = _company_job(con, "x1", "", 80)
+    second = _company_job(con, "x2", "   ", 70)
+    con.commit()
+    view = jobs._load_jobs("new", jobs.PILE_NONE, 0)
+    assert view["total"] == 2
+    assert [r["company_count"] for r in view["rows"]] == [1, 1]
+    assert [r["id"] for r in view["rows"]] == [first, second]
+
+
+def test_the_group_that_represents_a_company_is_chosen_by_the_aged_score(
+    con, data_dir
+):
+    import datetime
+    today = datetime.date.today()
+    stale_star = _company_job(con, "s1", "Firma", 92,
+                              (today - datetime.timedelta(days=150)).isoformat())
+    fresh_good = _company_job(con, "s2", "Firma", 78,
+                              (today - datetime.timedelta(days=1)).isoformat())
+    con.commit()
+    view = jobs._load_jobs("new", jobs.PILE_NONE, 0)
+    # 92 aged to 72 loses to a fresh 78: the row that represents the company is
+    # the one the ordering actually prefers, not the one with the raw high score
+    assert [r["id"] for r in view["rows"]] == [fresh_good]
+    assert [r["id"] for r in view["siblings"][view["rows"][0]["company_key"]]] \
+        == [stale_star]
+
+
+def test_grouping_respects_the_hidden_piles(con, data_dir):
+    from jobdeck import db
+    keep = _company_job(con, "g1", "Firma", 80)
+    mismatch = _company_job(con, "g2", "Firma", 0)
+    dead = _company_job(con, "g3", "Firma", 90)
+    con.execute("UPDATE jobs SET liveness='gone' WHERE id=?", (dead,))
+    con.commit()
+
+    view = jobs._load_jobs("new", jobs.PILE_NONE, 0)
+    # the 90 is offline and the 0 violates a hard requirement: neither may
+    # represent the company, and neither may be counted as one of its postings
+    assert [r["id"] for r in view["rows"]] == [keep]
+    assert view["rows"][0]["company_count"] == 1
+    assert view["siblings"] == {}
+
+    # each pile stays reachable as its own grouped view
+    assert [r["id"] for r in jobs._load_jobs("new", jobs.PILE_DEAD, 0)["rows"]] \
+        == [dead]
+    assert [r["id"] for r in
+            jobs._load_jobs("new", jobs.PILE_MISMATCHES, 0)["rows"]] == [mismatch]
+    assert db.count_job_groups(con, "new") == 1
+
+
+def test_one_employer_cannot_decide_how_much_a_page_renders(con, data_dir):
+    from jobdeck import db
+    for n in range(30):
+        _company_job(con, f"m{n}", "Massenposter GmbH", 90 - n)
+    con.commit()
+    view = jobs._load_jobs("new", jobs.PILE_NONE, 0)
+    assert view["total"] == 1
+    head = view["rows"][0]
+    assert head["company_count"] == 30            # the truth is still reported
+    siblings = view["siblings"][head["company_key"]]
+    assert len(siblings) == db.SIBLINGS_PER_COMPANY   # but the render is bounded
+    assert [r["match_score"] for r in siblings] == list(range(89, 79, -1))
+
+
+def test_the_grouping_toggle_never_reorders_the_all_statuses_view(con, data_dir):
+    # 'all' mixes statuses and is ordered newest-first; flipping the toggle must
+    # not silently switch the page to a score ordering. The scores DISAGREE with
+    # the ids on purpose — with them aligned the test could not fail.
+    best = _company_job(con, "z1", "Alpha", 95)     # oldest row, highest score
+    middle = _company_job(con, "z2", "Beta", 10)
+    newest = _company_job(con, "z3", "Gamma", 50)   # newest row, middling score
+    con.commit()
+    by_id = [newest, middle, best]                  # id DESC
+    flat = jobs._load_jobs("all", jobs.PILE_NONE, 0, collapse=False)
+    grouped = jobs._load_jobs("all", jobs.PILE_NONE, 0)
+    assert [r["id"] for r in flat["rows"]] == by_id
+    assert [r["id"] for r in grouped["rows"]] == by_id
+    # and the 'new' view DOES order on the aged score, so the two are not the
+    # same query with a different name
+    assert [r["id"] for r in jobs._load_jobs("new", jobs.PILE_NONE, 0)["rows"]] \
+        == [best, newest, middle]
+
+
+def test_companies_group_the_way_the_duplicate_gate_compares_them(con, data_dir):
+    """dedupe.py exists because SQLite's lower() folds ASCII only. The grouped
+    view claims "one application per company", so it must group by the very
+    function that enforces that — otherwise it shows two rows for one company
+    and the second application is refused after he has written it."""
+    from jobdeck.dedupe import find_duplicate_bewerbung
+    best = _company_job(con, "u1", "MÜLLER Software GmbH", 88)
+    _company_job(con, "u2", "Müller Software GmbH", 70)
+    con.commit()
+
+    view = jobs._load_jobs("new", jobs.PILE_NONE, 0)
+    assert view["total"] == 1
+    assert view["rows"][0]["id"] == best
+    assert view["rows"][0]["company_count"] == 2
+
+    # and the claim is true: the gate really does treat them as one company
+    from jobdeck import db
+    db.add_bewerbung(con, {"gesendet_am": "2026-08-01",
+                           "firma": "MÜLLER Software GmbH", "email": "",
+                           "kanal": "E-Mail", "status": "Gesendet"})
+    assert find_duplicate_bewerbung(con, "Müller Software GmbH", "") is not None
+
+
+def test_a_company_literally_named_like_a_blank_key_stays_its_own_group(con,
+                                                                       data_dir):
+    blank = _company_job(con, "k1", "", 80)
+    named = _company_job(con, "k2", f"job:{blank}", 70)
+    con.commit()
+    view = jobs._load_jobs("new", jobs.PILE_NONE, 0)
+    assert view["total"] == 2
+    assert [r["id"] for r in view["rows"]] == [blank, named]
+    assert [r["company_count"] for r in view["rows"]] == [1, 1]
+
+
+def test_grouped_paging_walks_companies_without_skipping_or_repeating(con, data_dir):
+    """Grouped mode has its own query, so it needs its own paging test: the flat
+    tests above cannot see an OFFSET missing from list_job_groups."""
+    for n in range(120):
+        _company_job(con, f"gp{n}", f"Firma {n:03d}", n + 1)
+        _company_job(con, f"gp{n}b", f"Firma {n:03d}", 1)   # a sibling each
+    con.commit()
+
+    seen, page = [], 0
+    while True:
+        view = jobs._load_jobs("new", jobs.PILE_NONE, page)
+        assert view["total"] == 120                 # companies, not the 240 rows
+        seen += [r["company"] for r in view["rows"]]
+        if page + 1 >= view["pages"]:
+            break
+        page += 1
+    assert page == 2 and view["pages"] == 3
+    assert len(seen) == 120 and len(set(seen)) == 120   # no repeat, none skipped
+    # and the page really is a slice of the ordering, not the head of it twice
+    first = jobs._load_jobs("new", jobs.PILE_NONE, 0)["rows"]
+    second = jobs._load_jobs("new", jobs.PILE_NONE, 1)["rows"]
+    assert first[0]["match_score"] == 120 and second[0]["match_score"] == 70
+
+
+def test_a_hidden_pile_never_leaks_in_as_a_sibling(con, data_dir):
+    """The sibling query is a THIRD consumer of the filters. If it ignored them,
+    the rows the working list hides would reappear underneath a company."""
+    keep = _company_job(con, "s1", "Firma", 90)
+    visible_sibling = _company_job(con, "s2", "Firma", 80)
+    mismatch = _company_job(con, "s3", "Firma", 0)
+    dead = _company_job(con, "s4", "Firma", 85)
+    con.execute("UPDATE jobs SET liveness='gone' WHERE id=?", (dead,))
+    con.commit()
+
+    view = jobs._load_jobs("new", jobs.PILE_NONE, 0)
+    head = view["rows"][0]
+    assert head["id"] == keep
+    assert head["company_count"] == 2               # not 4
+    siblings = view["siblings"][head["company_key"]]
+    assert [r["id"] for r in siblings] == [visible_sibling]
+    assert mismatch not in [r["id"] for r in siblings]
+    assert dead not in [r["id"] for r in siblings]
+
+    # each hidden row is still reachable from its own pile, with its siblings
+    dead_view = jobs._load_jobs("new", jobs.PILE_DEAD, 0)
+    assert [r["id"] for r in dead_view["rows"]] == [dead]
+
+
+def test_no_handler_writes_another_control_on_the_server():
+    """Mutual exclusion between two switches means the handler writes the OTHER
+    switch — and NiceGUI fires that server-side write as a background task, so
+    two clicks read in one socket turn make the two echo each other into an
+    endless refresh loop. The page uses one value for the three views instead;
+    this pins that nothing reintroduces a cross-write."""
+    source = pathlib.Path(jobs.__file__).read_text()
+    tree = ast.parse(source)
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            # `element.value = x` on anything that is not our own state dict
+            if (isinstance(target, ast.Attribute) and target.attr == "value"
+                    and not isinstance(target.value, ast.Subscript)):
+                offenders.append(f"{jobs.__name__}:{node.lineno}")
+    assert offenders == [], (
+        f"a server-side control write at {offenders}: NiceGUI dispatches it as a "
+        f"background task, which is how two switches echo each other forever"
+    )
+
+
+@pytest.mark.parametrize("collapse", [True, False])
+@pytest.mark.parametrize("pile", ["", "mismatches", "dead"])
+def test_the_printed_total_always_matches_the_rows_it_describes(con, data_dir,
+                                                               pile, collapse):
+    """The count and the list are two queries. If they ever filter differently
+    the header lies about the page beneath it, in either grouping mode and in
+    every view."""
+    from jobdeck import db
+    for n in range(7):
+        _company_job(con, f"c{n}", f"Firma {n % 3}", 90 - n)
+    mismatch = _company_job(con, "m", "Firma 9", 0)
+    dead = _company_job(con, "d", "Firma 8", 70)
+    con.execute("UPDATE jobs SET liveness='gone' WHERE id=?", (dead,))
+    con.commit()
+    assert mismatch and dead
+
+    view = jobs._load_jobs("new", pile, 0, collapse=collapse)
+    assert len(view["rows"]) == view["total"], (pile, collapse)
+    # and the count helper agrees with the listing helper it is paired with
+    filters = jobs._view_filters(pile, "new")
+    count = db.count_job_groups if collapse else db.count_jobs
+    listing = db.list_job_groups if collapse else db.list_jobs
+    assert count(con, "new", **filters) == len(
+        listing(con, "new", limit=500, **filters))
+
+
+def test_changing_the_view_always_returns_to_the_first_page(con, data_dir):
+    """Page 3 of a different list means nothing — and an offset past the end
+    would render an empty page until the user noticed."""
+    source = pathlib.Path(jobs.__file__).read_text()
+    for handler in ("async def set_filter", "async def set_pile",
+                    "async def set_collapse"):
+        body = source[source.index(handler):]
+        body = body[:body.index("await refresh()")]
+        assert 'page["value"] = 0' in body, f"{handler} does not reset the page"
+
+    # and the loader is what makes a stale offset harmless either way
+    for n in range(120):
+        _company_job(con, f"p{n}", f"Firma {n:03d}", n + 1)
+    con.commit()
+    assert jobs._load_jobs("new", jobs.PILE_NONE, 99)["page"] == 2
+    assert jobs._load_jobs("new", jobs.PILE_NONE, -5)["page"] == 0
