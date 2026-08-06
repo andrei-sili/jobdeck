@@ -35,6 +35,8 @@ def test_known_ats_hosts_are_named(url, vendor):
     ("https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1003292975-S", "Arbeitsagentur"),
     ("https://de.jooble.org/away/12345", "Jooble"),
     ("https://www.arbeitnow.com/jobs/companies/x/y", "Arbeitnow"),
+    # the board's UK market — same site, second TLD
+    ("https://www.arbeitnow.co.uk/jobs/companies/x/y", "Arbeitnow"),
     ("https://www.xing.com/jobs/osnabrueck-ki-154887444", "XING"),
     ("https://jobs.ams.at/public/emps/jobs/abc", "AMS"),
     ("https://www.get-in-it.de/jobsuche/p12345", "get in IT"),
@@ -54,6 +56,8 @@ def test_known_boards_are_labelled(url, label):
     "https://evilgermantechjobs.de/x",
     "https://get-in-it.de.evil.com/jobsuche/p1",
     "https://studyflix.de.attacker.test/jobs/detail/1",
+    "https://arbeitnow.co.uk.evil.com/jobs/companies/x/y",
+    "https://evil-arbeitnow.co.uk/jobs/companies/x/y",
 ])
 def test_board_suffix_anchors_reject_lookalike_hosts(lookalike):
     # without the '$' anchor a foreign host inherits a board's trusted label

@@ -76,7 +76,11 @@ _ATS_RULES = tuple(
 _BOARDS = (
     ("Arbeitsagentur", r"(?:^|\.)arbeitsagentur\.de$"),
     ("Jooble", r"(?:^|\.)jooble\.org$"),
-    ("Arbeitnow", r"(?:^|\.)arbeitnow\.com$"),
+    # Arbeitnow serves its UK listings from a second TLD whose pages, markup and
+    # robots.txt are identical to the .com one (byte-identical robots, verified
+    # 2026-08-06). Without it 13 of his postings read as the employer's own site
+    # and earn a page inspection the board never needed.
+    ("Arbeitnow", r"(?:^|\.)arbeitnow\.(?:com|co\.uk)$"),
     # aggregators the Arbeitsagentur feed points at via externeURL — without an
     # entry they classify as company_site and earn a pointless page inspection
     ("get in IT", r"(?:^|\.)get-in-it\.de$"),

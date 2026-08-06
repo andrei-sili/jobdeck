@@ -58,13 +58,27 @@ def _is_robots_disallowed(url: str) -> bool:
             or "ckey=" in (parts.query or "").lower())
 
 
+# The board runs one site per market — its UK listings live on .co.uk, with the
+# same markup, the same `…/apply` route and a byte-identical robots.txt.
+_ARBEITNOW_SITES = ("arbeitnow.com", "arbeitnow.co.uk")
+
+
+def _arbeitnow_site(host: str) -> str:
+    """Which Arbeitnow site a host belongs to, '' when it is not one.
+
+    Collapses the `www.` variant so a page and its own apply link compare equal
+    however the feed spelled them, while keeping the two markets distinct: a
+    .co.uk page must not adopt an apply link pointing at .com."""
+    host = (host or "").lower().removeprefix("www.")
+    return host if host in _ARBEITNOW_SITES else ""
+
+
 def _is_arbeitnow_job(url: str) -> bool:
     """True for an Arbeitnow job page (its feed URLs all point there)."""
     parts = netsafe.split_url(url if "://" in url else "https://" + url)
     if parts is None:
         return False
-    host = (parts.hostname or "").lower()
-    return (host == "arbeitnow.com" or host.endswith(".arbeitnow.com")) \
+    return bool(_arbeitnow_site(parts.hostname or "")) \
         and parts.path.startswith("/jobs/")
 
 
@@ -101,21 +115,24 @@ def _arbeitnow_apply_href(hrefs: list[str], page_url: str) -> str:
     """THIS posting's own ``…/apply`` deep-link, '' when the layout changed.
 
     The href comes from an UNTRUSTED page, so it is accepted only when it is
-    an https link to the board's own host whose path is exactly this job's
-    path + '/apply' — a planted anchor earlier in the document (employer-
-    supplied description HTML, a 'related jobs' block) must not win, and a
-    non-http scheme must never become a URL the app opens."""
+    an https link to the SAME Arbeitnow site as the page it was read from,
+    whose path is exactly this job's path + '/apply' — a planted anchor earlier
+    in the document (employer-supplied description HTML, a 'related jobs'
+    block) must not win, and a non-http scheme must never become a URL the app
+    opens."""
     page_parts = netsafe.split_url(page_url)
     if page_parts is None:
+        return ""
+    site = _arbeitnow_site(page_parts.hostname or "")
+    if not site:
         return ""
     want = page_parts.path.rstrip("/") + "/apply"
     for href in hrefs:
         parts = netsafe.split_url(href)  # a poisoned href must not raise
         if parts is None:
             continue
-        host = (parts.hostname or "").lower()
         if (parts.scheme in ("http", "https")
-                and host in ("www.arbeitnow.com", "arbeitnow.com")
+                and _arbeitnow_site(parts.hostname or "") == site
                 and not parts.username and not parts.password
                 and parts.path.rstrip("/") == want):
             return href
