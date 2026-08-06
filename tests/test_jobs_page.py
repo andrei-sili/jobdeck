@@ -610,3 +610,47 @@ def test_no_handler_writes_another_control_on_the_server():
         f"a server-side control write at {offenders}: NiceGUI dispatches it as a "
         f"background task, which is how two switches echo each other forever"
     )
+
+
+@pytest.mark.parametrize("collapse", [True, False])
+@pytest.mark.parametrize("pile", ["", "mismatches", "dead"])
+def test_the_printed_total_always_matches_the_rows_it_describes(con, data_dir,
+                                                               pile, collapse):
+    """The count and the list are two queries. If they ever filter differently
+    the header lies about the page beneath it, in either grouping mode and in
+    every view."""
+    from jobdeck import db
+    for n in range(7):
+        _company_job(con, f"c{n}", f"Firma {n % 3}", 90 - n)
+    mismatch = _company_job(con, "m", "Firma 9", 0)
+    dead = _company_job(con, "d", "Firma 8", 70)
+    con.execute("UPDATE jobs SET liveness='gone' WHERE id=?", (dead,))
+    con.commit()
+    assert mismatch and dead
+
+    view = jobs._load_jobs("new", pile, 0, collapse=collapse)
+    assert len(view["rows"]) == view["total"], (pile, collapse)
+    # and the count helper agrees with the listing helper it is paired with
+    filters = jobs._view_filters(pile, "new")
+    count = db.count_job_groups if collapse else db.count_jobs
+    listing = db.list_job_groups if collapse else db.list_jobs
+    assert count(con, "new", **filters) == len(
+        listing(con, "new", limit=500, **filters))
+
+
+def test_changing_the_view_always_returns_to_the_first_page(con, data_dir):
+    """Page 3 of a different list means nothing — and an offset past the end
+    would render an empty page until the user noticed."""
+    source = pathlib.Path(jobs.__file__).read_text()
+    for handler in ("async def set_filter", "async def set_pile",
+                    "async def set_collapse"):
+        body = source[source.index(handler):]
+        body = body[:body.index("await refresh()")]
+        assert 'page["value"] = 0' in body, f"{handler} does not reset the page"
+
+    # and the loader is what makes a stale offset harmless either way
+    for n in range(120):
+        _company_job(con, f"p{n}", f"Firma {n:03d}", n + 1)
+    con.commit()
+    assert jobs._load_jobs("new", jobs.PILE_NONE, 99)["page"] == 2
+    assert jobs._load_jobs("new", jobs.PILE_NONE, -5)["page"] == 0

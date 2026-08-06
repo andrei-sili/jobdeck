@@ -162,7 +162,7 @@ def _store(job_id: int, result: Probe) -> None:
             db.refresh_job_published_on(con, job_id, result.published_raw)
 
 
-async def check_pending(limit: int = BATCH_LIMIT,
+async def check_pending(limit: int | None = None,
                         client: httpx.AsyncClient | None = None) -> dict:
     """Probe a batch of postings, best-scored first, and record what came back.
 
@@ -177,6 +177,10 @@ async def check_pending(limit: int = BATCH_LIMIT,
     posting's age corrected, which is how existing rows stop being judged by the
     date their ad FIRST appeared.
     """
+    # read at CALL time, not captured as a default: BATCH_LIMIT is a promise to
+    # other people's servers, and a default argument would freeze the value this
+    # module was imported with
+    limit = BATCH_LIMIT if limit is None else limit
     counts = {LIVENESS_ALIVE: 0, LIVENESS_GONE: 0, "unknown": 0}
     if _lock.locked():
         # Not a queue: a second pass would ask the same servers the same

@@ -492,3 +492,63 @@ async def test_the_pre_send_warning_survives_pressing_apply_via_portal(
     row = db.list_drafts_with_jobs(con, ["ready"])[0]
     assert row["job_liveness"] == "gone"      # the warning can still fire
     assert row["job_status"] == "portal"      # and nothing about his work moved
+
+
+async def test_every_bound_on_the_outbound_volume_is_load_bearing(con, data_dir,
+                                                                 monkeypatch):
+    """These numbers are a promise to other people's servers, not a preference:
+    a batch limit, a pause between postings, and a wall-clock deadline each.
+    Without a test any of them can be deleted or raised with the suite green."""
+    import asyncio
+    _seed(con, [{"source": "arbeitnow", "ext": f"j{n}",
+                 "url": _AN_JOB["url"] + str(n), "score": 100 - n}
+                for n in range(8)])
+    asked, slept = [], []
+
+    def handler(request):
+        asked.append(str(request.url))
+        return httpx.Response(200)
+
+    real_sleep = asyncio.sleep
+
+    async def counting_sleep(seconds):
+        slept.append(seconds)
+        await real_sleep(0)
+
+    monkeypatch.setattr(liveness.asyncio, "sleep", counting_sleep)
+    monkeypatch.setattr(liveness, "BATCH_LIMIT", 3)
+    async with _client(handler) as client:
+        res = await liveness.check_pending(client=client)
+
+    # the limit bounds the pass, and it is read at call time rather than frozen
+    # into a default argument
+    assert res["checked"] == 3 and len(asked) == 3
+    # one pause BETWEEN postings, never before the first
+    assert slept == [liveness.BATCH_PAUSE_S] * 2
+
+    # and the deadline really wraps each probe
+    async def never_answers(request):
+        await real_sleep(5)
+        return httpx.Response(200)
+
+    monkeypatch.setattr(liveness, "PROBE_DEADLINE_S", 0.05)
+    monkeypatch.setattr(liveness, "BATCH_LIMIT", 1)
+    async with _client(never_answers) as client:
+        res = await liveness.check_pending(client=client)
+    assert res == {"checked": 1, "alive": 0, "gone": 0, "unknown": 1, "redated": 0}
+
+
+def test_the_volume_numbers_are_pinned_as_literals():
+    """Pinned as values, not read off the module: the test above proves the pass
+    HONOURS these numbers, which stays green if someone raises them tenfold.
+    What they bound is how hard an unattended job hits other people's servers,
+    so changing one should have to change this line and say why.
+
+    200 per pass covers his whole probeable corpus once; 0.5 s between postings
+    is gentler than a human clicking; 20 h means once a day per posting whatever
+    the tick interval; 25 s per probe keeps one slow server from holding the
+    single-flight slot."""
+    assert liveness.BATCH_LIMIT == 200
+    assert liveness.BATCH_PAUSE_S == 0.5
+    assert liveness.RECHECK_AFTER_H == 20
+    assert liveness.PROBE_DEADLINE_S == 25.0
