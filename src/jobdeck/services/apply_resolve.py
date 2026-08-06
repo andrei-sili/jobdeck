@@ -58,30 +58,6 @@ def _is_robots_disallowed(url: str) -> bool:
             or "ckey=" in (parts.query or "").lower())
 
 
-# The board runs one site per market — its UK listings live on .co.uk, with the
-# same markup, the same `…/apply` route and a byte-identical robots.txt.
-_ARBEITNOW_SITES = ("arbeitnow.com", "arbeitnow.co.uk")
-
-
-def _arbeitnow_site(host: str) -> str:
-    """Which Arbeitnow site a host belongs to, '' when it is not one.
-
-    Collapses the `www.` variant so a page and its own apply link compare equal
-    however the feed spelled them, while keeping the two markets distinct: a
-    .co.uk page must not adopt an apply link pointing at .com."""
-    host = (host or "").lower().removeprefix("www.")
-    return host if host in _ARBEITNOW_SITES else ""
-
-
-def _is_arbeitnow_job(url: str) -> bool:
-    """True for an Arbeitnow job page (its feed URLs all point there)."""
-    parts = netsafe.split_url(url if "://" in url else "https://" + url)
-    if parts is None:
-        return False
-    return bool(_arbeitnow_site(parts.hostname or "")) \
-        and parts.path.startswith("/jobs/")
-
-
 class _ArbeitnowPage(HTMLParser):
     """Signals an Arbeitnow job page carries in raw server-rendered HTML:
     anchor hrefs (one is the ``…/apply`` deep-link) and form ids (the
@@ -123,7 +99,7 @@ def _arbeitnow_apply_href(hrefs: list[str], page_url: str) -> str:
     page_parts = netsafe.split_url(page_url)
     if page_parts is None:
         return ""
-    site = _arbeitnow_site(page_parts.hostname or "")
+    site = apply_channel.arbeitnow_site(page_parts.hostname or "")
     if not site:
         return ""
     want = page_parts.path.rstrip("/") + "/apply"
@@ -132,7 +108,7 @@ def _arbeitnow_apply_href(hrefs: list[str], page_url: str) -> str:
         if parts is None:
             continue
         if (parts.scheme in ("http", "https")
-                and _arbeitnow_site(parts.hostname or "") == site
+                and apply_channel.arbeitnow_site(parts.hostname or "") == site
                 and not parts.username and not parts.password
                 and parts.path.rstrip("/") == want):
             return href
@@ -191,7 +167,7 @@ async def resolve(
     email = (job["contact_email"] or "").strip()
     if email:
         return url, apply_channel.classify(url, email)
-    if url and _is_arbeitnow_job(url):
+    if url and apply_channel.is_arbeitnow_job(url):
         resolved = await _resolve_arbeitnow(client, url)
         if resolved is not None:
             return resolved

@@ -97,6 +97,31 @@ _BOARDS = (
 _BOARD_RULES = tuple((label, re.compile(h, re.I)) for label, h in _BOARDS)
 
 
+# The board runs one site per market — its UK listings live on .co.uk, with the
+# same markup, the same `…/apply` route and a byte-identical robots.txt.
+_ARBEITNOW_SITES = ("arbeitnow.com", "arbeitnow.co.uk")
+
+
+def arbeitnow_site(host: str) -> str:
+    """Which Arbeitnow site a host belongs to, '' when it is not one.
+
+    Collapses the `www.` variant so a page and its own apply link compare equal
+    however the feed spelled them, while keeping the two markets distinct: a
+    .co.uk page must not adopt an apply link pointing at .com."""
+    host = (host or "").lower().removeprefix("www.")
+    return host if host in _ARBEITNOW_SITES else ""
+
+
+def is_arbeitnow_job(url: str) -> bool:
+    """True for an Arbeitnow JOB page — the one route of theirs robots.txt
+    allows a bot to request (the `…/apply` deep-link is disallowed)."""
+    parts = netsafe.split_url(url if "://" in url else "https://" + url)
+    if parts is None:
+        return False
+    return bool(arbeitnow_site(parts.hostname or "")) \
+        and parts.path.startswith("/jobs/")
+
+
 def _hostname(url: str) -> tuple[str, str]:
     """(lowercased host, path) for a URL, tolerating a missing scheme. A
     malformed URL yields no host, so it classifies as UNKNOWN rather than

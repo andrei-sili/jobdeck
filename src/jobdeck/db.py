@@ -20,6 +20,12 @@ def _now() -> str:
     return datetime.datetime.now().isoformat(timespec="seconds")
 
 
+def _hours_ago(hours: int) -> str:
+    """A `_now()`-comparable timestamp, `hours` in the past."""
+    moment = datetime.datetime.now() - datetime.timedelta(hours=hours)
+    return moment.isoformat(timespec="seconds")
+
+
 def connect(db_path: Path | None = None) -> sqlite3.Connection:
     con = sqlite3.connect(db_path or config.DB_PATH)
     con.row_factory = sqlite3.Row
@@ -374,6 +380,11 @@ def insert_job_if_new(con: sqlite3.Connection, values: dict) -> int | None:
 # inbox hides those rows by default but they are never deleted.
 MISMATCH_SQL = "match_score=0"
 
+# A posting whose ad the source says is no longer there (services/liveness.py).
+# Hidden by default for the same reason and with the same promise: a 404 is a
+# fact, not a judgement — it hides the row, it never deletes it.
+GONE_SQL = "liveness='gone'"
+
 
 def list_jobs(
     con: sqlite3.Connection,
@@ -509,6 +520,77 @@ def set_apply_channel(
         "UPDATE jobs SET apply_channel=?, ats_vendor=?, apply_url=? WHERE id=?",
         (channel, vendor, apply_url, job_id),
     )
+
+
+def set_job_liveness(
+    con: sqlite3.Connection, job_id: int, liveness: str | None
+) -> None:
+    """Record what a liveness probe observed. `None` means the server gave no
+    answer: the attempt is timestamped so the pass rotates on, but the last
+    real observation is kept — an unreachable host must not erase it.
+
+    Additive metadata only: never touches status, a draft or an application."""
+    if liveness is None:
+        con.execute(
+            "UPDATE jobs SET liveness_checked_at=? WHERE id=?", (_now(), job_id)
+        )
+        return
+    con.execute(
+        "UPDATE jobs SET liveness=?, liveness_checked_at=? WHERE id=?",
+        (liveness, _now(), job_id),
+    )
+
+
+def jobs_needing_liveness_check(
+    con: sqlite3.Connection,
+    limit: int,
+    sources: tuple[str, ...],
+    recheck_after_h: int,
+    recheck_gone_after_h: int = 168,
+    min_score: int = 1,
+) -> list[sqlite3.Row]:
+    """Postings worth asking about, longest-unchecked first.
+
+    Restricted to sources that can be asked at all (Jooble's URLs are all
+    robots-disallowed, so probing it is not an option) and to postings still in
+    the inbox above the mismatch floor — resolving the fate of a posting he
+    ruled out is work nobody asked for.
+
+    A posting already seen `gone` is re-asked far more rarely rather than never:
+    that keeps the daily pass cheap while letting a systematic wrong answer (a
+    board answering 404 to everything for an hour) heal itself instead of
+    hiding real postings forever.
+    """
+    if not sources:
+        return []
+    placeholders = ",".join("?" * len(sources))
+    cutoff = _hours_ago(recheck_after_h)
+    gone_cutoff = _hours_ago(recheck_gone_after_h)
+    return con.execute(
+        f"""
+        SELECT * FROM jobs
+         WHERE status='new'
+           AND source IN ({placeholders})
+           AND (match_score IS NULL OR match_score>=?)
+           AND (liveness_checked_at=''
+                OR (liveness='gone' AND liveness_checked_at<?)
+                OR (liveness<>'gone' AND liveness_checked_at<?))
+         ORDER BY liveness_checked_at ASC,
+                  match_score DESC NULLS LAST, id DESC
+         LIMIT ?
+        """,
+        (*sources, min_score, gone_cutoff, cutoff, limit),
+    ).fetchall()
+
+
+def count_gone_jobs(con: sqlite3.Connection, status: str | None = None) -> int:
+    """How many postings the liveness filter would hide for this inbox view."""
+    sql = f"SELECT COUNT(*) FROM jobs WHERE {GONE_SQL}"
+    params: tuple = ()
+    if status:
+        sql += " AND status=?"
+        params = (status,)
+    return con.execute(sql, params).fetchone()[0]
 
 
 def jobs_needing_apply_channel(

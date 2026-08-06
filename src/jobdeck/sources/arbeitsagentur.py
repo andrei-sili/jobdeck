@@ -61,6 +61,17 @@ def _screen_external_url(raw) -> str:
     return url
 
 
+def detail_url(external_id: str) -> str:
+    """The API's detail route for a Referenznummer.
+
+    Public because the liveness pass asks this exact endpoint whether a posting
+    still exists — it answers 404 once an ad is taken down, which is the only
+    free liveness signal in the whole corpus. One builder, so the base64 detail
+    encoding cannot drift between the two callers."""
+    encoded = base64.urlsafe_b64encode(external_id.encode()).decode()
+    return f"{BASE_URL}{DETAIL_PATH}/{encoded}"
+
+
 def _place(item) -> str:
     """City of the first work location, with the country when it is not
     Germany.
@@ -149,10 +160,9 @@ class ArbeitsagenturSource:
         return postings
 
     async def fetch_details(self, posting: JobPosting) -> JobPosting:
-        encoded = base64.urlsafe_b64encode(posting.external_id.encode()).decode()
         try:
             resp = await self._client.get(
-                f"{BASE_URL}{DETAIL_PATH}/{encoded}",
+                detail_url(posting.external_id),
                 headers={"X-API-Key": API_KEY},
             )
             resp.raise_for_status()
