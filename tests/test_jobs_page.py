@@ -271,20 +271,41 @@ def test_the_working_inbox_hides_both_piles_and_each_view_shows_one():
     assert set(jobs._PILE_FILTERS) == set(jobs._EMPTY_VIEW)
 
 
-@pytest.mark.parametrize("pile, mismatches, dead, expected", [
-    (jobs.PILE_NONE, 129, 14, "129 mismatches hidden · 14 dead hidden"),
-    (jobs.PILE_NONE, 0, 14, "14 dead hidden"),
-    (jobs.PILE_NONE, 129, 0, "129 mismatches hidden"),
-    (jobs.PILE_NONE, 0, 0, ""),
-    # the pile on screen is not "hidden" any more; the other one still is
-    (jobs.PILE_MISMATCHES, 129, 14, "14 dead hidden"),
-    (jobs.PILE_DEAD, 129, 14, "129 mismatches hidden"),
+@pytest.mark.parametrize("pile, status, mismatches, dead, expected", [
+    (jobs.PILE_NONE, "new", 129, 58, "129 mismatches hidden · 58 dead hidden"),
+    (jobs.PILE_NONE, "new", 0, 58, "58 dead hidden"),
+    (jobs.PILE_NONE, "new", 129, 0, "129 mismatches hidden"),
+    (jobs.PILE_NONE, "new", 0, 0, ""),
+    # a pile view INCLUDES the other pile, so it must not claim to hide it — the
+    # label is derived from the filters the query really used
+    (jobs.PILE_MISMATCHES, "new", 129, 58,
+     "129 mismatches — hard requirement violated"),
+    (jobs.PILE_DEAD, "new", 129, 58, "58 postings whose ad is gone"),
+    # a view of postings he has already acted on hides nothing at all
+    (jobs.PILE_NONE, "portal", 129, 58, ""),
+    (jobs.PILE_NONE, "applied", 129, 58, ""),
 ])
-def test_the_hidden_line_states_each_pile_separately(pile, mismatches, dead,
-                                                     expected):
-    # never a total: a posting can be both a mismatch and offline, so adding
-    # the two would double-count it
-    assert jobs._hidden_line(pile, mismatches, dead) == expected
+def test_the_hidden_line_can_never_contradict_the_list(pile, status, mismatches,
+                                                       dead, expected):
+    # never a total either: a posting can be both a mismatch and offline, so
+    # adding the two would double-count it
+    filters = jobs._view_filters(pile, status)
+    assert jobs._hidden_line(filters, mismatches, dead) == expected
+
+
+def test_a_posting_he_has_acted_on_is_never_hidden_from_its_own_view(con, data_dir):
+    """The row of a posting in `portal` carries the button that finishes the job
+    ("I applied — record it"). Hiding it for being offline would hide that."""
+    from jobdeck import db
+    job_id = _company_job(con, "p1", "Firma", 90)
+    con.execute("UPDATE jobs SET status='portal', liveness='gone' WHERE id=?",
+                (job_id,))
+    con.commit()
+    portal = jobs._load_jobs("portal", jobs.PILE_NONE, 0)
+    assert [r["id"] for r in portal["rows"]] == [job_id]
+    assert portal["filters"] == {"mismatches": "include", "gone": "include"}
+    # while the working inbox still hides it
+    assert db.count_jobs(con, "new", gone="exclude") == 0
 
 
 @pytest.mark.parametrize("job, expected", [
@@ -349,17 +370,19 @@ def test_paging_does_not_skip_or_repeat_a_row_at_the_boundary(con, data_dir):
     assert second["rows"][0]["match_score"] == 1
 
 
-@pytest.mark.parametrize("page, total, shown, expected", [
-    (0, 287, 50, "1–50 von 287"),
-    (1, 287, 50, "51–100 von 287"),
-    (5, 287, 37, "251–287 von 287"),
-    (0, 3, 3, "1–3 von 3"),
-    (0, 0, 0, ""),
+@pytest.mark.parametrize("page, total, shown, collapse, expected", [
+    (0, 266, 50, True, "1–50 von 266 Firmen"),
+    (1, 266, 50, True, "51–100 von 266 Firmen"),
+    (0, 287, 50, False, "1–50 von 287 Stellen"),
+    (5, 287, 37, False, "251–287 von 287 Stellen"),
+    (0, 3, 3, True, "1–3 von 3 Firmen"),
+    (0, 0, 0, True, ""),
 ])
-def test_the_range_line_says_where_in_the_pipeline_this_page_sits(
-    page, total, shown, expected
-):
-    assert jobs._range_line(page, total, shown) == expected
+def test_the_range_line_names_the_unit_it_counts(page, total, shown, collapse,
+                                                 expected):
+    # the unit changes with the grouping toggle while the pile counts beside it
+    # stay postings; an unlabelled pair of numbers invites comparing them
+    assert jobs._range_line(page, total, shown, collapse) == expected
 
 
 def _company_job(con, ext, company, score, published_on=""):

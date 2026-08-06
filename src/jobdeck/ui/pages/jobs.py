@@ -43,14 +43,31 @@ _EMPTY_VIEW = {
 }
 
 
-def _hidden_line(pile: str, mismatches: int, dead: int) -> str:
-    """What the current view is NOT showing. Two independent statements, never
+def _view_filters(pile: str, status: str) -> dict:
+    """The pile filters this view really uses.
+
+    Hiding is for the WORKING list. Once he has acted on a posting — opened its
+    portal, applied, skipped it — its row carries the action that finishes the
+    job ("I applied — record it"), so hiding it would hide that button. Only the
+    `new` view hides; every other filter shows what it contains."""
+    if pile == PILE_NONE and status != "new":
+        return {"mismatches": "include", "gone": "include"}
+    return _PILE_FILTERS[pile]
+
+
+def _hidden_line(filters: dict, mismatches: int, dead: int) -> str:
+    """What this view is not showing, derived from the filters it actually used
+    so the label cannot contradict the list. Two independent statements, never
     a total: a posting can be both a mismatch and offline."""
     parts = []
-    if pile != PILE_MISMATCHES and mismatches:
+    if filters["mismatches"] == "exclude" and mismatches:
         parts.append(f"{mismatches} mismatches hidden")
-    if pile != PILE_DEAD and dead:
+    elif filters["mismatches"] == "only":
+        parts.append(f"{mismatches} mismatches — hard requirement violated")
+    if filters["gone"] == "exclude" and dead:
         parts.append(f"{dead} dead hidden")
+    elif filters["gone"] == "only":
+        parts.append(f"{dead} postings whose ad is gone")
     return " · ".join(parts)
 
 
@@ -84,7 +101,7 @@ def _load_jobs(status: str, pile: str, page: int, collapse: bool = True) -> dict
     page rather than an empty one."""
     with db.db() as con:
         status_arg = None if status == "all" else status
-        filters = _PILE_FILTERS[pile]
+        filters = _view_filters(pile, status)
         count = db.count_job_groups if collapse else db.count_jobs
         total = count(con, status_arg, **filters)
         pages = max(1, -(-total // PAGE_SIZE))
@@ -100,6 +117,8 @@ def _load_jobs(status: str, pile: str, page: int, collapse: bool = True) -> dict
         return {
             "rows": rows,
             "siblings": siblings,
+            "filters": filters,
+            "collapse": collapse,
             "mismatches": db.count_mismatches(con, status_arg),
             "dead": db.count_gone_jobs(con, status_arg),
             "total": total,
@@ -108,12 +127,17 @@ def _load_jobs(status: str, pile: str, page: int, collapse: bool = True) -> dict
         }
 
 
-def _range_line(page: int, total: int, shown: int) -> str:
-    """'51–100 von 287' — where in the pipeline this page sits."""
+def _range_line(page: int, total: int, shown: int, collapse: bool) -> str:
+    """'51–100 von 266 Firmen' — where in the pipeline this page sits.
+
+    The unit is named because it changes with the grouping toggle: a grouped
+    page counts companies while the hidden-pile counts beside it are postings,
+    and an unlabelled pair of numbers invites comparing them."""
     if not total:
         return ""
     first = page * PAGE_SIZE + 1
-    return f"{first}–{first + shown - 1} von {total}"
+    unit = "Firmen" if collapse else "Stellen"
+    return f"{first}–{first + shown - 1} von {total} {unit}"
 
 
 def _set_status(job_id: int, status: str):
@@ -178,7 +202,7 @@ async def jobs_page():
             page["value"] = view["page"]  # the loader clamped it to what exists
             container.clear()
             hidden_label.set_text(
-                _hidden_line(pile["value"], view["mismatches"], view["dead"]))
+                _hidden_line(view["filters"], view["mismatches"], view["dead"]))
             with container:
                 if not view["rows"]:
                     ui.label(_EMPTY_VIEW[pile["value"]]).classes("text-gray-500")
@@ -190,7 +214,7 @@ async def jobs_page():
             pager.clear()
             with pager:
                 ui.label(_range_line(view["page"], view["total"],
-                                     len(view["rows"]))) \
+                                     len(view["rows"]), view["collapse"])) \
                     .classes("text-xs text-gray-500")
                 if view["pages"] <= 1:
                     return
