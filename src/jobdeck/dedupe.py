@@ -6,11 +6,44 @@ folds ASCII A-Z.
 """
 
 import sqlite3
+import unicodedata
+
+# Characters a company writes for DECORATION, never to say which company it
+# is. Dropping them is what makes an employer who prints a registered-symbol
+# after its name the same employer that answered an earlier application:
+#   Cf  invisible format marks — a soft hyphen inside a scraped title, a
+#       zero-width space, a bidi mark; by definition nothing is rendered
+#   Cc  stray control bytes (real whitespace is handled before this)
+#   So  ® © ™ ℠ and other standalone symbols
+#   Sk  free-standing accent marks, e.g. a ring above worn as part of a
+#       wordmark — the modifier twin of So
+# What is deliberately NOT dropped: ordinary punctuation, because a dot can
+# carry identity ('a.b GmbH' is not 'ab GmbH'), and legal forms, because GmbH
+# and AG can be two different companies under one name.
+_DROP_CATEGORIES = frozenset({"Cf", "Cc", "So", "Sk"})
 
 
 def norm(text: object) -> str:
-    """Normalize text for comparison: strip whitespace, Unicode casefold."""
-    return str(text or "").strip().casefold()
+    """Normalize text for comparison: drop decoration, fold case and space.
+
+    Two spellings of one company must land on one string, and two companies
+    must never land on the same one. Order matters: decoration is dropped
+    BEFORE NFKC, or '™' would compatibility-decompose into the letters 'TM'
+    and survive as part of the name.
+    """
+    kept = []
+    for char in str(text or ""):
+        # A newline between two words is a word boundary; deleting it as a
+        # control character would weld 'Dresden\nDresden' into one word.
+        if char.isspace():
+            kept.append(" ")
+        elif unicodedata.category(char) not in _DROP_CATEGORIES:
+            kept.append(char)
+    # NFKC folds the compatibility spellings apart from the ones above: a
+    # non-breaking space, a fullwidth letter, a decomposed umlaut.
+    folded = unicodedata.normalize("NFKC", "".join(kept))
+    # split() collapses runs and trims — a scraped title carries both.
+    return " ".join(folded.split()).casefold()
 
 
 def find_duplicate_bewerbung(

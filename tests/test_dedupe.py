@@ -38,6 +38,33 @@ def test_norm_handles_umlauts_and_whitespace():
     assert norm(None) == ""
 
 
+def test_norm_drops_decoration_that_does_not_name_the_company():
+    # The miss this closes: a posting spelling the employer with a registered
+    # symbol, against an application already sent to it without one.
+    assert norm("a.b® GmbH") == norm("a.b GmbH") == "a.b gmbh"
+    assert norm("ACME™") == norm("ACME©") == norm("ACME") == "acme"
+    assert norm("2GRAD˚") == "2grad"  # Sk, the modifier twin of ®
+
+
+def test_norm_collapses_the_whitespace_a_scraper_leaves_behind():
+    assert norm("Beispiel  GmbH") == "beispiel gmbh"
+    assert norm("Entwickler in Berlin\nBerlin") == "entwickler in berlin berlin"
+    assert norm("Fachinformatiker\xa0(m/w/d)") == "fachinformatiker (m/w/d)"
+    assert norm("intel\xadligen\xadte") == "intelligente"  # soft hyphens
+
+
+def test_norm_keeps_what_actually_names_a_company():
+    # A dot carries identity, and a legal form can tell two companies apart.
+    assert norm("a.b GmbH") != norm("ab GmbH")
+    assert norm("Müller GmbH") != norm("Müller AG")
+
+
+def test_norm_decoration_is_dropped_before_nfkc_widens_it():
+    # NFKC decomposes '™' into the letters 'TM'; dropping it afterwards would
+    # leave 'acmetm' behind and the two spellings would stay different.
+    assert "tm" not in norm("ACME™")
+
+
 def test_duplicate_by_firma_case_insensitive(con):
     dup = find_duplicate_bewerbung(con, "müller gmbh", "")
     assert dup is not None and dup["firma"] == "Müller GmbH"
