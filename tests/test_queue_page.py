@@ -179,3 +179,14 @@ def test_the_queue_keeps_exactly_one_page_lifetime_timer():
     tests/test_draft_visibility_pages.py."""
     source = pathlib.Path(queue.__file__).read_text()
     assert source.count("ui.timer(") == 1
+
+
+def test_the_poll_is_cancelled_when_the_page_goes_away():
+    """NiceGUI reads a timer's parent slot BEFORE its own stop check
+    (nicegui/timer.py, _run_in_loop), so a tick landing after the page is torn
+    down raises rather than stopping — an ERROR traceback in his log every
+    time he leaves this page. Seen in the running app, not in the suite."""
+    source = pathlib.Path(queue.__file__).read_text()
+    tail = source[source.index("ui.timer("):]
+    assert "on_disconnect(" in tail, "the timer outlives its page"
+    assert "cancel()" in tail

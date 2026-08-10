@@ -195,7 +195,14 @@ async def queue_page():
                 return
             await refresh()
 
-        ui.timer(GENERATING_POLL_SECONDS, poll_while_generating)
+        poll = ui.timer(GENERATING_POLL_SECONDS, poll_while_generating)
+        # NiceGUI reads the timer's parent slot BEFORE its own "should I stop?"
+        # test (nicegui/timer.py, _run_in_loop), so a tick that lands after the
+        # page has been torn down raises instead of stopping — an ERROR
+        # traceback in the log every time he leaves this page. Cancelling on
+        # disconnect gets there first. The lambda absorbs the client NiceGUI
+        # passes to a one-parameter handler; `poll.cancel` takes none.
+        ui.context.client.on_disconnect(lambda *_: poll.cancel())
 
         def render_draft(row: dict):
             score = (f" · match {row['job_score']}"
