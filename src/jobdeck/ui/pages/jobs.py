@@ -233,6 +233,14 @@ async def jobs_page():
         refresh_gen = {"n": 0}  # rapid filter/switch flips: last request wins
         container = ui.column().classes("w-full gap-2")
         pager = ui.row().classes("items-center gap-2")
+        # Feedback has to outlive the row that asked for it. A handler runs in
+        # the slot of the button that fired it, and refresh() clears
+        # `container` — so a dialog or notification built after a refresh has
+        # no live parent and raises instead of appearing, silently swallowing
+        # the very error it was meant to report. This host is a sibling of the
+        # list, so no refresh can delete it; clearing it first keeps exactly
+        # one dialog alive at a time.
+        overlay = ui.column()
 
         async def refresh():
             refresh_gen["n"] += 1
@@ -447,7 +455,9 @@ async def jobs_page():
             if not force:
                 existing = await run.io_bound(_load_draft, job["id"])
                 if existing is not None and existing["status"] == "ready":
-                    show_draft(existing, job)
+                    overlay.clear()
+                    with overlay:
+                        show_draft(existing, job)
                     return
             ui.notify("Drafting application…")
             if button is not None:
@@ -456,12 +466,16 @@ async def jobs_page():
                 button.set_text("wird geschrieben…")
                 button.disable()
             result = await drafting.draft_for_job(job["id"])
-            # The row carries the outcome from here on, whichever way it went.
+            # The row carries the outcome from here on, whichever way it went —
+            # and everything the user sees afterwards is built in `overlay`,
+            # because this refresh has just deleted the button we came from.
             await refresh()
-            if not result["ok"]:
-                ui.notify(result["error"], type="warning", multi_line=True)
-                return
-            show_draft(result["draft"], job)
+            overlay.clear()
+            with overlay:
+                if not result["ok"]:
+                    ui.notify(result["error"], type="warning", multi_line=True)
+                    return
+                show_draft(result["draft"], job)
 
         async def resolve_channel(job: dict):
             ui.notify("Bewerbungskanal wird ermittelt…")

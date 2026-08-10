@@ -746,3 +746,50 @@ def test_the_draft_button_stands_down_while_one_is_being_written():
     handler = handler[:handler.index("async def resolve_channel")]
     assert "await refresh()" in handler
     assert button  # the button itself still exists
+
+
+def test_nothing_the_user_sees_is_built_on_a_slot_a_refresh_just_deleted():
+    """A handler runs in the slot of the button that fired it, and refresh()
+    clears the container that button lives in. NiceGUI then raises
+    'The parent element this slot belongs to has been deleted' from
+    context.client — so the failure notification never appears and the error
+    it was reporting is swallowed. Caught in the running app 2026-08-10, with
+    the whole suite green: an AST rule is what makes it stay caught."""
+    tree = ast.parse(pathlib.Path(jobs.__file__).read_text())
+    handlers = [n for n in ast.walk(tree)
+                if isinstance(n, ast.AsyncFunctionDef) and n.name == "draft"]
+    assert len(handlers) == 1, "the draft handler moved or was renamed"
+
+    # The name alone proves nothing: `overlay = container` would satisfy every
+    # rule below while restoring the defect exactly.
+    bindings = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                and [ast.unparse(t) for t in n.targets] == ["overlay"]]
+    assert [ast.unparse(b.value) for b in bindings] == ["ui.column()"], (
+        "`overlay` must be its own element, not another name for one a "
+        "refresh clears")
+
+    def refreshes(node) -> bool:
+        return any(isinstance(c, ast.Call) and getattr(c.func, "id", "") == "refresh"
+                   for c in ast.walk(node))
+
+    body = handlers[0].body
+    after = body[next(i for i, s in enumerate(body) if refreshes(s)) + 1:]
+    assert after, "the handler does nothing after refreshing — the guard is moot"
+
+    def is_overlay_reset(node) -> bool:
+        """`overlay.clear()` builds nothing, so it needs no live parent."""
+        return (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                and ast.unparse(node.value.func) == "overlay.clear")
+
+    hosted = 0
+    for statement in after:
+        if is_overlay_reset(statement):
+            continue
+        assert isinstance(statement, ast.With), (
+            f"line {statement.lineno}: built outside a live parent after "
+            "refresh() deleted this handler's slot")
+        assert [ast.unparse(i.context_expr) for i in statement.items] == ["overlay"], (
+            f"line {statement.lineno}: the host must be the sibling `overlay`, "
+            "not an element the refresh can delete")
+        hosted += 1
+    assert hosted, "nothing is hosted — the rule would pass on an empty tail"
