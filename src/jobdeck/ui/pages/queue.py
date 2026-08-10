@@ -6,12 +6,13 @@ real sending is OFF, the banner and the pre-send confirmation both show
 the test recipient every message will actually go to.
 """
 
+import datetime
 import pathlib
 
 from nicegui import run, ui
 
 from jobdeck import db
-from jobdeck.services import liveness, mappe, send
+from jobdeck.services import drafting, liveness, mappe, send
 from jobdeck.ui import helpers
 from jobdeck.ui.helpers import open_in_system, openable_url
 from jobdeck.ui.layout import frame
@@ -20,7 +21,10 @@ FILTERS = ["open", "sent", "discarded"]
 FILTER_STATUSES = {
     # 'failed' belongs here too: its only other surface is the Job inbox's
     # Draft button, which disappears once the job leaves status 'new'.
-    "open": ["ready", "approved", "sending", "failed"],
+    # 'generating' belongs here because the row EXISTS for the minute it takes
+    # to write — and while no view listed it, pressing Draft a second time was
+    # the only way to learn the app was working.
+    "open": ["generating", "ready", "approved", "sending", "failed"],
     "sent": ["sent"],
     "discarded": ["discarded"],
 }
@@ -30,6 +34,41 @@ EMPTY_TEXT = {
     "discarded": "No discarded drafts.",
 }
 EDITABLE_STATUS = ("ready", "approved")
+
+# How often the queue re-reads itself while a draft is being written, so the
+# row becomes the finished application on its own. Nothing else polls: the
+# timer is inert unless the page it belongs to is showing a 'generating' row.
+GENERATING_POLL_SECONDS = 5.0
+
+
+def generating_line(updated_at: object) -> tuple[str, str]:
+    """(text, CSS classes) for a draft that is being written right now.
+
+    The cut-off is drafting's own claim timeout, so this row never promises a
+    wait the Job inbox would already let him restart. An unreadable timestamp
+    falls back to the patient wording: a stored value we cannot parse is not
+    evidence that anything is wrong."""
+    try:
+        started = datetime.datetime.fromisoformat(str(updated_at))
+        minutes = (datetime.datetime.now() - started).total_seconds() / 60
+    except (TypeError, ValueError):
+        minutes = 0.0
+    if minutes >= drafting.CLAIM_TIMEOUT_MIN:
+        return (f"⚠ Seit {int(minutes)} Minuten kein Ergebnis — der Vorgang "
+                "wurde abgebrochen. Im Job-Postfach neu starten.",
+                "text-sm text-amber-700")
+    return ("Die Bewerbung wird gerade geschrieben — das dauert etwa eine "
+            "Minute. Die Zeile aktualisiert sich von selbst.",
+            "text-sm text-blue-700")
+
+
+def draft_signature(drafts: list[dict]) -> list[tuple]:
+    """What the rendered queue is showing, cheaply comparable.
+
+    The poll rebuilds the page only when this changes: a rebuild collapses
+    every open expansion, and doing that every few seconds while he is reading
+    a different draft would be its own defect."""
+    return [(d["id"], d["status"], d["updated_at"]) for d in drafts]
 
 
 def _load_drafts(filter_value: str):
@@ -79,6 +118,7 @@ async def queue_page():
     with frame("Review queue"):
         filter_state = {"value": "open"}
         refresh_gen = {"n": 0}  # rapid filter flips: last request wins
+        shown = {"signature": [], "generating": False}
 
         banner = ui.row().classes("w-full items-center gap-2")
         with ui.row().classes("items-center gap-4"):
@@ -93,6 +133,8 @@ async def queue_page():
             status = await run.io_bound(_send_status)
             if gen != refresh_gen["n"]:
                 return  # superseded — a newer refresh already owns the view
+            shown["signature"] = draft_signature(drafts)
+            shown["generating"] = any(d["status"] == "generating" for d in drafts)
             banner.clear()
             with banner:
                 if status["real"]:
@@ -118,12 +160,39 @@ async def queue_page():
             filter_state["value"] = value
             await refresh()
 
+        async def poll_while_generating():
+            """Turn the 'wird geschrieben…' row into the finished draft.
+
+            Inert unless the view is actually showing one, and it rebuilds the
+            page only when the drafts really changed — a periodic rebuild
+            would collapse the expansion he is reading."""
+            if not shown["generating"]:
+                return
+            drafts = await run.io_bound(_load_drafts, filter_state["value"])
+            if draft_signature(drafts) == shown["signature"]:
+                return
+            await refresh()
+
+        ui.timer(GENERATING_POLL_SECONDS, poll_while_generating)
+
         def render_draft(row: dict):
             score = (f" · match {row['job_score']}"
                      if row["job_score"] is not None else "")
+            # The head is the only part an unopened row shows, so a draft
+            # being written has to say so THERE — 'generating' in the status
+            # slot is the word the database uses, not the one he reads.
+            state = ("wird geschrieben…" if row["status"] == "generating"
+                     else row["status"])
             head = (f"{row['job_company']}  —  {row['job_title']}"
-                    f"  ({row['status']}{score})")
+                    f"  ({state}{score})")
             with ui.expansion(head).classes("w-full border rounded"):
+                if row["status"] == "generating":
+                    ui.label(f"Begonnen {row['updated_at'][:16]}") \
+                        .classes("text-xs text-gray-500")
+                    text, classes = generating_line(row["updated_at"])
+                    ui.label(text).classes(classes)
+                    render_posting_link(row)
+                    return
                 ui.label(f"To: {row['recipient'] or '(no recipient yet)'} · "
                          f"updated {row['updated_at'][:16]}") \
                     .classes("text-xs text-gray-500")
@@ -189,12 +258,16 @@ async def queue_page():
                         ui.button("Restore", icon="restore",
                                   on_click=lambda r=row: restore(r)) \
                             .props("outline")
-                    posting_url = openable_url(row["job_url"])
-                    if posting_url:
-                        ui.button("Open posting", icon="open_in_new",
-                                  on_click=lambda u=posting_url:
-                                  ui.navigate.to(u, new_tab=True)) \
-                            .props("flat")
+                    render_posting_link(row)
+
+        def render_posting_link(row: dict):
+            """The one button every draft row offers, whatever its status."""
+            posting_url = openable_url(row["job_url"])
+            if posting_url:
+                ui.button("Open posting", icon="open_in_new",
+                          on_click=lambda u=posting_url:
+                          ui.navigate.to(u, new_tab=True)) \
+                    .props("flat")
 
         async def _simple_action(action, job_id: int, success: str):
             result = await run.io_bound(action, job_id)
