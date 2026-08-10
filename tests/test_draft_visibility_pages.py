@@ -40,6 +40,11 @@ def _keep_the_package_importable():
     sys.modules.update(saved)
 
 
+def user_error_records(caplog):
+    """The ERROR records the page logged during the test body."""
+    return [r for r in caplog.get_records("call") if r.levelname == "ERROR"]
+
+
 def _posting(con, company="Beispiel GmbH", **over):
     job_id = db.insert_job_if_new(con, {
         "source": "stub", "external_id": over.pop("ext", "e1"),
@@ -197,3 +202,64 @@ async def test_an_abandoned_claim_tells_both_screens_the_same_thing(
     await user.should_not_see("Die Zeile aktualisiert sich")
     await user.open("/jobs")
     await user.should_see("abgebrochen")
+
+
+async def test_the_pressed_button_says_what_it_is_doing_for_the_whole_wait(
+        user: User, con, data_dir, monkeypatch):
+    """A minute is long enough that the faded 'Drafting application…' toast
+    reads as 'nothing happened' — which is what made him press it twice. The
+    relabel could be replaced with `pass` and the suite stayed green."""
+    from jobdeck.ui.pages import jobs as jobs_page
+
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_draft(job_id):
+        started.set()
+        await release.wait()
+        return {"ok": False, "error": "stopped on purpose", "draft": None}
+
+    monkeypatch.setattr(jobs_page.drafting, "draft_for_job", slow_draft)
+    _posting(con)
+    await user.open("/jobs")
+    await user.should_see(DRAFT_BUTTON)
+
+    user.find(DRAFT_BUTTON).click()
+    await asyncio.wait_for(started.wait(), timeout=2)
+    await user.should_see("wird geschrieben…")
+    await user.should_not_see(DRAFT_BUTTON)
+
+    release.set()
+    await asyncio.sleep(0.2)
+    # …and the failure is REPORTED rather than swallowed by the refresh that
+    # deleted the slot the handler was running in
+    await user.should_see("stopped on purpose")
+
+
+async def test_an_unexpected_failure_does_not_leave_the_button_dead(
+        user: User, con, data_dir, monkeypatch, caplog):
+    """drafting re-raises anything that is not an LLM error. Without a
+    try/finally the row kept claiming a draft was being written, the list was
+    never refreshed and the control stayed greyed out until a page reload —
+    under a commit titled 'report a drafting failure instead of swallowing
+    it'."""
+    from jobdeck.ui.pages import jobs as jobs_page
+
+    async def exploding_draft(job_id):
+        raise RuntimeError("a posting field was not what the code expected")
+
+    monkeypatch.setattr(jobs_page.drafting, "draft_for_job", exploding_draft)
+    _posting(con)
+    await user.open("/jobs")
+    user.find(DRAFT_BUTTON).click()
+    await asyncio.sleep(0.3)
+    await user.should_see(DRAFT_BUTTON)
+    await user.should_not_see("wird geschrieben…")
+    await user.should_see("unerwartet fehlgeschlagen")
+
+    # The traceback must still reach the log — that is the only place the real
+    # cause survives. Consumed here because NiceGUI's `user` fixture fails a
+    # test on any ERROR record, and this one is the point of the test.
+    logged = user_error_records(caplog)
+    assert [r.message for r in logged] == ["drafting job 1 raised"]
+    assert logged[0].exc_info[0] is RuntimeError
+    caplog.get_records("call").clear()

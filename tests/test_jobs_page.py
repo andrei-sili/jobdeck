@@ -778,6 +778,84 @@ def test_an_unreadable_claim_timestamp_reads_as_running():
         {"draft_status": "generating", "draft_updated_at": "not a timestamp"})
 
 
+_NESTED_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+
+
+def _own_statements(func):
+    """Nodes belonging to this function, not to a scope nested inside it.
+
+    The whole subtree of a nested def is skipped, not merely its header — and
+    a lambda counts as nested too: `on_click=lambda: ui.navigate.to(...)` runs
+    when the button is clicked, in that button's own live slot, not while the
+    page around it is being built."""
+    stack = list(ast.iter_child_nodes(func))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, _NESTED_SCOPES):
+            continue
+        yield node
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _unhosted_ui_calls(path):
+    """Every element a page builds on a slot a refresh may already have taken
+    away: a bare `ui.notify` anywhere (the page has `say` for that), and a
+    `ui.dialog()` or `ui.navigate.to()` reached AFTER the handler has awaited.
+
+    Before an await the sender's slot is alive by definition, so a synchronous
+    click handler navigating straight away is fine."""
+    tree = ast.parse(pathlib.Path(path).read_text())
+    page = next(n for n in ast.walk(tree)
+                if isinstance(n, ast.AsyncFunctionDef) and n.name.endswith("_page"))
+    hosted = {
+        node.lineno
+        for stmt in ast.walk(page) if isinstance(stmt, ast.With)
+        and any(ast.unparse(i.context_expr) == "overlay" for i in stmt.items)
+        for node in ast.walk(stmt) if hasattr(node, "lineno")
+    }
+    offenders = []
+    for func in [n for n in ast.walk(page) if isinstance(n, ast.AsyncFunctionDef)]:
+        own = list(_own_statements(func))
+        awaits = [n.lineno for n in own if isinstance(n, ast.Await)]
+        first_await = min(awaits, default=None)
+        for node in own:
+            if not isinstance(node, ast.Call):
+                continue
+            target = ast.unparse(node.func)
+            if target == "ui.notify" and node.lineno not in hosted:
+                offenders.append((func.name, target, node.lineno))
+            elif (target in ("ui.dialog", "ui.navigate.to")
+                    and first_await is not None and node.lineno > first_await
+                    and node.lineno not in hosted):
+                offenders.append((func.name, target, node.lineno))
+    return sorted(set(offenders))
+
+
+@pytest.mark.parametrize("page_module", ["jobs.py", "queue.py"])
+def test_nothing_is_shown_on_a_slot_that_may_already_be_gone(page_module):
+    """The defect CLASS, not the one place it was found. A handler runs in the
+    slot of the element that fired it; any refresh — its own, a concurrent
+    one, or the queue's timer — deletes that slot while the handler is
+    awaiting. NiceGUI then raises from context.client and handle_event
+    swallows it, so the user sees NOTHING: the drafting error notification
+    vanished exactly this way with the whole suite green."""
+    path = pathlib.Path(jobs.__file__).parent / page_module
+    offenders = _unhosted_ui_calls(path)
+    assert offenders == [], (
+        f"{page_module}: built where a refresh can delete it — "
+        + ", ".join(f"{fn}() {what} at line {line}" for fn, what, line in offenders)
+        + " (use say(...) for messages, `with overlay:` for the rest)")
+
+
+@pytest.mark.parametrize("page_module", ["jobs.py", "queue.py"])
+def test_the_slot_rule_is_actually_binding(page_module):
+    """A scan that finds no candidates would pass on any code at all."""
+    source = (pathlib.Path(jobs.__file__).parent / page_module).read_text()
+    assert source.count("with overlay") >= 2, "nothing is hosted"
+    assert "def say(" in source, "the page has no safe way to notify"
+    assert source.count("say(") >= 5, "messages are not routed through it"
+
+
 def test_nothing_the_user_sees_is_built_on_a_slot_a_refresh_just_deleted():
     """A handler runs in the slot of the button that fired it, and refresh()
     clears the container that button lives in. NiceGUI then raises
@@ -794,7 +872,8 @@ def test_nothing_the_user_sees_is_built_on_a_slot_a_refresh_just_deleted():
     # rule below while restoring the defect exactly.
     bindings = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)
                 and [ast.unparse(t) for t in n.targets] == ["overlay"]]
-    assert [ast.unparse(b.value) for b in bindings] == ["ui.column()"], (
+    assert len(bindings) == 1 and ast.unparse(
+        bindings[0].value).startswith("ui.column()"), (
         "`overlay` must be its own element, not another name for one a "
         "refresh clears")
 

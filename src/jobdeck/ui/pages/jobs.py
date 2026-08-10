@@ -1,5 +1,6 @@
 """Job inbox: discovered postings with per-job actions."""
 
+import logging
 import pathlib
 
 from nicegui import run, ui
@@ -13,6 +14,8 @@ from jobdeck.ui.helpers import (
     posting_markdown,
 )
 from jobdeck.ui.layout import frame
+
+log = logging.getLogger(__name__)
 
 FILTERS = ["new", "portal", "duplicate", "skipped", "applied", "all"]
 
@@ -265,7 +268,17 @@ async def jobs_page():
         # the very error it was meant to report. This host is a sibling of the
         # list, so no refresh can delete it; clearing it first keeps exactly
         # one dialog alive at a time.
-        overlay = ui.column()
+        overlay = ui.column().classes("contents")
+
+        def say(message: str, **kwargs) -> None:
+            """Tell the user something, from a slot no refresh can delete.
+
+            `ui.notify` needs a live parent, and a handler's own is the element
+            that fired it — which this page's refresh (and, in the queue, its
+            timer) removes. Every message goes through here so the question
+            "is my slot still alive?" never has to be asked at a call site."""
+            with overlay:
+                ui.notify(message, **kwargs)
 
         async def refresh():
             refresh_gen["n"] += 1
@@ -413,7 +426,8 @@ async def jobs_page():
                             ).props("flat dense")
 
         def show_draft(draft_row: dict, job: dict):
-            with ui.dialog() as dialog, ui.card().classes("w-[720px] max-w-full"):
+            with overlay, ui.dialog() as dialog, \
+                    ui.card().classes("w-[720px] max-w-full"):
                 ui.label(f"Draft — {job['title']}").classes("font-bold")
                 recipient = draft_row["recipient"] or \
                     "no application e-mail found (portal or manual contact)"
@@ -434,27 +448,27 @@ async def jobs_page():
                 ).classes("text-xs text-gray-600")
                 with ui.row().classes("w-full justify-end gap-2"):
                     async def make_pdf():
-                        ui.notify("Creating Bewerbungsmappe…")
+                        say("Creating Bewerbungsmappe…")
                         result = await mappe.create_mappe(job["id"])
                         if not result["ok"]:
-                            ui.notify(result["error"], type="warning",
+                            say(result["error"], type="warning",
                                       multi_line=True)
                             return
                         pdf_label.set_text(f"Mappe: {result['pdf_path']}")
-                        ui.notify(
+                        say(
                             helpers.mappe_summary(result, with_anlagen=True),
                             type="positive", multi_line=True,
                         )
                         if result["warning"]:
-                            ui.notify(result["warning"], type="warning",
+                            say(result["warning"], type="warning",
                                       multi_line=True)
 
                     def open_pdf():
                         path = (pdf_label.text or "").removeprefix("Mappe: ")
                         if not path:
-                            ui.notify("create the Mappe first", type="warning")
+                            say("create the Mappe first", type="warning")
                         elif not pathlib.Path(path).exists():
-                            ui.notify("the Mappe file is gone — create it "
+                            say("the Mappe file is gone — create it "
                                       "again", type="warning")
                         else:
                             open_in_system(path)
@@ -486,13 +500,23 @@ async def jobs_page():
                     with overlay:
                         show_draft(existing, job)
                     return
-            ui.notify("Drafting application…")
+            say("Drafting application…")
             if button is not None:
                 # A minute is long enough that a faded toast reads as "nothing
                 # happened" — the button that was pressed says what it is doing.
                 button.set_text("wird geschrieben…")
                 button.disable()
-            result = await drafting.draft_for_job(job["id"])
+            try:
+                result = await drafting.draft_for_job(job["id"])
+            except Exception:  # noqa: BLE001 — one posting, not the page
+                # drafting re-raises anything that is not an LLM error, having
+                # already marked the draft 'failed'. Without this the relabelled
+                # button stayed dead and the row kept claiming a draft was being
+                # written, with nothing said anywhere the user looks.
+                log.exception("drafting job %s raised", job["id"])
+                result = {"ok": False, "draft": None,
+                          "error": "Der Entwurf ist unerwartet fehlgeschlagen "
+                                   "— Details stehen im Log."}
             # The row carries the outcome from here on, whichever way it went —
             # and everything the user sees afterwards is built in `overlay`,
             # because this refresh has just deleted the button we came from.
@@ -500,27 +524,29 @@ async def jobs_page():
             overlay.clear()
             with overlay:
                 if not result["ok"]:
-                    ui.notify(result["error"], type="warning", multi_line=True)
+                    say(result["error"], type="warning", multi_line=True)
                     return
                 show_draft(result["draft"], job)
 
         async def resolve_channel(job: dict):
-            ui.notify("Bewerbungskanal wird ermittelt…")
+            say("Bewerbungskanal wird ermittelt…")
             res = await apply_resolve.resolve_and_store(job["id"])
             label = _apply_line({**job, "apply_channel": res["channel"],
                                  "ats_vendor": res["vendor"]})
-            ui.notify(label or "Kanal nicht ermittelbar",
-                      type="positive" if label else "warning")
             await refresh()
+            say(label or "Kanal nicht ermittelbar",
+                      type="positive" if label else "warning")
 
         async def find_email(job: dict):
-            ui.notify("Kontakt-E-Mail wird gesucht…")
+            say("Kontakt-E-Mail wird gesucht…")
             res = await contact_lookup.lookup_and_propose(job["id"])
             if not res["email"]:
-                ui.notify("Keine verifizierte Bewerbungs-E-Mail gefunden",
+                say("Keine verifizierte Bewerbungs-E-Mail gefunden",
                           type="warning")
                 return
-            with ui.dialog() as dialog, ui.card().classes("w-[440px] max-w-full"):
+            overlay.clear()
+            with overlay, ui.dialog() as dialog, \
+                    ui.card().classes("w-[440px] max-w-full"):
                 ui.label("Gefundene Bewerbungs-E-Mail").classes("font-bold")
                 ui.label(res["email"]).classes("text-lg")
                 ui.label(f"Quelle: {res['source_url']}").classes(
@@ -534,7 +560,7 @@ async def jobs_page():
 
                 async def adopt():
                     await run.io_bound(_set_contact_email, job["id"], res["email"])
-                    ui.notify(f"Übernommen: {res['email']}", type="positive")
+                    say(f"Übernommen: {res['email']}", type="positive")
                     dialog.close()
                     await refresh()
 
@@ -548,12 +574,13 @@ async def jobs_page():
         async def mark_portal(job: dict):
             await run.io_bound(_set_status, job["id"], "portal")
             open_url = _openable_url(job)
-            if open_url:
-                ui.navigate.to(open_url, new_tab=True)
-            else:
-                ui.notify("No safe URL stored for this posting — open it manually.",
-                          type="warning")
             await refresh()
+            if not open_url:
+                say("No safe URL stored for this posting — open it manually.",
+                    type="warning")
+                return
+            with overlay:  # navigate.to needs a live slot exactly like notify
+                ui.navigate.to(open_url, new_tab=True)
 
         async def skip(job: dict):
             await run.io_bound(_set_status, job["id"], "skipped")
@@ -561,11 +588,11 @@ async def jobs_page():
 
         async def confirm_applied(job: dict):
             bewerbung_id = await run.io_bound(_confirm_applied, job["id"], "Online-Portal")
-            if bewerbung_id is None:
-                ui.notify("Blocked: you already applied at this company", type="warning")
-            else:
-                ui.notify("Application recorded ✓", type="positive")
             await refresh()
+            if bewerbung_id is None:
+                say("Blocked: you already applied at this company", type="warning")
+            else:
+                say("Application recorded ✓", type="positive")
 
         with ui.row().classes("items-center gap-4"):
             ui.toggle(

@@ -134,6 +134,16 @@ async def queue_page():
         # of the page's flex layout so it costs no blank row.
         overlay = ui.column().classes("contents")
 
+        def say(message: str, **kwargs) -> None:
+            """Tell the user something, from a slot no refresh can delete.
+
+            `ui.notify` needs a live parent, and a handler's own is the element
+            that fired it — which this page's refresh (and, in the queue, its
+            timer) removes. Every message goes through here so the question
+            "is my slot still alive?" never has to be asked at a call site."""
+            with overlay:
+                ui.notify(message, **kwargs)
+
         async def refresh():
             refresh_gen["n"] += 1
             gen = refresh_gen["n"]
@@ -284,9 +294,9 @@ async def queue_page():
         async def _simple_action(action, job_id: int, success: str):
             result = await run.io_bound(action, job_id)
             if not result["ok"]:
-                ui.notify(result["error"], type="warning", multi_line=True)
+                say(result["error"], type="warning", multi_line=True)
             else:
-                ui.notify(success, type="positive")
+                say(success, type="positive")
             await refresh()
 
         async def approve(row: dict):
@@ -374,16 +384,16 @@ async def queue_page():
                     if updated is not None:
                         current.update(updated)
                     if error:
-                        ui.notify(error, type="warning", multi_line=True)
+                        say(error, type="warning", multi_line=True)
                         await refresh()
                         return False
                     if clear_pdf:
                         pdf_label.set_text("No Mappe PDF yet — the text "
                                            "changed; create it again.")
-                        ui.notify("Text changed — create the PDF again",
+                        say("Text changed — create the PDF again",
                                   type="warning")
                     if was_approved:
-                        ui.notify("Edited — the draft went back to ready; "
+                        say("Edited — the draft went back to ready; "
                                   "approve it again for auto-send",
                                   type="warning", multi_line=True)
                     return True
@@ -391,31 +401,31 @@ async def queue_page():
                 async def save_only():
                     if not await save():
                         return
-                    ui.notify("Saved", type="positive")
+                    say("Saved", type="positive")
                     await refresh()
 
                 async def make_pdf():
                     if not await save():
                         return
-                    ui.notify("Creating Bewerbungsmappe…")
+                    say("Creating Bewerbungsmappe…")
                     result = await mappe.create_mappe(job_id)
                     if not result["ok"]:
-                        ui.notify(result["error"], type="warning",
+                        say(result["error"], type="warning",
                                   multi_line=True)
                         return
                     current["pdf_path"] = result["pdf_path"]
                     pdf_label.set_text(f"Mappe: {result['pdf_path']}")
-                    ui.notify(helpers.mappe_summary(result), type="positive")
+                    say(helpers.mappe_summary(result), type="positive")
                     if result["warning"]:
-                        ui.notify(result["warning"], type="warning",
+                        say(result["warning"], type="warning",
                                   multi_line=True)
 
                 def open_pdf():
                     path = current.get("pdf_path", "")
                     if not path:
-                        ui.notify("create the Mappe first", type="warning")
+                        say("create the Mappe first", type="warning")
                     elif not pathlib.Path(path).exists():
-                        ui.notify("the Mappe file is gone — create it again",
+                        say("the Mappe file is gone — create it again",
                                   type="warning")
                     else:
                         open_in_system(path)
@@ -432,7 +442,7 @@ async def queue_page():
                         }
                     )
                     if error:
-                        ui.notify(error, type="warning", multi_line=True)
+                        say(error, type="warning", multi_line=True)
                         return
                     mode = ("TEST send" if test_mode
                             else "REAL send to the company")
@@ -456,7 +466,7 @@ async def queue_page():
                     confirm.open()
                     if not await confirm:
                         return
-                    ui.notify("Sending…")
+                    say("Sending…")
                     # Pin what the confirmation actually showed: between the
                     # dialog and this call another tab could have edited the
                     # draft or flipped the sending mode.
@@ -471,11 +481,11 @@ async def queue_page():
                         "recipient_shown": final,
                     })
                     if not result["ok"]:
-                        ui.notify(result["error"], type="warning",
+                        say(result["error"], type="warning",
                                   multi_line=True)
                         await refresh()
                         return
-                    ui.notify(
+                    say(
                         f"{'TEST sent' if result['test_mode'] else 'Sent'} "
                         f"to {result['recipient']} ✓", type="positive",
                     )
@@ -487,10 +497,10 @@ async def queue_page():
                         return
                     result = await run.io_bound(send.approve, job_id)
                     if not result["ok"]:
-                        ui.notify(result["error"], type="warning",
+                        say(result["error"], type="warning",
                                   multi_line=True)
                         return
-                    ui.notify("Approved — auto-send will pick it up",
+                    say("Approved — auto-send will pick it up",
                               type="positive")
                     dialog.close()
                     await refresh()
