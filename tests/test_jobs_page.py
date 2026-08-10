@@ -654,3 +654,95 @@ def test_changing_the_view_always_returns_to_the_first_page(con, data_dir):
     con.commit()
     assert jobs._load_jobs("new", jobs.PILE_NONE, 99)["page"] == 2
     assert jobs._load_jobs("new", jobs.PILE_NONE, -5)["page"] == 0
+
+
+# --------------------------------------------------------------------------
+# A draft being written was invisible everywhere for the minute it took: the
+# row existed and no view listed it, so pressing Draft twice was the only way
+# to learn the app was working.
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize("status, expected_in_line", [
+    ("generating", "wird gerade geschrieben"),
+    ("ready", "Review queue"),
+    ("approved", "Review queue"),
+    ("sending", "Versand"),
+    ("failed", "fehlgeschlagen"),
+    ("sent", "gesendet"),
+])
+def test_the_row_says_what_its_draft_is_doing(status, expected_in_line):
+    text, classes = jobs._draft_line(status)
+    assert expected_in_line in text
+    assert classes.startswith("text-sm ")
+
+
+@pytest.mark.parametrize("status", ["discarded", "", None])
+def test_a_posting_with_nothing_to_report_says_nothing(status):
+    """A discarded draft leaves the posting where it started; a line about a
+    draft that no longer exists would only be in the way."""
+    assert jobs._draft_line(status) == ("", "")
+
+
+def test_the_inbox_carries_the_draft_state_in_every_view(con, data_dir):
+    from jobdeck import db
+    quiet = _company_job(con, "d1", "Ohne Entwurf GmbH", 90)
+    busy = _company_job(con, "d2", "Mit Entwurf GmbH", 80)
+    db.upsert_draft(con, busy, {"status": "generating"})
+    con.commit()
+
+    for collapse in (True, False):
+        rows = {r["id"]: r["draft_status"]
+                for r in jobs._load_jobs("new", jobs.PILE_NONE, 0,
+                                         collapse=collapse)["rows"]}
+        assert rows[busy] == "generating", collapse
+        assert rows[quiet] is None, collapse
+
+
+def test_a_sibling_row_carries_it_too(con, data_dir):
+    """Siblings come from the shared ranking CTE — if the column were added to
+    the flat query only, a grouped company's other postings would lose it."""
+    from jobdeck import db
+    best = _company_job(con, "s1", "Eine Firma GmbH", 90)
+    second = _company_job(con, "s2", "Eine Firma GmbH", 70)
+    db.upsert_draft(con, second, {"status": "ready"})
+    con.commit()
+    view = jobs._load_jobs("new", jobs.PILE_NONE, 0)
+    head = view["rows"][0]
+    assert head["id"] == best
+    siblings = view["siblings"][head["company_key"]]
+    assert [(r["id"], r["draft_status"]) for r in siblings] == [(second, "ready")]
+
+
+def test_the_row_describes_the_same_draft_every_button_acts_on(con, data_dir):
+    """drafts.job_id has no UNIQUE constraint and get_draft_by_job answers with
+    the NEWEST row. A view reading any other one would describe a draft the
+    buttons do not touch."""
+    from jobdeck import db
+    job_id = _company_job(con, "n1", "Zwei Entwürfe GmbH", 90)
+    con.execute(
+        "INSERT INTO drafts (job_id, status, created_at, updated_at) "
+        "VALUES (?, 'discarded', '2026-08-01T10:00:00', '2026-08-01T10:00:00')",
+        (job_id,))
+    con.execute(
+        "INSERT INTO drafts (job_id, status, created_at, updated_at) "
+        "VALUES (?, 'ready', '2026-08-02T10:00:00', '2026-08-02T10:00:00')",
+        (job_id,))
+    con.commit()
+    assert db.get_draft_by_job(con, job_id)["status"] == "ready"
+    view = jobs._load_jobs("new", jobs.PILE_NONE, 0)
+    assert view["rows"][0]["draft_status"] == "ready"
+
+
+def test_the_draft_button_stands_down_while_one_is_being_written():
+    """Pressing it then can only produce 'already being generated' — the
+    refusal that made the app look broken in the first place."""
+    source = pathlib.Path(jobs.__file__).read_text()
+    button = source[source.index('"Draft application"'):]
+    guard = source[:source.index('"Draft application"')]
+    guard = guard[guard.rindex('if (job["status"]'):]
+    assert 'job["draft_status"] != "generating"' in guard
+    # and the outcome reaches the row: without a refresh the line would still
+    # claim the draft is being written after it finished
+    handler = source[source.index("async def draft("):]
+    handler = handler[:handler.index("async def resolve_channel")]
+    assert "await refresh()" in handler
+    assert button  # the button itself still exists

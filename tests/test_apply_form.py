@@ -320,8 +320,10 @@ def test_the_inbox_offers_the_cockpit_exactly_where_a_form_is_filled():
     source = pathlib.Path(jobs_page.__file__).read_text()
     assert 'ui.navigate.to(f"/cockpit/{j[\'id\']}")' in source
     # offered while applying is possible, and drafting stays reachable there —
-    # the cockpit's own gaps tell him to draft
-    assert source.count('if job["status"] in ("new", "portal"):') == 2
+    # the cockpit's own gaps tell him to draft. Matched on the condition rather
+    # than the whole `if` line: the Draft button carries a second clause now
+    # (it hides while one is being written) and must still cover both statuses.
+    assert source.count('job["status"] in ("new", "portal")') == 2
 
 
 @pytest.mark.parametrize("job, expected, why", [

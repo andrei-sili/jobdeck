@@ -396,6 +396,18 @@ MISMATCH_SQL = "match_score=0"
 # fact, not a judgement — it hides the row, it never deletes it.
 GONE_SQL = f"liveness='{LIVENESS_GONE}'"
 
+# What the posting's own draft is doing, so the inbox can say so on the row.
+# A draft that is being written is otherwise invisible EVERYWHERE for the
+# minute it takes: the row exists, and no view showed it, so the only feedback
+# a second press gave was "already being generated".
+# `drafts.job_id` carries no UNIQUE constraint and `get_draft_by_job` answers
+# with the newest row — this must pick the SAME one, or the inbox would
+# describe a draft other than the one every button acts on.
+_DRAFT_STATUS_SQL = (
+    "(SELECT d.status FROM drafts d WHERE d.job_id=jobs.id "
+    "ORDER BY d.id DESC LIMIT 1)"
+)
+
 
 def _job_filters(
     status: str | None, mismatches: str, gone: str
@@ -450,7 +462,8 @@ def _ranked_jobs_cte(where_sql: str) -> str:
         "WITH filtered AS ("
         f" SELECT *, {freshness.AGE_SQL} AS age_days,"
         f" {freshness.effective_score_sql()} AS effective_score,"
-        f" {_COMPANY_KEY_SQL} AS company_key"
+        f" {_COMPANY_KEY_SQL} AS company_key,"
+        f" {_DRAFT_STATUS_SQL} AS draft_status"
         f" FROM jobs{where_sql}"
         "), ranked AS ("
         " SELECT *, ROW_NUMBER() OVER ranking AS rank_in_company,"
@@ -574,7 +587,8 @@ def list_jobs(
     # the UI prints is the very number that decided the row's position — two
     # copies of that rule would drift (see freshness.py).
     derived = (f"{freshness.AGE_SQL} AS age_days, "
-               f"{freshness.effective_score_sql()} AS effective_score")
+               f"{freshness.effective_score_sql()} AS effective_score, "
+               f"{_DRAFT_STATUS_SQL} AS draft_status")
     order = _JOB_ORDER_SQL if status else "id DESC"
     return con.execute(
         f"SELECT *, {derived} FROM jobs{where_sql} "

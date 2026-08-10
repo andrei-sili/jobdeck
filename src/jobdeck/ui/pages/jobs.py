@@ -191,6 +191,32 @@ def _apply_line(job: dict) -> str:
     return ""
 
 
+# What the posting's own draft is doing, said on the row itself. Writing one
+# takes about a minute, and for that minute the only feedback was a toast that
+# had already faded — so a second press answered "already being generated" and
+# the app looked broken. 'discarded' says nothing on purpose: the posting is
+# back to where it started, and a line about a draft that no longer exists
+# would only be in the way.
+_DRAFT_LINES = {
+    "generating": ("✍ Die Bewerbung wird gerade geschrieben — das dauert "
+                   "etwa eine Minute.", "text-sm text-blue-700"),
+    "ready": ("✓ Entwurf fertig — in der Review queue prüfen und senden.",
+              "text-sm text-green-700"),
+    "approved": ("✓ Entwurf freigegeben — wartet in der Review queue auf den "
+                 "Versand.", "text-sm text-green-700"),
+    "sending": ("Ein Versand läuft — oder er ist stecken geblieben. In der "
+                "Review queue auflösen.", "text-sm text-amber-700"),
+    "failed": ("⚠ Der Entwurf ist fehlgeschlagen — neu schreiben, oder in der "
+               "Review queue verwerfen.", "text-sm text-red-700"),
+    "sent": ("✓ Bewerbung gesendet.", "text-sm text-gray-600"),
+}
+
+
+def _draft_line(draft_status: object) -> tuple[str, str]:
+    """(text, CSS classes) for the posting's draft state; ('', '') for none."""
+    return _DRAFT_LINES.get(str(draft_status or ""), ("", ""))
+
+
 def _openable_url(job: dict) -> str:
     """The URL a posting's buttons may hand to the browser, '' when none is
     safe. The resolved apply link wins over the raw feed URL."""
@@ -273,6 +299,9 @@ async def jobs_page():
                 if job["duplicate_of"]:
                     ui.label("⚠ You already applied at this company — see Applications.") \
                         .classes("text-sm text-amber-700")
+                draft_text, draft_classes = _draft_line(job["draft_status"])
+                if draft_text:
+                    ui.label(draft_text).classes(draft_classes)
                 channel_line = _apply_line(job)
                 if channel_line:
                     ui.label(channel_line).classes("text-sm text-blue-700")
@@ -297,11 +326,18 @@ async def jobs_page():
                                   on_click=lambda j=job:
                                       ui.navigate.to(f"/cockpit/{j['id']}")) \
                             .props("outline")
-                    if job["status"] in ("new", "portal"):
+                    if (job["status"] in ("new", "portal")
+                            and job["draft_status"] != "generating"):
                         # also at the form stage: the cockpit's own gaps tell him
-                        # to draft, and opening a form moves the posting here
-                        ui.button("Draft application", icon="edit_note",
-                                  on_click=lambda j=job: draft(j)).props("outline")
+                        # to draft, and opening a form moves the posting here.
+                        # While one is being written the button can only refuse,
+                        # so the line above says so instead.
+                        # `draft_button` is local to this render_job call, so the
+                        # closure sees this row's own button and no other.
+                        draft_button = ui.button("Draft application", icon="edit_note") \
+                            .props("outline")
+                        draft_button.on_click(
+                            lambda j=job, b=draft_button: draft(j, button=b))
                     if job["status"] == "new":
                         ui.button("Apply via portal", icon="language",
                                   on_click=lambda j=job: mark_portal(j)).props("outline")
@@ -405,7 +441,7 @@ async def jobs_page():
             dialog.close()
             await draft(job, force=True)
 
-        async def draft(job: dict, force: bool = False):
+        async def draft(job: dict, force: bool = False, button=None):
             # a finished draft costs nothing to show again — regenerate only
             # on explicit request
             if not force:
@@ -414,7 +450,14 @@ async def jobs_page():
                     show_draft(existing, job)
                     return
             ui.notify("Drafting application…")
+            if button is not None:
+                # A minute is long enough that a faded toast reads as "nothing
+                # happened" — the button that was pressed says what it is doing.
+                button.set_text("wird geschrieben…")
+                button.disable()
             result = await drafting.draft_for_job(job["id"])
+            # The row carries the outcome from here on, whichever way it went.
+            await refresh()
             if not result["ok"]:
                 ui.notify(result["error"], type="warning", multi_line=True)
                 return
