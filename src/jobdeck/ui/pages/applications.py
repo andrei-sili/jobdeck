@@ -14,7 +14,7 @@ from jobdeck.constants import (
     STATUS_OPTIONS,
 )
 from jobdeck.dates import days_since
-from jobdeck.dedupe import find_duplicate_bewerbung, norm
+from jobdeck.dedupe import find_duplicate_bewerbung, fold
 from jobdeck.ui.helpers import open_in_system
 from jobdeck.ui.layout import frame
 
@@ -90,9 +90,9 @@ async def applications_page():
         table.on("rowClick", lambda e: edit_dialog(e.args[1]))
 
         def matches(row):
-            q = norm(state["query"])
+            q = fold(state["query"])
             if q:
-                haystack = norm(" ".join(str(row.get(k) or "") for k in SEARCH_FIELDS))
+                haystack = fold(" ".join(str(row.get(k) or "") for k in SEARCH_FIELDS))
                 if q not in haystack:
                     return False
             if state["status"] != "Alle" and (row.get("status") or "") != state["status"]:

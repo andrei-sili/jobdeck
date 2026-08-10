@@ -10,7 +10,7 @@ import logging
 
 import httpx
 
-from jobdeck.dedupe import norm
+from jobdeck.dedupe import fold
 from jobdeck.sources.base import (
     JobPosting,
     SearchQuery,
@@ -32,7 +32,10 @@ class ArbeitnowSource:
         self._client = client
 
     def _matches(self, query: SearchQuery, item: dict) -> bool:
-        haystack = norm(
+        # `fold`, not `norm`: this is a search haystack built from a posting's
+        # whole description, so nothing may be deleted from it — and norm is a
+        # per-character loop running on the shared event loop here.
+        haystack = fold(
             " ".join(
                 [
                     item.get("title", "") or "",
@@ -41,11 +44,11 @@ class ArbeitnowSource:
                 ]
             )
         )
-        terms = [t for t in norm(query.keywords).split() if t]
+        terms = [t for t in fold(query.keywords).split() if t]
         if terms and not any(term in haystack for term in terms):
             return False
         if query.location:
-            location_ok = norm(item.get("location", "")).find(norm(query.location)) >= 0
+            location_ok = fold(item.get("location", "")).find(fold(query.location)) >= 0
             if not location_ok and not item.get("remote", False):
                 return False
         return True

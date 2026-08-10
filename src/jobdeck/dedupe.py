@@ -8,28 +8,45 @@ folds ASCII A-Z.
 import sqlite3
 import unicodedata
 
-# Characters a company writes for DECORATION, never to say which company it
-# is. Dropping them is what makes an employer who prints a registered-symbol
-# after its name the same employer that answered an earlier application:
-#   Cf  invisible format marks — a soft hyphen inside a scraped title, a
-#       zero-width space, a bidi mark; by definition nothing is rendered
-#   Cc  stray control bytes (real whitespace is handled before this)
-#   So  ® © ™ ℠ and other standalone symbols
-#   Sk  free-standing accent marks, e.g. a ring above worn as part of a
-#       wordmark — the modifier twin of So
-# What is deliberately NOT dropped: ordinary punctuation, because a dot can
-# carry identity ('a.b GmbH' is not 'ab GmbH'), and legal forms, because GmbH
-# and AG can be two different companies under one name.
-_DROP_CATEGORIES = frozenset({"Cf", "Cc", "So", "Sk"})
+# The ONLY visible characters `norm` deletes: marks that assert a name is a
+# trademark without ever saying WHICH one. No employer is called "X" while a
+# different one is called "X®", so removing them cannot merge two companies.
+#
+# Deliberately NOT dropped, though every one of them is "decorative" in some
+# font: '°' (a firm really can be called "180°"), free-standing accents, and
+# enclosed or pictographic symbols. Deleting whole Unicode symbol categories
+# would fold "Ⓐ GmbH" into "Ⓑ GmbH" — and a FALSE duplicate is the worse
+# error: a missed one wastes an application, a false one silently forbids a
+# real application to a firm he has never written to.
+_TRADEMARK_MARKS = frozenset("®©™℠℗")
+
+# Invisible by definition, so they cannot carry identity either: Cf is the
+# soft hyphen inside a scraped title, the zero-width space, the bidi marks;
+# Cc is a stray control byte. Real whitespace is handled before this.
+_INVISIBLE_CATEGORIES = frozenset({"Cf", "Cc"})
+
+
+def fold(text: object) -> str:
+    """Case-fold for SEARCHING — umlaut- and ß-correct, and nothing else.
+
+    Keyword matching and free-text search want every character the source
+    wrote; only `norm` may delete any, and only because it answers a question
+    about IDENTITY. Keeping them apart also keeps `norm` off the hot path:
+    it is a per-character Python loop, and a posting description is large.
+    """
+    return str(text or "").casefold()
 
 
 def norm(text: object) -> str:
-    """Normalize text for comparison: drop decoration, fold case and space.
+    """Normalize a NAME for comparison: drop decoration, fold case and space.
 
-    Two spellings of one company must land on one string, and two companies
-    must never land on the same one. Order matters: decoration is dropped
-    BEFORE NFKC, or '™' would compatibility-decompose into the letters 'TM'
-    and survive as part of the name.
+    Two spellings of one company must land on one string, and two different
+    companies must not. Order matters: the marks are dropped BEFORE NFKC, or
+    '™' would compatibility-decompose into the letters 'TM' and survive as
+    part of the name.
+
+    For matching or searching free text use `fold` — this deletes characters,
+    which is only ever right when the question is "is this the same company".
     """
     kept = []
     for char in str(text or ""):
@@ -37,10 +54,12 @@ def norm(text: object) -> str:
         # control character would weld 'Dresden\nDresden' into one word.
         if char.isspace():
             kept.append(" ")
-        elif unicodedata.category(char) not in _DROP_CATEGORIES:
+        elif char in _TRADEMARK_MARKS:
+            continue
+        elif unicodedata.category(char) not in _INVISIBLE_CATEGORIES:
             kept.append(char)
-    # NFKC folds the compatibility spellings apart from the ones above: a
-    # non-breaking space, a fullwidth letter, a decomposed umlaut.
+    # NFKC folds the compatibility spellings the drop above does not reach:
+    # a fullwidth letter, a decomposed umlaut, a Roman numeral.
     folded = unicodedata.normalize("NFKC", "".join(kept))
     # split() collapses runs and trims — a scraped title carries both.
     return " ".join(folded.split()).casefold()
