@@ -65,6 +65,32 @@ def norm(text: object) -> str:
     return " ".join(folded.split()).casefold()
 
 
+_BEWERBUNGEN_SQL = "SELECT * FROM bewerbungen ORDER BY gesendet_am DESC, id DESC"
+
+
+def _first_match(
+    rows: list, firma: str, email: str, exclude_id: int | None = None
+) -> dict | None:
+    """The newest application matching this company OR contact e-mail.
+
+    The one definition of "already applied here". Everything that answers that
+    question — the send gate, the recording path, the job inbox's warning —
+    goes through this, because a second copy of the rule is a screen that
+    tells the user one thing while the gate does another."""
+    firma_n = norm(firma)
+    email_n = norm(email)
+    if not firma_n and not email_n:
+        return None
+    for row in rows:
+        if exclude_id is not None and row["id"] == exclude_id:
+            continue
+        if firma_n and norm(row["firma"]) == firma_n:
+            return dict(row)
+        if email_n and norm(row["email"]) and norm(row["email"]) == email_n:
+            return dict(row)
+    return None
+
+
 def find_duplicate_bewerbung(
     con: sqlite3.Connection,
     firma: str,
@@ -76,21 +102,26 @@ def find_duplicate_bewerbung(
     Case-insensitive (umlaut-aware), ignores surrounding whitespace.
     Returns the matching row as a dict, or None.
     """
-    firma_n = norm(firma)
-    email_n = norm(email)
-    if not firma_n and not email_n:
-        return None
-    rows = con.execute(
-        "SELECT * FROM bewerbungen ORDER BY gesendet_am DESC, id DESC"
-    ).fetchall()
-    for row in rows:
-        if exclude_id is not None and row["id"] == exclude_id:
-            continue
-        if firma_n and norm(row["firma"]) == firma_n:
-            return dict(row)
-        if email_n and norm(row["email"]) and norm(row["email"]) == email_n:
-            return dict(row)
-    return None
+    return _first_match(con.execute(_BEWERBUNGEN_SQL).fetchall(),
+                        firma, email, exclude_id)
+
+
+def duplicates_for_jobs(con: sqlite3.Connection, jobs: list) -> dict[int, dict]:
+    """{job id: the application that already went to this company}.
+
+    Asked per PAGE rather than per row so one scan of the applications serves
+    the whole view. `jobs.duplicate_of` cannot answer this: it is written once,
+    when the posting is discovered, so every application he sends afterwards
+    silently makes more inbox rows lie — 30 of his open postings were at firms
+    the gate would already refuse, and the top-ranked one of all had had an
+    Absage."""
+    rows = con.execute(_BEWERBUNGEN_SQL).fetchall()
+    found = {}
+    for job in jobs:
+        match = _first_match(rows, job["company"], job["contact_email"])
+        if match is not None:
+            found[job["id"]] = match
+    return found
 
 
 def find_duplicate_job(con: sqlite3.Connection, company: str, title: str) -> dict | None:

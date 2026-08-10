@@ -814,7 +814,12 @@ def _unhosted_ui_calls(path):
         for node in ast.walk(stmt) if hasattr(node, "lineno")
     }
     offenders = []
-    for func in [n for n in ast.walk(page) if isinstance(n, ast.AsyncFunctionDef)]:
+    # Sync helpers count too: `say` is a plain def, and dropping its
+    # `with overlay:` restores the whole defect while every async handler
+    # still looks innocent.
+    scopes = [page] + [n for n in ast.walk(page)
+                       if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    for func in scopes:
         own = list(_own_statements(func))
         awaits = [n.lineno for n in own if isinstance(n, ast.Await)]
         first_await = min(awaits, default=None)

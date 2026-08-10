@@ -6,6 +6,7 @@ import pathlib
 from nicegui import run, ui
 
 from jobdeck import apply_channel, db
+from jobdeck.dedupe import duplicates_for_jobs
 from jobdeck.services import apply_resolve, contact_lookup, drafting, liveness, mappe
 from jobdeck.ui import helpers
 from jobdeck.ui.helpers import (
@@ -135,7 +136,11 @@ def _load_jobs(status: str, pile: str, page: int, collapse: bool = True) -> dict
             keys = [r["company_key"] for r in rows if r["company_count"] > 1]
             for row in db.list_company_siblings(con, keys, status_arg, **filters):
                 siblings.setdefault(row["company_key"], []).append(dict(row))
+        # Asked of the duplicate gate itself, for the rows on screen — see
+        # dedupe.duplicates_for_jobs for why the stored flag cannot answer it.
+        on_screen = rows + [r for group in siblings.values() for r in group]
         return {
+            "applied": duplicates_for_jobs(con, on_screen),
             "rows": rows,
             "siblings": siblings,
             "filters": filters,
@@ -245,6 +250,24 @@ def _claim_is_running(job: dict) -> bool:
             and not drafting.claim_is_stale(job["draft_updated_at"]))
 
 
+def _applied_line(already: dict) -> str:
+    """'⚠ Bewerbung … am 12.06. — Absage' for a firm the gate would refuse.
+
+    Only ONE application per company is possible, so this row can never become
+    one. It says WHICH application and how it ended, because that is the
+    difference between a company still deciding and one that already said no."""
+    parts = []
+    when = str(already.get("gesendet_am") or "")[:10]
+    if when:
+        parts.append(f"am {when}")
+    status = str(already.get("status") or "").strip()
+    if status:
+        parts.append(status)
+    detail = f" ({' · '.join(parts)})" if parts else ""
+    return (f"⚠ Bei {already.get('firma') or 'dieser Firma'} hast du dich "
+            f"bereits beworben{detail} — eine Bewerbung pro Firma.")
+
+
 def _openable_url(job: dict) -> str:
     """The URL a posting's buttons may hand to the browser, '' when none is
     safe. The resolved apply link wins over the raw feed URL."""
@@ -257,6 +280,10 @@ async def jobs_page():
         status_filter = {"value": "new"}
         pile = {"value": PILE_NONE}
         collapse = {"value": True}
+        # What the duplicate gate says about the rows currently on screen,
+        # refreshed with them. Not `jobs.duplicate_of`: that is written once at
+        # discovery, so every application he sends makes more rows stale.
+        applied: dict[int, dict] = {}
         page = {"value": 0}
         refresh_gen = {"n": 0}  # rapid filter/switch flips: last request wins
         container = ui.column().classes("w-full gap-2")
@@ -296,6 +323,8 @@ async def jobs_page():
             with container:
                 if not view["rows"]:
                     ui.label(_EMPTY_VIEW[pile["value"]]).classes("text-gray-500")
+                applied.clear()
+                applied.update(view["applied"])
                 for job in view["rows"]:
                     render_job(job, view["siblings"].get(job.get("company_key"), []))
             render_pager(view)
@@ -342,9 +371,10 @@ async def jobs_page():
                     ui.label(f"⚠ Anzeige offline — beim letzten Abruf am "
                              f"{checked} nicht mehr vorhanden.") \
                         .classes("text-sm text-red-700")
-                if job["duplicate_of"]:
-                    ui.label("⚠ You already applied at this company — see Applications.") \
-                        .classes("text-sm text-amber-700")
+                already = applied.get(job["id"])
+                if already:
+                    ui.label(_applied_line(already)).classes(
+                        "text-sm text-amber-700")
                 draft_text, draft_classes = _draft_line(
                     job["draft_status"], job["draft_updated_at"])
                 if draft_text:
@@ -374,6 +404,7 @@ async def jobs_page():
                                       ui.navigate.to(f"/cockpit/{j['id']}")) \
                             .props("outline")
                     if (job["status"] in ("new", "portal")
+                            and not already
                             and not _claim_is_running(job)):
                         # also at the form stage: the cockpit's own gaps tell him
                         # to draft, and opening a form moves the posting here.

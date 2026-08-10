@@ -159,3 +159,38 @@ def test_duplicate_job_same_company_title(con):
 
 def test_duplicate_job_different_title(con):
     assert find_duplicate_job(con, "Müller GmbH", "Java Entwickler") is None
+
+
+def test_duplicates_for_jobs_answers_exactly_like_the_gate(con):
+    """The inbox warning and the send gate must never disagree — so they are
+    the same rule, asked once per page instead of once per row."""
+    from jobdeck.dedupe import duplicates_for_jobs
+    jobs = [
+        {"id": 1, "company": "Müller GmbH", "contact_email": ""},
+        {"id": 2, "company": "MÜLLER  GmbH ", "contact_email": ""},   # same firm
+        {"id": 3, "company": "Andere AG", "contact_email": "jobs@mueller.de"},
+        {"id": 4, "company": "Nie Beworben GmbH", "contact_email": ""},
+        {"id": 5, "company": "", "contact_email": ""},                # no data
+        {"id": 6, "company": "ACME AG®", "contact_email": ""},        # decorated
+    ]
+    batch = duplicates_for_jobs(con, jobs)
+    for job in jobs:
+        one = find_duplicate_bewerbung(con, job["company"], job["contact_email"])
+        assert (batch.get(job["id"]) or None) == one, job
+    assert sorted(batch) == [1, 2, 3, 6]
+    assert batch[3]["firma"] == "Müller GmbH"       # matched on the e-mail
+    assert batch[6]["firma"] == "ACME AG"           # matched through the ®
+
+
+def test_duplicates_for_jobs_reads_the_applications_once(con):
+    """Once per page, not once per row: the inbox renders fifty postings and
+    each call would otherwise re-scan the whole applications table."""
+    from jobdeck.dedupe import _BEWERBUNGEN_SQL, duplicates_for_jobs
+    seen = []
+    con.set_trace_callback(seen.append)
+    try:
+        duplicates_for_jobs(con, [{"id": i, "company": f"Firma {i}",
+                                   "contact_email": ""} for i in range(50)])
+    finally:
+        con.set_trace_callback(None)
+    assert [s for s in seen if "FROM bewerbungen" in s] == [_BEWERBUNGEN_SQL]

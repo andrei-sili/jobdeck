@@ -263,3 +263,50 @@ async def test_an_unexpected_failure_does_not_leave_the_button_dead(
     assert [r.message for r in logged] == ["drafting job 1 raised"]
     assert logged[0].exc_info[0] is RuntimeError
     caplog.get_records("call").clear()
+
+
+# --------------------------------------------------------------------------
+# "You already applied here" — computed, not remembered
+# --------------------------------------------------------------------------
+async def test_a_posting_at_a_firm_he_already_wrote_to_says_so(
+        user: User, con, data_dir):
+    """`jobs.duplicate_of` is written once, when the posting is discovered, so
+    every application sent afterwards makes more inbox rows lie. Measured on
+    his real data: 30 open postings were at firms the send gate would already
+    refuse, and the top-ranked posting of all had had an Absage."""
+    job_id = _posting(con, company="Beispiel GmbH")
+    db.add_bewerbung(con, {"gesendet_am": "2026-06-12", "firma": "Beispiel GmbH",
+                           "email": "", "kanal": "E-Mail", "status": "Absage"})
+    con.commit()
+    # nothing wrote jobs.duplicate_of — the posting still looks untouched
+    assert con.execute("SELECT duplicate_of FROM jobs WHERE id=?",
+                       (job_id,)).fetchone()[0] is None
+
+    await user.open("/jobs")
+    await user.should_see("bereits beworben")
+    await user.should_see("Absage")
+    await user.should_see("2026-06-12")
+    # …and nothing invites him to spend a draft on an application that can
+    # never be sent
+    await user.should_not_see(DRAFT_BUTTON)
+
+
+async def test_the_decorated_spelling_is_covered_by_the_same_warning(
+        user: User, con, data_dir):
+    """The whole point of the norm fix, seen from the screen."""
+    _posting(con, company="Beispiel® GmbH")
+    db.add_bewerbung(con, {"gesendet_am": "2026-06-12", "firma": "Beispiel GmbH",
+                           "email": "", "kanal": "E-Mail", "status": "Absage"})
+    con.commit()
+    await user.open("/jobs")
+    await user.should_see("bereits beworben")
+
+
+async def test_a_firm_he_never_wrote_to_is_left_alone(user: User, con, data_dir):
+    _posting(con, company="Ganz Neue GmbH")
+    db.add_bewerbung(con, {"gesendet_am": "2026-06-12", "firma": "Andere GmbH",
+                           "email": "", "kanal": "E-Mail", "status": "Absage"})
+    con.commit()
+    await user.open("/jobs")
+    await user.should_not_see("bereits beworben")
+    await user.should_see(DRAFT_BUTTON)
