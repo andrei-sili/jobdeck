@@ -5,7 +5,14 @@ import asyncio
 from nicegui import run, ui
 
 from jobdeck import apply_form, backup, config, db, gmail
-from jobdeck.services import apply_resolve, liveness, mappe, polling, scoring
+from jobdeck.services import (
+    apply_resolve,
+    liveness,
+    mappe,
+    polling,
+    preparing,
+    scoring,
+)
 from jobdeck.ui.helpers import open_in_system
 from jobdeck.ui.layout import frame
 
@@ -47,6 +54,12 @@ def _get_settings():
         }
 
 
+def _prepare_filter():
+    """The prepare-batch filter, defaults applied (see preparing.py)."""
+    with db.db() as con:
+        return preparing.settings(con)
+
+
 def _set_setting(key, value):
     with db.db() as con:
         db.set_setting(con, key, value)
@@ -66,6 +79,7 @@ def _ai_enabled():
 async def settings_page():
     with frame("Settings"):
         settings = await run.io_bound(_get_settings)
+        prep = await run.io_bound(_prepare_filter)
 
         with ui.card().classes("w-full"):
             ui.label("Data & credentials").classes("font-bold")
@@ -221,6 +235,94 @@ async def settings_page():
                 ui.notify("Saved", type="positive")
 
             ui.button("Save", on_click=save_application)
+
+        with ui.card().classes("w-full"):
+            ui.label("Bewerbungen vorbereiten").classes("font-bold")
+            ui.label(
+                "Picks the best-ranked postings that pass the filter, writes the "
+                "Anschreiben and builds the Mappe for each, and tops the review "
+                "queue up to the daily number. It only PREPARES — every send "
+                "stays a separate click, and the send cap is untouched."
+            ).classes("text-xs text-gray-500")
+            with ui.row().classes("items-center gap-4 flex-wrap"):
+                max_age = ui.number(
+                    "Nicht älter als (Tage)", value=prep["max_age_days"],
+                    min=1, max=365).classes("w-44")
+                min_score = ui.number(
+                    "Mindest-Score", value=prep["min_score"],
+                    min=1, max=100).classes("w-40")
+                per_day = ui.number(
+                    "Pro Tag vorbereiten", value=prep["per_day"],
+                    min=1, max=20).classes("w-44")
+            include_forms = ui.switch(
+                "Also postings that need a form (not just direct e-mail)",
+                value=prep["include_forms"],
+            ).tooltip("Nothing fresh carries a direct e-mail — with this off the "
+                      "queue rarely fills")
+            plan_label = ui.label().classes("text-sm")
+
+            async def save_prepare_filter():
+                for key, field, default in (
+                    ("prepare_max_age_days", max_age, preparing.DEFAULT_MAX_AGE_DAYS),
+                    ("prepare_min_score", min_score, preparing.DEFAULT_MIN_SCORE),
+                    ("prepare_per_day", per_day, preparing.DEFAULT_PER_DAY),
+                ):
+                    await run.io_bound(_set_setting, key,
+                                       str(int(field.value or default)))
+                await run.io_bound(_set_setting, "prepare_include_forms",
+                                   "1" if include_forms.value else "0")
+                ui.notify("Saved", type="positive")
+                await show_plan()
+
+            async def show_plan():
+                view = await run.io_bound(preparing.plan)
+                if not view["candidates"]:
+                    plan_label.set_text(
+                        f"Nothing to prepare: {view['waiting']} applications are "
+                        f"already waiting (target {view['config']['per_day']})."
+                        if view["room"] == 0 else
+                        "No posting passes the filter — widen the age or lower "
+                        "the score."
+                    )
+                    return
+                names = ", ".join(j["company"][:22] for j in view["candidates"])
+                plan_label.set_text(
+                    f"Would prepare {len(view['candidates'])} "
+                    f"(≈ ${view['estimate_usd']:.2f}): {names}"
+                )
+
+            async def prepare_now():
+                await show_plan()
+                ui.notify("Writing the applications — about a minute each…")
+                res = await preparing.prepare_day()
+                if res.get("error"):
+                    ui.notify(res["error"], type="warning", multi_line=True)
+                    return
+                if res.get("skipped"):
+                    ui.notify("A run is already in progress", type="warning")
+                    return
+                if not res["candidates"]:
+                    ui.notify(
+                        f"Nothing to prepare — {res['waiting']} already waiting",
+                        type="positive")
+                    return
+                tail = (f", {res['no_mappe']} without a Mappe"
+                        if res["no_mappe"] else "")
+                ui.notify(
+                    f"{res['prepared']} prepared{tail}, {res['failed']} failed "
+                    f"— ${res['cost_usd']:.2f}. Open the Review queue.",
+                    type="positive" if not res["failed"] else "warning",
+                    multi_line=True)
+                for problem in res["errors"][:3]:
+                    ui.notify(problem, type="warning", multi_line=True)
+                await show_plan()
+
+            with ui.row().classes("items-center gap-2"):
+                ui.button("Save filter", on_click=save_prepare_filter).props("outline")
+                ui.button("Vorbereiten", icon="playlist_add",
+                          on_click=prepare_now).props("color=primary")
+                ui.button("Was würde vorbereitet?", icon="visibility",
+                          on_click=show_plan).props("flat")
 
         with ui.card().classes("w-full"):
             ui.label("Bewerbungsdaten (für Formulare)").classes("font-bold")
