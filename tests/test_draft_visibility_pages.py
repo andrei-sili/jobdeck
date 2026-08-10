@@ -310,3 +310,27 @@ async def test_a_firm_he_never_wrote_to_is_left_alone(user: User, con, data_dir)
     await user.open("/jobs")
     await user.should_not_see("bereits beworben")
     await user.should_see(DRAFT_BUTTON)
+
+
+async def test_opening_a_draft_twice_leaves_one_dialog_behind(
+        user: User, con, data_dir):
+    """`overlay.clear()` could be deleted with the suite green while every
+    draft left its dialog parented to the host for the page's lifetime —
+    contradicting the comment that says it keeps exactly one alive."""
+    from nicegui import ui
+
+    job_id = _posting(con)
+    db.upsert_draft(con, job_id, {
+        "status": "ready", "betreff": "Bewerbung als Python Entwickler",
+        "recipient": "jobs@beispiel.example"})
+    con.commit()
+    await user.open("/jobs")
+
+    def dialogs():
+        return [e for e in user.client.elements.values()
+                if isinstance(e, ui.dialog)]
+
+    for _ in range(3):
+        user.find(DRAFT_BUTTON).click()
+        await asyncio.sleep(0.2)
+        assert len(dialogs()) == 1, f"{len(dialogs())} dialogs are alive at once"
