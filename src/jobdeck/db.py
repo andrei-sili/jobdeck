@@ -786,6 +786,85 @@ def jobs_needing_liveness_check(
     ).fetchall()
 
 
+# Draft states that mean "this posting already has an application in progress",
+# so the daily batch must not draft it a second time. `failed` is deliberately
+# absent: a posting whose drafting broke is a fair candidate again.
+PREPARED_DRAFT_STATUS = ("generating", "ready", "approved", "sending", "sent")
+
+
+def jobs_to_prepare(
+    con: sqlite3.Connection,
+    limit: int,
+    max_age_days: int,
+    min_score: int,
+    include_forms: bool = True,
+) -> list[sqlite3.Row]:
+    """The postings worth writing an application for, best-ranked first.
+
+    The filters are the ones he asked for — no older than `max_age_days`, at
+    least `min_score` — plus the three the rest of the app already enforces and
+    that would otherwise waste a paid draft:
+
+    * a posting whose ad is gone, or that violates a hard requirement (score 0),
+      is never a candidate;
+    * a company he has ALREADY applied to is skipped, because
+      `find_duplicate_bewerbung` would refuse the second application anyway —
+      compared with `jd_norm`, the very function that gate uses;
+    * a posting that already has a draft in flight is skipped.
+
+    An unknown publication date excludes a posting here, unlike in the inbox —
+    and it falls out of the age bound rather than needing its own clause, since
+    an unreadable date makes the age NULL and `NULL <= n` is never true. The
+    inbox must not hide a posting for missing information; a paid draft should
+    go to one we can vouch is current.
+    """
+    placeholders = ",".join("?" * len(PREPARED_DRAFT_STATUS))
+    return con.execute(
+        f"""
+        SELECT j.*, {freshness.AGE_SQL} AS age_days,
+               {freshness.effective_score_sql()} AS effective_score
+          FROM jobs j
+         WHERE j.status='new'
+           AND NOT ({GONE_SQL.replace('liveness', 'j.liveness')})
+           AND j.duplicate_of IS NULL
+           AND j.match_score >= ?
+           AND {freshness.AGE_SQL} <= ?
+           AND (? OR j.contact_email <> '')
+           AND NOT EXISTS (
+                 SELECT 1 FROM drafts d
+                  WHERE d.job_id = j.id AND d.status IN ({placeholders}))
+           AND jd_norm(j.company) NOT IN (
+                 SELECT jd_norm(firma) FROM bewerbungen
+                  WHERE trim(coalesce(firma,'')) <> '')
+         ORDER BY effective_score DESC, j.published_on DESC, j.id DESC
+         LIMIT ?
+        """,
+        (min_score, max_age_days, 1 if include_forms else 0,
+         *PREPARED_DRAFT_STATUS, limit),
+    ).fetchall()
+
+
+def count_waiting_drafts(con: sqlite3.Connection) -> int:
+    """Applications written and still waiting to be sent.
+
+    This is the meter for "prepare N a day", not the number of drafts CREATED
+    today: what he asked to see is a queue holding N applications, so a draft he
+    discarded must free its place, and one he sent must free it too. Both
+    thresholds still bind — a single press never prepares more than N."""
+    return con.execute(
+        "SELECT COUNT(*) FROM drafts WHERE status IN ('ready','approved')"
+    ).fetchone()[0]
+
+
+def count_drafts_created_today(con: sqlite3.Connection) -> int:
+    """Drafts written since local midnight — reported so the cost of the day is
+    visible, never used as the quota (see count_waiting_drafts)."""
+    today = datetime.date.today().isoformat()
+    return con.execute(
+        "SELECT COUNT(*) FROM drafts WHERE created_at LIKE ?", (f"{today}%",)
+    ).fetchone()[0]
+
+
 def count_gone_jobs(con: sqlite3.Connection, status: str | None = None) -> int:
     """How many postings the liveness filter would hide for this inbox view."""
     sql = f"SELECT COUNT(*) FROM jobs WHERE {GONE_SQL}"
