@@ -1,6 +1,10 @@
 """Data-layer behaviour of the review queue page (no NiceGUI rendering)."""
 
+import datetime
+import pathlib
+
 from jobdeck import db
+from jobdeck.services import drafting
 from jobdeck.ui.pages import queue
 
 
@@ -113,3 +117,76 @@ def test_the_queue_carries_the_liveness_of_the_posting_it_would_send_to(con,
     con.execute("UPDATE jobs SET liveness='alive' WHERE id=?", (job_id,))
     con.commit()
     assert db.list_drafts_with_jobs(con, ["ready"])[0]["job_liveness"] == "alive"
+
+
+# --------------------------------------------------------------------------
+# A draft being written: the row existed for the ~60 s it took and no view
+# listed it, so a second press was the only feedback the app gave.
+# --------------------------------------------------------------------------
+def test_a_draft_being_written_is_listed_while_it_is_written(con, data_dir):
+    job_id = _job_with_draft(con, status="generating")
+    rows = db.list_drafts_with_jobs(con, queue.FILTER_STATUSES["open"])
+    assert [(r["job_id"], r["status"]) for r in rows] == [(job_id, "generating")]
+
+
+def test_a_fresh_claim_promises_the_wait_and_says_it_updates_itself():
+    now = datetime.datetime.now().isoformat(timespec="seconds")
+    text, classes = queue.generating_line(now)
+    assert "wird gerade geschrieben" in text
+    assert "aktualisiert sich" in text
+    assert "amber" not in classes
+
+
+def test_an_abandoned_claim_says_so_instead_of_promising_a_minute():
+    """The process can die mid-call. Past drafting's own claim timeout the Job
+    inbox will already hand the posting to a new attempt, so the row must not
+    keep telling him to wait."""
+    stale = datetime.datetime.now() - datetime.timedelta(
+        minutes=drafting.CLAIM_TIMEOUT_MIN + 2)
+    text, classes = queue.generating_line(stale.isoformat(timespec="seconds"))
+    assert "abgebrochen" in text and "Draft" in text
+    assert "amber" in classes
+    # the number it prints is the real age, not a constant
+    assert str(drafting.CLAIM_TIMEOUT_MIN + 2) in text
+
+
+def test_an_unreadable_timestamp_is_not_evidence_of_a_dead_claim():
+    text, _ = queue.generating_line("not a timestamp")
+    assert "wird gerade geschrieben" in text
+    assert queue.generating_line(None)[0] == text
+
+
+def test_the_poll_rebuilds_the_page_only_when_the_drafts_changed(con, data_dir):
+    """A rebuild collapses every open expansion. Polling every few seconds
+    while he reads a different draft would be its own defect."""
+    job_id = _job_with_draft(con, status="generating")
+    before = [dict(r) for r in db.list_drafts_with_jobs(
+        con, queue.FILTER_STATUSES["open"])]
+    unchanged = [dict(r) for r in db.list_drafts_with_jobs(
+        con, queue.FILTER_STATUSES["open"])]
+    assert queue.draft_signature(before) == queue.draft_signature(unchanged)
+
+    db.upsert_draft(con, job_id, {"status": "ready"})
+    con.commit()
+    after = [dict(r) for r in db.list_drafts_with_jobs(
+        con, queue.FILTER_STATUSES["open"])]
+    assert queue.draft_signature(before) != queue.draft_signature(after)
+
+
+def test_the_queue_keeps_exactly_one_page_lifetime_timer():
+    """A timer created per generating row would accumulate on every refresh.
+    What the timer DOES is proven by rendering the page — see
+    tests/test_draft_visibility_pages.py."""
+    source = pathlib.Path(queue.__file__).read_text()
+    assert source.count("ui.timer(") == 1
+
+
+def test_the_poll_is_cancelled_when_the_page_goes_away():
+    """NiceGUI reads a timer's parent slot BEFORE its own stop check
+    (nicegui/timer.py, _run_in_loop), so a tick landing after the page is torn
+    down raises rather than stopping — an ERROR traceback in his log every
+    time he leaves this page. Seen in the running app, not in the suite."""
+    source = pathlib.Path(queue.__file__).read_text()
+    tail = source[source.index("ui.timer("):]
+    assert "on_disconnect(" in tail, "the timer outlives its page"
+    assert "cancel()" in tail

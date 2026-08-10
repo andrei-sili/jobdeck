@@ -1,10 +1,12 @@
 """Job inbox: discovered postings with per-job actions."""
 
+import logging
 import pathlib
 
 from nicegui import run, ui
 
 from jobdeck import apply_channel, db
+from jobdeck.dedupe import duplicates_for_jobs
 from jobdeck.services import apply_resolve, contact_lookup, drafting, liveness, mappe
 from jobdeck.ui import helpers
 from jobdeck.ui.helpers import (
@@ -13,6 +15,8 @@ from jobdeck.ui.helpers import (
     posting_markdown,
 )
 from jobdeck.ui.layout import frame
+
+log = logging.getLogger(__name__)
 
 FILTERS = ["new", "portal", "duplicate", "skipped", "applied", "all"]
 
@@ -29,10 +33,12 @@ PAGE_SIZE = 50
 # filter that stacks with the other: mixing either back into the list would
 # leave it unreachable once better-scored rows fill the page.
 PILE_NONE, PILE_MISMATCHES, PILE_DEAD = "", "mismatches", "dead"
+PILE_APPLIED = "applied_firm"
 _PILE_FILTERS = {
-    PILE_NONE: {"mismatches": "exclude", "gone": "exclude"},
-    PILE_MISMATCHES: {"mismatches": "only", "gone": "include"},
-    PILE_DEAD: {"mismatches": "include", "gone": "only"},
+    PILE_NONE: {"mismatches": "exclude", "gone": "exclude", "applied": "exclude"},
+    PILE_MISMATCHES: {"mismatches": "only", "gone": "include", "applied": "include"},
+    PILE_DEAD: {"mismatches": "include", "gone": "only", "applied": "include"},
+    PILE_APPLIED: {"mismatches": "include", "gone": "include", "applied": "only"},
 }
 
 # ONE control for the three views, deliberately not two switches. Mutual
@@ -44,6 +50,7 @@ PILE_LABELS = {
     PILE_NONE: "Arbeitsliste",
     PILE_MISMATCHES: "Mismatches",
     PILE_DEAD: "Dead ads",
+    PILE_APPLIED: "Schon beworben",
 }
 
 
@@ -51,6 +58,8 @@ _EMPTY_VIEW = {
     PILE_NONE: "Nothing here. Run a search profile to discover jobs.",
     PILE_MISMATCHES: "No mismatches — nothing is hidden.",
     PILE_DEAD: "No dead postings — every ad checked so far is still online.",
+    PILE_APPLIED: "Keine Stelle bei einer Firma, bei der du dich schon "
+                  "beworben hast.",
 }
 
 
@@ -62,11 +71,11 @@ def _view_filters(pile: str, status: str) -> dict:
     job ("I applied — record it"), so hiding it would hide that button. Only the
     `new` view hides; every other filter shows what it contains."""
     if pile == PILE_NONE and status != "new":
-        return {"mismatches": "include", "gone": "include"}
+        return {"mismatches": "include", "gone": "include", "applied": "include"}
     return _PILE_FILTERS[pile]
 
 
-def _hidden_line(filters: dict, mismatches: int, dead: int) -> str:
+def _hidden_line(filters: dict, mismatches: int, dead: int, applied: int = 0) -> str:
     """What this view is not showing, derived from the filters it actually used
     so the label cannot contradict the list. Two independent statements, never
     a total: a posting can be both a mismatch and offline."""
@@ -79,6 +88,11 @@ def _hidden_line(filters: dict, mismatches: int, dead: int) -> str:
         parts.append(f"{dead} dead hidden")
     elif filters["gone"] == "only":
         parts.append(f"{dead} postings whose ad is gone")
+    if filters["applied"] == "exclude" and applied:
+        parts.append(f"{applied} bei schon beworbenen Firmen hidden")
+    elif filters["applied"] == "only":
+        parts.append(f"{applied} Stellen bei Firmen, bei denen du dich "
+                     "schon beworben hast")
     return " · ".join(parts)
 
 
@@ -132,13 +146,18 @@ def _load_jobs(status: str, pile: str, page: int, collapse: bool = True) -> dict
             keys = [r["company_key"] for r in rows if r["company_count"] > 1]
             for row in db.list_company_siblings(con, keys, status_arg, **filters):
                 siblings.setdefault(row["company_key"], []).append(dict(row))
+        # Asked of the duplicate gate itself, for the rows on screen — see
+        # dedupe.duplicates_for_jobs for why the stored flag cannot answer it.
+        on_screen = rows + [r for group in siblings.values() for r in group]
         return {
+            "applied": duplicates_for_jobs(con, on_screen),
             "rows": rows,
             "siblings": siblings,
             "filters": filters,
             "collapse": collapse,
             "mismatches": db.count_mismatches(con, status_arg),
             "dead": db.count_gone_jobs(con, status_arg),
+            "applied_firm": db.count_applied_firm_jobs(con, status_arg),
             "total": total,
             "page": page,
             "pages": pages,
@@ -191,6 +210,75 @@ def _apply_line(job: dict) -> str:
     return ""
 
 
+# What the posting's own draft is doing, said on the row itself. Writing one
+# takes about a minute, and for that minute the only feedback was a toast that
+# had already faded — so a second press answered "already being generated" and
+# the app looked broken. 'discarded' says nothing on purpose: the posting is
+# back to where it started, and a line about a draft that no longer exists
+# would only be in the way.
+_DRAFT_LINES = {
+    "ready": ("✓ Entwurf fertig — in der Review queue prüfen und senden.",
+              "text-sm text-green-700"),
+    "approved": ("✓ Entwurf freigegeben — wartet in der Review queue auf den "
+                 "Versand.", "text-sm text-green-700"),
+    "sending": ("Ein Versand läuft — oder er ist stecken geblieben. In der "
+                "Review queue auflösen.", "text-sm text-amber-700"),
+    "failed": ("⚠ Der Entwurf ist fehlgeschlagen — neu schreiben, oder in der "
+               "Review queue verwerfen.", "text-sm text-red-700"),
+    "sent": ("✓ Bewerbung gesendet.", "text-sm text-gray-600"),
+}
+
+
+# A claim whose process died says so instead of promising a minute forever —
+# and it must say the SAME thing the review queue says about the same row, so
+# both ask services/drafting. This is also the line that has to stay honest
+# about the Draft button below it: the button is what restarts an abandoned
+# draft, so it comes back exactly when this text starts calling it abandoned.
+_CLAIM_LIVE = ("✍ Die Bewerbung wird gerade geschrieben — das dauert etwa "
+               "eine Minute.", "text-sm text-blue-700")
+_CLAIM_ABANDONED = ("⚠ Der Entwurf wurde begonnen und nie fertig — der "
+                    "Vorgang ist abgebrochen. Erneut auf „Draft "
+                    "application“ drücken.", "text-sm text-amber-700")
+
+
+def _draft_line(draft_status: object, draft_updated_at: object = None
+                ) -> tuple[str, str]:
+    """(text, CSS classes) for the posting's draft state; ('', '') for none."""
+    if str(draft_status or "") == "generating":
+        return (_CLAIM_ABANDONED if drafting.claim_is_stale(draft_updated_at)
+                else _CLAIM_LIVE)
+    return _DRAFT_LINES.get(str(draft_status or ""), ("", ""))
+
+
+def _claim_is_running(job: dict) -> bool:
+    """Is a draft for this posting being written RIGHT NOW?
+
+    Only then may the Draft button hide. `drafting._claim` re-claims a row
+    abandoned past CLAIM_TIMEOUT_MIN, and this button is the only surface
+    that can trigger it — hiding it for as long as the row merely says
+    'generating' left a crashed draft with no way back."""
+    return (job["draft_status"] == "generating"
+            and not drafting.claim_is_stale(job["draft_updated_at"]))
+
+
+def _applied_line(already: dict) -> str:
+    """'⚠ Bewerbung … am 12.06. — Absage' for a firm the gate would refuse.
+
+    Only ONE application per company is possible, so this row can never become
+    one. It says WHICH application and how it ended, because that is the
+    difference between a company still deciding and one that already said no."""
+    parts = []
+    when = str(already.get("gesendet_am") or "")[:10]
+    if when:
+        parts.append(f"am {when}")
+    status = str(already.get("status") or "").strip()
+    if status:
+        parts.append(status)
+    detail = f" ({' · '.join(parts)})" if parts else ""
+    return (f"⚠ Bei {already.get('firma') or 'dieser Firma'} hast du dich "
+            f"bereits beworben{detail} — eine Bewerbung pro Firma.")
+
+
 def _openable_url(job: dict) -> str:
     """The URL a posting's buttons may hand to the browser, '' when none is
     safe. The resolved apply link wins over the raw feed URL."""
@@ -203,10 +291,32 @@ async def jobs_page():
         status_filter = {"value": "new"}
         pile = {"value": PILE_NONE}
         collapse = {"value": True}
+        # What the duplicate gate says about the rows currently on screen,
+        # refreshed with them. Not `jobs.duplicate_of`: that is written once at
+        # discovery, so every application he sends makes more rows stale.
+        applied: dict[int, dict] = {}
         page = {"value": 0}
         refresh_gen = {"n": 0}  # rapid filter/switch flips: last request wins
         container = ui.column().classes("w-full gap-2")
         pager = ui.row().classes("items-center gap-2")
+        # Feedback has to outlive the row that asked for it. A handler runs in
+        # the slot of the button that fired it, and refresh() clears
+        # `container` — so a dialog or notification built after a refresh has
+        # no live parent and raises instead of appearing, silently swallowing
+        # the very error it was meant to report. This host is a sibling of the
+        # list, so no refresh can delete it; clearing it first keeps exactly
+        # one dialog alive at a time.
+        overlay = ui.column().classes("contents")
+
+        def say(message: str, **kwargs) -> None:
+            """Tell the user something, from a slot no refresh can delete.
+
+            `ui.notify` needs a live parent, and a handler's own is the element
+            that fired it — which this page's refresh (and, in the queue, its
+            timer) removes. Every message goes through here so the question
+            "is my slot still alive?" never has to be asked at a call site."""
+            with overlay:
+                ui.notify(message, **kwargs)
 
         async def refresh():
             refresh_gen["n"] += 1
@@ -220,10 +330,13 @@ async def jobs_page():
             page["value"] = view["page"]  # the loader clamped it to what exists
             container.clear()
             hidden_label.set_text(
-                _hidden_line(view["filters"], view["mismatches"], view["dead"]))
+                _hidden_line(view["filters"], view["mismatches"], view["dead"],
+                             view["applied_firm"]))
             with container:
                 if not view["rows"]:
                     ui.label(_EMPTY_VIEW[pile["value"]]).classes("text-gray-500")
+                applied.clear()
+                applied.update(view["applied"])
                 for job in view["rows"]:
                     render_job(job, view["siblings"].get(job.get("company_key"), []))
             render_pager(view)
@@ -270,9 +383,14 @@ async def jobs_page():
                     ui.label(f"⚠ Anzeige offline — beim letzten Abruf am "
                              f"{checked} nicht mehr vorhanden.") \
                         .classes("text-sm text-red-700")
-                if job["duplicate_of"]:
-                    ui.label("⚠ You already applied at this company — see Applications.") \
-                        .classes("text-sm text-amber-700")
+                already = applied.get(job["id"])
+                if already:
+                    ui.label(_applied_line(already)).classes(
+                        "text-sm text-amber-700")
+                draft_text, draft_classes = _draft_line(
+                    job["draft_status"], job["draft_updated_at"])
+                if draft_text:
+                    ui.label(draft_text).classes(draft_classes)
                 channel_line = _apply_line(job)
                 if channel_line:
                     ui.label(channel_line).classes("text-sm text-blue-700")
@@ -297,11 +415,20 @@ async def jobs_page():
                                   on_click=lambda j=job:
                                       ui.navigate.to(f"/cockpit/{j['id']}")) \
                             .props("outline")
-                    if job["status"] in ("new", "portal"):
+                    if (job["status"] in ("new", "portal")
+                            and not already
+                            and not _claim_is_running(job)):
                         # also at the form stage: the cockpit's own gaps tell him
-                        # to draft, and opening a form moves the posting here
-                        ui.button("Draft application", icon="edit_note",
-                                  on_click=lambda j=job: draft(j)).props("outline")
+                        # to draft, and opening a form moves the posting here.
+                        # While one is genuinely being written the button can
+                        # only refuse, so the line above says so instead — but
+                        # once the claim goes stale this is the ONLY way back.
+                        # `draft_button` is local to this render_job call, so the
+                        # closure sees this row's own button and no other.
+                        draft_button = ui.button("Draft application", icon="edit_note") \
+                            .props("outline")
+                        draft_button.on_click(
+                            lambda j=job, b=draft_button: draft(j, button=b))
                     if job["status"] == "new":
                         ui.button("Apply via portal", icon="language",
                                   on_click=lambda j=job: mark_portal(j)).props("outline")
@@ -342,7 +469,8 @@ async def jobs_page():
                             ).props("flat dense")
 
         def show_draft(draft_row: dict, job: dict):
-            with ui.dialog() as dialog, ui.card().classes("w-[720px] max-w-full"):
+            with overlay, ui.dialog() as dialog, \
+                    ui.card().classes("w-[720px] max-w-full"):
                 ui.label(f"Draft — {job['title']}").classes("font-bold")
                 recipient = draft_row["recipient"] or \
                     "no application e-mail found (portal or manual contact)"
@@ -363,27 +491,27 @@ async def jobs_page():
                 ).classes("text-xs text-gray-600")
                 with ui.row().classes("w-full justify-end gap-2"):
                     async def make_pdf():
-                        ui.notify("Creating Bewerbungsmappe…")
+                        say("Creating Bewerbungsmappe…")
                         result = await mappe.create_mappe(job["id"])
                         if not result["ok"]:
-                            ui.notify(result["error"], type="warning",
+                            say(result["error"], type="warning",
                                       multi_line=True)
                             return
                         pdf_label.set_text(f"Mappe: {result['pdf_path']}")
-                        ui.notify(
+                        say(
                             helpers.mappe_summary(result, with_anlagen=True),
                             type="positive", multi_line=True,
                         )
                         if result["warning"]:
-                            ui.notify(result["warning"], type="warning",
+                            say(result["warning"], type="warning",
                                       multi_line=True)
 
                     def open_pdf():
                         path = (pdf_label.text or "").removeprefix("Mappe: ")
                         if not path:
-                            ui.notify("create the Mappe first", type="warning")
+                            say("create the Mappe first", type="warning")
                         elif not pathlib.Path(path).exists():
-                            ui.notify("the Mappe file is gone — create it "
+                            say("the Mappe file is gone — create it "
                                       "again", type="warning")
                         else:
                             open_in_system(path)
@@ -405,38 +533,63 @@ async def jobs_page():
             dialog.close()
             await draft(job, force=True)
 
-        async def draft(job: dict, force: bool = False):
+        async def draft(job: dict, force: bool = False, button=None):
             # a finished draft costs nothing to show again — regenerate only
             # on explicit request
             if not force:
                 existing = await run.io_bound(_load_draft, job["id"])
                 if existing is not None and existing["status"] == "ready":
-                    show_draft(existing, job)
+                    overlay.clear()
+                    with overlay:
+                        show_draft(existing, job)
                     return
-            ui.notify("Drafting application…")
-            result = await drafting.draft_for_job(job["id"])
-            if not result["ok"]:
-                ui.notify(result["error"], type="warning", multi_line=True)
-                return
-            show_draft(result["draft"], job)
+            say("Drafting application…")
+            if button is not None:
+                # A minute is long enough that a faded toast reads as "nothing
+                # happened" — the button that was pressed says what it is doing.
+                button.set_text("wird geschrieben…")
+                button.disable()
+            try:
+                result = await drafting.draft_for_job(job["id"])
+            except Exception:  # noqa: BLE001 — one posting, not the page
+                # drafting re-raises anything that is not an LLM error, having
+                # already marked the draft 'failed'. Without this the relabelled
+                # button stayed dead and the row kept claiming a draft was being
+                # written, with nothing said anywhere the user looks.
+                log.exception("drafting job %s raised", job["id"])
+                result = {"ok": False, "draft": None,
+                          "error": "Der Entwurf ist unerwartet fehlgeschlagen "
+                                   "— Details stehen im Log."}
+            # The row carries the outcome from here on, whichever way it went —
+            # and everything the user sees afterwards is built in `overlay`,
+            # because this refresh has just deleted the button we came from.
+            await refresh()
+            overlay.clear()
+            with overlay:
+                if not result["ok"]:
+                    say(result["error"], type="warning", multi_line=True)
+                    return
+                show_draft(result["draft"], job)
 
         async def resolve_channel(job: dict):
-            ui.notify("Bewerbungskanal wird ermittelt…")
+            say("Bewerbungskanal wird ermittelt…")
             res = await apply_resolve.resolve_and_store(job["id"])
             label = _apply_line({**job, "apply_channel": res["channel"],
                                  "ats_vendor": res["vendor"]})
-            ui.notify(label or "Kanal nicht ermittelbar",
-                      type="positive" if label else "warning")
             await refresh()
+            say(label or "Kanal nicht ermittelbar",
+                      type="positive" if label else "warning")
 
         async def find_email(job: dict):
-            ui.notify("Kontakt-E-Mail wird gesucht…")
+            say("Kontakt-E-Mail wird gesucht…")
             res = await contact_lookup.lookup_and_propose(job["id"])
             if not res["email"]:
-                ui.notify("Keine verifizierte Bewerbungs-E-Mail gefunden",
+                say("Keine verifizierte Bewerbungs-E-Mail gefunden",
                           type="warning")
                 return
-            with ui.dialog() as dialog, ui.card().classes("w-[440px] max-w-full"):
+            overlay.clear()
+            with overlay, ui.dialog() as dialog, \
+                    ui.card().classes("w-[440px] max-w-full"):
                 ui.label("Gefundene Bewerbungs-E-Mail").classes("font-bold")
                 ui.label(res["email"]).classes("text-lg")
                 ui.label(f"Quelle: {res['source_url']}").classes(
@@ -450,7 +603,7 @@ async def jobs_page():
 
                 async def adopt():
                     await run.io_bound(_set_contact_email, job["id"], res["email"])
-                    ui.notify(f"Übernommen: {res['email']}", type="positive")
+                    say(f"Übernommen: {res['email']}", type="positive")
                     dialog.close()
                     await refresh()
 
@@ -464,12 +617,13 @@ async def jobs_page():
         async def mark_portal(job: dict):
             await run.io_bound(_set_status, job["id"], "portal")
             open_url = _openable_url(job)
-            if open_url:
-                ui.navigate.to(open_url, new_tab=True)
-            else:
-                ui.notify("No safe URL stored for this posting — open it manually.",
-                          type="warning")
             await refresh()
+            if not open_url:
+                say("No safe URL stored for this posting — open it manually.",
+                    type="warning")
+                return
+            with overlay:  # navigate.to needs a live slot exactly like notify
+                ui.navigate.to(open_url, new_tab=True)
 
         async def skip(job: dict):
             await run.io_bound(_set_status, job["id"], "skipped")
@@ -477,11 +631,11 @@ async def jobs_page():
 
         async def confirm_applied(job: dict):
             bewerbung_id = await run.io_bound(_confirm_applied, job["id"], "Online-Portal")
-            if bewerbung_id is None:
-                ui.notify("Blocked: you already applied at this company", type="warning")
-            else:
-                ui.notify("Application recorded ✓", type="positive")
             await refresh()
+            if bewerbung_id is None:
+                say("Blocked: you already applied at this company", type="warning")
+            else:
+                say("Application recorded ✓", type="positive")
 
         with ui.row().classes("items-center gap-4"):
             ui.toggle(
@@ -493,9 +647,12 @@ async def jobs_page():
                 PILE_LABELS,
                 value=PILE_NONE,
                 on_change=lambda e: set_pile(e.value),
-            ).tooltip("The two hidden piles: postings scored 0 for violating a "
-                      "hard requirement, and postings whose ad the board says "
-                      "is gone. Hidden from the working list, never deleted.")
+            ).mark("pile-toggle").tooltip("The three hidden piles: postings scored 0 for violating "
+                      "a hard requirement, postings whose ad the board says is "
+                      "gone, and postings at a company an application already "
+                      "went to — only one per company is possible, so those "
+                      "can never become one. Hidden from the working list, "
+                      "never deleted.")
             ui.switch(
                 "Group by company",
                 value=True,

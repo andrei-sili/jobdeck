@@ -15,6 +15,11 @@ from jobdeck.ui.helpers import openable_url, posting_markdown
 from jobdeck.ui.pages import jobs
 
 
+def drafting_module():
+    from jobdeck.services import drafting
+    return drafting
+
+
 def _render(markdown_source: str) -> str:
     """The exact HTML NiceGUI would put on the page for this Markdown."""
     return prepare_content(markdown_source, extras=" ".join(ui.markdown.default_extras))
@@ -260,37 +265,45 @@ def test_mappe_summary_lists_the_anlagen_for_the_job_inbox():
     assert none == "Mappe ready: 1 pages, 0.1 MB · no Anlagen ✓"
 
 
-def test_the_working_inbox_hides_both_piles_and_each_view_shows_one():
+def test_the_working_inbox_hides_every_pile_and_each_view_shows_one():
     # a mismatch violates a stated hard requirement, a dead posting's ad is
-    # gone: both are facts about the posting, so both hide it — and opening one
-    # pile is a separate VIEW, not a filter stacked on the other
+    # gone, and a posting at a company already applied to can never become an
+    # application: all three are FACTS about the posting, so all three hide it
+    # — and opening one pile is a separate VIEW, not a filter stacked on another
     assert jobs._PILE_FILTERS[jobs.PILE_NONE] == {
-        "mismatches": "exclude", "gone": "exclude"}
+        "mismatches": "exclude", "gone": "exclude", "applied": "exclude"}
     assert jobs._PILE_FILTERS[jobs.PILE_MISMATCHES]["mismatches"] == "only"
     assert jobs._PILE_FILTERS[jobs.PILE_DEAD]["gone"] == "only"
-    assert set(jobs._PILE_FILTERS) == set(jobs._EMPTY_VIEW)
+    assert jobs._PILE_FILTERS[jobs.PILE_APPLIED]["applied"] == "only"
+    for pile, filters in jobs._PILE_FILTERS.items():
+        only = [k for k, v in filters.items() if v == "only"]
+        assert len(only) == (0 if pile == jobs.PILE_NONE else 1), pile
+    assert set(jobs._PILE_FILTERS) == set(jobs._EMPTY_VIEW) == set(jobs.PILE_LABELS)
 
 
-@pytest.mark.parametrize("pile, status, mismatches, dead, expected", [
-    (jobs.PILE_NONE, "new", 129, 58, "129 mismatches hidden · 58 dead hidden"),
-    (jobs.PILE_NONE, "new", 0, 58, "58 dead hidden"),
-    (jobs.PILE_NONE, "new", 129, 0, "129 mismatches hidden"),
-    (jobs.PILE_NONE, "new", 0, 0, ""),
+@pytest.mark.parametrize("pile, status, mismatches, dead, applied, expected", [
+    (jobs.PILE_NONE, "new", 129, 58, 30,
+     "129 mismatches hidden · 58 dead hidden · 30 bei schon beworbenen Firmen hidden"),
+    (jobs.PILE_NONE, "new", 0, 58, 0, "58 dead hidden"),
+    (jobs.PILE_NONE, "new", 129, 0, 0, "129 mismatches hidden"),
+    (jobs.PILE_NONE, "new", 0, 0, 0, ""),
+    (jobs.PILE_APPLIED, "new", 129, 58, 30,
+     "30 Stellen bei Firmen, bei denen du dich schon beworben hast"),
     # a pile view INCLUDES the other pile, so it must not claim to hide it — the
     # label is derived from the filters the query really used
-    (jobs.PILE_MISMATCHES, "new", 129, 58,
+    (jobs.PILE_MISMATCHES, "new", 129, 58, 30,
      "129 mismatches — hard requirement violated"),
-    (jobs.PILE_DEAD, "new", 129, 58, "58 postings whose ad is gone"),
+    (jobs.PILE_DEAD, "new", 129, 58, 30, "58 postings whose ad is gone"),
     # a view of postings he has already acted on hides nothing at all
-    (jobs.PILE_NONE, "portal", 129, 58, ""),
-    (jobs.PILE_NONE, "applied", 129, 58, ""),
+    (jobs.PILE_NONE, "portal", 129, 58, 30, ""),
+    (jobs.PILE_NONE, "applied", 129, 58, 30, ""),
 ])
 def test_the_hidden_line_can_never_contradict_the_list(pile, status, mismatches,
-                                                       dead, expected):
+                                                       dead, applied, expected):
     # never a total either: a posting can be both a mismatch and offline, so
     # adding the two would double-count it
     filters = jobs._view_filters(pile, status)
-    assert jobs._hidden_line(filters, mismatches, dead) == expected
+    assert jobs._hidden_line(filters, mismatches, dead, applied) == expected
 
 
 def test_a_posting_he_has_acted_on_is_never_hidden_from_its_own_view(con, data_dir):
@@ -303,7 +316,8 @@ def test_a_posting_he_has_acted_on_is_never_hidden_from_its_own_view(con, data_d
     con.commit()
     portal = jobs._load_jobs("portal", jobs.PILE_NONE, 0)
     assert [r["id"] for r in portal["rows"]] == [job_id]
-    assert portal["filters"] == {"mismatches": "include", "gone": "include"}
+    assert portal["filters"] == {"mismatches": "include", "gone": "include",
+                                 "applied": "include"}
     # while the working inbox still hides it
     assert db.count_jobs(con, "new", gone="exclude") == 0
 
@@ -654,3 +668,289 @@ def test_changing_the_view_always_returns_to_the_first_page(con, data_dir):
     con.commit()
     assert jobs._load_jobs("new", jobs.PILE_NONE, 99)["page"] == 2
     assert jobs._load_jobs("new", jobs.PILE_NONE, -5)["page"] == 0
+
+
+# --------------------------------------------------------------------------
+# A draft being written was invisible everywhere for the minute it took: the
+# row existed and no view listed it, so pressing Draft twice was the only way
+# to learn the app was working.
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize("status, expected_in_line", [
+    ("generating", "wird gerade geschrieben"),
+    ("ready", "Review queue"),
+    ("approved", "Review queue"),
+    ("sending", "Versand"),
+    ("failed", "fehlgeschlagen"),
+    ("sent", "gesendet"),
+])
+def test_the_row_says_what_its_draft_is_doing(status, expected_in_line):
+    text, classes = jobs._draft_line(status)
+    assert expected_in_line in text
+    assert classes.startswith("text-sm ")
+
+
+@pytest.mark.parametrize("status", ["discarded", "", None])
+def test_a_posting_with_nothing_to_report_says_nothing(status):
+    """A discarded draft leaves the posting where it started; a line about a
+    draft that no longer exists would only be in the way."""
+    assert jobs._draft_line(status) == ("", "")
+
+
+def test_the_inbox_carries_the_draft_state_in_every_view(con, data_dir):
+    from jobdeck import db
+    quiet = _company_job(con, "d1", "Ohne Entwurf GmbH", 90)
+    busy = _company_job(con, "d2", "Mit Entwurf GmbH", 80)
+    db.upsert_draft(con, busy, {"status": "generating"})
+    con.commit()
+
+    for collapse in (True, False):
+        rows = {r["id"]: r["draft_status"]
+                for r in jobs._load_jobs("new", jobs.PILE_NONE, 0,
+                                         collapse=collapse)["rows"]}
+        assert rows[busy] == "generating", collapse
+        assert rows[quiet] is None, collapse
+
+
+def test_a_sibling_row_carries_it_too(con, data_dir):
+    """Siblings come from the shared ranking CTE — if the column were added to
+    the flat query only, a grouped company's other postings would lose it."""
+    from jobdeck import db
+    best = _company_job(con, "s1", "Eine Firma GmbH", 90)
+    second = _company_job(con, "s2", "Eine Firma GmbH", 70)
+    db.upsert_draft(con, second, {"status": "ready"})
+    con.commit()
+    view = jobs._load_jobs("new", jobs.PILE_NONE, 0)
+    head = view["rows"][0]
+    assert head["id"] == best
+    siblings = view["siblings"][head["company_key"]]
+    assert [(r["id"], r["draft_status"]) for r in siblings] == [(second, "ready")]
+
+
+def test_the_row_describes_the_same_draft_every_button_acts_on(con, data_dir):
+    """drafts.job_id has no UNIQUE constraint and get_draft_by_job answers with
+    the NEWEST row. A view reading any other one would describe a draft the
+    buttons do not touch."""
+    from jobdeck import db
+    job_id = _company_job(con, "n1", "Zwei Entwürfe GmbH", 90)
+    con.execute(
+        "INSERT INTO drafts (job_id, status, created_at, updated_at) "
+        "VALUES (?, 'discarded', '2026-08-01T10:00:00', '2026-08-01T10:00:00')",
+        (job_id,))
+    con.execute(
+        "INSERT INTO drafts (job_id, status, created_at, updated_at) "
+        "VALUES (?, 'ready', '2026-08-02T10:00:00', '2026-08-02T10:00:00')",
+        (job_id,))
+    con.commit()
+    assert db.get_draft_by_job(con, job_id)["status"] == "ready"
+    view = jobs._load_jobs("new", jobs.PILE_NONE, 0)
+    assert view["rows"][0]["draft_status"] == "ready"
+
+
+def test_the_draft_button_is_guarded_on_a_live_claim_not_on_a_status():
+    """A row can say 'generating' long after the process holding the claim
+    died, and this button is the only thing that can restart it — see
+    tests/test_draft_visibility_pages.py for the rendered proof."""
+    source = pathlib.Path(jobs.__file__).read_text()
+    guard = source[:source.index('"Draft application"')]
+    guard = guard[guard.rindex('if (job["status"]'):]
+    assert "_claim_is_running(job)" in guard
+    # and the outcome reaches the row: without a refresh the line would still
+    # claim the draft is being written after it finished
+    handler = source[source.index("async def draft("):]
+    handler = handler[:handler.index("async def resolve_channel")]
+    assert "await refresh()" in handler
+
+
+@pytest.mark.parametrize("age, running", [
+    (0.0, True), (1.0, True),
+    (drafting_module().CLAIM_TIMEOUT_MIN - 0.1, True),
+    (drafting_module().CLAIM_TIMEOUT_MIN + 0.1, False),
+    (600.0, False),
+])
+def test_only_a_claim_the_reclaim_would_refuse_hides_the_button(age, running):
+    """The button must come back at exactly the moment drafting._claim would
+    take the row over — one minute earlier and a second draft is paid for,
+    one minute later and an abandoned draft is unrecoverable."""
+    import datetime
+    stamp = (datetime.datetime.now()
+             - datetime.timedelta(minutes=age)).isoformat(timespec="seconds")
+    job = {"draft_status": "generating", "draft_updated_at": stamp}
+    assert jobs._claim_is_running(job) is running
+    assert ("abgebrochen" in jobs._draft_line("generating", stamp)[0]) is not running
+
+
+def test_an_unreadable_claim_timestamp_reads_as_running():
+    """A stored value we cannot parse is not evidence the process died — and
+    treating it as dead would let a second claim start while the first is
+    still spending money."""
+    assert jobs._claim_is_running(
+        {"draft_status": "generating", "draft_updated_at": "not a timestamp"})
+
+
+_NESTED_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+
+
+def _own_statements(func):
+    """Nodes belonging to this function, not to a scope nested inside it.
+
+    The whole subtree of a nested def is skipped, not merely its header — and
+    a lambda counts as nested too: `on_click=lambda: ui.navigate.to(...)` runs
+    when the button is clicked, in that button's own live slot, not while the
+    page around it is being built."""
+    stack = list(ast.iter_child_nodes(func))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, _NESTED_SCOPES):
+            continue
+        yield node
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _unhosted_ui_calls(path):
+    """Every element a page builds on a slot a refresh may already have taken
+    away: a bare `ui.notify` anywhere (the page has `say` for that), and a
+    `ui.dialog()` or `ui.navigate.to()` reached AFTER the handler has awaited.
+
+    Before an await the sender's slot is alive by definition, so a synchronous
+    click handler navigating straight away is fine."""
+    tree = ast.parse(pathlib.Path(path).read_text())
+    page = next(n for n in ast.walk(tree)
+                if isinstance(n, ast.AsyncFunctionDef) and n.name.endswith("_page"))
+    hosted = {
+        node.lineno
+        for stmt in ast.walk(page) if isinstance(stmt, ast.With)
+        and any(ast.unparse(i.context_expr) == "overlay" for i in stmt.items)
+        for node in ast.walk(stmt) if hasattr(node, "lineno")
+    }
+    offenders = []
+    # Sync helpers count too: `say` is a plain def, and dropping its
+    # `with overlay:` restores the whole defect while every async handler
+    # still looks innocent.
+    scopes = [page] + [n for n in ast.walk(page)
+                       if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    for func in scopes:
+        own = list(_own_statements(func))
+        awaits = [n.lineno for n in own if isinstance(n, ast.Await)]
+        first_await = min(awaits, default=None)
+        for node in own:
+            if not isinstance(node, ast.Call):
+                continue
+            target = ast.unparse(node.func)
+            if target == "ui.notify" and node.lineno not in hosted:
+                offenders.append((func.name, target, node.lineno))
+            elif (target in ("ui.dialog", "ui.navigate.to")
+                    and first_await is not None and node.lineno > first_await
+                    and node.lineno not in hosted):
+                offenders.append((func.name, target, node.lineno))
+    return sorted(set(offenders))
+
+
+@pytest.mark.parametrize("page_module", ["jobs.py", "queue.py"])
+def test_nothing_is_shown_on_a_slot_that_may_already_be_gone(page_module):
+    """The defect CLASS, not the one place it was found. A handler runs in the
+    slot of the element that fired it; any refresh — its own, a concurrent
+    one, or the queue's timer — deletes that slot while the handler is
+    awaiting. NiceGUI then raises from context.client and handle_event
+    swallows it, so the user sees NOTHING: the drafting error notification
+    vanished exactly this way with the whole suite green."""
+    path = pathlib.Path(jobs.__file__).parent / page_module
+    offenders = _unhosted_ui_calls(path)
+    assert offenders == [], (
+        f"{page_module}: built where a refresh can delete it — "
+        + ", ".join(f"{fn}() {what} at line {line}" for fn, what, line in offenders)
+        + " (use say(...) for messages, `with overlay:` for the rest)")
+
+
+@pytest.mark.parametrize("page_module", ["jobs.py", "queue.py"])
+def test_the_slot_rule_is_actually_binding(page_module):
+    """A scan that finds no candidates would pass on any code at all."""
+    source = (pathlib.Path(jobs.__file__).parent / page_module).read_text()
+    assert source.count("with overlay") >= 2, "nothing is hosted"
+    assert "def say(" in source, "the page has no safe way to notify"
+    assert source.count("say(") >= 5, "messages are not routed through it"
+
+
+def test_nothing_the_user_sees_is_built_on_a_slot_a_refresh_just_deleted():
+    """A handler runs in the slot of the button that fired it, and refresh()
+    clears the container that button lives in. NiceGUI then raises
+    'The parent element this slot belongs to has been deleted' from
+    context.client — so the failure notification never appears and the error
+    it was reporting is swallowed. Caught in the running app 2026-08-10, with
+    the whole suite green: an AST rule is what makes it stay caught."""
+    tree = ast.parse(pathlib.Path(jobs.__file__).read_text())
+    handlers = [n for n in ast.walk(tree)
+                if isinstance(n, ast.AsyncFunctionDef) and n.name == "draft"]
+    assert len(handlers) == 1, "the draft handler moved or was renamed"
+
+    # The name alone proves nothing: `overlay = container` would satisfy every
+    # rule below while restoring the defect exactly.
+    bindings = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                and [ast.unparse(t) for t in n.targets] == ["overlay"]]
+    assert len(bindings) == 1 and ast.unparse(
+        bindings[0].value).startswith("ui.column()"), (
+        "`overlay` must be its own element, not another name for one a "
+        "refresh clears")
+
+    def refreshes(node) -> bool:
+        return any(isinstance(c, ast.Call) and getattr(c.func, "id", "") == "refresh"
+                   for c in ast.walk(node))
+
+    body = handlers[0].body
+    after = body[next(i for i, s in enumerate(body) if refreshes(s)) + 1:]
+    assert after, "the handler does nothing after refreshing — the guard is moot"
+
+    def is_overlay_reset(node) -> bool:
+        """`overlay.clear()` builds nothing, so it needs no live parent."""
+        return (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                and ast.unparse(node.value.func) == "overlay.clear")
+
+    hosted = 0
+    for statement in after:
+        if is_overlay_reset(statement):
+            continue
+        assert isinstance(statement, ast.With), (
+            f"line {statement.lineno}: built outside a live parent after "
+            "refresh() deleted this handler's slot")
+        assert [ast.unparse(i.context_expr) for i in statement.items] == ["overlay"], (
+            f"line {statement.lineno}: the host must be the sibling `overlay`, "
+            "not an element the refresh can delete")
+        hosted += 1
+    assert hosted, "nothing is hosted — the rule would pass on an empty tail"
+
+
+def test_the_sql_filter_agrees_with_the_gate_on_every_shape(con, data_dir):
+    """`db.APPLIED_FIRM_SQL` is a SECOND implementation of _first_match — it has
+    to run where the paging and the counts do. Two hand-written copies of one
+    rule drift, and this one decides whether a posting is shown at all, so the
+    two are pinned equal over a generated corpus rather than argued about."""
+    from jobdeck import db
+    from jobdeck.dedupe import _BEWERBUNGEN_SQL, _first_match
+
+    firms = ["Müller GmbH", "MÜLLER  GmbH", "müller gmbh ", "Müller AG",
+             "a.b® GmbH", "a.b GmbH", "ab GmbH", "180° GmbH", "180 GmbH",
+             "ACME™", "ACME", "", "   ", "Ⓐ GmbH", "Ⓑ GmbH", "Beispiel\xadGmbH"]
+    mails = ["", "jobs@mueller.de", "JOBS@MUELLER.DE", "  ",
+             "bewerbung^x@a.de", "bewerbungx@a.de", "hr@andere.de"]
+    for firma, email in [("Müller GmbH", "jobs@mueller.de"), ("ACME AG", ""),
+                         ("", "hr@andere.de"), ("  ", "  ")]:
+        db.add_bewerbung(con, {"gesendet_am": "2026-06-10", "firma": firma,
+                               "email": email, "kanal": "E-Mail",
+                               "status": "Gesendet"})
+    for index, (firma, email) in enumerate(
+            [(f, m) for f in firms for m in mails]):
+        db.insert_job_if_new(con, {
+            "source": "stub", "external_id": f"x{index}", "title": "Dev",
+            "company": firma, "contact_email": email,
+            "url": f"https://e.example/{index}"})
+    con.commit()
+
+    rows = con.execute(_BEWERBUNGEN_SQL).fetchall()
+    by_sql = {r[0] for r in con.execute(
+        f"SELECT id FROM jobs WHERE {db.APPLIED_FIRM_SQL}")}
+    by_gate = {j["id"] for j in con.execute("SELECT * FROM jobs")
+               if _first_match(rows, j["company"], j["contact_email"])}
+    assert by_sql == by_gate, (
+        f"SQL-only: {sorted(by_sql - by_gate)}, gate-only: {sorted(by_gate - by_sql)}")
+    assert by_gate, "the corpus produced no matches — the check would be vacuous"
+    assert by_gate != {j[0] for j in con.execute("SELECT id FROM jobs")}, \
+        "everything matched — the check would pass on a filter that never hides"

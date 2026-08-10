@@ -37,6 +37,29 @@ NO_REGEN = {
 }
 
 
+def claim_age_minutes(updated_at: object) -> float:
+    """How long a 'generating' row has been claimed, 0.0 when unreadable.
+
+    A stored timestamp we cannot parse is not evidence that anything is
+    wrong, so it reads as fresh: treating it as abandoned would let a second
+    claim start while the first is still spending money."""
+    try:
+        started = datetime.datetime.fromisoformat(str(updated_at))
+    except (TypeError, ValueError):
+        return 0.0
+    return (datetime.datetime.now() - started).total_seconds() / 60
+
+
+def claim_is_stale(updated_at: object) -> bool:
+    """Has the process holding this claim died?
+
+    ONE definition for the three places that must agree: the reclaim in
+    `_claim`, the review queue's wording, and the Job inbox's Draft button —
+    which is the only surface that can trigger the reclaim, so a button that
+    hid for longer than this made an abandoned draft unrecoverable."""
+    return claim_age_minutes(updated_at) >= CLAIM_TIMEOUT_MIN
+
+
 def _error(message: str) -> dict:
     return {"ok": False, "error": message, "draft": None}
 
@@ -75,9 +98,7 @@ def _claim(job_id: int) -> str:
             if refusal:
                 return refusal
             if existing["status"] == "generating":
-                started = datetime.datetime.fromisoformat(existing["updated_at"])
-                age_min = (datetime.datetime.now() - started).total_seconds() / 60
-                if age_min < CLAIM_TIMEOUT_MIN:
+                if not claim_is_stale(existing["updated_at"]):
                     return "a draft for this posting is already being generated"
                 log.warning("reclaiming abandoned draft for job %s", job_id)
         # A regenerated draft invalidates any previously built Mappe — the

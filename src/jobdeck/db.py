@@ -396,9 +396,50 @@ MISMATCH_SQL = "match_score=0"
 # fact, not a judgement — it hides the row, it never deletes it.
 GONE_SQL = f"liveness='{LIVENESS_GONE}'"
 
+# What the posting's own draft is doing, so the inbox can say so on the row.
+# A draft that is being written is otherwise invisible EVERYWHERE for the
+# minute it takes: the row exists, and no view showed it, so the only feedback
+# a second press gave was "already being generated".
+# `drafts.job_id` carries no UNIQUE constraint and `get_draft_by_job` answers
+# with the newest row — this must pick the SAME one, or the inbox would
+# describe a draft other than the one every button acts on.
+_DRAFT_STATUS_SQL = (
+    "(SELECT d.status FROM drafts d WHERE d.job_id=jobs.id "
+    "ORDER BY d.id DESC LIMIT 1)"
+)
+# When the draft last moved. For a 'generating' row this is when the claim was
+# taken, which is what tells a draft still being written from one whose process
+# died — the Draft button is the only thing that can restart the second, so the
+# inbox has to be able to tell them apart (services/drafting.claim_is_stale).
+_DRAFT_UPDATED_SQL = (
+    "(SELECT d.updated_at FROM drafts d WHERE d.job_id=jobs.id "
+    "ORDER BY d.id DESC LIMIT 1)"
+)
+
+
+# A posting at a company an application already went to. Only ONE application
+# per company is possible, so such a posting can never become one — the same
+# kind of fact as a score-0 mismatch or an offline ad, and hidden on the same
+# terms. It is the SQL mirror of dedupe._first_match (company OR contact
+# e-mail, each arm requiring the posting's own field to be non-empty), because
+# the filter has to run where the paging and the counts do. A differential
+# test pins the two equal over a generated corpus — two hand-written copies of
+# one rule drift, and this one decides whether he sees a posting at all.
+# Written as two UNCORRELATED IN-subqueries on purpose. The obvious
+# `EXISTS (... WHERE jd_norm(b.firma) = jd_norm(jobs.company))` makes SQLite
+# call jd_norm — a Python callback — once per (posting, application) pair:
+# measured at 330 ms over the real corpus, and the inbox pays the filter three
+# times per page (count, list, siblings). Uncorrelated, each side is folded
+# once and matched through an ephemeral index.
+APPLIED_FIRM_SQL = """(
+    (jd_norm(jobs.company) <> '' AND jd_norm(jobs.company) IN (
+        SELECT jd_norm(b.firma) FROM bewerbungen b WHERE jd_norm(b.firma) <> ''))
+ OR (jd_norm(jobs.contact_email) <> '' AND jd_norm(jobs.contact_email) IN (
+        SELECT jd_norm(b.email) FROM bewerbungen b WHERE jd_norm(b.email) <> '')))"""
+
 
 def _job_filters(
-    status: str | None, mismatches: str, gone: str
+    status: str | None, mismatches: str, gone: str, applied: str = "include"
 ) -> tuple[list[str], list]:
     """WHERE fragments + bound values shared by the list and the count, so a
     page can never be filtered differently from the total printed beside it.
@@ -406,7 +447,8 @@ def _job_filters(
     An unrecognised filter value raises rather than being ignored: silently
     falling through would SHOW a pile the caller asked to hide, and a hidden
     pile exists precisely because its rows should not be acted on."""
-    for name, value in (("mismatches", mismatches), ("gone", gone)):
+    for name, value in (("mismatches", mismatches), ("gone", gone),
+                        ("applied", applied)):
         if value not in ("include", "exclude", "only"):
             raise ValueError(f"{name}={value!r}: expected include/exclude/only")
     where, params = [], []
@@ -421,6 +463,10 @@ def _job_filters(
         where.append(f"NOT ({GONE_SQL})")
     elif gone == "only":
         where.append(GONE_SQL)
+    if applied == "exclude":
+        where.append(f"NOT ({APPLIED_FIRM_SQL})")
+    elif applied == "only":
+        where.append(APPLIED_FIRM_SQL)
     return where, params
 
 
@@ -450,7 +496,9 @@ def _ranked_jobs_cte(where_sql: str) -> str:
         "WITH filtered AS ("
         f" SELECT *, {freshness.AGE_SQL} AS age_days,"
         f" {freshness.effective_score_sql()} AS effective_score,"
-        f" {_COMPANY_KEY_SQL} AS company_key"
+        f" {_COMPANY_KEY_SQL} AS company_key,"
+        f" {_DRAFT_STATUS_SQL} AS draft_status,"
+        f" {_DRAFT_UPDATED_SQL} AS draft_updated_at"
         f" FROM jobs{where_sql}"
         "), ranked AS ("
         " SELECT *, ROW_NUMBER() OVER ranking AS rank_in_company,"
@@ -472,6 +520,7 @@ def list_job_groups(
     limit: int = 500,
     mismatches: str = "include",
     gone: str = "include",
+    applied: str = "include",
     offset: int = 0,
 ) -> list[sqlite3.Row]:
     """One row per company: its best-ranked posting, plus `company_count`.
@@ -481,7 +530,7 @@ def list_job_groups(
     never silently reorders the page under the user. Only the ranking WITHIN a
     company is always by score, because something has to choose which posting
     represents it."""
-    where, params = _job_filters(status, mismatches, gone)
+    where, params = _job_filters(status, mismatches, gone, applied)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     order = _JOB_ORDER_SQL if status else "id DESC"
     return con.execute(
@@ -497,9 +546,10 @@ def count_job_groups(
     status: str | None = None,
     mismatches: str = "include",
     gone: str = "include",
+    applied: str = "include",
 ) -> int:
     """How many companies the grouped view holds."""
-    where, params = _job_filters(status, mismatches, gone)
+    where, params = _job_filters(status, mismatches, gone, applied)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     return con.execute(
         f"{_ranked_jobs_cte(where_sql)}"
@@ -517,6 +567,7 @@ def list_company_siblings(
     status: str | None = None,
     mismatches: str = "include",
     gone: str = "include",
+    applied: str = "include",
     per_company: int = SIBLINGS_PER_COMPANY,
 ) -> list[sqlite3.Row]:
     """The postings a grouped row stands in front of, best-ranked first.
@@ -527,7 +578,7 @@ def list_company_siblings(
     are."""
     if not company_keys:
         return []
-    where, params = _job_filters(status, mismatches, gone)
+    where, params = _job_filters(status, mismatches, gone, applied)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     placeholders = ",".join("?" * len(company_keys))
     return con.execute(
@@ -545,10 +596,11 @@ def count_jobs(
     status: str | None = None,
     mismatches: str = "include",
     gone: str = "include",
+    applied: str = "include",
 ) -> int:
     """How many postings a `list_jobs` call with the same filters would have,
     ignoring its page limit — the total a paged view has to print."""
-    where, params = _job_filters(status, mismatches, gone)
+    where, params = _job_filters(status, mismatches, gone, applied)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     return con.execute(
         f"SELECT COUNT(*) FROM jobs{where_sql}", params
@@ -561,6 +613,7 @@ def list_jobs(
     limit: int = 500,
     mismatches: str = "include",
     gone: str = "include",
+    applied: str = "include",
     offset: int = 0,
 ) -> list[sqlite3.Row]:
     """List postings. mismatches: 'include' (default), 'exclude' (hide the
@@ -568,13 +621,15 @@ def list_jobs(
     (just the hidden pile — keeps mismatches reachable regardless of how
     many better-scored rows fill the page limit). `gone` takes the same three
     values over postings whose ad the source says is no longer there."""
-    where, params = _job_filters(status, mismatches, gone)
+    where, params = _job_filters(status, mismatches, gone, applied)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     # The age-adjusted score is SELECTED as well as ordered on, so the number
     # the UI prints is the very number that decided the row's position — two
     # copies of that rule would drift (see freshness.py).
     derived = (f"{freshness.AGE_SQL} AS age_days, "
-               f"{freshness.effective_score_sql()} AS effective_score")
+               f"{freshness.effective_score_sql()} AS effective_score, "
+               f"{_DRAFT_STATUS_SQL} AS draft_status, "
+               f"{_DRAFT_UPDATED_SQL} AS draft_updated_at")
     order = _JOB_ORDER_SQL if status else "id DESC"
     return con.execute(
         f"SELECT *, {derived} FROM jobs{where_sql} "
@@ -833,9 +888,7 @@ def jobs_to_prepare(
            AND NOT EXISTS (
                  SELECT 1 FROM drafts d
                   WHERE d.job_id = j.id AND d.status IN ({placeholders}))
-           AND jd_norm(j.company) NOT IN (
-                 SELECT jd_norm(firma) FROM bewerbungen
-                  WHERE trim(coalesce(firma,'')) <> '')
+           AND NOT ({APPLIED_FIRM_SQL.replace("jobs.", "j.")})
          ORDER BY effective_score DESC, j.published_on DESC, j.id DESC
          LIMIT ?
         """,
@@ -868,6 +921,16 @@ def count_drafts_created_today(con: sqlite3.Connection) -> int:
 def count_gone_jobs(con: sqlite3.Connection, status: str | None = None) -> int:
     """How many postings the liveness filter would hide for this inbox view."""
     sql = f"SELECT COUNT(*) FROM jobs WHERE {GONE_SQL}"
+    params: tuple = ()
+    if status:
+        sql += " AND status=?"
+        params = (status,)
+    return con.execute(sql, params).fetchone()[0]
+
+
+def count_applied_firm_jobs(con: sqlite3.Connection, status: str | None = None) -> int:
+    """How many postings the already-applied filter would hide for this view."""
+    sql = f"SELECT COUNT(*) FROM jobs WHERE {APPLIED_FIRM_SQL}"
     params: tuple = ()
     if status:
         sql += " AND status=?"
