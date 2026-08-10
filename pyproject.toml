@@ -78,3 +78,7 @@ select = ["E", "F", "W", "I", "UP", "B"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# NiceGUI's in-process page harness. `user_plugin`, not the full `plugin`:
+# the latter pulls in selenium for its browser fixture, which this project
+# neither needs nor installs.
+markers = ["nicegui_main_file: entry point for the NiceGUI user fixture"]

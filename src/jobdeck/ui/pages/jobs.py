@@ -198,8 +198,6 @@ def _apply_line(job: dict) -> str:
 # back to where it started, and a line about a draft that no longer exists
 # would only be in the way.
 _DRAFT_LINES = {
-    "generating": ("✍ Die Bewerbung wird gerade geschrieben — das dauert "
-                   "etwa eine Minute.", "text-sm text-blue-700"),
     "ready": ("✓ Entwurf fertig — in der Review queue prüfen und senden.",
               "text-sm text-green-700"),
     "approved": ("✓ Entwurf freigegeben — wartet in der Review queue auf den "
@@ -212,9 +210,36 @@ _DRAFT_LINES = {
 }
 
 
-def _draft_line(draft_status: object) -> tuple[str, str]:
+# A claim whose process died says so instead of promising a minute forever —
+# and it must say the SAME thing the review queue says about the same row, so
+# both ask services/drafting. This is also the line that has to stay honest
+# about the Draft button below it: the button is what restarts an abandoned
+# draft, so it comes back exactly when this text starts calling it abandoned.
+_CLAIM_LIVE = ("✍ Die Bewerbung wird gerade geschrieben — das dauert etwa "
+               "eine Minute.", "text-sm text-blue-700")
+_CLAIM_ABANDONED = ("⚠ Der Entwurf wurde begonnen und nie fertig — der "
+                    "Vorgang ist abgebrochen. Erneut auf „Draft "
+                    "application“ drücken.", "text-sm text-amber-700")
+
+
+def _draft_line(draft_status: object, draft_updated_at: object = None
+                ) -> tuple[str, str]:
     """(text, CSS classes) for the posting's draft state; ('', '') for none."""
+    if str(draft_status or "") == "generating":
+        return (_CLAIM_ABANDONED if drafting.claim_is_stale(draft_updated_at)
+                else _CLAIM_LIVE)
     return _DRAFT_LINES.get(str(draft_status or ""), ("", ""))
+
+
+def _claim_is_running(job: dict) -> bool:
+    """Is a draft for this posting being written RIGHT NOW?
+
+    Only then may the Draft button hide. `drafting._claim` re-claims a row
+    abandoned past CLAIM_TIMEOUT_MIN, and this button is the only surface
+    that can trigger it — hiding it for as long as the row merely says
+    'generating' left a crashed draft with no way back."""
+    return (job["draft_status"] == "generating"
+            and not drafting.claim_is_stale(job["draft_updated_at"]))
 
 
 def _openable_url(job: dict) -> str:
@@ -307,7 +332,8 @@ async def jobs_page():
                 if job["duplicate_of"]:
                     ui.label("⚠ You already applied at this company — see Applications.") \
                         .classes("text-sm text-amber-700")
-                draft_text, draft_classes = _draft_line(job["draft_status"])
+                draft_text, draft_classes = _draft_line(
+                    job["draft_status"], job["draft_updated_at"])
                 if draft_text:
                     ui.label(draft_text).classes(draft_classes)
                 channel_line = _apply_line(job)
@@ -335,11 +361,12 @@ async def jobs_page():
                                       ui.navigate.to(f"/cockpit/{j['id']}")) \
                             .props("outline")
                     if (job["status"] in ("new", "portal")
-                            and job["draft_status"] != "generating"):
+                            and not _claim_is_running(job)):
                         # also at the form stage: the cockpit's own gaps tell him
                         # to draft, and opening a form moves the posting here.
-                        # While one is being written the button can only refuse,
-                        # so the line above says so instead.
+                        # While one is genuinely being written the button can
+                        # only refuse, so the line above says so instead — but
+                        # once the claim goes stale this is the ONLY way back.
                         # `draft_button` is local to this render_job call, so the
                         # closure sees this row's own button and no other.
                         draft_button = ui.button("Draft application", icon="edit_note") \

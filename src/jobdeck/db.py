@@ -407,6 +407,14 @@ _DRAFT_STATUS_SQL = (
     "(SELECT d.status FROM drafts d WHERE d.job_id=jobs.id "
     "ORDER BY d.id DESC LIMIT 1)"
 )
+# When the draft last moved. For a 'generating' row this is when the claim was
+# taken, which is what tells a draft still being written from one whose process
+# died — the Draft button is the only thing that can restart the second, so the
+# inbox has to be able to tell them apart (services/drafting.claim_is_stale).
+_DRAFT_UPDATED_SQL = (
+    "(SELECT d.updated_at FROM drafts d WHERE d.job_id=jobs.id "
+    "ORDER BY d.id DESC LIMIT 1)"
+)
 
 
 def _job_filters(
@@ -463,7 +471,8 @@ def _ranked_jobs_cte(where_sql: str) -> str:
         f" SELECT *, {freshness.AGE_SQL} AS age_days,"
         f" {freshness.effective_score_sql()} AS effective_score,"
         f" {_COMPANY_KEY_SQL} AS company_key,"
-        f" {_DRAFT_STATUS_SQL} AS draft_status"
+        f" {_DRAFT_STATUS_SQL} AS draft_status,"
+        f" {_DRAFT_UPDATED_SQL} AS draft_updated_at"
         f" FROM jobs{where_sql}"
         "), ranked AS ("
         " SELECT *, ROW_NUMBER() OVER ranking AS rank_in_company,"
@@ -588,7 +597,8 @@ def list_jobs(
     # copies of that rule would drift (see freshness.py).
     derived = (f"{freshness.AGE_SQL} AS age_days, "
                f"{freshness.effective_score_sql()} AS effective_score, "
-               f"{_DRAFT_STATUS_SQL} AS draft_status")
+               f"{_DRAFT_STATUS_SQL} AS draft_status, "
+               f"{_DRAFT_UPDATED_SQL} AS draft_updated_at")
     order = _JOB_ORDER_SQL if status else "id DESC"
     return con.execute(
         f"SELECT *, {derived} FROM jobs{where_sql} "

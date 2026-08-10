@@ -144,8 +144,10 @@ def test_an_abandoned_claim_says_so_instead_of_promising_a_minute():
     stale = datetime.datetime.now() - datetime.timedelta(
         minutes=drafting.CLAIM_TIMEOUT_MIN + 2)
     text, classes = queue.generating_line(stale.isoformat(timespec="seconds"))
-    assert "abgebrochen" in text and "neu starten" in text
+    assert "abgebrochen" in text and "Draft" in text
     assert "amber" in classes
+    # the number it prints is the real age, not a constant
+    assert str(drafting.CLAIM_TIMEOUT_MIN + 2) in text
 
 
 def test_an_unreadable_timestamp_is_not_evidence_of_a_dead_claim():
@@ -171,12 +173,9 @@ def test_the_poll_rebuilds_the_page_only_when_the_drafts_changed(con, data_dir):
     assert queue.draft_signature(before) != queue.draft_signature(after)
 
 
-def test_the_queue_polls_only_while_something_is_being_written():
-    """One timer for the page's lifetime, inert otherwise — a timer created
-    per generating row would accumulate on every refresh."""
+def test_the_queue_keeps_exactly_one_page_lifetime_timer():
+    """A timer created per generating row would accumulate on every refresh.
+    What the timer DOES is proven by rendering the page — see
+    tests/test_draft_visibility_pages.py."""
     source = pathlib.Path(queue.__file__).read_text()
     assert source.count("ui.timer(") == 1
-    body = source[source.index("async def poll_while_generating"):]
-    body = body[:body.index("ui.timer(")]
-    assert 'if not shown["generating"]:' in body
-    assert "return" in body

@@ -6,7 +6,6 @@ real sending is OFF, the banner and the pre-send confirmation both show
 the test recipient every message will actually go to.
 """
 
-import datetime
 import pathlib
 
 from nicegui import run, ui
@@ -36,27 +35,27 @@ EMPTY_TEXT = {
 EDITABLE_STATUS = ("ready", "approved")
 
 # How often the queue re-reads itself while a draft is being written, so the
-# row becomes the finished application on its own. Nothing else polls: the
-# timer is inert unless the page it belongs to is showing a 'generating' row.
+# row becomes the finished application on its own.
 GENERATING_POLL_SECONDS = 5.0
+# …and how many of those ticks to skip when nothing is being written. A gate
+# derived only from the last render would never START polling for a draft begun
+# in another tab or by the prepare-a-batch pass, and would never STOP for a
+# claim stranded by a crash — so the slow heartbeat covers both, at one small
+# query every half minute.
+IDLE_POLL_EVERY = 6
 
 
 def generating_line(updated_at: object) -> tuple[str, str]:
     """(text, CSS classes) for a draft that is being written right now.
 
-    The cut-off is drafting's own claim timeout, so this row never promises a
-    wait the Job inbox would already let him restart. An unreadable timestamp
-    falls back to the patient wording: a stored value we cannot parse is not
-    evidence that anything is wrong."""
-    try:
-        started = datetime.datetime.fromisoformat(str(updated_at))
-        minutes = (datetime.datetime.now() - started).total_seconds() / 60
-    except (TypeError, ValueError):
-        minutes = 0.0
-    if minutes >= drafting.CLAIM_TIMEOUT_MIN:
-        return (f"⚠ Seit {int(minutes)} Minuten kein Ergebnis — der Vorgang "
-                "wurde abgebrochen. Im Job-Postfach neu starten.",
-                "text-sm text-amber-700")
+    The cut-off is drafting's own, so this row and the Job inbox — two views
+    of one database row — cannot contradict each other, and so this text can
+    promise the restart exactly when the inbox's Draft button comes back."""
+    if drafting.claim_is_stale(updated_at):
+        minutes = int(drafting.claim_age_minutes(updated_at))
+        return (f"⚠ Seit {minutes} Minuten kein Ergebnis — der Vorgang wurde "
+                "abgebrochen. Im Job-Postfach erneut auf „Draft "
+                "application“ drücken.", "text-sm text-amber-700")
     return ("Die Bewerbung wird gerade geschrieben — das dauert etwa eine "
             "Minute. Die Zeile aktualisiert sich von selbst.",
             "text-sm text-blue-700")
@@ -118,13 +117,22 @@ async def queue_page():
     with frame("Review queue"):
         filter_state = {"value": "open"}
         refresh_gen = {"n": 0}  # rapid filter flips: last request wins
-        shown = {"signature": [], "generating": False}
+        shown = {"signature": [], "live_claim": False}
+        tick = {"n": 0}
 
         banner = ui.row().classes("w-full items-center gap-2")
         with ui.row().classes("items-center gap-4"):
             ui.toggle(FILTERS, value="open",
                       on_change=lambda e: set_filter(e.value))
         container = ui.column().classes("w-full gap-2")
+        # Dialogs and post-await notifications live HERE, never in a row.
+        # A handler runs in the slot of the button that fired it, and
+        # refresh() clears `container` — since this page now refreshes on a
+        # timer rather than only on a click, an editor open over the list
+        # would otherwise be deleted mid-typing, and a coroutine parked on
+        # `await confirm` would never resolve. `contents` keeps the host out
+        # of the page's flex layout so it costs no blank row.
+        overlay = ui.column().classes("contents")
 
         async def refresh():
             refresh_gen["n"] += 1
@@ -134,7 +142,9 @@ async def queue_page():
             if gen != refresh_gen["n"]:
                 return  # superseded — a newer refresh already owns the view
             shown["signature"] = draft_signature(drafts)
-            shown["generating"] = any(d["status"] == "generating" for d in drafts)
+            shown["live_claim"] = any(
+                d["status"] == "generating"
+                and not drafting.claim_is_stale(d["updated_at"]) for d in drafts)
             banner.clear()
             with banner:
                 if status["real"]:
@@ -163,10 +173,12 @@ async def queue_page():
         async def poll_while_generating():
             """Turn the 'wird geschrieben…' row into the finished draft.
 
-            Inert unless the view is actually showing one, and it rebuilds the
-            page only when the drafts really changed — a periodic rebuild
-            would collapse the expansion he is reading."""
-            if not shown["generating"]:
+            Fast while a claim is genuinely running, a slow heartbeat
+            otherwise — and it rebuilds the page only when the drafts really
+            changed, because a periodic rebuild would collapse the expansion
+            he is reading."""
+            tick["n"] += 1
+            if not shown["live_claim"] and tick["n"] % IDLE_POLL_EVERY:
                 return
             drafts = await run.io_bound(_load_drafts, filter_state["value"])
             if draft_signature(drafts) == shown["signature"]:
@@ -293,7 +305,8 @@ async def queue_page():
 
         async def resolve(row: dict, assume_sent: bool):
             if assume_sent:
-                with ui.dialog() as confirm, ui.card():
+                overlay.clear()
+                with overlay, ui.dialog() as confirm, ui.card():
                     ui.label("Record as sent?").classes("font-bold")
                     ui.label("Only if the Gmail 'Sent' folder shows this "
                              "message went out. It will be recorded without "
@@ -317,7 +330,9 @@ async def queue_page():
         def show_editor(row: dict):
             job_id = row["job_id"]
             current = dict(row)
-            with ui.dialog() as dialog, ui.card().classes("w-[760px] max-w-full"):
+            overlay.clear()
+            with overlay, ui.dialog() as dialog, \
+                    ui.card().classes("w-[760px] max-w-full"):
                 ui.label(f"{row['job_company']} — {row['job_title']}") \
                     .classes("font-bold")
                 hint = (f"posting contact: {row['job_contact_email']}"
@@ -423,7 +438,7 @@ async def queue_page():
                             else "REAL send to the company")
                     attachment = (pathlib.Path(current["pdf_path"]).name
                                   if current["pdf_path"] else "NONE")
-                    with ui.dialog() as confirm, ui.card():
+                    with overlay, ui.dialog() as confirm, ui.card():
                         ui.label("Send this application?").classes("font-bold")
                         ui.label(f"{mode}: {final}").classes(
                             "text-sm font-bold text-red-700" if not test_mode

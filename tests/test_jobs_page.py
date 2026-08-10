@@ -15,6 +15,11 @@ from jobdeck.ui.helpers import openable_url, posting_markdown
 from jobdeck.ui.pages import jobs
 
 
+def drafting_module():
+    from jobdeck.services import drafting
+    return drafting
+
+
 def _render(markdown_source: str) -> str:
     """The exact HTML NiceGUI would put on the page for this Markdown."""
     return prepare_content(markdown_source, extras=" ".join(ui.markdown.default_extras))
@@ -732,20 +737,45 @@ def test_the_row_describes_the_same_draft_every_button_acts_on(con, data_dir):
     assert view["rows"][0]["draft_status"] == "ready"
 
 
-def test_the_draft_button_stands_down_while_one_is_being_written():
-    """Pressing it then can only produce 'already being generated' — the
-    refusal that made the app look broken in the first place."""
+def test_the_draft_button_is_guarded_on_a_live_claim_not_on_a_status():
+    """A row can say 'generating' long after the process holding the claim
+    died, and this button is the only thing that can restart it — see
+    tests/test_draft_visibility_pages.py for the rendered proof."""
     source = pathlib.Path(jobs.__file__).read_text()
-    button = source[source.index('"Draft application"'):]
     guard = source[:source.index('"Draft application"')]
     guard = guard[guard.rindex('if (job["status"]'):]
-    assert 'job["draft_status"] != "generating"' in guard
+    assert "_claim_is_running(job)" in guard
     # and the outcome reaches the row: without a refresh the line would still
     # claim the draft is being written after it finished
     handler = source[source.index("async def draft("):]
     handler = handler[:handler.index("async def resolve_channel")]
     assert "await refresh()" in handler
-    assert button  # the button itself still exists
+
+
+@pytest.mark.parametrize("age, running", [
+    (0.0, True), (1.0, True),
+    (drafting_module().CLAIM_TIMEOUT_MIN - 0.1, True),
+    (drafting_module().CLAIM_TIMEOUT_MIN + 0.1, False),
+    (600.0, False),
+])
+def test_only_a_claim_the_reclaim_would_refuse_hides_the_button(age, running):
+    """The button must come back at exactly the moment drafting._claim would
+    take the row over — one minute earlier and a second draft is paid for,
+    one minute later and an abandoned draft is unrecoverable."""
+    import datetime
+    stamp = (datetime.datetime.now()
+             - datetime.timedelta(minutes=age)).isoformat(timespec="seconds")
+    job = {"draft_status": "generating", "draft_updated_at": stamp}
+    assert jobs._claim_is_running(job) is running
+    assert ("abgebrochen" in jobs._draft_line("generating", stamp)[0]) is not running
+
+
+def test_an_unreadable_claim_timestamp_reads_as_running():
+    """A stored value we cannot parse is not evidence the process died — and
+    treating it as dead would let a second claim start while the first is
+    still spending money."""
+    assert jobs._claim_is_running(
+        {"draft_status": "generating", "draft_updated_at": "not a timestamp"})
 
 
 def test_nothing_the_user_sees_is_built_on_a_slot_a_refresh_just_deleted():
