@@ -40,6 +40,14 @@ def _keep_the_package_importable():
     sys.modules.update(saved)
 
 
+async def _open_pile(user: User, pile: str | None = None):
+    """Switch the inbox to the 'already applied' pile through its real control."""
+    from jobdeck.ui.pages import jobs as jobs_page
+    toggle = next(iter(user.find(marker="pile-toggle").elements))
+    toggle.set_value(pile if pile is not None else jobs_page.PILE_APPLIED)
+    await asyncio.sleep(0.3)
+
+
 def user_error_records(caplog):
     """The ERROR records the page logged during the test body."""
     return [r for r in caplog.get_records("call") if r.levelname == "ERROR"]
@@ -282,12 +290,19 @@ async def test_a_posting_at_a_firm_he_already_wrote_to_says_so(
     assert con.execute("SELECT duplicate_of FROM jobs WHERE id=?",
                        (job_id,)).fetchone()[0] is None
 
+    # it is OUT of the working list: it can never become an application, which
+    # is a fact about the posting, exactly like a score-0 mismatch
     await user.open("/jobs")
+    await user.should_not_see("Beispiel GmbH")
+    await user.should_see("bei schon beworbenen Firmen hidden")
+
+    # …and one click away, saying why, with nothing inviting him to spend a
+    # draft on an application that can never be sent
+    await _open_pile(user)
+    await user.should_see("Beispiel GmbH")
     await user.should_see("bereits beworben")
     await user.should_see("Absage")
     await user.should_see("2026-06-12")
-    # …and nothing invites him to spend a draft on an application that can
-    # never be sent
     await user.should_not_see(DRAFT_BUTTON)
 
 
@@ -299,6 +314,7 @@ async def test_the_decorated_spelling_is_covered_by_the_same_warning(
                            "email": "", "kanal": "E-Mail", "status": "Absage"})
     con.commit()
     await user.open("/jobs")
+    await _open_pile(user)
     await user.should_see("bereits beworben")
 
 

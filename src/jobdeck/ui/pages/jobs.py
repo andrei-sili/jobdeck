@@ -33,10 +33,12 @@ PAGE_SIZE = 50
 # filter that stacks with the other: mixing either back into the list would
 # leave it unreachable once better-scored rows fill the page.
 PILE_NONE, PILE_MISMATCHES, PILE_DEAD = "", "mismatches", "dead"
+PILE_APPLIED = "applied_firm"
 _PILE_FILTERS = {
-    PILE_NONE: {"mismatches": "exclude", "gone": "exclude"},
-    PILE_MISMATCHES: {"mismatches": "only", "gone": "include"},
-    PILE_DEAD: {"mismatches": "include", "gone": "only"},
+    PILE_NONE: {"mismatches": "exclude", "gone": "exclude", "applied": "exclude"},
+    PILE_MISMATCHES: {"mismatches": "only", "gone": "include", "applied": "include"},
+    PILE_DEAD: {"mismatches": "include", "gone": "only", "applied": "include"},
+    PILE_APPLIED: {"mismatches": "include", "gone": "include", "applied": "only"},
 }
 
 # ONE control for the three views, deliberately not two switches. Mutual
@@ -48,6 +50,7 @@ PILE_LABELS = {
     PILE_NONE: "Arbeitsliste",
     PILE_MISMATCHES: "Mismatches",
     PILE_DEAD: "Dead ads",
+    PILE_APPLIED: "Schon beworben",
 }
 
 
@@ -55,6 +58,8 @@ _EMPTY_VIEW = {
     PILE_NONE: "Nothing here. Run a search profile to discover jobs.",
     PILE_MISMATCHES: "No mismatches — nothing is hidden.",
     PILE_DEAD: "No dead postings — every ad checked so far is still online.",
+    PILE_APPLIED: "Keine Stelle bei einer Firma, bei der du dich schon "
+                  "beworben hast.",
 }
 
 
@@ -66,11 +71,11 @@ def _view_filters(pile: str, status: str) -> dict:
     job ("I applied — record it"), so hiding it would hide that button. Only the
     `new` view hides; every other filter shows what it contains."""
     if pile == PILE_NONE and status != "new":
-        return {"mismatches": "include", "gone": "include"}
+        return {"mismatches": "include", "gone": "include", "applied": "include"}
     return _PILE_FILTERS[pile]
 
 
-def _hidden_line(filters: dict, mismatches: int, dead: int) -> str:
+def _hidden_line(filters: dict, mismatches: int, dead: int, applied: int = 0) -> str:
     """What this view is not showing, derived from the filters it actually used
     so the label cannot contradict the list. Two independent statements, never
     a total: a posting can be both a mismatch and offline."""
@@ -83,6 +88,11 @@ def _hidden_line(filters: dict, mismatches: int, dead: int) -> str:
         parts.append(f"{dead} dead hidden")
     elif filters["gone"] == "only":
         parts.append(f"{dead} postings whose ad is gone")
+    if filters["applied"] == "exclude" and applied:
+        parts.append(f"{applied} bei schon beworbenen Firmen hidden")
+    elif filters["applied"] == "only":
+        parts.append(f"{applied} Stellen bei Firmen, bei denen du dich "
+                     "schon beworben hast")
     return " · ".join(parts)
 
 
@@ -147,6 +157,7 @@ def _load_jobs(status: str, pile: str, page: int, collapse: bool = True) -> dict
             "collapse": collapse,
             "mismatches": db.count_mismatches(con, status_arg),
             "dead": db.count_gone_jobs(con, status_arg),
+            "applied_firm": db.count_applied_firm_jobs(con, status_arg),
             "total": total,
             "page": page,
             "pages": pages,
@@ -319,7 +330,8 @@ async def jobs_page():
             page["value"] = view["page"]  # the loader clamped it to what exists
             container.clear()
             hidden_label.set_text(
-                _hidden_line(view["filters"], view["mismatches"], view["dead"]))
+                _hidden_line(view["filters"], view["mismatches"], view["dead"],
+                             view["applied_firm"]))
             with container:
                 if not view["rows"]:
                     ui.label(_EMPTY_VIEW[pile["value"]]).classes("text-gray-500")
@@ -635,9 +647,12 @@ async def jobs_page():
                 PILE_LABELS,
                 value=PILE_NONE,
                 on_change=lambda e: set_pile(e.value),
-            ).tooltip("The two hidden piles: postings scored 0 for violating a "
-                      "hard requirement, and postings whose ad the board says "
-                      "is gone. Hidden from the working list, never deleted.")
+            ).mark("pile-toggle").tooltip("The three hidden piles: postings scored 0 for violating "
+                      "a hard requirement, postings whose ad the board says is "
+                      "gone, and postings at a company an application already "
+                      "went to — only one per company is possible, so those "
+                      "can never become one. Hidden from the working list, "
+                      "never deleted.")
             ui.switch(
                 "Group by company",
                 value=True,

@@ -265,37 +265,45 @@ def test_mappe_summary_lists_the_anlagen_for_the_job_inbox():
     assert none == "Mappe ready: 1 pages, 0.1 MB · no Anlagen ✓"
 
 
-def test_the_working_inbox_hides_both_piles_and_each_view_shows_one():
+def test_the_working_inbox_hides_every_pile_and_each_view_shows_one():
     # a mismatch violates a stated hard requirement, a dead posting's ad is
-    # gone: both are facts about the posting, so both hide it — and opening one
-    # pile is a separate VIEW, not a filter stacked on the other
+    # gone, and a posting at a company already applied to can never become an
+    # application: all three are FACTS about the posting, so all three hide it
+    # — and opening one pile is a separate VIEW, not a filter stacked on another
     assert jobs._PILE_FILTERS[jobs.PILE_NONE] == {
-        "mismatches": "exclude", "gone": "exclude"}
+        "mismatches": "exclude", "gone": "exclude", "applied": "exclude"}
     assert jobs._PILE_FILTERS[jobs.PILE_MISMATCHES]["mismatches"] == "only"
     assert jobs._PILE_FILTERS[jobs.PILE_DEAD]["gone"] == "only"
-    assert set(jobs._PILE_FILTERS) == set(jobs._EMPTY_VIEW)
+    assert jobs._PILE_FILTERS[jobs.PILE_APPLIED]["applied"] == "only"
+    for pile, filters in jobs._PILE_FILTERS.items():
+        only = [k for k, v in filters.items() if v == "only"]
+        assert len(only) == (0 if pile == jobs.PILE_NONE else 1), pile
+    assert set(jobs._PILE_FILTERS) == set(jobs._EMPTY_VIEW) == set(jobs.PILE_LABELS)
 
 
-@pytest.mark.parametrize("pile, status, mismatches, dead, expected", [
-    (jobs.PILE_NONE, "new", 129, 58, "129 mismatches hidden · 58 dead hidden"),
-    (jobs.PILE_NONE, "new", 0, 58, "58 dead hidden"),
-    (jobs.PILE_NONE, "new", 129, 0, "129 mismatches hidden"),
-    (jobs.PILE_NONE, "new", 0, 0, ""),
+@pytest.mark.parametrize("pile, status, mismatches, dead, applied, expected", [
+    (jobs.PILE_NONE, "new", 129, 58, 30,
+     "129 mismatches hidden · 58 dead hidden · 30 bei schon beworbenen Firmen hidden"),
+    (jobs.PILE_NONE, "new", 0, 58, 0, "58 dead hidden"),
+    (jobs.PILE_NONE, "new", 129, 0, 0, "129 mismatches hidden"),
+    (jobs.PILE_NONE, "new", 0, 0, 0, ""),
+    (jobs.PILE_APPLIED, "new", 129, 58, 30,
+     "30 Stellen bei Firmen, bei denen du dich schon beworben hast"),
     # a pile view INCLUDES the other pile, so it must not claim to hide it — the
     # label is derived from the filters the query really used
-    (jobs.PILE_MISMATCHES, "new", 129, 58,
+    (jobs.PILE_MISMATCHES, "new", 129, 58, 30,
      "129 mismatches — hard requirement violated"),
-    (jobs.PILE_DEAD, "new", 129, 58, "58 postings whose ad is gone"),
+    (jobs.PILE_DEAD, "new", 129, 58, 30, "58 postings whose ad is gone"),
     # a view of postings he has already acted on hides nothing at all
-    (jobs.PILE_NONE, "portal", 129, 58, ""),
-    (jobs.PILE_NONE, "applied", 129, 58, ""),
+    (jobs.PILE_NONE, "portal", 129, 58, 30, ""),
+    (jobs.PILE_NONE, "applied", 129, 58, 30, ""),
 ])
 def test_the_hidden_line_can_never_contradict_the_list(pile, status, mismatches,
-                                                       dead, expected):
+                                                       dead, applied, expected):
     # never a total either: a posting can be both a mismatch and offline, so
     # adding the two would double-count it
     filters = jobs._view_filters(pile, status)
-    assert jobs._hidden_line(filters, mismatches, dead) == expected
+    assert jobs._hidden_line(filters, mismatches, dead, applied) == expected
 
 
 def test_a_posting_he_has_acted_on_is_never_hidden_from_its_own_view(con, data_dir):
@@ -308,7 +316,8 @@ def test_a_posting_he_has_acted_on_is_never_hidden_from_its_own_view(con, data_d
     con.commit()
     portal = jobs._load_jobs("portal", jobs.PILE_NONE, 0)
     assert [r["id"] for r in portal["rows"]] == [job_id]
-    assert portal["filters"] == {"mismatches": "include", "gone": "include"}
+    assert portal["filters"] == {"mismatches": "include", "gone": "include",
+                                 "applied": "include"}
     # while the working inbox still hides it
     assert db.count_jobs(con, "new", gone="exclude") == 0
 
@@ -907,3 +916,41 @@ def test_nothing_the_user_sees_is_built_on_a_slot_a_refresh_just_deleted():
             "not an element the refresh can delete")
         hosted += 1
     assert hosted, "nothing is hosted — the rule would pass on an empty tail"
+
+
+def test_the_sql_filter_agrees_with_the_gate_on_every_shape(con, data_dir):
+    """`db.APPLIED_FIRM_SQL` is a SECOND implementation of _first_match — it has
+    to run where the paging and the counts do. Two hand-written copies of one
+    rule drift, and this one decides whether a posting is shown at all, so the
+    two are pinned equal over a generated corpus rather than argued about."""
+    from jobdeck import db
+    from jobdeck.dedupe import _BEWERBUNGEN_SQL, _first_match
+
+    firms = ["Müller GmbH", "MÜLLER  GmbH", "müller gmbh ", "Müller AG",
+             "a.b® GmbH", "a.b GmbH", "ab GmbH", "180° GmbH", "180 GmbH",
+             "ACME™", "ACME", "", "   ", "Ⓐ GmbH", "Ⓑ GmbH", "Beispiel\xadGmbH"]
+    mails = ["", "jobs@mueller.de", "JOBS@MUELLER.DE", "  ",
+             "bewerbung^x@a.de", "bewerbungx@a.de", "hr@andere.de"]
+    for firma, email in [("Müller GmbH", "jobs@mueller.de"), ("ACME AG", ""),
+                         ("", "hr@andere.de"), ("  ", "  ")]:
+        db.add_bewerbung(con, {"gesendet_am": "2026-06-10", "firma": firma,
+                               "email": email, "kanal": "E-Mail",
+                               "status": "Gesendet"})
+    for index, (firma, email) in enumerate(
+            [(f, m) for f in firms for m in mails]):
+        db.insert_job_if_new(con, {
+            "source": "stub", "external_id": f"x{index}", "title": "Dev",
+            "company": firma, "contact_email": email,
+            "url": f"https://e.example/{index}"})
+    con.commit()
+
+    rows = con.execute(_BEWERBUNGEN_SQL).fetchall()
+    by_sql = {r[0] for r in con.execute(
+        f"SELECT id FROM jobs WHERE {db.APPLIED_FIRM_SQL}")}
+    by_gate = {j["id"] for j in con.execute("SELECT * FROM jobs")
+               if _first_match(rows, j["company"], j["contact_email"])}
+    assert by_sql == by_gate, (
+        f"SQL-only: {sorted(by_sql - by_gate)}, gate-only: {sorted(by_gate - by_sql)}")
+    assert by_gate, "the corpus produced no matches — the check would be vacuous"
+    assert by_gate != {j[0] for j in con.execute("SELECT id FROM jobs")}, \
+        "everything matched — the check would pass on a filter that never hides"
