@@ -79,6 +79,7 @@ async def applications_page():
                 .props("dense").classes("w-44")
             ui.space()
             count_label = ui.label("").classes("text-sm text-gray-500")
+            live_host = ui.row().classes("items-center")
             ui.button("CSV export", icon="download", on_click=lambda: do_export()) \
                 .props("outline")
 
@@ -235,11 +236,12 @@ async def applications_page():
 
         with ui.row():
             ui.button("New application", icon="add", on_click=lambda: edit_dialog(None))
-            # Every real send records an application here — from the queue, from
-            # auto-send and from the cockpit's "Beworben — eintragen". Sending in
-            # one tab and looking here in another showed nothing at all until a
-            # reload, and the due-date colouring was computed from that same
-            # stale snapshot.
+
+        # Every real send records an application here — from the queue, from
+        # auto-send and from the cockpit's "Beworben — eintragen". Sending in one
+        # tab and looking here in another showed nothing until a reload, and the
+        # due-date colouring was computed from that same stale snapshot.
+        with live_host:
             live_view = live.watch(_signature, refresh, busy=live.dialog_open)
 
         await refresh()

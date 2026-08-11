@@ -102,6 +102,7 @@ async def settings_page():
     with frame("Settings"):
         settings = await run.io_bound(_get_settings)
         prep = await run.io_bound(_prepare_filter)
+        live_host = ui.row().classes("w-full items-center")
 
         with ui.card().classes("w-full"):
             ui.label("Data & credentials").classes("font-bold")
@@ -534,7 +535,7 @@ async def settings_page():
             live_view.mark(meters["signature"])
             show_meters(meters)
 
-        with ui.row().classes("items-center"):
+        with live_host:
             live_view = live.watch(_signature, refresh_meters,
                                    busy=live.dialog_open)
         show_meters({**settings, "signature": None})

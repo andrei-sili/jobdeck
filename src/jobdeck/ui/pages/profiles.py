@@ -45,6 +45,7 @@ def _get_profile_row(profile_id):
 @ui.page("/profiles")
 async def profiles_page():
     with frame("Search profiles"):
+        header = ui.row().classes("w-full items-center gap-2")
         container = ui.column().classes("w-full gap-2")
         # Dialogs live in a sibling of the list, never in the row that opened
         # them: a handler runs in the slot of its own button and refresh()
@@ -232,10 +233,10 @@ async def profiles_page():
                                 .props("flat round color=negative") \
                                 .mark("delete-profile").tooltip("Delete")
 
-        with ui.row().classes("items-center gap-2"):
-            ui.button("New profile", icon="add", on_click=lambda: edit_dialog(None))
-            # The scheduler polls each profile hourly and rewrites "Last poll"
-            # and the error line. A source going down set an error this page
-            # never showed, and a recovery never cleared it on screen.
+        ui.button("New profile", icon="add", on_click=lambda: edit_dialog(None))
+        # The scheduler polls each profile hourly and rewrites "Last poll" and
+        # the error line. A source going down set an error this page never
+        # showed, and a recovery never cleared it on screen.
+        with header:
             live_view = live.watch(_signature, refresh, busy=live.dialog_open)
         await refresh()

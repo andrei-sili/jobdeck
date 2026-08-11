@@ -147,6 +147,8 @@ async def queue_page():
         applied: dict[int, dict] = {}
 
         banner = ui.row().classes("w-full items-center gap-2")
+        # Beside the banner rather than inside it: refresh() clears `banner`.
+        banner_extra = ui.row().classes("items-center")
         with ui.row().classes("items-center gap-4"):
             ui.toggle(FILTERS, value="open",
                       on_change=lambda e: set_filter(e.value))
@@ -216,12 +218,15 @@ async def queue_page():
         # into the finished application by itself — and a slow heartbeat
         # otherwise, which is what covers a draft begun in another tab or by the
         # prepare-a-batch pass, and a claim stranded by a crash.
-        live_view = live.watch(
-            _signature, refresh,
-            seconds=GENERATING_POLL_SECONDS, idle_every=IDLE_POLL_EVERY,
-            hot=lambda: shown["live_claim"],
-            busy=lambda: reading["rows"] > 0 or live.dialog_open(),
-        )
+        # In the banner, at the top: an update notice under the list is one
+        # nobody sees.
+        with banner_extra:
+            live_view = live.watch(
+                _signature, refresh,
+                seconds=GENERATING_POLL_SECONDS, idle_every=IDLE_POLL_EVERY,
+                hot=lambda: shown["live_claim"],
+                busy=lambda: reading["rows"] > 0 or live.dialog_open(),
+            )
 
         def render_draft(row: dict):
             score = (f" · match {row['job_score']}"

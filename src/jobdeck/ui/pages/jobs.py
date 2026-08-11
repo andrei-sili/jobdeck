@@ -348,6 +348,10 @@ async def jobs_page():
         # How many postings he has expanded to read. A rebuild collapses every
         # one of them, so while this is above zero the live watcher defers.
         reading = {"rows": 0}
+        # First element of the page: an update notice under fifty rows is an
+        # update notice nobody sees. The filters live at the bottom (they always
+        # have), so this cannot ride along with them.
+        header = ui.row().classes("w-full items-center gap-2")
         container = ui.column().classes("w-full gap-2")
         pager = ui.row().classes("items-center gap-2")
         # Feedback has to outlive the row that asked for it. A handler runs in
@@ -719,10 +723,11 @@ async def jobs_page():
             ).tooltip("One row per company, showing its best-scored posting — "
                       "only one application per company is possible anyway")
             hidden_label = ui.label().classes("text-xs text-gray-500")
-            # Postings arrive hourly, scores land every ten minutes and the
-            # liveness pass runs 90 s after every start — all of it invisible
-            # until this. It rebuilds only when the data really changed, and
-            # never while he has a posting open or a dialog on screen.
+        # Postings arrive hourly, scores land every ten minutes and the liveness
+        # pass runs 90 s after every start — all of it invisible until this. It
+        # rebuilds only when the data really changed, and never while he has a
+        # posting open or a dialog on screen.
+        with header:
             live_view = live.watch(
                 _signature, refresh,
                 busy=lambda: reading["rows"] > 0 or live.dialog_open(),
