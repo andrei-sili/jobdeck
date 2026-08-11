@@ -451,8 +451,6 @@ async def jobs_page():
                         draft_button.on_click(
                             lambda j=job, b=draft_button: draft(j, button=b))
                     if job["status"] == "new":
-                        ui.button("Apply via portal", icon="language",
-                                  on_click=lambda j=job: mark_portal(j)).props("outline")
                         if not job["contact_email"]:
                             ui.button("Kontakt-E-Mail suchen", icon="alternate_email",
                                       on_click=lambda j=job: find_email(j)).props("outline")
@@ -634,17 +632,6 @@ async def jobs_page():
                                   on_click=adopt).props("color=positive")
                     ui.button("Schließen", on_click=dialog.close).props("flat")
             dialog.open()
-
-        async def mark_portal(job: dict):
-            await run.io_bound(_set_status, job["id"], "portal")
-            open_url = _openable_url(job)
-            await refresh()
-            if not open_url:
-                say("No safe URL stored for this posting — open it manually.",
-                    type="warning")
-                return
-            with overlay:  # navigate.to needs a live slot exactly like notify
-                ui.navigate.to(open_url, new_tab=True)
 
         async def skip(job: dict):
             await run.io_bound(_set_status, job["id"], "skipped")

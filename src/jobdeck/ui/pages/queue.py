@@ -6,6 +6,7 @@ real sending is OFF, the banner and the pre-send confirmation both show
 the test recipient every message will actually go to.
 """
 
+import logging
 import pathlib
 
 from nicegui import run, ui
@@ -16,6 +17,8 @@ from jobdeck.services import drafting, liveness, mappe, send
 from jobdeck.ui import helpers, live
 from jobdeck.ui.helpers import open_in_system, openable_url
 from jobdeck.ui.layout import frame
+
+log = logging.getLogger(__name__)
 
 FILTERS = ["open", "sent", "discarded"]
 FILTER_STATUSES = {
@@ -282,9 +285,15 @@ async def queue_page():
                                   on_click=lambda r=row: discard(r)) \
                             .props("outline color=grey")
                     if row["status"] == "failed":
-                        ui.label("Drafting failed — re-draft it from the Job "
-                                 "inbox, or discard it.") \
-                            .classes("text-sm text-amber-700")
+                        ui.label("Drafting failed — write it again, or discard "
+                                 "it.").classes("text-sm text-amber-700")
+                        # It used to send him to the Job inbox for this, where
+                        # the button only appears while the posting is still
+                        # 'new' — so a failed draft for a posting he had already
+                        # opened as a form had nowhere at all to be retried.
+                        again = ui.button("Neu schreiben", icon="refresh") \
+                            .props("outline")
+                        again.on_click(lambda r=row, b=again: redraft(r, b))
                         ui.button("Discard", icon="delete",
                                   on_click=lambda r=row: discard(r)) \
                             .props("outline color=grey")
@@ -331,6 +340,24 @@ async def queue_page():
             else:
                 say(success, type="positive")
             await refresh()
+
+        async def redraft(row: dict, button):
+            """Write a failed draft again, from the screen it failed on."""
+            say("Die Bewerbung wird geschrieben — das dauert etwa eine Minute…")
+            button.set_text("wird geschrieben…")
+            button.disable()
+            try:
+                result = await drafting.draft_for_job(row["job_id"])
+            except Exception:  # noqa: BLE001 — one draft, not the page
+                log.exception("re-drafting job %s raised", row["job_id"])
+                result = {"ok": False,
+                          "error": "Der Entwurf ist unerwartet fehlgeschlagen "
+                                   "— Details stehen im Log."}
+            await refresh()  # the row carries the outcome from here on
+            if not result["ok"]:
+                say(result["error"], type="warning", multi_line=True)
+            else:
+                say("Entwurf fertig ✓", type="positive")
 
         async def approve(row: dict):
             await _simple_action(send.approve, row["job_id"],

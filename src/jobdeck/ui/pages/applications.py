@@ -190,6 +190,24 @@ async def applications_page():
                     await refresh()
 
                 async def delete():
+                    """A real application, its status history and its links to
+                    the sent e-mail — one unconfirmed click removed all of it."""
+                    with ui.dialog() as confirm, ui.card():
+                        ui.label(f"Bewerbung bei „{data.get('firma')}“ "
+                                 f"löschen?").classes("font-bold")
+                        ui.label("Der Verlauf und die Verknüpfung zur "
+                                 "gesendeten E-Mail gehen mit. Das lässt sich "
+                                 "nicht rückgängig machen.").classes("text-sm")
+                        with ui.row().classes("justify-end gap-2 w-full"):
+                            ui.button("Abbrechen",
+                                      on_click=lambda: confirm.submit(False)) \
+                                .props("flat")
+                            ui.button("Löschen", icon="delete",
+                                      on_click=lambda: confirm.submit(True)) \
+                                .props("color=negative")
+                    confirm.open()
+                    if not await confirm:
+                        return
                     await run.io_bound(_delete, data["id"])
                     dialog.close()
                     await refresh()
@@ -198,7 +216,8 @@ async def applications_page():
                     with ui.row():
                         if data.get("id"):
                             ui.button("Delete", on_click=delete) \
-                                .props("flat color=negative")
+                                .props("flat color=negative") \
+                                .mark("delete-application")
                             if data.get("dokument"):
                                 ui.button(
                                     "Open document",

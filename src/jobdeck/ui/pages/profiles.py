@@ -46,6 +46,11 @@ def _get_profile_row(profile_id):
 async def profiles_page():
     with frame("Search profiles"):
         container = ui.column().classes("w-full gap-2")
+        # Dialogs live in a sibling of the list, never in the row that opened
+        # them: a handler runs in the slot of its own button and refresh()
+        # clears `container`, so a coroutine parked on `await confirm` would
+        # never resolve once the page rebuilt itself.
+        overlay = ui.column().classes("contents")
 
         def edit_dialog(profile: dict | None):
             data = profile or {}
@@ -149,8 +154,25 @@ async def profiles_page():
             )
             await refresh()
 
-        async def delete(profile_id: int):
-            await run.io_bound(_delete_profile, profile_id)
+        async def delete(profile: dict):
+            """One unconfirmed click used to remove a search profile — and the
+            postings it discovered keep referencing it."""
+            overlay.clear()
+            with overlay, ui.dialog() as confirm, ui.card():
+                ui.label(f"Suchprofil „{profile['name']}“ löschen?") \
+                    .classes("font-bold")
+                ui.label("Die gefundenen Stellen bleiben erhalten; gesucht "
+                         "wird damit nicht mehr.").classes("text-sm")
+                with ui.row().classes("justify-end gap-2 w-full"):
+                    ui.button("Abbrechen",
+                              on_click=lambda: confirm.submit(False)).props("flat")
+                    ui.button("Löschen", icon="delete",
+                              on_click=lambda: confirm.submit(True)) \
+                        .props("color=negative")
+            confirm.open()
+            if not await confirm:
+                return
+            await run.io_bound(_delete_profile, profile["id"])
             await refresh()
 
         async def refresh():
@@ -206,8 +228,9 @@ async def profiles_page():
                                       on_click=lambda row=p: edit_dialog(row)) \
                                 .props("flat round").tooltip("Edit")
                             ui.button(icon="delete",
-                                      on_click=lambda pid=p["id"]: delete(pid)) \
-                                .props("flat round color=negative").tooltip("Delete")
+                                      on_click=lambda row=p: delete(row)) \
+                                .props("flat round color=negative") \
+                                .mark("delete-profile").tooltip("Delete")
 
         with ui.row().classes("items-center gap-2"):
             ui.button("New profile", icon="add", on_click=lambda: edit_dialog(None))
