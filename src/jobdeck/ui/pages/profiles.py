@@ -48,15 +48,22 @@ async def profiles_page():
     with frame("Search profiles"):
         header = ui.row().classes("w-full items-center gap-2")
         container = ui.column().classes("w-full gap-2")
-        # Dialogs live in a sibling of the list, never in the row that opened
-        # them: a handler runs in the slot of its own button and refresh()
-        # clears `container`, so a coroutine parked on `await confirm` would
-        # never resolve once the page rebuilt itself.
+        # Dialogs and messages live in a sibling of the list, never in the row
+        # that opened them: a handler runs in the slot of its own button and
+        # refresh() clears `container`, so a coroutine parked on `await confirm`
+        # would never resolve once the page rebuilt itself — and now that this
+        # page rebuilds on a timer, that can happen without anyone clicking.
         overlay = ui.column().classes("contents")
+
+        def say(message: str, **kwargs) -> None:
+            """Tell the user something, from a slot no refresh can delete."""
+            with overlay:
+                ui.notify(message, **kwargs)
 
         def edit_dialog(profile: dict | None):
             data = profile or {}
-            with ui.dialog() as dialog, ui.card().classes("w-96"):
+            overlay.clear()
+            with overlay, ui.dialog() as dialog, ui.card().classes("w-96"):
                 ui.label("Search profile").classes("font-bold")
                 name = ui.input("Name", value=data.get("name", "")).classes("w-full")
                 keywords = ui.input(
@@ -120,7 +127,7 @@ async def profiles_page():
 
                 async def save():
                     if not name.value.strip() or not keywords.value.strip():
-                        ui.notify("Name and keywords are required", type="warning")
+                        say("Name and keywords are required", type="warning")
                         return
                     values = {
                         "name": name.value.strip(),
@@ -146,14 +153,14 @@ async def profiles_page():
             dialog.open()
 
         async def run_now(profile_id: int):
-            ui.notify("Polling sources…")
+            """A poll takes tens of seconds — long enough for the scheduler's
+            own pass to finish and rebuild this list underneath. The result then
+            has to be said from a slot that survives that."""
+            say("Polling sources…")
             row = await run.io_bound(_get_profile_row, profile_id)
             counters = await polling.poll_profile(row)
-            ui.notify(
-                f"Done: {counters['new']} new, {counters['duplicate']} already applied, "
-                f"{counters['known']} known",
-                type="positive",
-            )
+            say(f"Done: {counters['new']} new, {counters['duplicate']} already "
+                f"applied, {counters['known']} known", type="positive")
             await refresh()
 
         async def delete(profile: dict):

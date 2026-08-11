@@ -84,13 +84,25 @@ async def cockpit_page(job_id: int):
         # twice. It watches its OWN posting, so an unrelated poll cannot move
         # the buttons under his hand.
         body = ui.column().classes("w-full gap-2")
+        # Messages and navigations live HERE, never in the row that triggered
+        # them: every control is built inside `body`, and refresh() clears it.
+        # A handler that awaits and then speaks would be speaking from a slot a
+        # tick may already have deleted — NiceGUI raises out of context.client
+        # and the confirmation is swallowed (reproduced: "Application recorded
+        # ✓" never appears and an ERROR lands in the log instead).
+        overlay = ui.column().classes("contents")
+
+        def say(message: str, **kwargs) -> None:
+            """Tell the user something, from a slot no refresh can delete."""
+            with overlay:
+                ui.notify(message, **kwargs)
 
         async def refresh():
             view = await run.io_bound(_load, job_id)
             live_view.mark(None if view is None else view["signature"])
             body.clear()
             with body:
-                _render(view, job_id, refresh)
+                _render(view, job_id, refresh, say, overlay)
 
         with ui.row().classes("items-center"):
             live_view = live.watch(lambda: _signature(job_id), refresh,
@@ -98,7 +110,7 @@ async def cockpit_page(job_id: int):
         await refresh()
 
 
-def _render(view: dict | None, job_id: int, refresh) -> None:
+def _render(view: dict | None, job_id: int, refresh, say, overlay) -> None:
     if view is None:
         ui.label(f"Posting {job_id} does not exist.").classes("text-gray-500")
         return
@@ -115,21 +127,22 @@ def _render(view: dict | None, job_id: int, refresh) -> None:
         # the posting leaves the working inbox and its liveness keeps being
         # checked while he is at the form
         await run.io_bound(_mark_portal, job_id)
-        ui.navigate.to(url, new_tab=True)
+        with overlay:  # navigate.to needs a live slot exactly like notify
+            ui.navigate.to(url, new_tab=True)
         await refresh()  # the posting is 'portal' now; this screen says so
 
     def copy(field: apply_form.Field):
         ui.clipboard.write(field.value)
-        ui.notify(f"{field.label} kopiert", type="positive")
+        say(f"{field.label} kopiert", type="positive")
 
     async def record_applied():
         bewerbung_id = await run.io_bound(_record, job_id, "Online-Portal")
         if bewerbung_id is None:
-            ui.notify("Blocked: you already applied at this company",
-                      type="warning")
+            say("Blocked: you already applied at this company", type="warning")
             return
-        ui.notify("Application recorded ✓", type="positive")
-        ui.navigate.to("/jobs")
+        say("Application recorded ✓", type="positive")
+        with overlay:
+            ui.navigate.to("/jobs")
 
     if job["liveness"] == LIVENESS_GONE:
         checked = (job["liveness_checked_at"] or "")[:10]

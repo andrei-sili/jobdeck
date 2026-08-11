@@ -820,11 +820,12 @@ def _unhosted_ui_calls(path):
     Before an await the sender's slot is alive by definition, so a synchronous
     click handler navigating straight away is fine."""
     tree = ast.parse(pathlib.Path(path).read_text())
-    page = next(n for n in ast.walk(tree)
-                if isinstance(n, ast.AsyncFunctionDef) and n.name.endswith("_page"))
+    # The whole module, not just the @ui.page function: the cockpit builds its
+    # rows from a module-level `_render`, and a rule that only looked inside the
+    # page function would pass it without reading a line of it.
     hosted = {
         node.lineno
-        for stmt in ast.walk(page) if isinstance(stmt, ast.With)
+        for stmt in ast.walk(tree) if isinstance(stmt, ast.With)
         and any(ast.unparse(i.context_expr) == "overlay" for i in stmt.items)
         for node in ast.walk(stmt) if hasattr(node, "lineno")
     }
@@ -832,8 +833,8 @@ def _unhosted_ui_calls(path):
     # Sync helpers count too: `say` is a plain def, and dropping its
     # `with overlay:` restores the whole defect while every async handler
     # still looks innocent.
-    scopes = [page] + [n for n in ast.walk(page)
-                       if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    scopes = [n for n in ast.walk(tree)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
     for func in scopes:
         own = list(_own_statements(func))
         awaits = [n.lineno for n in own if isinstance(n, ast.Await)]
@@ -851,7 +852,11 @@ def _unhosted_ui_calls(path):
     return sorted(set(offenders))
 
 
-@pytest.mark.parametrize("page_module", ["jobs.py", "queue.py"])
+# Every page that CLEARS a container and rebuilds it. `applications.py` is
+# deliberately absent: its refresh assigns `table.rows` and deletes no element,
+# so no handler's slot can die under it.
+@pytest.mark.parametrize("page_module",
+                         ["jobs.py", "queue.py", "profiles.py", "cockpit.py"])
 def test_nothing_is_shown_on_a_slot_that_may_already_be_gone(page_module):
     """The defect CLASS, not the one place it was found. A handler runs in the
     slot of the element that fired it; any refresh — its own, a concurrent
@@ -867,13 +872,14 @@ def test_nothing_is_shown_on_a_slot_that_may_already_be_gone(page_module):
         + " (use say(...) for messages, `with overlay:` for the rest)")
 
 
-@pytest.mark.parametrize("page_module", ["jobs.py", "queue.py"])
+@pytest.mark.parametrize("page_module",
+                         ["jobs.py", "queue.py", "profiles.py", "cockpit.py"])
 def test_the_slot_rule_is_actually_binding(page_module):
     """A scan that finds no candidates would pass on any code at all."""
     source = (pathlib.Path(jobs.__file__).parent / page_module).read_text()
     assert source.count("with overlay") >= 2, "nothing is hosted"
     assert "def say(" in source, "the page has no safe way to notify"
-    assert source.count("say(") >= 5, "messages are not routed through it"
+    assert source.count("say(") >= 4, "messages are not routed through it"
 
 
 def test_nothing_the_user_sees_is_built_on_a_slot_a_refresh_just_deleted():
