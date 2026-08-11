@@ -385,14 +385,14 @@ def test_set_job_facts_stores_what_the_source_stated(con):
     job_id = _add_job(con)
 
     written = db.set_job_facts(con, job_id, {
-        "work_strasse": "Musterstraße 26", "work_plz_ort": "70178 Stuttgart",
+        "work_strasse": "Musterstraße 26", "work_plz_ort": "54321 Beispielstadt",
         "salary_from": "37000", "salary_to": "47000",
         "salary_period": "Jahresgehalt", "temp_agency": 1})
 
     row = db.get_job(con, job_id)
     assert written == 6
     assert row["work_strasse"] == "Musterstraße 26"
-    assert row["work_plz_ort"] == "70178 Stuttgart"
+    assert row["work_plz_ort"] == "54321 Beispielstadt"
     assert (row["salary_from"], row["salary_to"]) == ("37000", "47000")
     assert row["salary_period"] == "Jahresgehalt"
     assert row["temp_agency"] == 1
@@ -402,12 +402,12 @@ def test_a_silent_payload_never_erases_what_an_earlier_one_said(con):
     """The same columns are filled by discovery and by the daily liveness
     probe; a payload that omits a field must not delete it."""
     job_id = _add_job(con)
-    db.set_job_facts(con, job_id, {"work_plz_ort": "52222 Stolberg"})
+    db.set_job_facts(con, job_id, {"work_plz_ort": "12345 Musterstadt"})
 
     db.set_job_facts(con, job_id, {"work_plz_ort": "", "salary_from": "40000"})
 
     row = db.get_job(con, job_id)
-    assert row["work_plz_ort"] == "52222 Stolberg"
+    assert row["work_plz_ort"] == "12345 Musterstadt"
     assert row["salary_from"] == "40000"
 
 

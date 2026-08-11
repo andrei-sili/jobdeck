@@ -562,7 +562,7 @@ _DETAIL_WITH_FACTS = {
     **_DETAIL,
     "stellenlokationen": [{"adresse": {
         "strasse": "Musterstraße", "hausnummer": "26",
-        "plz": "70178", "ort": "Stuttgart"}}],
+        "plz": "54321", "ort": "Beispielstadt"}}],
     "gehaltsspanneVon": 37000, "gehaltsspanneBis": 47000,
     "verguetungsangabe": "JAHRESGEHALT",
     "istArbeitnehmerUeberlassung": True,
@@ -596,7 +596,7 @@ async def test_the_pass_fills_the_columns_of_a_posting_stored_before_them(
         await liveness.check_pending(limit=10, client=client)
 
     row = db.get_job(con, ids["old"])
-    assert row["work_plz_ort"] == "70178 Stuttgart"
+    assert row["work_plz_ort"] == "54321 Beispielstadt"
     assert row["salary_period"] == "JAHRESGEHALT"
     assert row["temp_agency"] == 1
 

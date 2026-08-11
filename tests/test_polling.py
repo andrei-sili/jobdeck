@@ -112,7 +112,7 @@ async def test_a_stored_posting_keeps_the_facts_its_source_stated(
     """The Arbeitsagentur states a work address, a pay range and whether the
     job is Arbeitnehmerüberlassung; all of it used to be parsed and dropped."""
     posting = _posting(facts={"work_strasse": "Musterstraße 26",
-                              "work_plz_ort": "70178 Stuttgart",
+                              "work_plz_ort": "54321 Beispielstadt",
                               "salary_from": "37000", "temp_agency": 1})
     monkeypatch.setattr(polling, "get_sources",
                         lambda client: {"stub": StubSource("stub", [posting])})
@@ -121,7 +121,7 @@ async def test_a_stored_posting_keeps_the_facts_its_source_stated(
 
     row = db.list_jobs(con)[0]
     assert row["work_strasse"] == "Musterstraße 26"
-    assert row["work_plz_ort"] == "70178 Stuttgart"
+    assert row["work_plz_ort"] == "54321 Beispielstadt"
     assert row["salary_from"] == "37000" and row["temp_agency"] == 1
 
 

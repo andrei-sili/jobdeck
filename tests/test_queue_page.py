@@ -185,6 +185,35 @@ def test_the_queue_asks_the_duplicate_gate_about_every_draft(con, data_dir):
     assert "Firma GmbH" in helpers.applied_line(view["applied"][job_id])
 
 
+def test_a_sent_draft_is_not_warned_about_its_own_application(con, data_dir):
+    """It MADE that application: matching it against itself is an echo, and
+    every row of the 'sent' tab would carry one."""
+    job_id = _job_with_draft(con, status="sent")
+    row_id = db.add_bewerbung(con, {"gesendet_am": "2026-08-11",
+                                    "firma": "Firma GmbH", "email": "hr@firma.de",
+                                    "kanal": "E-Mail", "status": "Gesendet"})
+    con.execute("UPDATE drafts SET bewerbung_id=? WHERE job_id=?", (row_id, job_id))
+    con.commit()
+
+    assert queue._load("sent")["applied"] == {}
+
+
+def test_a_second_application_at_that_company_still_warns(con, data_dir):
+    """The echo is only the draft's OWN application; another one is exactly the
+    thing the gate refuses."""
+    job_id = _job_with_draft(con, status="sent")
+    mine = db.add_bewerbung(con, {"gesendet_am": "2026-08-11",
+                                  "firma": "Firma GmbH", "email": "hr@firma.de",
+                                  "kanal": "E-Mail", "status": "Gesendet"})
+    db.add_bewerbung(con, {"gesendet_am": "2026-08-12", "firma": "Firma GmbH",
+                           "email": "hr@firma.de", "kanal": "E-Mail",
+                           "status": "Absage"})
+    con.execute("UPDATE drafts SET bewerbung_id=? WHERE job_id=?", (mine, job_id))
+    con.commit()
+
+    assert queue._load("sent")["applied"][job_id]["id"] != mine
+
+
 def test_a_draft_at_an_untouched_company_carries_no_warning(con, data_dir):
     _job_with_draft(con)
     db.add_bewerbung(con, {"gesendet_am": "2026-06-12", "firma": "Andere AG",

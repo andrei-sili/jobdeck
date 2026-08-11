@@ -117,10 +117,18 @@ def _load(filter_value: str) -> dict:
         # drafts from the cockpit, nothing did.
         postings = [{"id": r["job_id"], "company": r["job_company"],
                      "contact_email": r["job_contact_email"]} for r in rows]
+        applied = duplicates_for_jobs(con, postings)
+        # A sent draft MADE the application at that company, so matching it
+        # against itself is not a warning, it is an echo — every row of the
+        # 'sent' tab would carry one. A second application at the same company
+        # still warns, because then the match is a different row.
+        own = {r["job_id"]: r["bewerbung_id"] for r in rows}
+        applied = {job_id: match for job_id, match in applied.items()
+                   if own.get(job_id) != match["id"]}
         return {
             "drafts": rows,
             "status": _send_status(con),
-            "applied": duplicates_for_jobs(con, postings),
+            "applied": applied,
             "signature": signature,
         }
 

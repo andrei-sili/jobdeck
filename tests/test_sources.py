@@ -623,10 +623,10 @@ def test_posting_facts_reads_the_street_level_work_address():
     facts = arbeitsagentur.posting_facts({
         "stellenlokationen": [{"adresse": {
             "strasse": "Musterstraße", "hausnummer": "26",
-            "plz": "70178", "ort": "Stuttgart", "land": "DEUTSCHLAND"}}],
+            "plz": "54321", "ort": "Beispielstadt", "land": "DEUTSCHLAND"}}],
     })
     assert facts["work_strasse"] == "Musterstraße 26"
-    assert facts["work_plz_ort"] == "70178 Stuttgart"
+    assert facts["work_plz_ort"] == "54321 Beispielstadt"
 
 
 def test_posting_facts_survives_a_half_stated_address():
