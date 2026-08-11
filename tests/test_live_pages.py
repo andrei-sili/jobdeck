@@ -135,6 +135,50 @@ async def test_the_chip_hands_over_the_waiting_data_when_pressed(
     await user.should_see("Django Entwickler")
 
 
+async def test_the_dashboard_counts_an_application_recorded_elsewhere(
+        user: User, con, data_dir):
+    """It was rendered once and never again — the home screen that never moves
+    is the strongest single reason the app read as dead."""
+    await user.open("/")
+    await user.should_see("Applications")
+
+    db.add_bewerbung(con, {"gesendet_am": "2026-08-11", "firma": "Beispiel GmbH",
+                           "email": "hr@beispiel.example", "kanal": "E-Mail",
+                           "status": "Gesendet"})
+    con.commit()
+    await _tick(user)
+
+    await user.should_see("Gesendet")
+
+
+async def test_the_application_registry_shows_a_send_from_another_tab(
+        user: User, con, data_dir):
+    await user.open("/applications")
+    await user.should_see("0 applications")
+
+    db.add_bewerbung(con, {"gesendet_am": "2026-08-11", "firma": "Beispiel GmbH",
+                           "email": "hr@beispiel.example", "kanal": "E-Mail",
+                           "status": "Gesendet"})
+    con.commit()
+    await _tick(user)
+
+    await user.should_see("1 applications")
+
+
+async def test_the_profile_list_shows_a_poll_that_just_happened(
+        user: User, con, data_dir):
+    profile_id = db.add_profile(con, {"name": "Python", "keywords": "python"})
+    con.commit()
+    await user.open("/profiles")
+    await user.should_see("Python")
+
+    db.mark_profile_polled(con, profile_id, error="jooble: 401 Unauthorized")
+    con.commit()
+    await _tick(user)
+
+    await user.should_see("401 Unauthorized")
+
+
 async def test_an_open_dialog_also_defers_the_rebuild(
         user: User, con, data_dir):
     """A refresh deletes the list a dialog was opened over; the editor and the

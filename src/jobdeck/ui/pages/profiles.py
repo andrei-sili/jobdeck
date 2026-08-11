@@ -6,6 +6,7 @@ from nicegui import run, ui
 
 from jobdeck import db
 from jobdeck.services import polling
+from jobdeck.ui import live
 from jobdeck.ui.layout import frame
 
 ALL_SOURCES = ["arbeitsagentur", "jooble", "arbeitnow"]
@@ -13,7 +14,13 @@ ALL_SOURCES = ["arbeitsagentur", "jooble", "arbeitnow"]
 
 def _load_profiles():
     with db.db() as con:
-        return [dict(r) for r in db.list_profiles(con)]
+        return {"profiles": [dict(r) for r in db.list_profiles(con)],
+                "signature": db.profiles_signature(con)}
+
+
+def _signature() -> tuple:
+    with db.db() as con:
+        return db.profiles_signature(con)
 
 
 def _save_profile(profile_id, values):
@@ -148,7 +155,9 @@ async def profiles_page():
 
         async def refresh():
             container.clear()
-            profiles = await run.io_bound(_load_profiles)
+            view = await run.io_bound(_load_profiles)
+            live_view.mark(view["signature"])
+            profiles = view["profiles"]
             with container:
                 if not profiles:
                     ui.label(
@@ -200,5 +209,10 @@ async def profiles_page():
                                       on_click=lambda pid=p["id"]: delete(pid)) \
                                 .props("flat round color=negative").tooltip("Delete")
 
-        ui.button("New profile", icon="add", on_click=lambda: edit_dialog(None))
+        with ui.row().classes("items-center gap-2"):
+            ui.button("New profile", icon="add", on_click=lambda: edit_dialog(None))
+            # The scheduler polls each profile hourly and rewrites "Last poll"
+            # and the error line. A source going down set an error this page
+            # never showed, and a recovery never cleared it on screen.
+            live_view = live.watch(_signature, refresh, busy=live.dialog_open)
         await refresh()

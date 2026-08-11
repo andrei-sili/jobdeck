@@ -15,6 +15,7 @@ from jobdeck.constants import (
 )
 from jobdeck.dates import days_since
 from jobdeck.dedupe import find_duplicate_bewerbung, fold
+from jobdeck.ui import live
 from jobdeck.ui.helpers import open_in_system
 from jobdeck.ui.layout import frame
 
@@ -23,7 +24,13 @@ SEARCH_FIELDS = ("firma", "email", "ansprechpartner", "plz_ort")
 
 def _load():
     with db.db() as con:
-        return [dict(r) for r in db.list_bewerbungen(con)]
+        return {"rows": [dict(r) for r in db.list_bewerbungen(con)],
+                "signature": db.data_signature(con)}
+
+
+def _signature() -> tuple:
+    with db.db() as con:
+        return db.data_signature(con)
 
 
 def _save(row_id, values, new_status):
@@ -107,7 +114,9 @@ async def applications_page():
             return STATUS_COLORS.get(row.get("status") or "", "#ffffff")
 
         async def refresh():
-            state["rows"] = await run.io_bound(_load)
+            view = await run.io_bound(_load)
+            live_view.mark(view["signature"])
+            state["rows"] = view["rows"]
             apply_filter()
 
         def apply_filter(query=None, status=None):
@@ -207,5 +216,11 @@ async def applications_page():
 
         with ui.row():
             ui.button("New application", icon="add", on_click=lambda: edit_dialog(None))
+            # Every real send records an application here — from the queue, from
+            # auto-send and from the cockpit's "Beworben — eintragen". Sending in
+            # one tab and looking here in another showed nothing at all until a
+            # reload, and the due-date colouring was computed from that same
+            # stale snapshot.
+            live_view = live.watch(_signature, refresh, busy=live.dialog_open)
 
         await refresh()
