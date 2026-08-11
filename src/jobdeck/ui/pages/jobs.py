@@ -8,7 +8,7 @@ from nicegui import run, ui
 from jobdeck import apply_channel, db
 from jobdeck.dedupe import duplicates_for_jobs
 from jobdeck.services import apply_resolve, contact_lookup, drafting, liveness, mappe
-from jobdeck.ui import helpers
+from jobdeck.ui import helpers, live
 from jobdeck.ui.helpers import (
     open_in_system,
     openable_url,
@@ -150,6 +150,9 @@ def _load_jobs(status: str, pile: str, page: int, collapse: bool = True) -> dict
         # dedupe.duplicates_for_jobs for why the stored flag cannot answer it.
         on_screen = rows + [r for group in siblings.values() for r in group]
         return {
+            # Read beside the data it describes, so what the page hands back to
+            # the live watcher is exactly the state it is rendering.
+            "signature": db.data_signature(con),
             "applied": duplicates_for_jobs(con, on_screen),
             "rows": rows,
             "siblings": siblings,
@@ -175,6 +178,12 @@ def _range_line(page: int, total: int, shown: int, collapse: bool) -> str:
     first = page * PAGE_SIZE + 1
     unit = "Firmen" if collapse else "Stellen"
     return f"{first}–{first + shown - 1} von {total} {unit}"
+
+
+def _signature() -> tuple:
+    """One cheap read of everything this page's rows can say (see ui/live.py)."""
+    with db.db() as con:
+        return db.data_signature(con)
 
 
 def _set_status(job_id: int, status: str):
@@ -297,6 +306,9 @@ async def jobs_page():
         applied: dict[int, dict] = {}
         page = {"value": 0}
         refresh_gen = {"n": 0}  # rapid filter/switch flips: last request wins
+        # How many postings he has expanded to read. A rebuild collapses every
+        # one of them, so while this is above zero the live watcher defers.
+        reading = {"rows": 0}
         container = ui.column().classes("w-full gap-2")
         pager = ui.row().classes("items-center gap-2")
         # Feedback has to outlive the row that asked for it. A handler runs in
@@ -329,6 +341,8 @@ async def jobs_page():
                 return  # superseded — a newer refresh already owns the view
             page["value"] = view["page"]  # the loader clamped it to what exists
             container.clear()
+            reading["rows"] = 0  # every expansion just died with the container
+            live_view.mark(view["signature"])
             hidden_label.set_text(
                 _hidden_line(view["filters"], view["mismatches"], view["dead"],
                              view["applied_firm"]))
@@ -361,6 +375,10 @@ async def jobs_page():
             page["value"] += step
             await refresh()
 
+        def track_reading(event) -> None:
+            """Count the postings he currently has open."""
+            reading["rows"] = max(0, reading["rows"] + (1 if event.value else -1))
+
         def render_job(job: dict, siblings: list[dict] = ()):
             remote = " · remote" if job["remote"] else ""
             head = (f"{job['title']}  —  {job['company']}"
@@ -368,7 +386,10 @@ async def jobs_page():
             others = job.get("company_count", 1) - 1
             if others > 0:
                 head += f"  +{others}"
-            with ui.expansion(head).classes("w-full border rounded"):
+            # An open row is him READING a posting: the live watcher must not
+            # pull the list out from under it (see ui/live.py).
+            with ui.expansion(head, on_value_change=track_reading) \
+                    .classes("w-full border rounded"):
                 ui.label(f"Source: {job['source']} · found {job['fetched_at'][:16]} · "
                          f"status: {job['status']}").classes("text-xs text-gray-500")
                 if job["match_reason"]:
@@ -660,6 +681,14 @@ async def jobs_page():
             ).tooltip("One row per company, showing its best-scored posting — "
                       "only one application per company is possible anyway")
             hidden_label = ui.label().classes("text-xs text-gray-500")
+            # Postings arrive hourly, scores land every ten minutes and the
+            # liveness pass runs 90 s after every start — all of it invisible
+            # until this. It rebuilds only when the data really changed, and
+            # never while he has a posting open or a dialog on screen.
+            live_view = live.watch(
+                _signature, refresh,
+                busy=lambda: reading["rows"] > 0 or live.dialog_open(),
+            )
 
         async def set_collapse(value: bool):
             collapse["value"] = value

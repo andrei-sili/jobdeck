@@ -68,16 +68,17 @@ def tick_action(changed: bool, busy: bool) -> str:
     return DEFER if busy else REBUILD
 
 
-def dialog_open(host: ui.element) -> bool:
-    """True while a dialog built inside `host` is on screen.
+def dialog_open() -> bool:
+    """True while any dialog of the current page is on screen.
 
-    Pages build their dialogs in an overlay element that no refresh deletes and
-    clear it before opening the next one, so the host holds at most the last
-    dialog — closed ones stay as elements, which is why this asks each one
-    whether it is OPEN rather than whether one exists.
+    Asked of the whole client rather than of the element a page builds its
+    dialogs in: a closed dialog stays alive as an element (pages keep exactly
+    one around), so the question that matters is not "does one exist" but "is
+    one OPEN" — and asking the client cannot be defeated by where a dialog was
+    parented.
     """
     return any(isinstance(el, ui.dialog) and el.value
-               for el in host.descendants())
+               for el in ui.context.client.elements.values())
 
 
 class LiveView:
@@ -104,7 +105,11 @@ class LiveView:
         self.notice = ui.button(label, icon="refresh", on_click=self.apply) \
             .props("flat dense").classes("text-xs")
         self.notice.set_visibility(False)
-        self.timer = ui.timer(seconds, self.poll)
+        # `immediate=False`, or NiceGUI runs the first tick AS the timer is
+        # created — before the page has rendered anything, so nothing is `seen`
+        # yet and the tick starts a second refresh that races the page's own.
+        # Asking again the instant the page loads is pure waste anyway.
+        self.timer = ui.timer(seconds, self.poll, immediate=False)
         # The lambda absorbs the client NiceGUI hands a one-parameter handler;
         # `timer.cancel` takes none.
         ui.context.client.on_disconnect(lambda *_: self.timer.cancel())
