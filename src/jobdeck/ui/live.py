@@ -109,10 +109,21 @@ class LiveView:
         # created — before the page has rendered anything, so nothing is `seen`
         # yet and the tick starts a second refresh that races the page's own.
         # Asking again the instant the page loads is pure waste anyway.
+        self.client = ui.context.client
         self.timer = ui.timer(seconds, self.poll, immediate=False)
-        # The lambda absorbs the client NiceGUI hands a one-parameter handler;
-        # `timer.cancel` takes none.
-        ui.context.client.on_disconnect(lambda *_: self.timer.cancel())
+        # PAUSED, never cancelled. `on_disconnect` fires on EVERY socket drop —
+        # a sleeping laptop, a wifi blip, a socket.io reconnect — and NiceGUI
+        # only deletes the client if the browser fails to come back within the
+        # reconnect timeout. `cancel()` is irreversible (`activate()` asserts on
+        # a cancelled timer), so cancelling here left a page that reconnected
+        # fine, rendered fine, and never updated again for the rest of its life.
+        # Deactivating stops the callback just as effectively — a tick that
+        # lands after teardown was the reason for the original cancel — and
+        # NiceGUI's own `_should_stop` ends the loop when the client is really
+        # gone. The lambda absorbs the client NiceGUI hands a one-parameter
+        # handler.
+        self.client.on_disconnect(lambda *_: self.timer.deactivate())
+        self.client.on_connect(lambda *_: self.timer.activate())
 
     def mark(self, signature: Any) -> None:
         """Record what the page is now showing, and put the chip away.
@@ -131,6 +142,12 @@ class LiveView:
         self.notice.set_visibility(False)
 
     async def poll(self) -> None:
+        # A tick that lands while the browser is away has nobody to render for,
+        # and touching the page's elements then is what wrote ERROR tracebacks
+        # into his log. The deactivation above normally gets here first; this is
+        # the guard that does not depend on the order handlers run in.
+        if not self.client.has_socket_connection:
+            return
         self._ticks += 1
         hot = bool(self._hot()) if self._hot is not None else False
         if not should_check(self._ticks, hot, self._idle_every):

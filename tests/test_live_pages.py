@@ -272,3 +272,30 @@ async def test_an_open_dialog_also_defers_the_rebuild(
 
     await user.should_not_see("Django Entwickler")
     await user.should_see("Draft — Python Entwickler")
+
+
+async def test_a_reconnect_does_not_kill_the_self_refresh(user: User, con,
+                                                          data_dir):
+    """`on_disconnect` fires on every socket drop — a sleeping laptop, a wifi
+    blip — and NiceGUI only deletes the client if the browser fails to come
+    back. Cancelling the timer there is irreversible, so the page came back,
+    rendered fine, and never updated again."""
+    _posting(con)
+    await user.open("/jobs")
+    await user.should_see("Python Entwickler")
+    timer = next(e for e in user.client.elements.values()
+                 if isinstance(e, ui.timer))
+
+    with user.client:
+        for handler in list(user.client.disconnect_handlers):
+            handler(user.client)
+    assert not timer._is_canceled, "a transient disconnect cancelled the timer"
+
+    for handler in list(user.client.connect_handlers):
+        handler(user.client)
+    assert timer.active
+
+    _posting(con, external_id="e2", title="Django Entwickler",
+             company="Zweite GmbH")
+    await _tick(user)
+    await user.should_see("Django Entwickler")
