@@ -663,6 +663,18 @@ def test_a_pay_figure_that_is_not_a_number_is_not_invented():
     assert (facts["salary_from"], facts["salary_to"]) == ("", "")
 
 
+def test_a_non_finite_pay_figure_is_refused_at_the_door():
+    """json.loads — which httpx's .json() uses — accepts the non-standard
+    `Infinity` and `NaN` literals, and "1e999" parses to inf. Neither
+    `inf <= 0` nor `nan <= 0` is true, so the positivity bound is not what
+    stops them; stored, they would later raise out of the inbox's render."""
+    facts = arbeitsagentur.posting_facts({
+        "gehaltsspanneVon": float("inf"), "gehaltsspanneBis": float("nan")})
+    assert (facts["salary_from"], facts["salary_to"]) == ("", "")
+    assert arbeitsagentur.posting_facts(
+        {"gehaltsspanneVon": "1e999"})["salary_from"] == ""
+
+
 def test_posting_facts_flags_arbeitnehmerueberlassung():
     assert arbeitsagentur.posting_facts(
         {"istArbeitnehmerUeberlassung": True})["temp_agency"] == 1

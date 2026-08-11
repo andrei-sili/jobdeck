@@ -1,6 +1,7 @@
 """Job inbox: discovered postings with per-job actions."""
 
 import logging
+import math
 import pathlib
 
 from nicegui import run, ui
@@ -307,12 +308,18 @@ def _euro(raw: str) -> str:
     """A stored figure in German notation: 55000 → '55.000', 30.32 → '30,32'.
 
     Cents survive because they have to: the same field carries a yearly salary
-    and an hourly wage, and 30.32 €/h printed as '30' is a different offer."""
+    and an hourly wage, and 30.32 €/h printed as '30' is a different offer.
+
+    TOTAL by construction — it renders a value read from the database, and a row
+    that cannot be rendered takes the whole inbox down with it. `int(inf)` and
+    `int(nan)` raise, so the conversion happens inside the guard."""
     try:
         value = float(raw)
-    except (TypeError, ValueError):
+        if not math.isfinite(value):
+            return ""
+        whole = f"{int(value):,}".replace(",", ".")
+    except (TypeError, ValueError, OverflowError):
         return ""
-    whole = f"{int(value):,}".replace(",", ".")
     cents = round(value % 1, 2)
     return whole if not cents else f"{whole},{f'{cents:.2f}'[2:]}"
 

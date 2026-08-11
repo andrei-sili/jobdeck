@@ -114,3 +114,29 @@ def test_a_known_date_wins_the_tie_over_an_unknown_one(con, data_dir):
     undated = _job(con, "undated", 80, "")
     con.commit()
     assert [r["id"] for r in db.list_jobs(con, status="new")] == [dated, undated]
+
+
+# ---------------------------------------------------------------------------
+# The configured threshold is bound into every job query, so a value the parser
+# lets through is a value SQLite has to accept.
+# ---------------------------------------------------------------------------
+def test_an_infinite_threshold_falls_back_instead_of_raising():
+    """`int(float('inf'))` raises OverflowError — an ArithmeticError, which
+    sails past a ValueError guard and out of the inbox's own loader."""
+    assert freshness.stale_age_setting("inf") == freshness.DEFAULT_STALE_AGE_DAYS
+    assert freshness.stale_age_setting("1e999") == freshness.DEFAULT_STALE_AGE_DAYS
+    assert freshness.stale_age_setting("nan") == freshness.DEFAULT_STALE_AGE_DAYS
+
+
+def test_an_absurd_but_finite_threshold_is_clamped_not_refused():
+    """Past 2**63 SQLite refuses the parameter and every job query raises —
+    taking the inbox and the settings page that could fix it down together."""
+    assert freshness.stale_age_setting("1e20") == freshness.MAX_STALE_AGE_DAYS
+    assert freshness.stale_age_setting(10**30) == freshness.MAX_STALE_AGE_DAYS
+    # and the clamped value is one SQLite will actually bind
+    assert freshness.MAX_STALE_AGE_DAYS < 2 ** 63
+
+
+def test_a_threshold_he_could_mean_is_kept():
+    assert freshness.stale_age_setting("14") == 14
+    assert freshness.stale_age_setting(90.0) == 90

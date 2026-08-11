@@ -1061,6 +1061,16 @@ def test_the_row_states_the_pay_range_the_board_gave(job, expected):
     assert jobs._salary_line(job) == expected
 
 
+@pytest.mark.parametrize("stored", ["inf", "-inf", "nan", "1e999", "kaputt"])
+def test_a_row_can_never_be_unrenderable_because_of_what_was_stored(stored):
+    """The renderer reads a value from the database, and a row that raises
+    takes the whole inbox down with it — `int(float("inf"))` raises
+    OverflowError, `int(float("nan"))` a ValueError."""
+    assert jobs._euro(stored) == ""
+    assert jobs._salary_line(
+        {"salary_from": stored, "salary_to": "", "salary_period": ""}) == ""
+
+
 # ---------------------------------------------------------------------------
 # What a page hands to a worker thread must be callable with what it hands it.
 # `run.io_bound(f)` calls f() in a thread; the TypeError from a wrong arity is

@@ -49,17 +49,30 @@ DEFAULT_STALE_AGE_DAYS = 45
 OLD_SQL = f"({AGE_SQL} IS NOT NULL AND {AGE_SQL} >= ?)"
 
 
-def stale_age_setting(raw: str, default: int = DEFAULT_STALE_AGE_DAYS) -> int:
+# Ten years. Above this the threshold stops meaning anything (nothing in the
+# corpus is that old) and starts being a number SQLite has to bind: past 2**63
+# it refuses the parameter and every job query raises, which would take the
+# inbox AND the settings page that could fix it down together.
+MAX_STALE_AGE_DAYS = 3650
+
+
+def stale_age_setting(raw: object, default: int = DEFAULT_STALE_AGE_DAYS) -> int:
     """The configured age threshold, parsed the way the queries parse it.
 
-    A hand-edited or empty setting must not break the inbox, and a threshold of
-    zero would hide every posting with a date — so anything unreadable or
-    non-positive falls back to the default."""
+    A hand-edited or empty setting must not break the inbox, so every reading
+    that is not a usable number of days falls back to the default: unparseable
+    text, nothing, zero or less (which would hide every posting that has a
+    date), and infinity — `int(float('inf'))` raises OverflowError, which is an
+    ArithmeticError and would sail straight past a `ValueError` guard. A finite
+    but absurd value is clamped rather than refused: he meant "very old", and
+    that is what he gets."""
     try:
         days = int(float(str(raw).strip()))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
-    return days if days > 0 else default
+    if days <= 0:
+        return default
+    return min(days, MAX_STALE_AGE_DAYS)
 
 
 def penalty(age_days: int | None) -> int:

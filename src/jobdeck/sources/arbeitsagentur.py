@@ -10,6 +10,7 @@ defensive parsing: a malformed item is logged and skipped, never fatal.
 import asyncio
 import base64
 import logging
+import math
 
 import httpx
 
@@ -144,7 +145,11 @@ def _amount(raw) -> str:
         value = float(str(raw).replace(",", ".").strip())
     except (TypeError, ValueError):
         return ""
-    if value <= 0:
+    # json.loads accepts the non-standard `Infinity`/`NaN` literals, and
+    # "1e999" parses to inf, so a board answer really can carry one — and
+    # neither `inf <= 0` nor `nan <= 0` is true, so the bound below is not the
+    # guard. A figure that is not a finite number is not a pay figure.
+    if not math.isfinite(value) or value <= 0:
         return ""
     return f"{value:.2f}".rstrip("0").rstrip(".")
 
