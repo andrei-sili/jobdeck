@@ -636,12 +636,25 @@ def test_posting_facts_survives_a_half_stated_address():
     assert facts["work_plz_ort"] == "Aachen"
 
 
-def test_posting_facts_reads_the_pay_range_and_its_period():
+def test_posting_facts_reads_the_pay_range_and_what_it_means():
+    """`verguetungsangabe` is the period; `artDerVerguetung` only says whether
+    the figure is a range or a fixed sum, which the two numbers already show."""
     facts = arbeitsagentur.posting_facts({
         "gehaltsspanneVon": 37000, "gehaltsspanneBis": "47000.0",
-        "artDerVerguetung": "Jahresgehalt"})
+        "artDerVerguetung": "GEHALTSSPANNE",
+        "verguetungsangabe": "JAHRESGEHALT"})
     assert (facts["salary_from"], facts["salary_to"]) == ("37000", "47000")
-    assert facts["salary_period"] == "Jahresgehalt"
+    assert facts["salary_period"] == "JAHRESGEHALT"
+
+
+def test_an_hourly_wage_keeps_its_cents():
+    """The same field carries 55000.0 for a year and 30.32 for an hour —
+    measured live on the real API. Rounded to euros the offer changes."""
+    facts = arbeitsagentur.posting_facts({
+        "gehaltsspanneVon": 30.32, "gehaltsspanneBis": 33.69,
+        "verguetungsangabe": "STUNDENLOHN"})
+    assert (facts["salary_from"], facts["salary_to"]) == ("30.32", "33.69")
+    assert facts["salary_period"] == "STUNDENLOHN"
 
 
 def test_a_pay_figure_that_is_not_a_number_is_not_invented():

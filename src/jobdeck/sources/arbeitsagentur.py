@@ -130,17 +130,23 @@ def _first_address(payload) -> dict:
 
 
 def _amount(raw) -> str:
-    """A stated pay figure as plain digits, '' when it is not a number.
+    """A stated pay figure as a plain number, '' when it is not one.
 
-    Kept as text, exactly like `published_at`: the board's own statement is
-    stored and any interpretation happens where it is used."""
+    Cents are KEPT: the same field carries 55000.0 for a yearly salary and
+    30.32 for an hourly one (measured live, 10 of 40 postings state a range),
+    so rounding to whole euros would silently misprice every hourly posting.
+    Stored as text, exactly like `published_at` — the board's own statement,
+    with the interpretation left to where it is used.
+    """
     if isinstance(raw, bool) or raw is None:
         return ""
     try:
         value = float(str(raw).replace(",", ".").strip())
     except (TypeError, ValueError):
         return ""
-    return str(int(value)) if value > 0 else ""
+    if value <= 0:
+        return ""
+    return f"{value:.2f}".rstrip("0").rstrip(".")
 
 
 def posting_facts(payload) -> dict:
@@ -167,7 +173,12 @@ def posting_facts(payload) -> dict:
         "work_plz_ort": plz_ort,
         "salary_from": _amount(payload.get("gehaltsspanneVon")),
         "salary_to": _amount(payload.get("gehaltsspanneBis")),
-        "salary_period": str(payload.get("artDerVerguetung") or "").strip(),
+        # `verguetungsangabe`, NOT `artDerVerguetung`: probed live over 40 real
+        # postings, the latter says what SHAPE the figure has (GEHALTSSPANNE /
+        # FESTGEHALT) while the former says what it MEANS (JAHRESGEHALT /
+        # STUNDENLOHN) — and a range without that is unreadable, since 30.32
+        # and 55000 arrive in the same field.
+        "salary_period": str(payload.get("verguetungsangabe") or "").strip(),
         "temp_agency": 1 if payload.get("istArbeitnehmerUeberlassung") else 0,
     }
 

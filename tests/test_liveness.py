@@ -564,7 +564,7 @@ _DETAIL_WITH_FACTS = {
         "strasse": "Musterstraße", "hausnummer": "26",
         "plz": "70178", "ort": "Stuttgart"}}],
     "gehaltsspanneVon": 37000, "gehaltsspanneBis": 47000,
-    "artDerVerguetung": "Jahresgehalt",
+    "verguetungsangabe": "JAHRESGEHALT",
     "istArbeitnehmerUeberlassung": True,
 }
 
@@ -597,7 +597,7 @@ async def test_the_pass_fills_the_columns_of_a_posting_stored_before_them(
 
     row = db.get_job(con, ids["old"])
     assert row["work_plz_ort"] == "70178 Stuttgart"
-    assert row["salary_period"] == "Jahresgehalt"
+    assert row["salary_period"] == "JAHRESGEHALT"
     assert row["temp_agency"] == 1
 
 

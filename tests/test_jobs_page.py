@@ -1040,12 +1040,20 @@ def test_an_old_posting_is_never_deleted_only_moved(con, data_dir):
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("job, expected", [
     ({"salary_from": "37000", "salary_to": "47000",
-      "salary_period": "Jahresgehalt"},
+      "salary_period": "JAHRESGEHALT"},
      "Gehalt: 37.000 – 47.000 € (Jahresgehalt)"),
     ({"salary_from": "37000", "salary_to": "", "salary_period": ""},
      "Gehalt: 37.000 €"),
-    ({"salary_from": "", "salary_to": "45000", "salary_period": "Jahresgehalt"},
+    ({"salary_from": "", "salary_to": "45000", "salary_period": "JAHRESGEHALT"},
      "Gehalt: 45.000 € (Jahresgehalt)"),
+    # an hourly wage arrives in the same field as a yearly salary — measured
+    # live: 30.32 to 33.69 €/h. Printed as "30 – 33" it is a different offer.
+    ({"salary_from": "30.32", "salary_to": "33.69",
+      "salary_period": "STUNDENLOHN"},
+     "Gehalt: 30,32 – 33,69 € (Stundenlohn)"),
+    # the board's own code, when it is not one we can name, stays off the row
+    ({"salary_from": "55000", "salary_to": "", "salary_period": "GEHALTSSPANNE"},
+     "Gehalt: 55.000 €"),
     # the board states a range on a minority of postings; the rest say nothing
     ({"salary_from": "", "salary_to": "", "salary_period": ""}, ""),
 ])

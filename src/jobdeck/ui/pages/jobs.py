@@ -287,18 +287,43 @@ def _claim_is_running(job: dict) -> bool:
             and not drafting.claim_is_stale(job["draft_updated_at"]))
 
 
-def _salary_line(job: dict) -> str:
-    """'Gehalt: 37.000–47.000 € (Jahresgehalt)' — '' when the board stated none.
+# What the board's period code means, in the language the row is written in.
+# An unknown code prints NOTHING rather than shouting an enum at him: the
+# figures still stand on their own, and the vocabulary is somebody else's.
+_SALARY_PERIODS = {
+    "JAHRESGEHALT": "Jahresgehalt",
+    "MONATSGEHALT": "Monatsgehalt",
+    "WOCHENGEHALT": "Wochengehalt",
+    "STUNDENLOHN": "Stundenlohn",
+}
 
-    The Arbeitsagentur states a pay range on a minority of postings and the app
-    threw it away; where it exists it is the one fact he otherwise has to open
-    the ad to learn."""
-    low = str(job["salary_from"] or "").strip()
-    high = str(job["salary_to"] or "").strip()
-    if not low and not high:
+
+def _euro(raw: str) -> str:
+    """A stored figure in German notation: 55000 → '55.000', 30.32 → '30,32'.
+
+    Cents survive because they have to: the same field carries a yearly salary
+    and an hourly wage, and 30.32 €/h printed as '30' is a different offer."""
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
         return ""
-    span = " – ".join(f"{int(v):,}".replace(",", ".") for v in (low, high) if v)
-    period = str(job["salary_period"] or "").strip()
+    whole = f"{int(value):,}".replace(",", ".")
+    cents = round(value % 1, 2)
+    return whole if not cents else f"{whole},{f'{cents:.2f}'[2:]}"
+
+
+def _salary_line(job: dict) -> str:
+    """'Gehalt: 55.000 – 65.000 € (Jahresgehalt)' — '' when none was stated.
+
+    The Arbeitsagentur states a pay range on a minority of postings (10 of 40
+    probed live) and the app threw it away; where it exists it is the one fact
+    he otherwise has to open the ad to learn."""
+    figures = [_euro(str(job[key] or "").strip())
+               for key in ("salary_from", "salary_to")]
+    span = " – ".join(figure for figure in figures if figure)
+    if not span:
+        return ""
+    period = _SALARY_PERIODS.get(str(job["salary_period"] or "").strip().upper(), "")
     return f"Gehalt: {span} €" + (f" ({period})" if period else "")
 
 
