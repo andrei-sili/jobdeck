@@ -1,10 +1,12 @@
 """Data-layer behaviour of the review queue page (no NiceGUI rendering)."""
 
+import ast
 import datetime
 import pathlib
 
 from jobdeck import db
 from jobdeck.services import drafting
+from jobdeck.ui import helpers, live
 from jobdeck.ui.pages import queue
 
 
@@ -160,33 +162,99 @@ def test_the_poll_rebuilds_the_page_only_when_the_drafts_changed(con, data_dir):
     """A rebuild collapses every open expansion. Polling every few seconds
     while he reads a different draft would be its own defect."""
     job_id = _job_with_draft(con, status="generating")
-    before = [dict(r) for r in db.list_drafts_with_jobs(
-        con, queue.FILTER_STATUSES["open"])]
-    unchanged = [dict(r) for r in db.list_drafts_with_jobs(
-        con, queue.FILTER_STATUSES["open"])]
-    assert queue.draft_signature(before) == queue.draft_signature(unchanged)
+    before = queue._signature()
+    assert queue._signature() == before
 
     db.upsert_draft(con, job_id, {"status": "ready"})
     con.commit()
-    after = [dict(r) for r in db.list_drafts_with_jobs(
-        con, queue.FILTER_STATUSES["open"])]
-    assert queue.draft_signature(before) != queue.draft_signature(after)
+    assert queue._signature() != before
 
 
-def test_the_queue_keeps_exactly_one_page_lifetime_timer():
-    """A timer created per generating row would accumulate on every refresh.
-    What the timer DOES is proven by rendering the page — see
-    tests/test_draft_visibility_pages.py."""
-    source = pathlib.Path(queue.__file__).read_text()
-    assert source.count("ui.timer(") == 1
+def test_the_queue_asks_the_duplicate_gate_about_every_draft(con, data_dir):
+    """Two of the five drafts waiting in his real queue were at companies the
+    send path would refuse, and only the job inbox said so — on the form path,
+    where the cockpit drafts, nothing did."""
+    job_id = _job_with_draft(con)
+    db.add_bewerbung(con, {"gesendet_am": "2026-06-12", "firma": "Firma GmbH",
+                           "email": "", "kanal": "E-Mail", "status": "Absage"})
+    con.commit()
+
+    view = queue._load("open")
+
+    assert view["applied"][job_id]["status"] == "Absage"
+    assert "Firma GmbH" in helpers.applied_line(view["applied"][job_id])
 
 
-def test_the_poll_is_cancelled_when_the_page_goes_away():
+def test_a_draft_at_an_untouched_company_carries_no_warning(con, data_dir):
+    _job_with_draft(con)
+    db.add_bewerbung(con, {"gesendet_am": "2026-06-12", "firma": "Andere AG",
+                           "email": "", "kanal": "E-Mail", "status": "Absage"})
+    con.commit()
+
+    assert queue._load("open")["applied"] == {}
+
+
+def test_the_ad_dying_under_a_queued_draft_is_part_of_the_signature(
+        con, data_dir):
+    """The pre-send warning is about the POSTING, and the liveness pass runs
+    90 s after every start — i.e. exactly while he opens the queue and sends.
+    A signature over the drafts alone could never show it."""
+    job_id = _job_with_draft(con)
+    before = queue._signature()
+
+    db.set_job_liveness(con, job_id, "gone")
+    con.commit()
+
+    assert queue._signature() != before
+
+
+def test_flipping_real_sending_in_another_tab_is_part_of_the_signature(
+        con, data_dir):
+    """The banner is this page's loudest safety statement; it must not keep
+    saying TEST MODE after the switch was flipped elsewhere."""
+    _job_with_draft(con)
+    before = queue._signature()
+
+    db.set_setting(con, "real_send_enabled", "1")
+    con.commit()
+
+    assert queue._signature() != before
+
+
+def _repeating_timers(source: str) -> int:
+    """`ui.timer(...)` calls that keep ticking — a `once=True` deferred loader
+    is a different animal and stays allowed."""
+    tree = ast.parse(source)
+    found = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        target = node.func
+        if not (isinstance(target, ast.Attribute) and target.attr == "timer"):
+            continue
+        once = any(kw.arg == "once" and getattr(kw.value, "value", False)
+                   for kw in node.keywords)
+        found += 0 if once else 1
+    return found
+
+
+def test_no_page_starts_a_repeating_timer_of_its_own():
+    """Every self-refreshing page goes through ui/live.py, which owns the two
+    properties a hand-rolled timer keeps getting wrong: rebuild only on a real
+    change, and cancel on disconnect."""
+    pages = pathlib.Path(queue.__file__).parent
+    offenders = [p.name for p in sorted(pages.glob("*.py"))
+                 if _repeating_timers(p.read_text())]
+    assert offenders == []
+
+
+def test_the_shared_timer_is_cancelled_when_the_page_goes_away():
     """NiceGUI reads a timer's parent slot BEFORE its own stop check
     (nicegui/timer.py, _run_in_loop), so a tick landing after the page is torn
     down raises rather than stopping — an ERROR traceback in his log every
-    time he leaves this page. Seen in the running app, not in the suite."""
-    source = pathlib.Path(queue.__file__).read_text()
+    time he leaves the page. Seen in the running app, not in the suite."""
+    source = pathlib.Path(live.__file__).read_text()
+    assert source.count("ui.timer(") == 1
     tail = source[source.index("ui.timer("):]
     assert "on_disconnect(" in tail, "the timer outlives its page"
     assert "cancel()" in tail

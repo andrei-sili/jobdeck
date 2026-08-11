@@ -11,8 +11,9 @@ import pathlib
 from nicegui import run, ui
 
 from jobdeck import db
+from jobdeck.dedupe import duplicates_for_jobs
 from jobdeck.services import drafting, liveness, mappe, send
-from jobdeck.ui import helpers
+from jobdeck.ui import helpers, live
 from jobdeck.ui.helpers import open_in_system, openable_url
 from jobdeck.ui.layout import frame
 
@@ -61,28 +62,48 @@ def generating_line(updated_at: object) -> tuple[str, str]:
             "text-sm text-blue-700")
 
 
-def draft_signature(drafts: list[dict]) -> list[tuple]:
-    """What the rendered queue is showing, cheaply comparable.
+def _send_status(con) -> dict:
+    return {
+        "real": db.get_setting(con, "real_send_enabled", "0") == "1",
+        "test_recipient": db.get_setting(con, "test_recipient", "").strip(),
+        "cap": db.get_setting(con, "daily_send_cap", "15"),
+        "sent_today": db.count_outbound_today(con),
+    }
 
-    The poll rebuilds the page only when this changes: a rebuild collapses
-    every open expansion, and doing that every few seconds while he is reading
-    a different draft would be its own defect."""
-    return [(d["id"], d["status"], d["updated_at"]) for d in drafts]
+
+def _signature_of(con) -> tuple:
+    """Everything this page states, cheaply comparable (see ui/live.py).
+
+    Deliberately wider than the drafts: a row also carries the POSTING's
+    liveness — the pre-send "the ad is gone" warning this page exists for — and
+    the banner states the sending mode, which another tab can flip. A signature
+    over the drafts alone left both able to go stale while the page sat open,
+    which is precisely the window (liveness runs 90 s after every start, then he
+    sends) that warning was written for."""
+    return (db.data_signature(con), *sorted(_send_status(con).items()))
 
 
-def _load_drafts(filter_value: str):
+def _signature() -> tuple:
     with db.db() as con:
-        rows = db.list_drafts_with_jobs(con, FILTER_STATUSES[filter_value])
-        return [dict(r) for r in rows]
+        return _signature_of(con)
 
 
-def _send_status():
+def _load(filter_value: str) -> dict:
+    """One read of everything the queue renders, signature included."""
     with db.db() as con:
+        rows = [dict(r) for r in
+                db.list_drafts_with_jobs(con, FILTER_STATUSES[filter_value])]
+        # Asked of the duplicate gate itself, for the drafts on screen: the
+        # send path refuses a second application to a company (send.py), and
+        # until now only the job inbox said so — on the FORM path, where he
+        # drafts from the cockpit, nothing did.
+        postings = [{"id": r["job_id"], "company": r["job_company"],
+                     "contact_email": r["job_contact_email"]} for r in rows]
         return {
-            "real": db.get_setting(con, "real_send_enabled", "0") == "1",
-            "test_recipient": db.get_setting(con, "test_recipient", "").strip(),
-            "cap": db.get_setting(con, "daily_send_cap", "15"),
-            "sent_today": db.count_outbound_today(con),
+            "drafts": rows,
+            "status": _send_status(con),
+            "applied": duplicates_for_jobs(con, postings),
+            "signature": _signature_of(con),
         }
 
 
@@ -117,8 +138,10 @@ async def queue_page():
     with frame("Review queue"):
         filter_state = {"value": "open"}
         refresh_gen = {"n": 0}  # rapid filter flips: last request wins
-        shown = {"signature": [], "live_claim": False}
-        tick = {"n": 0}
+        shown = {"live_claim": False}
+        # Drafts he has expanded to read: a rebuild collapses every one of them.
+        reading = {"rows": 0}
+        applied: dict[int, dict] = {}
 
         banner = ui.row().classes("w-full items-center gap-2")
         with ui.row().classes("items-center gap-4"):
@@ -147,11 +170,14 @@ async def queue_page():
         async def refresh():
             refresh_gen["n"] += 1
             gen = refresh_gen["n"]
-            drafts = await run.io_bound(_load_drafts, filter_state["value"])
-            status = await run.io_bound(_send_status)
+            view = await run.io_bound(_load, filter_state["value"])
             if gen != refresh_gen["n"]:
                 return  # superseded — a newer refresh already owns the view
-            shown["signature"] = draft_signature(drafts)
+            drafts, status = view["drafts"], view["status"]
+            applied.clear()
+            applied.update(view["applied"])
+            reading["rows"] = 0  # every expansion just died with the container
+            live_view.mark(view["signature"])
             shown["live_claim"] = any(
                 d["status"] == "generating"
                 and not drafting.claim_is_stale(d["updated_at"]) for d in drafts)
@@ -180,29 +206,19 @@ async def queue_page():
             filter_state["value"] = value
             await refresh()
 
-        async def poll_while_generating():
-            """Turn the 'wird geschrieben…' row into the finished draft.
+        def track_reading(event) -> None:
+            reading["rows"] = max(0, reading["rows"] + (1 if event.value else -1))
 
-            Fast while a claim is genuinely running, a slow heartbeat
-            otherwise — and it rebuilds the page only when the drafts really
-            changed, because a periodic rebuild would collapse the expansion
-            he is reading."""
-            tick["n"] += 1
-            if not shown["live_claim"] and tick["n"] % IDLE_POLL_EVERY:
-                return
-            drafts = await run.io_bound(_load_drafts, filter_state["value"])
-            if draft_signature(drafts) == shown["signature"]:
-                return
-            await refresh()
-
-        poll = ui.timer(GENERATING_POLL_SECONDS, poll_while_generating)
-        # NiceGUI reads the timer's parent slot BEFORE its own "should I stop?"
-        # test (nicegui/timer.py, _run_in_loop), so a tick that lands after the
-        # page has been torn down raises instead of stopping — an ERROR
-        # traceback in the log every time he leaves this page. Cancelling on
-        # disconnect gets there first. The lambda absorbs the client NiceGUI
-        # passes to a one-parameter handler; `poll.cancel` takes none.
-        ui.context.client.on_disconnect(lambda *_: poll.cancel())
+        # Fast while a draft is genuinely being written — that row has to turn
+        # into the finished application by itself — and a slow heartbeat
+        # otherwise, which is what covers a draft begun in another tab or by the
+        # prepare-a-batch pass, and a claim stranded by a crash.
+        live_view = live.watch(
+            _signature, refresh,
+            seconds=GENERATING_POLL_SECONDS, idle_every=IDLE_POLL_EVERY,
+            hot=lambda: shown["live_claim"],
+            busy=lambda: reading["rows"] > 0 or live.dialog_open(),
+        )
 
         def render_draft(row: dict):
             score = (f" · match {row['job_score']}"
@@ -214,7 +230,8 @@ async def queue_page():
                      else row["status"])
             head = (f"{row['job_company']}  —  {row['job_title']}"
                     f"  ({state}{score})")
-            with ui.expansion(head).classes("w-full border rounded"):
+            with ui.expansion(head, on_value_change=track_reading) \
+                    .classes("w-full border rounded"):
                 if row["status"] == "generating":
                     ui.label(f"Begonnen {row['updated_at'][:16]}") \
                         .classes("text-xs text-gray-500")
@@ -231,6 +248,15 @@ async def queue_page():
                     ui.label(f"⚠ Die Anzeige war am {checked} nicht mehr "
                              "online — vor dem Versand prüfen.") \
                         .classes("text-sm text-red-700")
+                already = applied.get(row["job_id"])
+                if already:
+                    # The send path refuses this application anyway, inside its
+                    # own claim. Saying so HERE is what stops him building a
+                    # Mappe and pressing Send to be told no — two of the five
+                    # drafts waiting in his queue were at such companies, and
+                    # only the job inbox warned.
+                    ui.label(helpers.applied_line(already)) \
+                        .classes("text-sm text-amber-700")
                 if row["pdf_path"]:
                     ui.label(f"Mappe: {row['pdf_path']}") \
                         .classes("text-xs text-gray-600")
@@ -460,6 +486,12 @@ async def queue_page():
                         ui.label(f"{mode}: {final}").classes(
                             "text-sm font-bold text-red-700" if not test_mode
                             else "text-sm font-bold text-amber-700")
+                        already = applied.get(job_id)
+                        if already:
+                            # last statement before the press; the gate inside
+                            # the claim would refuse it a second later
+                            ui.label(helpers.applied_line(already)) \
+                                .classes("text-sm font-bold text-amber-700")
                         ui.label(f"Betreff: {current['betreff']}") \
                             .classes("text-sm")
                         ui.label(f"Attachment: {attachment}").classes("text-sm")

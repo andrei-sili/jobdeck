@@ -270,24 +270,6 @@ def _claim_is_running(job: dict) -> bool:
             and not drafting.claim_is_stale(job["draft_updated_at"]))
 
 
-def _applied_line(already: dict) -> str:
-    """'⚠ Bewerbung … am 12.06. — Absage' for a firm the gate would refuse.
-
-    Only ONE application per company is possible, so this row can never become
-    one. It says WHICH application and how it ended, because that is the
-    difference between a company still deciding and one that already said no."""
-    parts = []
-    when = str(already.get("gesendet_am") or "")[:10]
-    if when:
-        parts.append(f"am {when}")
-    status = str(already.get("status") or "").strip()
-    if status:
-        parts.append(status)
-    detail = f" ({' · '.join(parts)})" if parts else ""
-    return (f"⚠ Bei {already.get('firma') or 'dieser Firma'} hast du dich "
-            f"bereits beworben{detail} — eine Bewerbung pro Firma.")
-
-
 def _openable_url(job: dict) -> str:
     """The URL a posting's buttons may hand to the browser, '' when none is
     safe. The resolved apply link wins over the raw feed URL."""
@@ -406,7 +388,7 @@ async def jobs_page():
                         .classes("text-sm text-red-700")
                 already = applied.get(job["id"])
                 if already:
-                    ui.label(_applied_line(already)).classes(
+                    ui.label(helpers.applied_line(already)).classes(
                         "text-sm text-amber-700")
                 draft_text, draft_classes = _draft_line(
                     job["draft_status"], job["draft_updated_at"])
