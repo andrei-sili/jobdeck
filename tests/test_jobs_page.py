@@ -1059,3 +1059,60 @@ def test_an_old_posting_is_never_deleted_only_moved(con, data_dir):
 ])
 def test_the_row_states_the_pay_range_the_board_gave(job, expected):
     assert jobs._salary_line(job) == expected
+
+
+# ---------------------------------------------------------------------------
+# What a page hands to a worker thread must be callable with what it hands it.
+# `run.io_bound(f)` calls f() in a thread; the TypeError from a wrong arity is
+# caught by NiceGUI and written to the log, so the button simply does nothing
+# and says nothing. That is how "Send now" — the app's primary send path — was
+# silently inert on this branch after `_send_status` gained a parameter.
+# ---------------------------------------------------------------------------
+def _io_bound_calls():
+    """Every `run.io_bound(name, *args)` in the UI package, as (path, node)."""
+    ui_dir = pathlib.Path(jobs.__file__).parent.parent
+    found = []
+    for path in sorted(ui_dir.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "io_bound"
+                    and node.args):
+                found.append((path, node))
+    return found
+
+
+def _accepts(func_node: ast.FunctionDef, count: int) -> bool:
+    """Can this def be called with `count` positional arguments?"""
+    spec = func_node.args
+    positional = spec.posonlyargs + spec.args
+    required = len(positional) - len(spec.defaults)
+    return required <= count and (count <= len(positional) or spec.vararg)
+
+
+def test_every_io_bound_call_matches_the_arity_of_what_it_calls():
+    import importlib
+
+    calls = _io_bound_calls()
+    assert len(calls) >= 15, "the scan found almost nothing — it would pass vacuously"
+    checked = 0
+    for path, node in calls:
+        target = node.args[0]
+        if not isinstance(target, ast.Name):
+            continue  # a lambda or an attribute — nothing to look up by name
+        module = importlib.import_module(
+            f"jobdeck.ui.pages.{path.stem}" if path.parent.name == "pages"
+            else f"jobdeck.ui.{path.stem}")
+        defs = {n.name: n for n in ast.walk(ast.parse(path.read_text()))
+                if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)}
+        func = defs.get(target.id)
+        if func is None or not hasattr(module, target.id):
+            continue  # not a module-level function of this file
+        given = len(node.args) - 1
+        assert _accepts(func, given), (
+            f"{path.name}:{node.lineno} calls {target.id} with {given} "
+            f"argument(s) through run.io_bound, but its definition needs more — "
+            f"the TypeError would be swallowed into the log and the control "
+            f"would silently do nothing")
+        checked += 1
+    assert checked >= 10, "nothing was actually checked — the lookup is broken"

@@ -176,3 +176,32 @@ async def test_a_temp_agency_posting_says_so_on_the_row(user: User, con,
 
     await user.should_see("Arbeitnehmerüberlassung")
     await user.should_see("Gehalt: 37.000 € (Jahresgehalt)")
+
+
+# ---------------------------------------------------------------------------
+# The send path's last screen
+# ---------------------------------------------------------------------------
+async def test_send_now_reaches_the_confirmation_with_the_resolved_recipient(
+        user: User, con, data_dir):
+    """The one screen between him and a real e-mail. It was silently inert on
+    this branch — `run.io_bound` called a function that had gained a parameter,
+    NiceGUI logged the TypeError, and the button did nothing and said nothing.
+    Nothing is sent here: the dialog is where the test stops."""
+    job_id = _posting(con, company="Beispiel GmbH")
+    db.upsert_draft(con, job_id, {
+        "status": "ready", "recipient": "jobs@beispiel.example",
+        "betreff": "Bewerbung als Python Entwickler",
+        "email_body": "Guten Tag,", "anschreiben_body": "Sehr geehrte Damen,",
+        "pdf_path": "/tmp/mappe.pdf"})
+    db.set_setting(con, "test_recipient", "probe@example.org")
+    con.commit()
+
+    await user.open("/queue")
+    user.find("Review & send").click()
+    await asyncio.sleep(0.2)
+    user.find("Send now").click()
+    await asyncio.sleep(0.3)
+
+    await user.should_see("Send this application?")
+    await user.should_see("TEST send: probe@example.org")
+    assert db.count_outbound_today(con) == 0, "nothing may be sent by a test"

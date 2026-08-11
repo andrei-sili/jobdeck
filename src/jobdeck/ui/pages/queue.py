@@ -91,6 +91,18 @@ def _signature() -> tuple:
         return _signature_of(con)
 
 
+def _current_send_status() -> dict:
+    """The sending mode on its own connection, for the pre-send check.
+
+    `_send_status` takes the connection its two other callers already hold; this
+    is the one caller that has none. Keeping the wrapper explicit is what makes
+    the arity visible — the version of this file that passed no connection at
+    all raised inside the io_bound thread, where NiceGUI logs the exception and
+    shows the user nothing, so "Send now" did nothing at all and said nothing."""
+    with db.db() as con:
+        return _send_status(con)
+
+
 def _load(filter_value: str) -> dict:
     """One read of everything the queue renders, signature included."""
     with db.db() as con:
@@ -498,7 +510,7 @@ async def queue_page():
                 async def send_now():
                     if not await save():
                         return
-                    status = await run.io_bound(_send_status)
+                    status = await run.io_bound(_current_send_status)
                     final, test_mode, error = send.resolve_recipient(
                         current["recipient"], {
                             "real_send_enabled":
