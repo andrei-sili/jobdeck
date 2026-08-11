@@ -24,8 +24,9 @@ SEARCH_FIELDS = ("firma", "email", "ansprechpartner", "plz_ort")
 
 def _load():
     with db.db() as con:
+        signature = db.data_signature(con)  # first: see jobs._load_jobs
         return {"rows": [dict(r) for r in db.list_bewerbungen(con)],
-                "signature": db.data_signature(con)}
+                "signature": signature}
 
 
 def _signature() -> tuple:

@@ -106,6 +106,9 @@ def _current_send_status() -> dict:
 def _load(filter_value: str) -> dict:
     """One read of everything the queue renders, signature included."""
     with db.db() as con:
+        # First, before any row: see _load_jobs in jobs.py for why the order is
+        # load-bearing.
+        signature = _signature_of(con)
         rows = [dict(r) for r in
                 db.list_drafts_with_jobs(con, FILTER_STATUSES[filter_value])]
         # Asked of the duplicate gate itself, for the drafts on screen: the
@@ -118,7 +121,7 @@ def _load(filter_value: str) -> dict:
             "drafts": rows,
             "status": _send_status(con),
             "applied": duplicates_for_jobs(con, postings),
-            "signature": _signature_of(con),
+            "signature": signature,
         }
 
 

@@ -2,6 +2,9 @@
 answer. The decision is pure so it can be pinned without a browser; the wiring
 is exercised by the page-rendering tests."""
 
+import ast
+import pathlib
+
 from jobdeck import db
 from jobdeck.ui import live
 
@@ -159,3 +162,45 @@ def test_a_poll_error_changes_the_profiles_signature(con, data_dir):
     db.mark_profile_polled(con, profile_id, error="jooble: 401")
     con.commit()
     assert db.profiles_signature(con) != before
+
+
+# --------------------------------------------------------------------------
+# The order inside a loader is load-bearing
+# --------------------------------------------------------------------------
+def _db_calls(func) -> list[str]:
+    """`db.<name>(...)` calls inside a function, in source order, minus the
+    connection itself."""
+    names = []
+    for node in ast.walk(func):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and getattr(node.func.value, "id", "") == "db"
+                and node.func.attr != "db"):
+            names.append((node.lineno, node.func.attr))
+    return [name for _, name in sorted(names)]
+
+
+def test_every_loader_reads_its_signature_before_the_data_it_describes():
+    """sqlite3 gives each SELECT its own read snapshot, so a poll committing
+    between the rows and the signature would marry STALE rows to a FRESH
+    signature — which the watcher then records as "what the page is showing",
+    and the change is never rendered. Reading the signature first can only fail
+    the safe way: one rebuild nobody needed."""
+    from jobdeck.ui.pages import jobs as jobs_page
+
+    pages = pathlib.Path(jobs_page.__file__).parent
+    checked = []
+    for path in sorted(pages.glob("*.py")):
+        tree = ast.parse(path.read_text())
+        for func in ast.walk(tree):
+            if not isinstance(func, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            calls = _db_calls(func)
+            signatures = [c for c in calls if c.endswith("_signature")]
+            if not signatures or len(calls) == 1:
+                continue
+            assert calls[0].endswith("_signature"), (
+                f"{path.name}:{func.name} reads {calls[0]} before its "
+                f"signature — a write landing between the two would be lost")
+            checked.append(f"{path.name}:{func.name}")
+    assert len(checked) >= 4, f"the scan found almost nothing: {checked}"

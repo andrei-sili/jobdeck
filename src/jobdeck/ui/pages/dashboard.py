@@ -13,13 +13,14 @@ FOLLOW_UP_DEFAULT = 14
 
 def _load():
     with db.db() as con:
+        signature = db.data_signature(con)  # first: see jobs._load_jobs
         return {
             "apps": [dict(r) for r in db.list_bewerbungen(con)],
             "jobs": db.count_jobs_by_status(con),
             "activity": [dict(r) for r in db.recent_activity(con, limit=10)],
             "threshold": int(db.get_setting(con, "follow_up_days",
                                             str(FOLLOW_UP_DEFAULT))),
-            "signature": db.data_signature(con),
+            "signature": signature,
         }
 
 

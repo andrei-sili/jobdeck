@@ -14,8 +14,9 @@ ALL_SOURCES = ["arbeitsagentur", "jooble", "arbeitnow"]
 
 def _load_profiles():
     with db.db() as con:
+        signature = db.profiles_signature(con)  # first: see jobs._load_jobs
         return {"profiles": [dict(r) for r in db.list_profiles(con)],
-                "signature": db.profiles_signature(con)}
+                "signature": signature}
 
 
 def _signature() -> tuple:

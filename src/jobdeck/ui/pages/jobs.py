@@ -144,6 +144,13 @@ def _load_jobs(status: str, pile: str, page: int, collapse: bool = True) -> dict
     user's feet, and asking for page 5 of a two-page list must show the last
     page rather than an empty one."""
     with db.db() as con:
+        # The signature is read FIRST, before a single row. sqlite3 runs each
+        # SELECT in its own read snapshot, so a poll or a liveness pass
+        # committing between the two reads would otherwise marry STALE rows to
+        # a FRESH signature — and the watcher would then record that signature
+        # as "what the page is showing" and never rebuild. This order can only
+        # fail the safe way: one rebuild nobody needed.
+        signature = db.data_signature(con)
         status_arg = None if status == "all" else status
         stale_age_days = freshness.stale_age_setting(
             db.get_setting(con, "stale_age_days", ""))
@@ -165,9 +172,7 @@ def _load_jobs(status: str, pile: str, page: int, collapse: bool = True) -> dict
         # dedupe.duplicates_for_jobs for why the stored flag cannot answer it.
         on_screen = rows + [r for group in siblings.values() for r in group]
         return {
-            # Read beside the data it describes, so what the page hands back to
-            # the live watcher is exactly the state it is rendering.
-            "signature": db.data_signature(con),
+            "signature": signature,
             "applied": duplicates_for_jobs(con, on_screen),
             "rows": rows,
             "siblings": siblings,

@@ -61,13 +61,14 @@ def _get_meters():
     """The numbers a settings page must not show stale: LLM spend and the
     sends counted against today's cap."""
     with db.db() as con:
+        signature = db.meter_signature(con)  # first: see jobs._load_jobs
         return {
             "llm_calls": db.get_setting(con, "llm_calls", "0"),
             "llm_input_tokens": db.get_setting(con, "llm_input_tokens", "0"),
             "llm_output_tokens": db.get_setting(con, "llm_output_tokens", "0"),
             "llm_cost_usd": db.get_setting(con, "llm_cost_usd", "0"),
             "sent_today": db.count_outbound_today(con),
-            "signature": db.meter_signature(con),
+            "signature": signature,
         }
 
 

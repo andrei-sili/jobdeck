@@ -24,6 +24,7 @@ from jobdeck.ui.layout import frame
 def _load(job_id: int) -> dict | None:
     """The posting, its draft and the applicant settings in one read."""
     with db.db() as con:
+        signature = db.job_signature(con, job_id)  # first: see jobs._load_jobs
         job = db.get_job(con, job_id)
         if job is None:
             return None
@@ -34,7 +35,7 @@ def _load(job_id: int) -> dict | None:
             "job": dict(job),
             "draft": dict(draft) if draft is not None else None,
             "settings": settings,
-            "signature": db.job_signature(con, job_id),
+            "signature": signature,
         }
 
 
