@@ -7,11 +7,12 @@ pollers write; busy_timeout absorbs the rare write/write collision.
 
 import datetime
 import json
+import logging
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-from jobdeck import backup, config, dates, freshness, migrations
+from jobdeck import apply_channel, backup, config, dates, freshness, migrations
 from jobdeck.constants import (
     EMAIL_OUTBOUND,
     EMAIL_OUTBOUND_TEST,
@@ -19,6 +20,8 @@ from jobdeck.constants import (
     STATUS_RANK,
 )
 from jobdeck.dedupe import find_duplicate_bewerbung, norm
+
+log = logging.getLogger(__name__)
 
 
 def _now() -> str:
@@ -113,6 +116,13 @@ def bootstrap() -> str | None:
                 src.close()
     with db() as con:
         migrations.migrate(con)
+        # Self-healing, like the published_on backfill beside it: derived from
+        # data the row already holds, so it is idempotent and a posting whose
+        # e-mail was harvested before this rule existed stops looking like a
+        # form job on the next start.
+        converted = resolve_email_channels(con)
+        if converted:
+            log.info("apply channel: %s postings apply by e-mail", converted)
     return backup.run_startup_backup()
 
 
@@ -382,9 +392,14 @@ def insert_job_if_new(con: sqlite3.Connection, values: dict) -> int | None:
                 values.get("duplicate_of"),
             ),
         )
-        return cur.lastrowid
+        job_id = cur.lastrowid
     except sqlite3.IntegrityError:
         return None  # UNIQUE(source, external_id) — already known
+    # A posting that arrives WITH an application address is an e-mail job from
+    # the first second; waiting for a resolve pass to say so is what left 81 of
+    # them looking like form jobs.
+    resolve_email_channels(con, job_id)
+    return job_id
 
 
 # Score 0 is reserved for hard-criteria violations (see ai/scoring.py); the
@@ -976,11 +991,54 @@ def set_contact_email(
     """Adopt a human-confirmed application e-mail for a posting (from the
     web contact lookup). `source` records provenance (e.g. 'web_lookup'). The
     address becomes the send recipient only through the normal draft→queue path,
-    still behind real_send_enabled and the per-send human confirmation."""
+    still behind real_send_enabled and the per-send human confirmation.
+
+    An e-mail arriving is also the moment the posting stops being a form job —
+    so the channel is recomputed here rather than waiting for a resolve pass
+    that may never be run again on this row."""
     con.execute(
         "UPDATE jobs SET contact_email=?, contact_source=? WHERE id=?",
         (email, source, job_id),
     )
+    resolve_email_channels(con, job_id)
+
+
+# Statuses whose channel is still worth deciding. A posting already applied to,
+# skipped or filed as a duplicate is finished business — rewriting how one
+# would have applied to it changes nothing and would only rewrite history.
+_CHANNEL_STATUSES = ("new", "portal")
+
+
+def resolve_email_channels(
+    con: sqlite3.Connection, job_id: int | None = None
+) -> int:
+    """Record 'apply by e-mail' wherever a posting already holds one. Returns
+    the number of postings that changed.
+
+    A stored `contact_email` settles the question with no network at all: it is
+    the first rule of `apply_channel.classify` and the short-circuit
+    `apply_resolve.resolve` takes before it fetches anything. Nothing applied
+    that rule outside the resolver, so 81 of his Arbeitsagentur postings held an
+    application address and still read as unresolved — form jobs, in an app
+    whose whole pain is form jobs — while only 5 said 'direct_email'.
+
+    Only the CHANNEL is written: the ATS vendor and the resolved apply URL stay,
+    because they remain true about the posting and the row still offers to open
+    it.
+    """
+    statuses = ",".join("?" * len(_CHANNEL_STATUSES))
+    where_id = " AND id=?" if job_id is not None else ""
+    params = [apply_channel.CHANNEL_DIRECT_EMAIL, apply_channel.CHANNEL_DIRECT_EMAIL,
+              *_CHANNEL_STATUSES]
+    if job_id is not None:
+        params.append(job_id)
+    cur = con.execute(
+        "UPDATE jobs SET apply_channel=? "
+        "WHERE contact_email<>'' AND COALESCE(apply_channel,'')<>? "
+        f"AND status IN ({statuses}){where_id}",
+        params,
+    )
+    return cur.rowcount
 
 
 def count_jobs_by_status(con: sqlite3.Connection) -> dict[str, int]:

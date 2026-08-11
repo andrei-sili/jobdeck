@@ -321,3 +321,56 @@ def test_an_unknown_filter_value_raises_instead_of_showing_a_hidden_pile(con):
             db.count_jobs(con, status="new", **bad)
         with pytest.raises(ValueError):
             db.count_job_groups(con, status="new", **bad)
+
+
+# ---------------------------------------------------------------------------
+# "A stored e-mail settles the channel" — the rule that only the resolver knew
+# ---------------------------------------------------------------------------
+def test_a_posting_that_arrives_with_an_email_applies_by_email(con):
+    """Nothing outside the resolver applied `classify`'s first rule, so 81 of
+    his Arbeitsagentur postings held an application address and still read as
+    unresolved form jobs — in an app whose whole pain is form jobs."""
+    job_id = _add_job(con, contact_email="bewerbung@firma.de")
+    assert db.get_job(con, job_id)["apply_channel"] == "direct_email"
+
+
+def test_a_posting_without_an_email_is_left_for_the_resolver(con):
+    job_id = _add_job(con, contact_email="")
+    assert db.get_job(con, job_id)["apply_channel"] == ""
+
+
+def test_an_adopted_email_converts_a_form_job(con):
+    """The web lookup's whole purpose: the posting stops being a form job the
+    moment he confirms an address."""
+    job_id = _add_job(con, contact_email="")
+    db.set_apply_channel(con, job_id, "company_site", "", "https://firma.de/x")
+
+    db.set_contact_email(con, job_id, "bewerbung@firma.de", "web_lookup")
+
+    row = db.get_job(con, job_id)
+    assert row["apply_channel"] == "direct_email"
+    # the resolved URL stays: it is still true, and the row still offers to
+    # open the posting with it
+    assert row["apply_url"] == "https://firma.de/x"
+
+
+def test_the_stock_is_converted_once_the_rule_exists(con):
+    """A posting whose e-mail was harvested before this rule existed heals on
+    the next start, from data the row already holds."""
+    job_id = _add_job(con, contact_email="bewerbung@firma.de")
+    con.execute("UPDATE jobs SET apply_channel='' WHERE id=?", (job_id,))
+
+    assert db.resolve_email_channels(con) == 1
+    assert db.get_job(con, job_id)["apply_channel"] == "direct_email"
+    assert db.resolve_email_channels(con) == 0, "not idempotent"
+
+
+def test_a_finished_posting_keeps_the_channel_it_was_applied_through(con):
+    """Rewriting how one WOULD have applied to a posting already sent, skipped
+    or filed as a duplicate changes nothing and only rewrites history."""
+    job_id = _add_job(con, contact_email="bewerbung@firma.de")
+    db.set_apply_channel(con, job_id, "ats_form", "JOIN", "https://join.com/x")
+    db.set_job_status(con, job_id, "applied")
+
+    assert db.resolve_email_channels(con) == 0
+    assert db.get_job(con, job_id)["apply_channel"] == "ats_form"
