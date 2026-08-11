@@ -552,3 +552,68 @@ def test_the_volume_numbers_are_pinned_as_literals():
     assert liveness.BATCH_PAUSE_S == 0.5
     assert liveness.RECHECK_AFTER_H == 20
     assert liveness.PROBE_DEADLINE_S == 25.0
+
+
+# ---------------------------------------------------------------------------
+# The daily probe already holds the detail payload — so the columns the app
+# used to throw away fill in for free, on the stock as well as on new rows.
+# ---------------------------------------------------------------------------
+_DETAIL_WITH_FACTS = {
+    **_DETAIL,
+    "stellenlokationen": [{"adresse": {
+        "strasse": "Musterstraße", "hausnummer": "26",
+        "plz": "70178", "ort": "Stuttgart"}}],
+    "gehaltsspanneVon": 37000, "gehaltsspanneBis": 47000,
+    "artDerVerguetung": "Jahresgehalt",
+    "istArbeitnehmerUeberlassung": True,
+}
+
+
+async def test_a_live_answer_also_carries_the_facts_the_payload_states():
+    def handler(request):
+        return httpx.Response(200, json=_DETAIL_WITH_FACTS)
+
+    async with _client(handler) as client:
+        result = await liveness.probe(_BA_JOB, client)
+
+    assert result.facts["work_strasse"] == "Musterstraße 26"
+    assert result.facts["salary_to"] == "47000"
+    assert result.facts["temp_agency"] == 1
+
+
+async def test_the_pass_fills_the_columns_of_a_posting_stored_before_them(
+        con, data_dir, monkeypatch):
+    """283 of his Arbeitsagentur postings predate these columns; this is what
+    heals them without a single extra request."""
+    monkeypatch.setattr(liveness, "BATCH_PAUSE_S", 0)
+    ids = _seed(con, [{"source": "arbeitsagentur", "ext": "old",
+                       "url": _BA_JOB["url"]}])
+
+    def handler(request):
+        return httpx.Response(200, json=_DETAIL_WITH_FACTS)
+
+    async with _client(handler) as client:
+        await liveness.check_pending(limit=10, client=client)
+
+    row = db.get_job(con, ids["old"])
+    assert row["work_plz_ort"] == "70178 Stuttgart"
+    assert row["salary_period"] == "Jahresgehalt"
+    assert row["temp_agency"] == 1
+
+
+async def test_a_dead_posting_leaves_its_stored_facts_alone(con, data_dir,
+                                                            monkeypatch):
+    """A 404 says nothing about the pay range it once stated."""
+    monkeypatch.setattr(liveness, "BATCH_PAUSE_S", 0)
+    ids = _seed(con, [{"source": "arbeitsagentur", "ext": "gone",
+                       "url": _BA_JOB["url"]}])
+    db.set_job_facts(con, ids["gone"], {"salary_from": "37000"})
+    con.commit()
+
+    def handler(request):
+        return httpx.Response(404, json=_DETAIL_WITH_FACTS)
+
+    async with _client(handler) as client:
+        await liveness.check_pending(limit=10, client=client)
+
+    assert db.get_job(con, ids["gone"])["salary_from"] == "37000"

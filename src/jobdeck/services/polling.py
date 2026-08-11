@@ -75,6 +75,7 @@ def _store_posting(profile_id: int, posting: JobPosting) -> str:
         job_id = db.insert_job_if_new(con, values)
         if job_id is None:
             return "known"
+        db.set_job_facts(con, job_id, posting.facts)
         return "duplicate" if dup is not None else "new"
 
 

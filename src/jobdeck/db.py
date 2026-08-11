@@ -783,6 +783,34 @@ def set_apply_channel(
     )
 
 
+# Facts a source states about a posting, in this table's vocabulary. The
+# writer accepts exactly these, so a source handing over a key nobody stores
+# fails loudly here instead of being dropped in silence.
+JOB_FACT_COLUMNS = ("work_strasse", "work_plz_ort", "salary_from", "salary_to",
+                    "salary_period", "temp_agency")
+
+
+def set_job_facts(con: sqlite3.Connection, job_id: int, facts: dict) -> int:
+    """Store what a source stated about a posting. Returns the column count.
+
+    Only values the source actually stated are written: a payload that omits a
+    field must never erase what an earlier one said, and the same function
+    therefore serves discovery and the daily liveness probe — which is how the
+    postings stored before these columns existed fill in without one extra
+    request. Additive metadata only: never status, never a draft."""
+    known = {key: value for key, value in (facts or {}).items()
+             if key in JOB_FACT_COLUMNS and value not in ("", None)}
+    unknown = set(facts or {}) - set(JOB_FACT_COLUMNS)
+    if unknown:
+        raise ValueError(f"unknown job facts: {sorted(unknown)}")
+    if not known:
+        return 0
+    assignments = ", ".join(f"{key}=?" for key in known)
+    con.execute(f"UPDATE jobs SET {assignments} WHERE id=?",
+                (*known.values(), job_id))
+    return len(known)
+
+
 def set_job_liveness(
     con: sqlite3.Connection, job_id: int, liveness: str | None
 ) -> None:

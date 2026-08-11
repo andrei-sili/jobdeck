@@ -120,6 +120,58 @@ def _place(item) -> str:
     return city
 
 
+def _first_address(payload) -> dict:
+    """The `adresse` of the first work location, {} when there is none."""
+    locations = payload.get("stellenlokationen") if isinstance(payload, dict) else None
+    if not isinstance(locations, list) or not locations:
+        return {}
+    address = (locations[0] or {}).get("adresse")
+    return address if isinstance(address, dict) else {}
+
+
+def _amount(raw) -> str:
+    """A stated pay figure as plain digits, '' when it is not a number.
+
+    Kept as text, exactly like `published_at`: the board's own statement is
+    stored and any interpretation happens where it is used."""
+    if isinstance(raw, bool) or raw is None:
+        return ""
+    try:
+        value = float(str(raw).replace(",", ".").strip())
+    except (TypeError, ValueError):
+        return ""
+    return str(int(value)) if value > 0 else ""
+
+
+def posting_facts(payload) -> dict:
+    """Structured facts of a detail payload, as the jobs table stores them.
+
+    Everything here was already being fetched and thrown away. It is a pure
+    function of the payload so the two callers that hold one — discovery and
+    the daily liveness probe — can both fill these columns, which is what lets
+    the existing stock heal without a single extra request.
+    """
+    if not isinstance(payload, dict):
+        return {}
+    address = _first_address(payload)
+    street = " ".join(part for part in (
+        str(address.get("strasse") or "").strip(),
+        str(address.get("hausnummer") or "").strip(),
+    ) if part)
+    plz_ort = " ".join(part for part in (
+        str(address.get("plz") or "").strip(),
+        str(address.get("ort") or "").strip(),
+    ) if part)
+    return {
+        "work_strasse": street,
+        "work_plz_ort": plz_ort,
+        "salary_from": _amount(payload.get("gehaltsspanneVon")),
+        "salary_to": _amount(payload.get("gehaltsspanneBis")),
+        "salary_period": str(payload.get("artDerVerguetung") or "").strip(),
+        "temp_agency": 1 if payload.get("istArbeitnehmerUeberlassung") else 0,
+    }
+
+
 class ArbeitsagenturSource:
     name = "arbeitsagentur"
 
@@ -230,6 +282,7 @@ class ArbeitsagenturSource:
             description = await self._fetch_page_text(external_url)
 
         posting.description = description
+        posting.facts = posting_facts(detail)
         posting.contact_email = extract_email(description)
         posting.remote = bool(
             detail.get("homeofficemoeglich")

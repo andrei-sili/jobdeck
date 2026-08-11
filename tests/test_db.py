@@ -1,3 +1,5 @@
+import pytest
+
 from jobdeck import db
 
 
@@ -374,3 +376,51 @@ def test_a_finished_posting_keeps_the_channel_it_was_applied_through(con):
 
     assert db.resolve_email_channels(con) == 0
     assert db.get_job(con, job_id)["apply_channel"] == "ats_form"
+
+
+# ---------------------------------------------------------------------------
+# Facts a source states about a posting
+# ---------------------------------------------------------------------------
+def test_set_job_facts_stores_what_the_source_stated(con):
+    job_id = _add_job(con)
+
+    written = db.set_job_facts(con, job_id, {
+        "work_strasse": "Musterstraße 26", "work_plz_ort": "70178 Stuttgart",
+        "salary_from": "37000", "salary_to": "47000",
+        "salary_period": "Jahresgehalt", "temp_agency": 1})
+
+    row = db.get_job(con, job_id)
+    assert written == 6
+    assert row["work_strasse"] == "Musterstraße 26"
+    assert row["work_plz_ort"] == "70178 Stuttgart"
+    assert (row["salary_from"], row["salary_to"]) == ("37000", "47000")
+    assert row["salary_period"] == "Jahresgehalt"
+    assert row["temp_agency"] == 1
+
+
+def test_a_silent_payload_never_erases_what_an_earlier_one_said(con):
+    """The same columns are filled by discovery and by the daily liveness
+    probe; a payload that omits a field must not delete it."""
+    job_id = _add_job(con)
+    db.set_job_facts(con, job_id, {"work_plz_ort": "52222 Stolberg"})
+
+    db.set_job_facts(con, job_id, {"work_plz_ort": "", "salary_from": "40000"})
+
+    row = db.get_job(con, job_id)
+    assert row["work_plz_ort"] == "52222 Stolberg"
+    assert row["salary_from"] == "40000"
+
+
+def test_a_fact_nobody_stores_is_refused_rather_than_dropped(con):
+    job_id = _add_job(con)
+    with pytest.raises(ValueError, match="homeofficetyp"):
+        db.set_job_facts(con, job_id, {"homeofficetyp": "teilweise"})
+
+
+def test_a_corrected_temp_agency_flag_can_go_back_to_zero(con):
+    job_id = _add_job(con)
+    db.set_job_facts(con, job_id, {"temp_agency": 1})
+
+    db.set_job_facts(con, job_id, {"temp_agency": 0})
+
+    assert db.get_job(con, job_id)["temp_agency"] == 0

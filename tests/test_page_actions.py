@@ -1,4 +1,4 @@
-"""Actions a page offers — and the ones it must ask about first.
+"""What a page shows, which actions it offers — and which it asks about first.
 
 Rendered for real: these are all "which control exists, and what does pressing
 it do", which no data-layer test can see.
@@ -157,3 +157,22 @@ async def test_a_confirmed_application_delete_goes_through(user: User, con,
     await asyncio.sleep(0.3)
 
     assert db.get_bewerbung(con, row_id) is None
+
+
+# ---------------------------------------------------------------------------
+# Facts the board states, on the row
+# ---------------------------------------------------------------------------
+async def test_a_temp_agency_posting_says_so_on_the_row(user: User, con,
+                                                        data_dir):
+    """The employer is a staffing firm and the work happens at a client's site
+    — worth knowing before writing a letter, and the reason that posting's
+    address is never borrowed for one."""
+    job_id = _posting(con, company="Zeitarbeit GmbH")
+    db.set_job_facts(con, job_id, {"temp_agency": 1, "salary_from": "37000",
+                                   "salary_period": "Jahresgehalt"})
+    con.commit()
+
+    await user.open("/jobs")
+
+    await user.should_see("Arbeitnehmerüberlassung")
+    await user.should_see("Gehalt: 37.000 € (Jahresgehalt)")

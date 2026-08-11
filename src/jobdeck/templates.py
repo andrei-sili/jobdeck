@@ -31,6 +31,30 @@ class TemplateError(ValueError):
     """The template file is missing required tokens or unusable."""
 
 
+def letter_address(job) -> tuple[str, str]:
+    """(STRASSE, PLZ_ORT) for the employer's address block.
+
+    An address the posting itself states wins: it was extracted from the text
+    the employer wrote, and where a posting names a postal address it is the one
+    it wants applications sent to. Where there is none — 725 of his 769 postings
+    state no address at all — the board's structured WORK address stands in,
+    which is deterministic and beats an LLM reading prose.
+
+    Except for Arbeitnehmerüberlassung, where it is refused: the employer there
+    is a staffing firm and the work location is somebody else's site, so the
+    letter would be addressed to a company that is not the recipient. Half an
+    address block is better than a confidently wrong one.
+    """
+    strasse = str(job["contact_strasse"] or "").strip()
+    plz_ort = str(job["contact_plz_ort"] or "").strip()
+    if strasse or plz_ort:
+        return strasse, plz_ort
+    if job["temp_agency"]:
+        return "", ""
+    return (str(job["work_strasse"] or "").strip(),
+            str(job["work_plz_ort"] or "").strip())
+
+
 def body_paragraphs_html(body_text: str) -> str:
     """Plain text with blank-line paragraph breaks → styled <p> blocks."""
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", body_text) if p.strip()]

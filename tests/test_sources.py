@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from jobdeck import netsafe
+from jobdeck.sources import arbeitsagentur
 from jobdeck.sources.arbeitnow import ArbeitnowSource
 from jobdeck.sources.arbeitsagentur import MAX_PAGE_BYTES, ArbeitsagenturSource
 from jobdeck.sources.base import (
@@ -613,3 +614,59 @@ async def test_arbeitsagentur_zero_hits_omit_the_result_key():
     source = ArbeitsagenturSource(make_client(
         lambda r: httpx.Response(200, json={"maxErgebnisse": 0, "page": 1, "size": 5})))
     assert await source.search(SearchQuery(keywords="nichts")) == []
+
+
+# ---------------------------------------------------------------------------
+# Facts the detail payload states and the app used to throw away
+# ---------------------------------------------------------------------------
+def test_posting_facts_reads_the_street_level_work_address():
+    facts = arbeitsagentur.posting_facts({
+        "stellenlokationen": [{"adresse": {
+            "strasse": "Musterstraße", "hausnummer": "26",
+            "plz": "70178", "ort": "Stuttgart", "land": "DEUTSCHLAND"}}],
+    })
+    assert facts["work_strasse"] == "Musterstraße 26"
+    assert facts["work_plz_ort"] == "70178 Stuttgart"
+
+
+def test_posting_facts_survives_a_half_stated_address():
+    facts = arbeitsagentur.posting_facts({
+        "stellenlokationen": [{"adresse": {"ort": "Aachen"}}]})
+    assert facts["work_strasse"] == ""
+    assert facts["work_plz_ort"] == "Aachen"
+
+
+def test_posting_facts_reads_the_pay_range_and_its_period():
+    facts = arbeitsagentur.posting_facts({
+        "gehaltsspanneVon": 37000, "gehaltsspanneBis": "47000.0",
+        "artDerVerguetung": "Jahresgehalt"})
+    assert (facts["salary_from"], facts["salary_to"]) == ("37000", "47000")
+    assert facts["salary_period"] == "Jahresgehalt"
+
+
+def test_a_pay_figure_that_is_not_a_number_is_not_invented():
+    facts = arbeitsagentur.posting_facts({
+        "gehaltsspanneVon": "nach Vereinbarung", "gehaltsspanneBis": None})
+    assert (facts["salary_from"], facts["salary_to"]) == ("", "")
+
+
+def test_posting_facts_flags_arbeitnehmerueberlassung():
+    assert arbeitsagentur.posting_facts(
+        {"istArbeitnehmerUeberlassung": True})["temp_agency"] == 1
+    assert arbeitsagentur.posting_facts({})["temp_agency"] == 0
+
+
+def test_posting_facts_tolerates_a_payload_of_the_wrong_shape():
+    """The endpoint is community-documented and has changed shape before; this
+    runs on the background polling path and on every liveness probe."""
+    assert arbeitsagentur.posting_facts("not a payload") == {}
+    assert arbeitsagentur.posting_facts(
+        {"stellenlokationen": "wrong"})["work_plz_ort"] == ""
+
+
+def test_posting_facts_speak_only_the_jobs_table_vocabulary():
+    """The writer refuses a key nobody stores, so a source cannot lose data in
+    silence — this pins the two halves of that contract together."""
+    from jobdeck import db as db_module
+    facts = arbeitsagentur.posting_facts({"gehaltsspanneVon": 1})
+    assert set(facts) <= set(db_module.JOB_FACT_COLUMNS)

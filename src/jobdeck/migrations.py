@@ -9,7 +9,7 @@ import sqlite3
 
 from jobdeck import dates
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Legacy table, exactly as the previous tracker created it.
 BEWERBUNGEN_SQL = """
@@ -76,6 +76,12 @@ CREATE TABLE IF NOT EXISTS jobs (
     published_on        TEXT NOT NULL DEFAULT '',
     liveness            TEXT NOT NULL DEFAULT '',
     liveness_checked_at TEXT NOT NULL DEFAULT '',
+    work_strasse        TEXT NOT NULL DEFAULT '',
+    work_plz_ort        TEXT NOT NULL DEFAULT '',
+    salary_from         TEXT NOT NULL DEFAULT '',
+    salary_to           TEXT NOT NULL DEFAULT '',
+    salary_period       TEXT NOT NULL DEFAULT '',
+    temp_agency         INTEGER NOT NULL DEFAULT 0,
     UNIQUE (source, external_id)
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
@@ -232,6 +238,33 @@ def _backfill_published_on(con: sqlite3.Connection) -> None:
             )
 
 
+def _ensure_source_fact_columns(con: sqlite3.Connection) -> None:
+    """Facts the boards state and the app used to throw away (schema v7).
+
+    All of them come from the Arbeitsagentur detail payload, which the app
+    already fetches twice — once at discovery and again on every liveness probe:
+
+    * `work_strasse` / `work_plz_ort`: the street-level address of the work
+      location. The letter's {{STRASSE}} / {{PLZ_ORT}} tokens were filled only
+      from an address an LLM had read out of the posting prose, which 725 of his
+      769 postings simply do not state.
+    * `salary_from` / `salary_to` / `salary_period`: the stated pay range, kept
+      as the board sent it so the inbox can show it without re-deriving.
+    * `temp_agency`: Arbeitnehmerüberlassung. A posting where the employer is a
+      staffing firm and the work happens somewhere else — worth knowing before
+      writing an application, and it is why the work address above is only ever
+      a FALLBACK for the letter.
+    """
+    existing = [row[1] for row in con.execute("PRAGMA table_info(jobs)")]
+    for col in ("work_strasse", "work_plz_ort", "salary_from", "salary_to",
+                "salary_period"):
+        if col not in existing:
+            con.execute(f"ALTER TABLE jobs ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+    if "temp_agency" not in existing:
+        con.execute(
+            "ALTER TABLE jobs ADD COLUMN temp_agency INTEGER NOT NULL DEFAULT 0")
+
+
 def _ensure_draft_columns(con: sqlite3.Connection) -> None:
     """Send-tracking columns added in schema v4 (additive only).
 
@@ -254,6 +287,7 @@ def migrate(con: sqlite3.Connection) -> None:
     _ensure_job_contact_columns(con)
     _ensure_apply_channel_columns(con)
     _ensure_freshness_columns(con)
+    _ensure_source_fact_columns(con)
     _ensure_draft_columns(con)
     _backfill_published_on(con)
     if version < 2:

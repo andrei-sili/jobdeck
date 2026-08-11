@@ -45,6 +45,11 @@ class JobPosting:
     description: str = ""
     contact_email: str = ""
     published_at: str = ""
+    # Structured facts a source states about the posting, in the jobs table's
+    # own vocabulary (work address, pay range, Arbeitnehmerüberlassung). A bag
+    # rather than ten fields: every source states a different subset, and the
+    # writer that stores them ignores what nobody stated.
+    facts: dict = field(default_factory=dict)
     raw: dict = field(default_factory=dict)
 
 

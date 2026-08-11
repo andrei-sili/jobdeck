@@ -287,6 +287,21 @@ def _claim_is_running(job: dict) -> bool:
             and not drafting.claim_is_stale(job["draft_updated_at"]))
 
 
+def _salary_line(job: dict) -> str:
+    """'Gehalt: 37.000–47.000 € (Jahresgehalt)' — '' when the board stated none.
+
+    The Arbeitsagentur states a pay range on a minority of postings and the app
+    threw it away; where it exists it is the one fact he otherwise has to open
+    the ad to learn."""
+    low = str(job["salary_from"] or "").strip()
+    high = str(job["salary_to"] or "").strip()
+    if not low and not high:
+        return ""
+    span = " – ".join(f"{int(v):,}".replace(",", ".") for v in (low, high) if v)
+    period = str(job["salary_period"] or "").strip()
+    return f"Gehalt: {span} €" + (f" ({period})" if period else "")
+
+
 def _openable_url(job: dict) -> str:
     """The URL a posting's buttons may hand to the browser, '' when none is
     safe. The resolved apply link wins over the raw feed URL."""
@@ -399,6 +414,16 @@ async def jobs_page():
                     )
                 if job["contact_email"]:
                     ui.label(f"Contact: {job['contact_email']}").classes("text-sm")
+                salary = _salary_line(job)
+                if salary:
+                    ui.label(salary).classes("text-sm text-gray-700")
+                if job["temp_agency"]:
+                    # The employer is a staffing firm and the work happens at a
+                    # client's site — worth knowing before writing a letter, and
+                    # the reason the letter never borrows this posting's address.
+                    ui.label("⚠ Arbeitnehmerüberlassung — der Arbeitsort "
+                             "gehört zu einem Kundenbetrieb.") \
+                        .classes("text-sm text-amber-700")
                 if job["liveness"] == liveness.LIVENESS_GONE:
                     checked = (job["liveness_checked_at"] or "")[:10]
                     ui.label(f"⚠ Anzeige offline — beim letzten Abruf am "

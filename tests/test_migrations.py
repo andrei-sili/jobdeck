@@ -324,3 +324,45 @@ def test_bootstrap_without_legacy_starts_empty(data_dir, monkeypatch):
     db.bootstrap()
     with db.db() as con:
         assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 0
+
+
+def test_migrate_adds_the_source_fact_columns_to_pre_v7_jobs(tmp_path):
+    """A pre-v7 jobs table gains the columns for the facts the boards state —
+    work address, pay range, Arbeitnehmerüberlassung — with defaults, and the
+    rows already stored keep everything they had."""
+    path = tmp_path / "v6.db"
+    con = sqlite3.connect(path)
+    con.row_factory = sqlite3.Row
+    con.execute(
+        """
+        CREATE TABLE jobs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            source      TEXT NOT NULL,
+            external_id TEXT NOT NULL,
+            company     TEXT NOT NULL DEFAULT '',
+            fetched_at  TEXT NOT NULL,
+            status      TEXT NOT NULL DEFAULT 'new',
+            UNIQUE (source, external_id)
+        )
+        """
+    )
+    con.execute(
+        "INSERT INTO jobs (source, external_id, company, fetched_at) "
+        "VALUES (?, ?, ?, ?)",
+        ("arbeitsagentur", "10001-1-S", "Beispiel GmbH", "2026-08-01T10:00:00"),
+    )
+    con.execute("PRAGMA user_version = 6")
+    con.commit()
+
+    migrations.migrate(con)
+
+    row = con.execute("SELECT * FROM jobs").fetchone()
+    assert row["company"] == "Beispiel GmbH"
+    for col in ("work_strasse", "work_plz_ort", "salary_from", "salary_to",
+                "salary_period"):
+        assert row[col] == ""
+    assert row["temp_agency"] == 0
+    assert (con.execute("PRAGMA user_version").fetchone()[0]
+            == migrations.SCHEMA_VERSION)
+    migrations.migrate(con)  # idempotent with the new columns present
+    con.close()

@@ -1033,3 +1033,21 @@ def test_an_old_posting_is_never_deleted_only_moved(con, data_dir):
 
     assert db.get_job(con, old) is not None
     assert db.get_job(con, old)["status"] == "new"
+
+
+# ---------------------------------------------------------------------------
+# What the row says about pay and about Arbeitnehmerüberlassung
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("job, expected", [
+    ({"salary_from": "37000", "salary_to": "47000",
+      "salary_period": "Jahresgehalt"},
+     "Gehalt: 37.000 – 47.000 € (Jahresgehalt)"),
+    ({"salary_from": "37000", "salary_to": "", "salary_period": ""},
+     "Gehalt: 37.000 €"),
+    ({"salary_from": "", "salary_to": "45000", "salary_period": "Jahresgehalt"},
+     "Gehalt: 45.000 € (Jahresgehalt)"),
+    # the board states a range on a minority of postings; the rest say nothing
+    ({"salary_from": "", "salary_to": "", "salary_period": ""}, ""),
+])
+def test_the_row_states_the_pay_range_the_board_gave(job, expected):
+    assert jobs._salary_line(job) == expected
