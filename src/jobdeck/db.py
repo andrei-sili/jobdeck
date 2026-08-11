@@ -989,6 +989,88 @@ def count_jobs_by_status(con: sqlite3.Connection) -> dict[str, int]:
 
 
 # --------------------------------------------------------------------------
+# Signatures — "has anything I display changed?" in one cheap query
+# --------------------------------------------------------------------------
+# A page polls one of these and rebuilds only when the value differs from what
+# it is showing (see ui/live.py). DERIVED rather than a version counter that
+# writers bump: a bump can be forgotten, and a forgotten bump is exactly the
+# silent staleness this mechanism exists to end — every write to these tables
+# moves one of the aggregates by construction.
+#
+# The jobs part is ONE scan with aggregates only; the per-status counts make a
+# status change visible even though the row count does not move (a transition
+# lowers one count and raises another, so only two opposite transitions inside
+# a single tick could cancel out). `status_history` is included through its id
+# alone because `set_status` writes an audit row for every application status
+# change — the one thing about a bewerbung a job row quotes.
+_JOBS_SIGNATURE_SQL = """
+SELECT COUNT(*), MAX(id), COUNT(match_score), TOTAL(match_score),
+       MAX(liveness_checked_at), TOTAL(liveness=?),
+       TOTAL(status='new'), TOTAL(status='portal'), TOTAL(status='applied'),
+       TOTAL(status='skipped'), TOTAL(status='duplicate'),
+       TOTAL(contact_email<>''), TOTAL(COALESCE(apply_channel,'')<>'')
+  FROM jobs
+"""
+
+# Drafts get the same treatment for the same reason, and NOT a MAX(updated_at):
+# the timestamp has second resolution, so two moves inside one second (a
+# discard and a re-draft, a test that writes both) would compare equal while
+# the queue shows something different.
+_DRAFTS_SIGNATURE_SQL = """
+SELECT COUNT(*), MAX(id), MAX(updated_at),
+       TOTAL(status='generating'), TOTAL(status='ready'),
+       TOTAL(status='approved'), TOTAL(status='sending'),
+       TOTAL(status='sent'), TOTAL(status='failed'),
+       TOTAL(status='discarded')
+  FROM drafts
+"""
+
+_APPLICATIONS_SIGNATURE_SQL = """
+SELECT (SELECT COUNT(*) FROM bewerbungen), (SELECT MAX(id) FROM bewerbungen),
+       (SELECT MAX(id) FROM status_history)
+"""
+
+
+def data_signature(con: sqlite3.Connection) -> tuple:
+    """What the pipeline pages (inbox, queue, dashboard, applications, cockpit)
+    are showing, compressed to one comparable tuple.
+
+    One signature for all of them on purpose: a page-specific one would have to
+    predict which writes it cares about, and being rebuilt by an unrelated
+    change costs a render nobody notices, while missing a related one is the
+    defect."""
+    return (
+        *con.execute(_JOBS_SIGNATURE_SQL, (LIVENESS_GONE,)).fetchone(),
+        *con.execute(_DRAFTS_SIGNATURE_SQL).fetchone(),
+        *con.execute(_APPLICATIONS_SIGNATURE_SQL).fetchone(),
+    )
+
+
+def meter_signature(con: sqlite3.Connection) -> tuple:
+    """The Settings numbers that move on their own: LLM spend and today's
+    sends. Deliberately NOT the whole settings snapshot — the page must never
+    overwrite an input he is typing in, so only the meters are polled."""
+    return (
+        get_setting(con, "llm_calls", "0"),
+        get_setting(con, "llm_input_tokens", "0"),
+        get_setting(con, "llm_output_tokens", "0"),
+        get_setting(con, "llm_cost_usd", "0"),
+        count_outbound_today(con),
+    )
+
+
+def profiles_signature(con: sqlite3.Connection) -> tuple:
+    """What the search-profile list shows about the poller: when each profile
+    was last polled and what it said. A handful of rows, so the errors are
+    compared verbatim rather than through an aggregate that could hide one."""
+    return tuple(con.execute(
+        "SELECT COUNT(*), MAX(id), MAX(COALESCE(last_polled_at,'')), "
+        "GROUP_CONCAT(COALESCE(last_poll_error,''), '|') "
+        "FROM search_profiles"
+    ).fetchone())
+
+
+# --------------------------------------------------------------------------
 # Drafts (one per job — re-drafting replaces the previous attempt)
 # --------------------------------------------------------------------------
 def get_draft(con: sqlite3.Connection, draft_id: int) -> sqlite3.Row | None:
