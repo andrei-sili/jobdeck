@@ -454,7 +454,8 @@ APPLIED_FIRM_SQL = """(
 
 
 def _job_filters(
-    status: str | None, mismatches: str, gone: str, applied: str = "include"
+    status: str | None, mismatches: str, gone: str, applied: str = "include",
+    old: str = "include", stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
 ) -> tuple[list[str], list]:
     """WHERE fragments + bound values shared by the list and the count, so a
     page can never be filtered differently from the total printed beside it.
@@ -463,7 +464,7 @@ def _job_filters(
     falling through would SHOW a pile the caller asked to hide, and a hidden
     pile exists precisely because its rows should not be acted on."""
     for name, value in (("mismatches", mismatches), ("gone", gone),
-                        ("applied", applied)):
+                        ("applied", applied), ("old", old)):
         if value not in ("include", "exclude", "only"):
             raise ValueError(f"{name}={value!r}: expected include/exclude/only")
     where, params = [], []
@@ -482,6 +483,15 @@ def _job_filters(
         where.append(f"NOT ({APPLIED_FIRM_SQL})")
     elif applied == "only":
         where.append(APPLIED_FIRM_SQL)
+    # The threshold is BOUND, and the fragment is appended together with its
+    # value: the params list is positional, so a clause added without its
+    # binding here would silently shift every later one.
+    if old == "exclude":
+        where.append(f"NOT {freshness.OLD_SQL}")
+        params.append(stale_age_days)
+    elif old == "only":
+        where.append(freshness.OLD_SQL)
+        params.append(stale_age_days)
     return where, params
 
 
@@ -536,6 +546,8 @@ def list_job_groups(
     mismatches: str = "include",
     gone: str = "include",
     applied: str = "include",
+    old: str = "include",
+    stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
     offset: int = 0,
 ) -> list[sqlite3.Row]:
     """One row per company: its best-ranked posting, plus `company_count`.
@@ -545,7 +557,7 @@ def list_job_groups(
     never silently reorders the page under the user. Only the ranking WITHIN a
     company is always by score, because something has to choose which posting
     represents it."""
-    where, params = _job_filters(status, mismatches, gone, applied)
+    where, params = _job_filters(status, mismatches, gone, applied, old, stale_age_days)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     order = _JOB_ORDER_SQL if status else "id DESC"
     return con.execute(
@@ -562,9 +574,11 @@ def count_job_groups(
     mismatches: str = "include",
     gone: str = "include",
     applied: str = "include",
+    old: str = "include",
+    stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
 ) -> int:
     """How many companies the grouped view holds."""
-    where, params = _job_filters(status, mismatches, gone, applied)
+    where, params = _job_filters(status, mismatches, gone, applied, old, stale_age_days)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     return con.execute(
         f"{_ranked_jobs_cte(where_sql)}"
@@ -583,6 +597,8 @@ def list_company_siblings(
     mismatches: str = "include",
     gone: str = "include",
     applied: str = "include",
+    old: str = "include",
+    stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
     per_company: int = SIBLINGS_PER_COMPANY,
 ) -> list[sqlite3.Row]:
     """The postings a grouped row stands in front of, best-ranked first.
@@ -593,7 +609,7 @@ def list_company_siblings(
     are."""
     if not company_keys:
         return []
-    where, params = _job_filters(status, mismatches, gone, applied)
+    where, params = _job_filters(status, mismatches, gone, applied, old, stale_age_days)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     placeholders = ",".join("?" * len(company_keys))
     return con.execute(
@@ -612,10 +628,12 @@ def count_jobs(
     mismatches: str = "include",
     gone: str = "include",
     applied: str = "include",
+    old: str = "include",
+    stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
 ) -> int:
     """How many postings a `list_jobs` call with the same filters would have,
     ignoring its page limit — the total a paged view has to print."""
-    where, params = _job_filters(status, mismatches, gone, applied)
+    where, params = _job_filters(status, mismatches, gone, applied, old, stale_age_days)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     return con.execute(
         f"SELECT COUNT(*) FROM jobs{where_sql}", params
@@ -629,6 +647,8 @@ def list_jobs(
     mismatches: str = "include",
     gone: str = "include",
     applied: str = "include",
+    old: str = "include",
+    stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
     offset: int = 0,
 ) -> list[sqlite3.Row]:
     """List postings. mismatches: 'include' (default), 'exclude' (hide the
@@ -636,7 +656,7 @@ def list_jobs(
     (just the hidden pile — keeps mismatches reachable regardless of how
     many better-scored rows fill the page limit). `gone` takes the same three
     values over postings whose ad the source says is no longer there."""
-    where, params = _job_filters(status, mismatches, gone, applied)
+    where, params = _job_filters(status, mismatches, gone, applied, old, stale_age_days)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     # The age-adjusted score is SELECTED as well as ordered on, so the number
     # the UI prints is the very number that decided the row's position — two
@@ -950,6 +970,19 @@ def count_applied_firm_jobs(con: sqlite3.Connection, status: str | None = None) 
     if status:
         sql += " AND status=?"
         params = (status,)
+    return con.execute(sql, params).fetchone()[0]
+
+
+def count_old_jobs(
+    con: sqlite3.Connection, status: str | None = None,
+    stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
+) -> int:
+    """How many postings the age filter would hide for this inbox view."""
+    sql = f"SELECT COUNT(*) FROM jobs WHERE {freshness.OLD_SQL}"
+    params: list = [stale_age_days]
+    if status:
+        sql += " AND status=?"
+        params.append(status)
     return con.execute(sql, params).fetchone()[0]
 
 

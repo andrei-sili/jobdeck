@@ -4,7 +4,7 @@ import asyncio
 
 from nicegui import run, ui
 
-from jobdeck import apply_form, backup, config, db, gmail
+from jobdeck import apply_form, backup, config, db, freshness, gmail
 from jobdeck.services import (
     apply_resolve,
     liveness,
@@ -22,6 +22,8 @@ def _get_settings():
     with db.db() as con:
         return {
             "follow_up_days": db.get_setting(con, "follow_up_days", "14"),
+            "stale_age_days": freshness.stale_age_setting(
+                db.get_setting(con, "stale_age_days", "")),
             "daily_send_cap": db.get_setting(con, "daily_send_cap", "15"),
             "ai_enabled": db.ai_enabled(con),
             "web_contact_search": db.get_setting(con, "web_contact_search", "0"),
@@ -171,12 +173,22 @@ async def settings_page():
             cap = ui.number("Daily send cap (all sends count, test included)",
                             value=int(settings["daily_send_cap"]),
                             min=1, max=100).classes("w-64")
+            stale_age = ui.number(
+                "Anzeigen gelten als alt nach (Tagen)",
+                value=settings["stale_age_days"], min=1, max=365).classes("w-64")
+            ui.label(
+                "Older postings leave the working list for the „Alte Anzeigen“ "
+                "pile — counted under the list, one click away, never deleted."
+            ).classes("text-xs text-gray-500")
 
             async def save():
                 await run.io_bound(_set_setting, "follow_up_days",
                                    str(int(follow_up.value or 14)))
                 await run.io_bound(_set_setting, "daily_send_cap",
                                    str(int(cap.value or 15)))
+                await run.io_bound(
+                    _set_setting, "stale_age_days",
+                    str(freshness.stale_age_setting(stale_age.value)))
                 ui.notify("Saved", type="positive")
 
             ui.button("Save", on_click=save)

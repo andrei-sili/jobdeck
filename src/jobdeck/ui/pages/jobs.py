@@ -5,7 +5,7 @@ import pathlib
 
 from nicegui import run, ui
 
-from jobdeck import apply_channel, db
+from jobdeck import apply_channel, db, freshness
 from jobdeck.dedupe import duplicates_for_jobs
 from jobdeck.services import apply_resolve, contact_lookup, drafting, liveness, mappe
 from jobdeck.ui import helpers, live
@@ -34,11 +34,16 @@ PAGE_SIZE = 50
 # leave it unreachable once better-scored rows fill the page.
 PILE_NONE, PILE_MISMATCHES, PILE_DEAD = "", "mismatches", "dead"
 PILE_APPLIED = "applied_firm"
+PILE_OLD = "old"
+_INCLUDE_ALL = {"mismatches": "include", "gone": "include", "applied": "include",
+                "old": "include"}
 _PILE_FILTERS = {
-    PILE_NONE: {"mismatches": "exclude", "gone": "exclude", "applied": "exclude"},
-    PILE_MISMATCHES: {"mismatches": "only", "gone": "include", "applied": "include"},
-    PILE_DEAD: {"mismatches": "include", "gone": "only", "applied": "include"},
-    PILE_APPLIED: {"mismatches": "include", "gone": "include", "applied": "only"},
+    PILE_NONE: {"mismatches": "exclude", "gone": "exclude", "applied": "exclude",
+                "old": "exclude"},
+    PILE_MISMATCHES: {**_INCLUDE_ALL, "mismatches": "only"},
+    PILE_DEAD: {**_INCLUDE_ALL, "gone": "only"},
+    PILE_APPLIED: {**_INCLUDE_ALL, "applied": "only"},
+    PILE_OLD: {**_INCLUDE_ALL, "old": "only"},
 }
 
 # ONE control for the three views, deliberately not two switches. Mutual
@@ -51,6 +56,7 @@ PILE_LABELS = {
     PILE_MISMATCHES: "Mismatches",
     PILE_DEAD: "Dead ads",
     PILE_APPLIED: "Schon beworben",
+    PILE_OLD: "Alte Anzeigen",
 }
 
 
@@ -60,6 +66,7 @@ _EMPTY_VIEW = {
     PILE_DEAD: "No dead postings — every ad checked so far is still online.",
     PILE_APPLIED: "Keine Stelle bei einer Firma, bei der du dich schon "
                   "beworben hast.",
+    PILE_OLD: "Keine alten Anzeigen — alles in der Arbeitsliste ist frisch.",
 }
 
 
@@ -71,14 +78,15 @@ def _view_filters(pile: str, status: str) -> dict:
     job ("I applied — record it"), so hiding it would hide that button. Only the
     `new` view hides; every other filter shows what it contains."""
     if pile == PILE_NONE and status != "new":
-        return {"mismatches": "include", "gone": "include", "applied": "include"}
+        return dict(_INCLUDE_ALL)
     return _PILE_FILTERS[pile]
 
 
-def _hidden_line(filters: dict, mismatches: int, dead: int, applied: int = 0) -> str:
+def _hidden_line(filters: dict, mismatches: int, dead: int, applied: int = 0,
+                 old: int = 0, stale_age_days: int = 0) -> str:
     """What this view is not showing, derived from the filters it actually used
-    so the label cannot contradict the list. Two independent statements, never
-    a total: a posting can be both a mismatch and offline."""
+    so the label cannot contradict the list. Independent statements, never a
+    total: a posting can be a mismatch AND offline AND old."""
     parts = []
     if filters["mismatches"] == "exclude" and mismatches:
         parts.append(f"{mismatches} mismatches hidden")
@@ -93,6 +101,10 @@ def _hidden_line(filters: dict, mismatches: int, dead: int, applied: int = 0) ->
     elif filters["applied"] == "only":
         parts.append(f"{applied} Stellen bei Firmen, bei denen du dich "
                      "schon beworben hast")
+    if filters.get("old") == "exclude" and old:
+        parts.append(f"{old} älter als {stale_age_days} Tage hidden")
+    elif filters.get("old") == "only":
+        parts.append(f"{old} Anzeigen älter als {stale_age_days} Tage")
     return " · ".join(parts)
 
 
@@ -133,7 +145,10 @@ def _load_jobs(status: str, pile: str, page: int, collapse: bool = True) -> dict
     page rather than an empty one."""
     with db.db() as con:
         status_arg = None if status == "all" else status
-        filters = _view_filters(pile, status)
+        stale_age_days = freshness.stale_age_setting(
+            db.get_setting(con, "stale_age_days", ""))
+        filters = {**_view_filters(pile, status),
+                   "stale_age_days": stale_age_days}
         count = db.count_job_groups if collapse else db.count_jobs
         total = count(con, status_arg, **filters)
         pages = max(1, -(-total // PAGE_SIZE))
@@ -161,6 +176,8 @@ def _load_jobs(status: str, pile: str, page: int, collapse: bool = True) -> dict
             "mismatches": db.count_mismatches(con, status_arg),
             "dead": db.count_gone_jobs(con, status_arg),
             "applied_firm": db.count_applied_firm_jobs(con, status_arg),
+            "old": db.count_old_jobs(con, status_arg, stale_age_days),
+            "stale_age_days": stale_age_days,
             "total": total,
             "page": page,
             "pages": pages,
@@ -327,7 +344,8 @@ async def jobs_page():
             live_view.mark(view["signature"])
             hidden_label.set_text(
                 _hidden_line(view["filters"], view["mismatches"], view["dead"],
-                             view["applied_firm"]))
+                             view["applied_firm"], view["old"],
+                             view["stale_age_days"]))
             with container:
                 if not view["rows"]:
                     ui.label(_EMPTY_VIEW[pile["value"]]).classes("text-gray-500")
@@ -650,11 +668,12 @@ async def jobs_page():
                 PILE_LABELS,
                 value=PILE_NONE,
                 on_change=lambda e: set_pile(e.value),
-            ).mark("pile-toggle").tooltip("The three hidden piles: postings scored 0 for violating "
+            ).mark("pile-toggle").tooltip("The four hidden piles: postings scored 0 for violating "
                       "a hard requirement, postings whose ad the board says is "
-                      "gone, and postings at a company an application already "
+                      "gone, postings at a company an application already "
                       "went to — only one per company is possible, so those "
-                      "can never become one. Hidden from the working list, "
+                      "can never become one — and postings older than the age "
+                      "you set in Settings. Hidden from the working list, "
                       "never deleted.")
             ui.switch(
                 "Group by company",

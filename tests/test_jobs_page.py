@@ -10,6 +10,7 @@ import pytest
 from nicegui import ui
 from nicegui.elements.markdown import prepare_content
 
+from jobdeck import freshness
 from jobdeck.ui import helpers
 from jobdeck.ui.helpers import openable_url, posting_markdown
 from jobdeck.ui.pages import jobs
@@ -271,10 +272,12 @@ def test_the_working_inbox_hides_every_pile_and_each_view_shows_one():
     # application: all three are FACTS about the posting, so all three hide it
     # — and opening one pile is a separate VIEW, not a filter stacked on another
     assert jobs._PILE_FILTERS[jobs.PILE_NONE] == {
-        "mismatches": "exclude", "gone": "exclude", "applied": "exclude"}
+        "mismatches": "exclude", "gone": "exclude", "applied": "exclude",
+        "old": "exclude"}
     assert jobs._PILE_FILTERS[jobs.PILE_MISMATCHES]["mismatches"] == "only"
     assert jobs._PILE_FILTERS[jobs.PILE_DEAD]["gone"] == "only"
     assert jobs._PILE_FILTERS[jobs.PILE_APPLIED]["applied"] == "only"
+    assert jobs._PILE_FILTERS[jobs.PILE_OLD]["old"] == "only"
     for pile, filters in jobs._PILE_FILTERS.items():
         only = [k for k, v in filters.items() if v == "only"]
         assert len(only) == (0 if pile == jobs.PILE_NONE else 1), pile
@@ -317,7 +320,8 @@ def test_a_posting_he_has_acted_on_is_never_hidden_from_its_own_view(con, data_d
     portal = jobs._load_jobs("portal", jobs.PILE_NONE, 0)
     assert [r["id"] for r in portal["rows"]] == [job_id]
     assert portal["filters"] == {"mismatches": "include", "gone": "include",
-                                 "applied": "include"}
+                                 "applied": "include", "old": "include",
+                                 "stale_age_days": freshness.DEFAULT_STALE_AGE_DAYS}
     # while the working inbox still hides it
     assert db.count_jobs(con, "new", gone="exclude") == 0
 
@@ -452,13 +456,15 @@ def test_the_group_that_represents_a_company_is_chosen_by_the_aged_score(
 ):
     import datetime
     today = datetime.date.today()
-    stale_star = _company_job(con, "s1", "Firma", 92,
-                              (today - datetime.timedelta(days=150)).isoformat())
+    # 40 days: aged enough to lose 12 points, still inside the working list
+    # (past the age threshold it would be in the "Alte Anzeigen" pile instead)
+    stale_star = _company_job(con, "s1", "Firma", 85,
+                              (today - datetime.timedelta(days=40)).isoformat())
     fresh_good = _company_job(con, "s2", "Firma", 78,
                               (today - datetime.timedelta(days=1)).isoformat())
     con.commit()
     view = jobs._load_jobs("new", jobs.PILE_NONE, 0)
-    # 92 aged to 72 loses to a fresh 78: the row that represents the company is
+    # 85 aged to 73 loses to a fresh 78: the row that represents the company is
     # the one the ordering actually prefers, not the one with the raw high score
     assert [r["id"] for r in view["rows"]] == [fresh_good]
     assert [r["id"] for r in view["siblings"][view["rows"][0]["company_key"]]] \
@@ -954,3 +960,76 @@ def test_the_sql_filter_agrees_with_the_gate_on_every_shape(con, data_dir):
     assert by_gate, "the corpus produced no matches — the check would be vacuous"
     assert by_gate != {j[0] for j in con.execute("SELECT id FROM jobs")}, \
         "everything matched — the check would pass on a filter that never hides"
+
+
+# ---------------------------------------------------------------------------
+# The age pile: past a configurable threshold a posting leaves the working
+# list — counted, one click away, never deleted (his decision, 2026-08-11).
+# ---------------------------------------------------------------------------
+def _aged(con, ext, days, score=80, company="Firma"):
+    import datetime
+    when = (datetime.date.today() - datetime.timedelta(days=days)).isoformat()
+    return _company_job(con, ext, f"{company} {ext}", score, when)
+
+
+def test_a_posting_past_the_threshold_leaves_the_working_list(con, data_dir):
+    fresh = _aged(con, "f1", days=3)
+    old = _aged(con, "o1", days=90)
+    con.commit()
+
+    working = jobs._load_jobs("new", jobs.PILE_NONE, 0)
+    assert [r["id"] for r in working["rows"]] == [fresh]
+    assert working["old"] == 1
+    assert working["stale_age_days"] == freshness.DEFAULT_STALE_AGE_DAYS
+
+    pile = jobs._load_jobs("new", jobs.PILE_OLD, 0)
+    assert [r["id"] for r in pile["rows"]] == [old]
+
+
+def test_a_posting_without_a_date_is_never_called_old(con, data_dir):
+    """Absence of information is not evidence of staleness — the same rule the
+    age penalty follows. Jooble states no publication date at all."""
+    undated = _company_job(con, "u1", "Firma u1", 80)
+    con.commit()
+
+    assert [r["id"] for r in jobs._load_jobs("new", jobs.PILE_NONE, 0)["rows"]] \
+        == [undated]
+    assert jobs._load_jobs("new", jobs.PILE_OLD, 0)["rows"] == []
+
+
+def test_the_threshold_he_sets_is_the_one_the_query_uses(con, data_dir):
+    from jobdeck import db
+    _aged(con, "m1", days=20)
+    db.set_setting(con, "stale_age_days", "14")
+    con.commit()
+
+    view = jobs._load_jobs("new", jobs.PILE_NONE, 0)
+    assert view["rows"] == [] and view["old"] == 1
+    assert view["stale_age_days"] == 14
+    assert "älter als 14 Tage" in jobs._hidden_line(
+        view["filters"], 0, 0, 0, view["old"], view["stale_age_days"])
+
+
+def test_an_unreadable_threshold_falls_back_instead_of_hiding_everything(
+        con, data_dir):
+    from jobdeck import db
+    fresh = _aged(con, "k1", days=3)
+    db.set_setting(con, "stale_age_days", "")   # hand-edited, or never set
+    con.commit()
+
+    assert [r["id"] for r in jobs._load_jobs("new", jobs.PILE_NONE, 0)["rows"]] \
+        == [fresh]
+    assert freshness.stale_age_setting("nonsense") == \
+        freshness.DEFAULT_STALE_AGE_DAYS
+    assert freshness.stale_age_setting("0") == freshness.DEFAULT_STALE_AGE_DAYS
+
+
+def test_an_old_posting_is_never_deleted_only_moved(con, data_dir):
+    from jobdeck import db
+    old = _aged(con, "d1", days=200)
+    con.commit()
+
+    jobs._load_jobs("new", jobs.PILE_NONE, 0)
+
+    assert db.get_job(con, old) is not None
+    assert db.get_job(con, old)["status"] == "new"
