@@ -13,6 +13,7 @@ from jobdeck.services import (
     preparing,
     scoring,
 )
+from jobdeck.ui import live
 from jobdeck.ui.helpers import open_in_system
 from jobdeck.ui.layout import frame
 
@@ -52,6 +53,25 @@ def _get_settings():
             "llm_output_tokens": db.get_setting(con, "llm_output_tokens", "0"),
             "llm_cost_usd": db.get_setting(con, "llm_cost_usd", "0"),
         }
+
+
+def _get_meters():
+    """The numbers a settings page must not show stale: LLM spend and the
+    sends counted against today's cap."""
+    with db.db() as con:
+        return {
+            "llm_calls": db.get_setting(con, "llm_calls", "0"),
+            "llm_input_tokens": db.get_setting(con, "llm_input_tokens", "0"),
+            "llm_output_tokens": db.get_setting(con, "llm_output_tokens", "0"),
+            "llm_cost_usd": db.get_setting(con, "llm_cost_usd", "0"),
+            "sent_today": db.count_outbound_today(con),
+            "signature": db.meter_signature(con),
+        }
+
+
+def _signature() -> tuple:
+    with db.db() as con:
+        return db.meter_signature(con)
 
 
 def _prepare_filter():
@@ -409,11 +429,7 @@ async def settings_page():
                 value=settings["real_send_enabled"] == "1",
                 on_change=toggle_real,
             )
-            ui.label(
-                f"{settings['sent_today']} sent today · daily cap: "
-                f"{settings['daily_send_cap']} (Tunables). While real "
-                f"sending is off, nothing can reach a company."
-            ).classes("text-xs text-gray-500")
+            sent_today_label = ui.label().classes("text-xs text-gray-500")
 
         with ui.card().classes("w-full"):
             ui.label("AI").classes("font-bold")
@@ -475,16 +491,41 @@ async def settings_page():
                           type="positive")
 
             ui.button("Save", on_click=save_global_tags).props("outline")
-            ui.label(
-                f"{settings['llm_calls']} calls · "
-                f"{settings['llm_input_tokens']} in / "
-                f"{settings['llm_output_tokens']} out tokens · "
-                f"${float(settings['llm_cost_usd']):.4f}"
-            ).classes("text-sm")
+            meter_label = ui.label().classes("text-sm")
             ui.label(
                 f"Model: {config.anthropic_model()} (set ANTHROPIC_MODEL to change). "
                 f"Match scoring needs {config.PROFILE_PATH} — see profile.example.md."
             ).classes("text-xs text-gray-500")
+
+        def show_meters(meters: dict) -> None:
+            """The two numbers that move while this page sits open: what the
+            background scoring has spent (a product principle — the cost is
+            shown in the UI) and how much of today's send cap is used.
+
+            Only these. The rest of the page is INPUTS, and re-rendering an
+            input he is typing in would throw his text away, which is why the
+            page does not rebuild itself as a whole."""
+            meter_label.set_text(
+                f"{meters['llm_calls']} calls · "
+                f"{meters['llm_input_tokens']} in / "
+                f"{meters['llm_output_tokens']} out tokens · "
+                f"${float(meters['llm_cost_usd']):.4f}"
+            )
+            sent_today_label.set_text(
+                f"{meters['sent_today']} sent today · daily cap: "
+                f"{settings['daily_send_cap']} (Tunables). While real "
+                f"sending is off, nothing can reach a company."
+            )
+
+        async def refresh_meters():
+            meters = await run.io_bound(_get_meters)
+            live_view.mark(meters["signature"])
+            show_meters(meters)
+
+        with ui.row().classes("items-center"):
+            live_view = live.watch(_signature, refresh_meters,
+                                   busy=live.dialog_open)
+        show_meters({**settings, "signature": None})
 
         with ui.card().classes("w-full"):
             ui.label("Maintenance").classes("font-bold")

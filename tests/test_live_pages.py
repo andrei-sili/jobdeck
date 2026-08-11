@@ -179,6 +179,79 @@ async def test_the_profile_list_shows_a_poll_that_just_happened(
     await user.should_see("401 Unauthorized")
 
 
+async def test_the_cockpit_fills_its_rows_when_the_draft_finishes(
+        user: User, con, data_dir):
+    """Its own hint tells him to draft the application first, and the draft is
+    written on another screen — so the rows it leaves empty are exactly the
+    ones a finished draft fills, a minute later, on a page built to sit open."""
+    job_id = _posting(con)
+    await user.open(f"/cockpit/{job_id}")
+    await user.should_see("Fehlt noch")
+
+    db.upsert_draft(con, job_id, {
+        "status": "ready", "betreff": "Bewerbung als Python Entwickler",
+        "anschreiben_body": "Sehr geehrte Damen und Herren,"})
+    con.commit()
+    await _tick(user)
+
+    await user.should_see("Sehr geehrte Damen und Herren,")
+
+
+async def test_the_cockpit_ignores_a_change_to_another_posting(
+        user: User, con, data_dir):
+    """It watches ONE posting: rebuilding while he types into an employer's
+    form because an unrelated job was scored would move the buttons under his
+    hand."""
+    job_id = _posting(con)
+    await user.open(f"/cockpit/{job_id}")
+    await user.should_see("Beispiel GmbH")
+    before = [e for e in user.client.elements.values()
+              if isinstance(e, ui.button)]
+
+    _posting(con, external_id="e2", title="Django Entwickler",
+             company="Zweite GmbH")
+    await _tick(user)
+
+    after = [e for e in user.client.elements.values()
+             if isinstance(e, ui.button)]
+    assert [e.id for e in after] == [e.id for e in before], \
+        "the cockpit rebuilt for a posting it is not showing"
+
+
+async def test_the_settings_meter_follows_the_spend(user: User, con, data_dir):
+    """Background scoring spends metered money every ten minutes and the page
+    showed the number from whenever it was opened."""
+    await user.open("/settings")
+    await user.should_see("0 calls")
+
+    db.record_llm_usage(con, input_tokens=1000, output_tokens=200,
+                        cost_usd=0.0123)
+    con.commit()
+    await _tick(user)
+
+    await user.should_see("1 calls")
+    await user.should_see("$0.0123")
+
+
+async def test_the_settings_forms_are_never_overwritten(user: User, con,
+                                                        data_dir):
+    """The page polls its METERS only: rebuilding a card would throw away
+    whatever he is typing into it."""
+    db.set_setting(con, "test_recipient", "andrei@example.org")
+    con.commit()
+    await user.open("/settings")
+    field = next(e for e in user.client.elements.values()
+                 if isinstance(e, ui.input)
+                 and "Test recipient" in (e.props.get("label") or ""))
+    field.set_value("halb getippt@example.org")
+
+    db.record_llm_usage(con, input_tokens=10, output_tokens=2, cost_usd=0.01)
+    con.commit()
+    await _tick(user)
+
+    assert field.value == "halb getippt@example.org"
+
+
 async def test_an_open_dialog_also_defers_the_rebuild(
         user: User, con, data_dir):
     """A refresh deletes the list a dialog was opened over; the editor and the

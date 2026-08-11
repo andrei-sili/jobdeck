@@ -1046,6 +1046,22 @@ def data_signature(con: sqlite3.Connection) -> tuple:
     )
 
 
+def job_signature(con: sqlite3.Connection, job_id: int) -> tuple | None:
+    """One posting's state, for a page that stands beside ONE form.
+
+    Per-posting rather than the whole pipeline: the apply cockpit sits open for
+    many minutes while he types into an employer's form, and rebuilding it every
+    time an unrelated posting is scored would move the buttons under his hand.
+    `None` when the posting is gone."""
+    row = con.execute(
+        "SELECT status, liveness, liveness_checked_at, contact_email, "
+        f"apply_channel, ats_vendor, apply_url, {_DRAFT_STATUS_SQL}, "
+        f"{_DRAFT_UPDATED_SQL} FROM jobs WHERE id=?",
+        (job_id,),
+    ).fetchone()
+    return None if row is None else tuple(row)
+
+
 def meter_signature(con: sqlite3.Connection) -> tuple:
     """The Settings numbers that move on their own: LLM spend and today's
     sends. Deliberately NOT the whole settings snapshot — the page must never
