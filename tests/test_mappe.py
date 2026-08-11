@@ -394,3 +394,64 @@ async def test_non_latin_applicant_name_keeps_filename_wellformed(con, data_dir)
     assert result["ok"], result["error"]
     name = pathlib.Path(result["pdf_path"]).name
     assert name == "Bewerbung_Mueller_Soehne_GmbH.pdf"  # no double underscore
+
+
+# ---------------------------------------------------------------------------
+# Which address the letter's block carries — through the real builder, not
+# through the pure function. The wiring is the part that can be reverted.
+# ---------------------------------------------------------------------------
+async def _captured_letter_values(con, data_dir, monkeypatch, job_id) -> dict:
+    captured = {}
+    real_render = mappe.templates.render_letter
+
+    def capture(template_html, values):
+        captured.update(values)
+        return real_render(template_html, values)
+
+    monkeypatch.setattr(mappe.templates, "render_letter", capture)
+    assert (await mappe.create_mappe(job_id))["ok"]
+    return captured
+
+
+async def test_the_letter_uses_the_boards_work_address_when_none_is_stated(
+        con, data_dir, monkeypatch):
+    """725 of his 769 postings state no address in their prose, so the block
+    was simply empty; the board states one for the work location."""
+    job_id = _setup(con, data_dir, with_anlagen=False)
+    con.execute("UPDATE jobs SET contact_strasse='', contact_plz_ort='', "
+                "work_strasse='Musterstraße 26', "
+                "work_plz_ort='54321 Beispielstadt' WHERE id=?", (job_id,))
+    con.commit()
+
+    captured = await _captured_letter_values(con, data_dir, monkeypatch, job_id)
+
+    assert captured["strasse"] == "Musterstraße 26"
+    assert captured["plz_ort"] == "54321 Beispielstadt"
+
+
+async def test_a_staffing_firm_gets_no_address_rather_than_its_clients(
+        con, data_dir, monkeypatch):
+    """Under Arbeitnehmerüberlassung the work location belongs to a client, so
+    the letter would be addressed to a company that is not the recipient."""
+    job_id = _setup(con, data_dir, with_anlagen=False)
+    con.execute("UPDATE jobs SET contact_strasse='', contact_plz_ort='', "
+                "work_strasse='Musterstraße 26', "
+                "work_plz_ort='54321 Beispielstadt', temp_agency=1 WHERE id=?",
+                (job_id,))
+    con.commit()
+
+    captured = await _captured_letter_values(con, data_dir, monkeypatch, job_id)
+
+    assert captured["strasse"] == "" and captured["plz_ort"] == ""
+
+
+async def test_an_address_the_posting_states_still_wins_in_the_letter(
+        con, data_dir, monkeypatch):
+    job_id = _setup(con, data_dir, with_anlagen=False)
+    con.execute("UPDATE jobs SET work_strasse='Musterstraße 26', "
+                "work_plz_ort='54321 Beispielstadt' WHERE id=?", (job_id,))
+    con.commit()
+
+    captured = await _captured_letter_values(con, data_dir, monkeypatch, job_id)
+
+    assert captured["strasse"] == "Weg 1"

@@ -811,3 +811,47 @@ def test_resolve_sending_requires_sending_status(con, data_dir, tmp_path):
     assert "nothing to resolve" in send.resolve_sending(
         job_id, assume_sent=True
     )["error"]
+
+
+async def test_the_recorded_application_carries_the_letter_s_own_address(
+    con, gmail_connected, sent_messages, tmp_path
+):
+    """The application record is what he reads months later, and it must say
+    the same address the letter printed — including where that address came
+    from the board rather than from the posting's prose."""
+    job_id = _insert_job(con)
+    con.execute("UPDATE jobs SET contact_strasse='', contact_plz_ort='', "
+                "work_strasse='Musterstraße 26', "
+                "work_plz_ort='54321 Beispielstadt' WHERE id=?", (job_id,))
+    con.commit()
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path))
+    _settings(con, real_send_enabled="1", applicant_name="Max Muster",
+              gmail_address="max@gmail.com")
+
+    result = await send.send_draft(job_id)
+    assert result["ok"], result["error"]
+
+    draft = db.get_draft_by_job(con, job_id)
+    bewerbung = db.get_bewerbung(con, draft["bewerbung_id"])
+    assert bewerbung["strasse"] == "Musterstraße 26"
+    assert bewerbung["plz_ort"] == "54321 Beispielstadt"
+
+
+async def test_a_staffing_firm_s_application_records_no_borrowed_address(
+    con, gmail_connected, sent_messages, tmp_path
+):
+    job_id = _insert_job(con)
+    con.execute("UPDATE jobs SET contact_strasse='', contact_plz_ort='', "
+                "work_strasse='Musterstraße 26', "
+                "work_plz_ort='54321 Beispielstadt', temp_agency=1 WHERE id=?",
+                (job_id,))
+    con.commit()
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path))
+    _settings(con, real_send_enabled="1", applicant_name="Max Muster",
+              gmail_address="max@gmail.com")
+
+    assert (await send.send_draft(job_id))["ok"]
+
+    draft = db.get_draft_by_job(con, job_id)
+    bewerbung = db.get_bewerbung(con, draft["bewerbung_id"])
+    assert (bewerbung["strasse"], bewerbung["plz_ort"]) == ("", "")

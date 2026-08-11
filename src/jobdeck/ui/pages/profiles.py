@@ -6,6 +6,7 @@ from nicegui import run, ui
 
 from jobdeck import db
 from jobdeck.services import polling
+from jobdeck.ui import live
 from jobdeck.ui.layout import frame
 
 ALL_SOURCES = ["arbeitsagentur", "jooble", "arbeitnow"]
@@ -13,7 +14,14 @@ ALL_SOURCES = ["arbeitsagentur", "jooble", "arbeitnow"]
 
 def _load_profiles():
     with db.db() as con:
-        return [dict(r) for r in db.list_profiles(con)]
+        signature = db.profiles_signature(con)  # first: see jobs._load_jobs
+        return {"profiles": [dict(r) for r in db.list_profiles(con)],
+                "signature": signature}
+
+
+def _signature() -> tuple:
+    with db.db() as con:
+        return db.profiles_signature(con)
 
 
 def _save_profile(profile_id, values):
@@ -38,11 +46,24 @@ def _get_profile_row(profile_id):
 @ui.page("/profiles")
 async def profiles_page():
     with frame("Search profiles"):
+        header = ui.row().classes("w-full items-center gap-2")
         container = ui.column().classes("w-full gap-2")
+        # Dialogs and messages live in a sibling of the list, never in the row
+        # that opened them: a handler runs in the slot of its own button and
+        # refresh() clears `container`, so a coroutine parked on `await confirm`
+        # would never resolve once the page rebuilt itself — and now that this
+        # page rebuilds on a timer, that can happen without anyone clicking.
+        overlay = ui.column().classes("contents")
+
+        def say(message: str, **kwargs) -> None:
+            """Tell the user something, from a slot no refresh can delete."""
+            with overlay:
+                ui.notify(message, **kwargs)
 
         def edit_dialog(profile: dict | None):
             data = profile or {}
-            with ui.dialog() as dialog, ui.card().classes("w-96"):
+            overlay.clear()
+            with overlay, ui.dialog() as dialog, ui.card().classes("w-96"):
                 ui.label("Search profile").classes("font-bold")
                 name = ui.input("Name", value=data.get("name", "")).classes("w-full")
                 keywords = ui.input(
@@ -106,7 +127,7 @@ async def profiles_page():
 
                 async def save():
                     if not name.value.strip() or not keywords.value.strip():
-                        ui.notify("Name and keywords are required", type="warning")
+                        say("Name and keywords are required", type="warning")
                         return
                     values = {
                         "name": name.value.strip(),
@@ -132,23 +153,42 @@ async def profiles_page():
             dialog.open()
 
         async def run_now(profile_id: int):
-            ui.notify("Polling sources…")
+            """A poll takes tens of seconds — long enough for the scheduler's
+            own pass to finish and rebuild this list underneath. The result then
+            has to be said from a slot that survives that."""
+            say("Polling sources…")
             row = await run.io_bound(_get_profile_row, profile_id)
             counters = await polling.poll_profile(row)
-            ui.notify(
-                f"Done: {counters['new']} new, {counters['duplicate']} already applied, "
-                f"{counters['known']} known",
-                type="positive",
-            )
+            say(f"Done: {counters['new']} new, {counters['duplicate']} already "
+                f"applied, {counters['known']} known", type="positive")
             await refresh()
 
-        async def delete(profile_id: int):
-            await run.io_bound(_delete_profile, profile_id)
+        async def delete(profile: dict):
+            """One unconfirmed click used to remove a search profile — and the
+            postings it discovered keep referencing it."""
+            overlay.clear()
+            with overlay, ui.dialog() as confirm, ui.card():
+                ui.label(f"Suchprofil „{profile['name']}“ löschen?") \
+                    .classes("font-bold")
+                ui.label("Die gefundenen Stellen bleiben erhalten; gesucht "
+                         "wird damit nicht mehr.").classes("text-sm")
+                with ui.row().classes("justify-end gap-2 w-full"):
+                    ui.button("Abbrechen",
+                              on_click=lambda: confirm.submit(False)).props("flat")
+                    ui.button("Löschen", icon="delete",
+                              on_click=lambda: confirm.submit(True)) \
+                        .props("color=negative")
+            confirm.open()
+            if not await confirm:
+                return
+            await run.io_bound(_delete_profile, profile["id"])
             await refresh()
 
         async def refresh():
             container.clear()
-            profiles = await run.io_bound(_load_profiles)
+            view = await run.io_bound(_load_profiles)
+            live_view.mark(view["signature"])
+            profiles = view["profiles"]
             with container:
                 if not profiles:
                     ui.label(
@@ -197,8 +237,14 @@ async def profiles_page():
                                       on_click=lambda row=p: edit_dialog(row)) \
                                 .props("flat round").tooltip("Edit")
                             ui.button(icon="delete",
-                                      on_click=lambda pid=p["id"]: delete(pid)) \
-                                .props("flat round color=negative").tooltip("Delete")
+                                      on_click=lambda row=p: delete(row)) \
+                                .props("flat round color=negative") \
+                                .mark("delete-profile").tooltip("Delete")
 
         ui.button("New profile", icon="add", on_click=lambda: edit_dialog(None))
+        # The scheduler polls each profile hourly and rewrites "Last poll" and
+        # the error line. A source going down set an error this page never
+        # showed, and a recovery never cleared it on screen.
+        with header:
+            live_view = live.watch(_signature, refresh, busy=live.dialog_open)
         await refresh()

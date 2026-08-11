@@ -1,3 +1,5 @@
+import pytest
+
 from jobdeck import db
 
 
@@ -321,3 +323,181 @@ def test_an_unknown_filter_value_raises_instead_of_showing_a_hidden_pile(con):
             db.count_jobs(con, status="new", **bad)
         with pytest.raises(ValueError):
             db.count_job_groups(con, status="new", **bad)
+
+
+# ---------------------------------------------------------------------------
+# "A stored e-mail settles the channel" — the rule that only the resolver knew
+# ---------------------------------------------------------------------------
+def test_a_posting_that_arrives_with_an_email_applies_by_email(con):
+    """Nothing outside the resolver applied `classify`'s first rule, so 81 of
+    his Arbeitsagentur postings held an application address and still read as
+    unresolved form jobs — in an app whose whole pain is form jobs."""
+    job_id = _add_job(con, contact_email="bewerbung@firma.de")
+    assert db.get_job(con, job_id)["apply_channel"] == "direct_email"
+
+
+def test_a_posting_without_an_email_is_left_for_the_resolver(con):
+    job_id = _add_job(con, contact_email="")
+    assert db.get_job(con, job_id)["apply_channel"] == ""
+
+
+def test_an_adopted_email_converts_a_form_job(con):
+    """The web lookup's whole purpose: the posting stops being a form job the
+    moment he confirms an address."""
+    job_id = _add_job(con, contact_email="")
+    db.set_apply_channel(con, job_id, "company_site", "", "https://firma.de/x")
+
+    db.set_contact_email(con, job_id, "bewerbung@firma.de", "web_lookup")
+
+    row = db.get_job(con, job_id)
+    assert row["apply_channel"] == "direct_email"
+    # the resolved URL stays: it is still true, and the row still offers to
+    # open the posting with it
+    assert row["apply_url"] == "https://firma.de/x"
+
+
+def test_the_stock_is_converted_once_the_rule_exists(con):
+    """A posting whose e-mail was harvested before this rule existed heals on
+    the next start, from data the row already holds."""
+    job_id = _add_job(con, contact_email="bewerbung@firma.de")
+    con.execute("UPDATE jobs SET apply_channel='' WHERE id=?", (job_id,))
+
+    assert db.resolve_email_channels(con) == 1
+    assert db.get_job(con, job_id)["apply_channel"] == "direct_email"
+    assert db.resolve_email_channels(con) == 0, "not idempotent"
+
+
+def test_a_finished_posting_keeps_the_channel_it_was_applied_through(con):
+    """Rewriting how one WOULD have applied to a posting already sent, skipped
+    or filed as a duplicate changes nothing and only rewrites history."""
+    job_id = _add_job(con, contact_email="bewerbung@firma.de")
+    db.set_apply_channel(con, job_id, "ats_form", "JOIN", "https://join.com/x")
+    db.set_job_status(con, job_id, "applied")
+
+    assert db.resolve_email_channels(con) == 0
+    assert db.get_job(con, job_id)["apply_channel"] == "ats_form"
+
+
+# ---------------------------------------------------------------------------
+# Facts a source states about a posting
+# ---------------------------------------------------------------------------
+def test_set_job_facts_stores_what_the_source_stated(con):
+    job_id = _add_job(con)
+
+    written = db.set_job_facts(con, job_id, {
+        "work_strasse": "Musterstraße 26", "work_plz_ort": "54321 Beispielstadt",
+        "salary_from": "37000", "salary_to": "47000",
+        "salary_period": "Jahresgehalt", "temp_agency": 1})
+
+    row = db.get_job(con, job_id)
+    assert written == 6
+    assert row["work_strasse"] == "Musterstraße 26"
+    assert row["work_plz_ort"] == "54321 Beispielstadt"
+    assert (row["salary_from"], row["salary_to"]) == ("37000", "47000")
+    assert row["salary_period"] == "Jahresgehalt"
+    assert row["temp_agency"] == 1
+
+
+def test_a_silent_payload_never_erases_what_an_earlier_one_said(con):
+    """The same columns are filled by discovery and by the daily liveness
+    probe; a payload that omits a field must not delete it."""
+    job_id = _add_job(con)
+    db.set_job_facts(con, job_id, {"work_plz_ort": "12345 Musterstadt"})
+
+    db.set_job_facts(con, job_id, {"work_plz_ort": "", "salary_from": "40000"})
+
+    row = db.get_job(con, job_id)
+    assert row["work_plz_ort"] == "12345 Musterstadt"
+    assert row["salary_from"] == "40000"
+
+
+def test_a_fact_nobody_stores_is_refused_rather_than_dropped(con):
+    job_id = _add_job(con)
+    with pytest.raises(ValueError, match="homeofficetyp"):
+        db.set_job_facts(con, job_id, {"homeofficetyp": "teilweise"})
+
+
+def test_a_corrected_temp_agency_flag_can_go_back_to_zero(con):
+    job_id = _add_job(con)
+    db.set_job_facts(con, job_id, {"temp_agency": 1})
+
+    db.set_job_facts(con, job_id, {"temp_agency": 0})
+
+    assert db.get_job(con, job_id)["temp_agency"] == 0
+
+
+def test_bootstrap_reclassifies_the_stock_it_finds(con, data_dir):
+    """The startup self-heal is what turned 82 of his postings from apparent
+    form jobs into e-mail applications; without a test the call itself could be
+    dropped with the suite green."""
+    job_id = _add_job(con, contact_email="bewerbung@firma.de")
+    con.execute("UPDATE jobs SET apply_channel='' WHERE id=?", (job_id,))
+    con.commit()
+
+    db.bootstrap()
+
+    assert db.get_job(con, job_id)["apply_channel"] == "direct_email"
+
+
+def test_a_posting_he_opened_as_a_form_still_converts(con):
+    """'portal' is where a posting sits while he fills a form — precisely the
+    row an address arriving later should rescue."""
+    job_id = _add_job(con, contact_email="bewerbung@firma.de")
+    con.execute("UPDATE jobs SET apply_channel='', status='portal' WHERE id=?",
+                (job_id,))
+
+    assert db.resolve_email_channels(con) == 1
+    assert db.get_job(con, job_id)["apply_channel"] == "direct_email"
+
+
+def test_resolving_a_channel_alone_changes_the_data_signature(con):
+    """The resolve-channels batch writes nothing but apply_channel, so that
+    term is the only thing that can tell an open page the batch happened."""
+    job_id = _add_job(con, contact_email="")
+    con.commit()
+    before = db.data_signature(con)
+
+    db.set_apply_channel(con, job_id, "ats_form", "JOIN", "https://join.com/x")
+    con.commit()
+
+    assert db.data_signature(con) != before
+
+
+def test_the_hidden_old_count_answers_for_one_view_at_a_time(con):
+    """The count sits next to the list and must describe the same view: an old
+    posting he already skipped is not hidden FROM the 'new' inbox."""
+    import datetime
+    old = (datetime.date.today() - datetime.timedelta(days=90)).isoformat()
+    fresh_id = _add_job(con, external_id="a")
+    skipped_id = _add_job(con, external_id="b")
+    for job_id in (fresh_id, skipped_id):
+        con.execute("UPDATE jobs SET published_on=? WHERE id=?", (old, job_id))
+    con.execute("UPDATE jobs SET status='skipped' WHERE id=?", (skipped_id,))
+    con.commit()
+
+    assert db.count_old_jobs(con, "new", 45) == 1
+    assert db.count_old_jobs(con, None, 45) == 2
+
+
+def test_the_cockpit_signature_follows_the_posting_not_only_its_draft(con):
+    """The cockpit watches one posting because the AD can die and the
+    application can be recorded elsewhere while he is at the form."""
+    job_id = _add_job(con)
+    con.commit()
+    seen = db.job_signature(con, job_id)
+
+    for write in (
+        lambda: db.set_job_liveness(con, job_id, "gone"),
+        lambda: db.set_job_status(con, job_id, "portal"),
+        lambda: db.set_contact_email(con, job_id, "neu@firma.de", "web_lookup"),
+        lambda: db.set_apply_channel(con, job_id, "ats_form", "JOIN", "https://x"),
+    ):
+        write()
+        con.commit()
+        current = db.job_signature(con, job_id)
+        assert current != seen, "the cockpit would not notice this"
+        seen = current
+
+
+def test_the_cockpit_signature_of_a_vanished_posting_is_nothing(con):
+    assert db.job_signature(con, 999999) is None

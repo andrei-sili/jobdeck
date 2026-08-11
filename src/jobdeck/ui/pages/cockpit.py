@@ -16,6 +16,7 @@ from nicegui import run, ui
 
 from jobdeck import apply_channel, apply_form, db
 from jobdeck.constants import LIVENESS_GONE
+from jobdeck.ui import live
 from jobdeck.ui.helpers import open_in_system, openable_url
 from jobdeck.ui.layout import frame
 
@@ -23,6 +24,7 @@ from jobdeck.ui.layout import frame
 def _load(job_id: int) -> dict | None:
     """The posting, its draft and the applicant settings in one read."""
     with db.db() as con:
+        signature = db.job_signature(con, job_id)  # first: see jobs._load_jobs
         job = db.get_job(con, job_id)
         if job is None:
             return None
@@ -33,7 +35,13 @@ def _load(job_id: int) -> dict | None:
             "job": dict(job),
             "draft": dict(draft) if draft is not None else None,
             "settings": settings,
+            "signature": signature,
         }
+
+
+def _signature(job_id: int) -> tuple | None:
+    with db.db() as con:
+        return db.job_signature(con, job_id)
 
 
 def _mark_portal(job_id: int) -> None:
@@ -68,87 +76,123 @@ def _channel_line(job: dict) -> str:
 @ui.page("/cockpit/{job_id}")
 async def cockpit_page(job_id: int):
     with frame("Bewerbung ausfüllen"):
-        view = await run.io_bound(_load, job_id)
-        if view is None:
-            ui.label(f"Posting {job_id} does not exist.").classes("text-gray-500")
-            return
-        job, draft = view["job"], view["draft"]
-        rows = apply_form.fields(job, draft, view["settings"])
-        gaps = apply_form.missing(rows)
+        # This screen is designed to SIT OPEN beside an employer's form for
+        # many minutes, and it was a one-shot render: a draft started from the
+        # inbox never filled these rows, the liveness pass could mark the ad
+        # gone with the warning computed only once, and an application recorded
+        # in another tab left "Beworben — eintragen" offering to record it
+        # twice. It watches its OWN posting, so an unrelated poll cannot move
+        # the buttons under his hand.
+        body = ui.column().classes("w-full gap-2")
+        # Messages and navigations live HERE, never in the row that triggered
+        # them: every control is built inside `body`, and refresh() clears it.
+        # A handler that awaits and then speaks would be speaking from a slot a
+        # tick may already have deleted — NiceGUI raises out of context.client
+        # and the confirmation is swallowed (reproduced: "Application recorded
+        # ✓" never appears and an ERROR lands in the log instead).
+        overlay = ui.column().classes("contents")
 
-        ui.label(f"{job['company']}").classes("text-lg font-bold")
-        ui.label(job["title"]).classes("text-sm")
-        ui.label(_channel_line(job)).classes("text-sm text-blue-700")
+        def say(message: str, **kwargs) -> None:
+            """Tell the user something, from a slot no refresh can delete."""
+            with overlay:
+                ui.notify(message, **kwargs)
 
-        async def open_form(url: str):
-            # opening the form is the moment he starts applying: record it, so
-            # the posting leaves the working inbox and its liveness keeps being
-            # checked while he is at the form
-            await run.io_bound(_mark_portal, job_id)
+        async def refresh():
+            view = await run.io_bound(_load, job_id)
+            live_view.mark(None if view is None else view["signature"])
+            body.clear()
+            with body:
+                _render(view, job_id, refresh, say, overlay)
+
+        with ui.row().classes("items-center"):
+            live_view = live.watch(lambda: _signature(job_id), refresh,
+                                   busy=live.dialog_open)
+        await refresh()
+
+
+def _render(view: dict | None, job_id: int, refresh, say, overlay) -> None:
+    if view is None:
+        ui.label(f"Posting {job_id} does not exist.").classes("text-gray-500")
+        return
+    job, draft = view["job"], view["draft"]
+    rows = apply_form.fields(job, draft, view["settings"])
+    gaps = apply_form.missing(rows)
+
+    ui.label(f"{job['company']}").classes("text-lg font-bold")
+    ui.label(job["title"]).classes("text-sm")
+    ui.label(_channel_line(job)).classes("text-sm text-blue-700")
+
+    async def open_form(url: str):
+        # opening the form is the moment he starts applying: record it, so
+        # the posting leaves the working inbox and its liveness keeps being
+        # checked while he is at the form
+        await run.io_bound(_mark_portal, job_id)
+        with overlay:  # navigate.to needs a live slot exactly like notify
             ui.navigate.to(url, new_tab=True)
+        await refresh()  # the posting is 'portal' now; this screen says so
 
-        def copy(field: apply_form.Field):
-            ui.clipboard.write(field.value)
-            ui.notify(f"{field.label} kopiert", type="positive")
+    def copy(field: apply_form.Field):
+        ui.clipboard.write(field.value)
+        say(f"{field.label} kopiert", type="positive")
 
-        async def record_applied():
-            bewerbung_id = await run.io_bound(_record, job_id, "Online-Portal")
-            if bewerbung_id is None:
-                ui.notify("Blocked: you already applied at this company",
-                          type="warning")
-                return
-            ui.notify("Application recorded ✓", type="positive")
+    async def record_applied():
+        bewerbung_id = await run.io_bound(_record, job_id, "Online-Portal")
+        if bewerbung_id is None:
+            say("Blocked: you already applied at this company", type="warning")
+            return
+        say("Application recorded ✓", type="positive")
+        with overlay:
             ui.navigate.to("/jobs")
 
-        if job["liveness"] == LIVENESS_GONE:
-            checked = (job["liveness_checked_at"] or "")[:10]
-            ui.label(f"⚠ Die Anzeige war am {checked} nicht mehr online — vor "
-                     "dem Ausfüllen prüfen.").classes("text-sm text-red-700")
+    if job["liveness"] == LIVENESS_GONE:
+        checked = (job["liveness_checked_at"] or "")[:10]
+        ui.label(f"⚠ Die Anzeige war am {checked} nicht mehr online — vor "
+                 "dem Ausfüllen prüfen.").classes("text-sm text-red-700")
 
-        with ui.row().classes("items-center gap-2"):
-            form_url = openable_url(job["apply_url"] or job["url"] or "")
-            if form_url:
-                ui.button("Formular öffnen", icon="open_in_new",
-                          on_click=lambda: open_form(form_url)).props("color=primary")
-            else:
-                ui.label("No safe URL stored — open the posting manually.") \
-                    .classes("text-sm text-amber-700")
-
-        if gaps:
-            ui.label("Fehlt noch: " + ", ".join(f.label for f in gaps)) \
+    with ui.row().classes("items-center gap-2"):
+        form_url = openable_url(job["apply_url"] or job["url"] or "")
+        if form_url:
+            ui.button("Formular öffnen", icon="open_in_new",
+                      on_click=lambda: open_form(form_url)).props("color=primary")
+        else:
+            ui.label("No safe URL stored — open the posting manually.") \
                 .classes("text-sm text-amber-700")
 
-        with ui.column().classes("w-full gap-1 mt-2"):
-            for field in rows:
-                with ui.row().classes("w-full items-start gap-2 border-b py-1"):
-                    ui.label(field.label).classes("text-xs text-gray-500 w-40 shrink-0")
-                    if field.ready:
-                        text = field.value
-                        shown = (text if not field.multiline
-                                 else text[:160] + ("…" if len(text) > 160 else ""))
-                        ui.label(shown).classes("text-sm grow break-all")
-                        ui.button(icon="content_copy",
-                                  on_click=lambda f=field: copy(f)) \
-                            .props("flat dense").tooltip("In die Zwischenablage")
-                    else:
-                        ui.label(field.hint).classes("text-sm text-amber-700 grow")
+    if gaps:
+        ui.label("Fehlt noch: " + ", ".join(f.label for f in gaps)) \
+            .classes("text-sm text-amber-700")
 
-        pdf_field = next((f for f in rows
-                          if f.label.startswith("Bewerbungsmappe")), None)
-        with ui.row().classes("items-center gap-2 mt-2"):
-            if pdf_field is not None and pdf_field.ready:
-                ui.button("Mappe-Ordner öffnen", icon="folder_open",
-                          on_click=lambda: open_in_system(
-                              str(pathlib.Path(pdf_field.value).parent))) \
-                    .props("outline") \
-                    .tooltip("Der Ordner, damit die Datei greifbar ist")
-            if job["status"] in RECORDABLE_STATUS:
-                ui.button("Beworben — eintragen", icon="check",
-                          on_click=record_applied).props("color=positive")
-            else:
-                # already applied, skipped or a duplicate: a second recording
-                # would make this posting a 'duplicate' of its own application
-                ui.label(f"Status: {job['status']} — nichts mehr einzutragen.") \
-                    .classes("text-sm text-gray-500")
-            ui.button("Zurück zum Inbox", icon="arrow_back",
-                      on_click=lambda: ui.navigate.to("/jobs")).props("flat")
+    with ui.column().classes("w-full gap-1 mt-2"):
+        for field in rows:
+            with ui.row().classes("w-full items-start gap-2 border-b py-1"):
+                ui.label(field.label).classes("text-xs text-gray-500 w-40 shrink-0")
+                if field.ready:
+                    text = field.value
+                    shown = (text if not field.multiline
+                             else text[:160] + ("…" if len(text) > 160 else ""))
+                    ui.label(shown).classes("text-sm grow break-all")
+                    ui.button(icon="content_copy",
+                              on_click=lambda f=field: copy(f)) \
+                        .props("flat dense").tooltip("In die Zwischenablage")
+                else:
+                    ui.label(field.hint).classes("text-sm text-amber-700 grow")
+
+    pdf_field = next((f for f in rows
+                      if f.label.startswith("Bewerbungsmappe")), None)
+    with ui.row().classes("items-center gap-2 mt-2"):
+        if pdf_field is not None and pdf_field.ready:
+            ui.button("Mappe-Ordner öffnen", icon="folder_open",
+                      on_click=lambda: open_in_system(
+                          str(pathlib.Path(pdf_field.value).parent))) \
+                .props("outline") \
+                .tooltip("Der Ordner, damit die Datei greifbar ist")
+        if job["status"] in RECORDABLE_STATUS:
+            ui.button("Beworben — eintragen", icon="check",
+                      on_click=record_applied).props("color=positive")
+        else:
+            # already applied, skipped or a duplicate: a second recording
+            # would make this posting a 'duplicate' of its own application
+            ui.label(f"Status: {job['status']} — nichts mehr einzutragen.") \
+                .classes("text-sm text-gray-500")
+        ui.button("Zurück zum Inbox", icon="arrow_back",
+                  on_click=lambda: ui.navigate.to("/jobs")).props("flat")

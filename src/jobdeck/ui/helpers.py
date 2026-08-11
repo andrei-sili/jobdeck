@@ -17,6 +17,30 @@ def openable_url(url: str) -> str:
     return url if netsafe.is_openable(url or "") else ""
 
 
+def applied_line(already: dict) -> str:
+    """'⚠ Bei X hast du dich bereits beworben (am 12.06. · Absage)'.
+
+    Only ONE application per company is possible — the send path refuses a
+    second one inside its own claim (services/send.py) — so a posting at such a
+    company can never become an application. It says WHICH application and how
+    it ended, because that is the difference between a company still deciding
+    and one that already said no.
+
+    Shared by the job inbox and the review queue: two wordings of one gate is
+    how a screen ends up telling him something the send path will not do.
+    """
+    parts = []
+    when = str(already.get("gesendet_am") or "")[:10]
+    if when:
+        parts.append(f"am {when}")
+    status = str(already.get("status") or "").strip()
+    if status:
+        parts.append(status)
+    detail = f" ({' · '.join(parts)})" if parts else ""
+    return (f"⚠ Bei {already.get('firma') or 'dieser Firma'} hast du dich "
+            f"bereits beworben{detail} — eine Bewerbung pro Firma.")
+
+
 def mappe_summary(result: dict, *, with_anlagen: bool = False) -> str:
     """Confirmation line for a finished Mappe, for every page that builds one.
 

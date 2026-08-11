@@ -117,11 +117,12 @@ def _build_mappe(job_id: int) -> dict:
         return _error(f"letter template not found: {template_file}")
     draft_revision = draft["updated_at"]
 
+    strasse, plz_ort = templates.letter_address(job)
     values = {
         "firma": job["company"],
         "ansprechpartner": job["ansprechpartner"],
-        "strasse": job["contact_strasse"],
-        "plz_ort": job["contact_plz_ort"],
+        "strasse": strasse,
+        "plz_ort": plz_ort,
         "ort": settings["applicant_ort"],
         "datum": heute_de(),
         # Follows the (possibly user-corrected) e-mail subject, so the letter

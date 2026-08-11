@@ -28,7 +28,7 @@ import datetime
 import logging
 import pathlib
 
-from jobdeck import db, gmail
+from jobdeck import db, gmail, templates
 from jobdeck.constants import EMAIL_OUTBOUND, EMAIL_OUTBOUND_TEST
 from jobdeck.dedupe import find_duplicate_bewerbung
 
@@ -237,13 +237,14 @@ def _record_real_send(draft: dict, job: dict, settings: dict, recipient: str,
                     "application record stands")
         # add_bewerbung, not apply_job: the duplicate gate ran before the
         # claim — after a successful send the record MUST exist regardless.
+        letter_strasse, letter_plz_ort = templates.letter_address(job)
         bewerbung_id = db.add_bewerbung(con, {
             "gesendet_am": datetime.date.today().isoformat(),
             "firma": job["company"],
             "email": recipient,
             "ansprechpartner": job["ansprechpartner"],
-            "strasse": job["contact_strasse"],
-            "plz_ort": job["contact_plz_ort"],
+            "strasse": letter_strasse,
+            "plz_ort": letter_plz_ort,
             "kanal": "E-Mail",
             "status": "Gesendet",
             "notiz": job["url"],
@@ -478,13 +479,14 @@ def resolve_sending(job_id: int, assume_sent: bool) -> dict:
                 "the company, so it is not an application. Resolve it as "
                 "'not sent'."
             )
+        letter_strasse, letter_plz_ort = templates.letter_address(job)
         bewerbung_id = db.add_bewerbung(con, {
             "gesendet_am": datetime.date.today().isoformat(),
             "firma": job["company"],
             "email": draft["recipient"],
             "ansprechpartner": job["ansprechpartner"],
-            "strasse": job["contact_strasse"],
-            "plz_ort": job["contact_plz_ort"],
+            "strasse": letter_strasse,
+            "plz_ort": letter_plz_ort,
             "kanal": "E-Mail",
             "status": "Gesendet",
             "notiz": f"{job['url']} | send resolved manually: assumed sent",

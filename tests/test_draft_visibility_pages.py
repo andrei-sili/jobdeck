@@ -173,11 +173,11 @@ async def test_the_queue_does_not_rebuild_while_nothing_changes(
     job_id = _posting(con)
     _claimed(con, job_id, minutes_ago=0.2)
 
-    # A poll that finds nothing new reads the drafts and stops there; only a
-    # rebuild also re-reads the sending banner. Counting both tells the two
-    # apart without reaching into the page's closures.
+    # A poll that finds nothing new reads the signature and stops there; only a
+    # rebuild goes on to load the rows. Counting both tells the two apart
+    # without reaching into the page's closures.
     polls, rebuilds = {"n": 0}, {"n": 0}
-    for name, counter in (("_load_drafts", polls), ("_send_status", rebuilds)):
+    for name, counter in (("_signature", polls), ("_load", rebuilds)):
         real = getattr(queue, name)
 
         def counting(*args, _real=real, _counter=counter):

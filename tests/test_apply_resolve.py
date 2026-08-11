@@ -515,10 +515,17 @@ async def test_resolve_pending_walks_the_backlog_best_scored_first(con, data_dir
         calls.append(str(request.url))
         return httpx.Response(200, text="<h1>Karriere</h1>")
 
+    # a posting that arrived WITH an address never waits for this pass at all
+    before = {r["external_id"]: r["apply_channel"]
+              for r in con.execute("SELECT external_id, apply_channel FROM jobs")}
+    assert before["c"] == ac.CHANNEL_DIRECT_EMAIL
+
     async with _client(handler) as client:
         res = await apply_resolve.resolve_pending(limit=10, client=client)
 
-    assert res["resolved"] == 3          # the already-resolved one is skipped
+    # two left to resolve: the already-resolved one and the e-mail one are both
+    # skipped
+    assert res["resolved"] == 2
     assert res["failed"] == 0
     assert res["remaining"] == 0
     stored = {r["external_id"]: r["apply_channel"]

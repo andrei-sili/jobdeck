@@ -28,7 +28,7 @@ touches its status, and never touches a draft or an application built from it.
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -48,6 +48,10 @@ class Probe:
 
     verdict: str | None
     published_raw: str = ""
+    # Structured facts the same answer carried (work address, pay range,
+    # Arbeitnehmerüberlassung). This request is made daily anyway, so the
+    # postings stored before those columns existed fill in for free.
+    facts: dict = field(default_factory=dict)
 
 
 # "This posting is not here." Both are used in the wild: the BA API answers 404,
@@ -108,7 +112,8 @@ async def _probe_arbeitsagentur(job, client: httpx.AsyncClient) -> Probe:
         payload = resp.json()
     except ValueError:  # the endpoint has changed shape before — liveness stands
         return Probe(verdict)
-    return Probe(verdict, arbeitsagentur.publication_start(payload))
+    return Probe(verdict, arbeitsagentur.publication_start(payload),
+                 arbeitsagentur.posting_facts(payload))
 
 
 async def _probe_arbeitnow(job, client: httpx.AsyncClient) -> Probe:
@@ -160,6 +165,8 @@ def _store(job_id: int, result: Probe) -> None:
         db.set_job_liveness(con, job_id, result.verdict)
         if result.published_raw:
             db.refresh_job_published_on(con, job_id, result.published_raw)
+        if result.facts:
+            db.set_job_facts(con, job_id, result.facts)
 
 
 async def check_pending(limit: int | None = None,

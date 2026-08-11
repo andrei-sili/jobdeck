@@ -35,6 +35,45 @@ STALE_PENALTY = 20  # 60 days and older
 # one-day offset at midnight cannot move a posting across a two-week bucket.
 AGE_SQL = "CAST(julianday(date('now')) - julianday(published_on) AS INTEGER)"
 
+# Past this age a posting leaves the working list for a pile of its own, on the
+# same terms as a mismatch, a dead ad and a firm already applied to: counted
+# under the list, one click away, never deleted (his decision, 2026-08-11 —
+# automatic DELETION was offered and rejected). The penalty above still orders
+# everything BELOW the threshold; this is the point where "old" stops being a
+# ranking question and starts being a different pile.
+DEFAULT_STALE_AGE_DAYS = 45
+
+# An unknown date is NOT old, for the same reason it is not penalised: absence
+# of information is not evidence of staleness, and the sources that omit a date
+# would otherwise be hidden wholesale.
+OLD_SQL = f"({AGE_SQL} IS NOT NULL AND {AGE_SQL} >= ?)"
+
+
+# Ten years. Above this the threshold stops meaning anything (nothing in the
+# corpus is that old) and starts being a number SQLite has to bind: past 2**63
+# it refuses the parameter and every job query raises, which would take the
+# inbox AND the settings page that could fix it down together.
+MAX_STALE_AGE_DAYS = 3650
+
+
+def stale_age_setting(raw: object, default: int = DEFAULT_STALE_AGE_DAYS) -> int:
+    """The configured age threshold, parsed the way the queries parse it.
+
+    A hand-edited or empty setting must not break the inbox, so every reading
+    that is not a usable number of days falls back to the default: unparseable
+    text, nothing, zero or less (which would hide every posting that has a
+    date), and infinity — `int(float('inf'))` raises OverflowError, which is an
+    ArithmeticError and would sail straight past a `ValueError` guard. A finite
+    but absurd value is clamped rather than refused: he meant "very old", and
+    that is what he gets."""
+    try:
+        days = int(float(str(raw).strip()))
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if days <= 0:
+        return default
+    return min(days, MAX_STALE_AGE_DAYS)
+
 
 def penalty(age_days: int | None) -> int:
     """How many points an age costs. An unknown age costs nothing."""

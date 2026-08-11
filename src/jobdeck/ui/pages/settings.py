@@ -4,7 +4,7 @@ import asyncio
 
 from nicegui import run, ui
 
-from jobdeck import apply_form, backup, config, db, gmail
+from jobdeck import apply_form, backup, config, db, freshness, gmail
 from jobdeck.services import (
     apply_resolve,
     liveness,
@@ -13,6 +13,7 @@ from jobdeck.services import (
     preparing,
     scoring,
 )
+from jobdeck.ui import live
 from jobdeck.ui.helpers import open_in_system
 from jobdeck.ui.layout import frame
 
@@ -21,6 +22,8 @@ def _get_settings():
     with db.db() as con:
         return {
             "follow_up_days": db.get_setting(con, "follow_up_days", "14"),
+            "stale_age_days": freshness.stale_age_setting(
+                db.get_setting(con, "stale_age_days", "")),
             "daily_send_cap": db.get_setting(con, "daily_send_cap", "15"),
             "ai_enabled": db.ai_enabled(con),
             "web_contact_search": db.get_setting(con, "web_contact_search", "0"),
@@ -54,6 +57,26 @@ def _get_settings():
         }
 
 
+def _get_meters():
+    """The numbers a settings page must not show stale: LLM spend and the
+    sends counted against today's cap."""
+    with db.db() as con:
+        signature = db.meter_signature(con)  # first: see jobs._load_jobs
+        return {
+            "llm_calls": db.get_setting(con, "llm_calls", "0"),
+            "llm_input_tokens": db.get_setting(con, "llm_input_tokens", "0"),
+            "llm_output_tokens": db.get_setting(con, "llm_output_tokens", "0"),
+            "llm_cost_usd": db.get_setting(con, "llm_cost_usd", "0"),
+            "sent_today": db.count_outbound_today(con),
+            "signature": signature,
+        }
+
+
+def _signature() -> tuple:
+    with db.db() as con:
+        return db.meter_signature(con)
+
+
 def _prepare_filter():
     """The prepare-batch filter, defaults applied (see preparing.py)."""
     with db.db() as con:
@@ -80,6 +103,7 @@ async def settings_page():
     with frame("Settings"):
         settings = await run.io_bound(_get_settings)
         prep = await run.io_bound(_prepare_filter)
+        live_host = ui.row().classes("w-full items-center")
 
         with ui.card().classes("w-full"):
             ui.label("Data & credentials").classes("font-bold")
@@ -151,15 +175,25 @@ async def settings_page():
             cap = ui.number("Daily send cap (all sends count, test included)",
                             value=int(settings["daily_send_cap"]),
                             min=1, max=100).classes("w-64")
+            stale_age = ui.number(
+                "Anzeigen gelten als alt nach (Tagen)",
+                value=settings["stale_age_days"], min=1, max=365).classes("w-64")
+            ui.label(
+                "Older postings leave the working list for the „Alte Anzeigen“ "
+                "pile — counted under the list, one click away, never deleted."
+            ).classes("text-xs text-gray-500")
 
             async def save():
                 await run.io_bound(_set_setting, "follow_up_days",
                                    str(int(follow_up.value or 14)))
                 await run.io_bound(_set_setting, "daily_send_cap",
                                    str(int(cap.value or 15)))
+                await run.io_bound(
+                    _set_setting, "stale_age_days",
+                    str(freshness.stale_age_setting(stale_age.value)))
                 ui.notify("Saved", type="positive")
 
-            ui.button("Save", on_click=save)
+            ui.button("Save", on_click=save).mark("save-tunables")
 
         with ui.card().classes("w-full"):
             ui.label("Application").classes("font-bold")
@@ -409,11 +443,7 @@ async def settings_page():
                 value=settings["real_send_enabled"] == "1",
                 on_change=toggle_real,
             )
-            ui.label(
-                f"{settings['sent_today']} sent today · daily cap: "
-                f"{settings['daily_send_cap']} (Tunables). While real "
-                f"sending is off, nothing can reach a company."
-            ).classes("text-xs text-gray-500")
+            sent_today_label = ui.label().classes("text-xs text-gray-500")
 
         with ui.card().classes("w-full"):
             ui.label("AI").classes("font-bold")
@@ -475,16 +505,41 @@ async def settings_page():
                           type="positive")
 
             ui.button("Save", on_click=save_global_tags).props("outline")
-            ui.label(
-                f"{settings['llm_calls']} calls · "
-                f"{settings['llm_input_tokens']} in / "
-                f"{settings['llm_output_tokens']} out tokens · "
-                f"${float(settings['llm_cost_usd']):.4f}"
-            ).classes("text-sm")
+            meter_label = ui.label().classes("text-sm")
             ui.label(
                 f"Model: {config.anthropic_model()} (set ANTHROPIC_MODEL to change). "
                 f"Match scoring needs {config.PROFILE_PATH} — see profile.example.md."
             ).classes("text-xs text-gray-500")
+
+        def show_meters(meters: dict) -> None:
+            """The two numbers that move while this page sits open: what the
+            background scoring has spent (a product principle — the cost is
+            shown in the UI) and how much of today's send cap is used.
+
+            Only these. The rest of the page is INPUTS, and re-rendering an
+            input he is typing in would throw his text away, which is why the
+            page does not rebuild itself as a whole."""
+            meter_label.set_text(
+                f"{meters['llm_calls']} calls · "
+                f"{meters['llm_input_tokens']} in / "
+                f"{meters['llm_output_tokens']} out tokens · "
+                f"${float(meters['llm_cost_usd']):.4f}"
+            )
+            sent_today_label.set_text(
+                f"{meters['sent_today']} sent today · daily cap: "
+                f"{settings['daily_send_cap']} (Tunables). While real "
+                f"sending is off, nothing can reach a company."
+            )
+
+        async def refresh_meters():
+            meters = await run.io_bound(_get_meters)
+            live_view.mark(meters["signature"])
+            show_meters(meters)
+
+        with live_host:
+            live_view = live.watch(_signature, refresh_meters,
+                                   busy=live.dialog_open)
+        show_meters({**settings, "signature": None})
 
         with ui.card().classes("w-full"):
             ui.label("Maintenance").classes("font-bold")

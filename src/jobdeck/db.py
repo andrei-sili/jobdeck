@@ -7,11 +7,12 @@ pollers write; busy_timeout absorbs the rare write/write collision.
 
 import datetime
 import json
+import logging
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-from jobdeck import backup, config, dates, freshness, migrations
+from jobdeck import apply_channel, backup, config, dates, freshness, migrations
 from jobdeck.constants import (
     EMAIL_OUTBOUND,
     EMAIL_OUTBOUND_TEST,
@@ -19,6 +20,8 @@ from jobdeck.constants import (
     STATUS_RANK,
 )
 from jobdeck.dedupe import find_duplicate_bewerbung, norm
+
+log = logging.getLogger(__name__)
 
 
 def _now() -> str:
@@ -113,6 +116,13 @@ def bootstrap() -> str | None:
                 src.close()
     with db() as con:
         migrations.migrate(con)
+        # Self-healing, like the published_on backfill beside it: derived from
+        # data the row already holds, so it is idempotent and a posting whose
+        # e-mail was harvested before this rule existed stops looking like a
+        # form job on the next start.
+        converted = resolve_email_channels(con)
+        if converted:
+            log.info("apply channel: %s postings apply by e-mail", converted)
     return backup.run_startup_backup()
 
 
@@ -382,9 +392,14 @@ def insert_job_if_new(con: sqlite3.Connection, values: dict) -> int | None:
                 values.get("duplicate_of"),
             ),
         )
-        return cur.lastrowid
+        job_id = cur.lastrowid
     except sqlite3.IntegrityError:
         return None  # UNIQUE(source, external_id) — already known
+    # A posting that arrives WITH an application address is an e-mail job from
+    # the first second; waiting for a resolve pass to say so is what left 81 of
+    # them looking like form jobs.
+    resolve_email_channels(con, job_id)
+    return job_id
 
 
 # Score 0 is reserved for hard-criteria violations (see ai/scoring.py); the
@@ -439,7 +454,8 @@ APPLIED_FIRM_SQL = """(
 
 
 def _job_filters(
-    status: str | None, mismatches: str, gone: str, applied: str = "include"
+    status: str | None, mismatches: str, gone: str, applied: str = "include",
+    old: str = "include", stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
 ) -> tuple[list[str], list]:
     """WHERE fragments + bound values shared by the list and the count, so a
     page can never be filtered differently from the total printed beside it.
@@ -448,7 +464,7 @@ def _job_filters(
     falling through would SHOW a pile the caller asked to hide, and a hidden
     pile exists precisely because its rows should not be acted on."""
     for name, value in (("mismatches", mismatches), ("gone", gone),
-                        ("applied", applied)):
+                        ("applied", applied), ("old", old)):
         if value not in ("include", "exclude", "only"):
             raise ValueError(f"{name}={value!r}: expected include/exclude/only")
     where, params = [], []
@@ -467,6 +483,15 @@ def _job_filters(
         where.append(f"NOT ({APPLIED_FIRM_SQL})")
     elif applied == "only":
         where.append(APPLIED_FIRM_SQL)
+    # The threshold is BOUND, and the fragment is appended together with its
+    # value: the params list is positional, so a clause added without its
+    # binding here would silently shift every later one.
+    if old == "exclude":
+        where.append(f"NOT {freshness.OLD_SQL}")
+        params.append(stale_age_days)
+    elif old == "only":
+        where.append(freshness.OLD_SQL)
+        params.append(stale_age_days)
     return where, params
 
 
@@ -521,6 +546,8 @@ def list_job_groups(
     mismatches: str = "include",
     gone: str = "include",
     applied: str = "include",
+    old: str = "include",
+    stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
     offset: int = 0,
 ) -> list[sqlite3.Row]:
     """One row per company: its best-ranked posting, plus `company_count`.
@@ -530,7 +557,7 @@ def list_job_groups(
     never silently reorders the page under the user. Only the ranking WITHIN a
     company is always by score, because something has to choose which posting
     represents it."""
-    where, params = _job_filters(status, mismatches, gone, applied)
+    where, params = _job_filters(status, mismatches, gone, applied, old, stale_age_days)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     order = _JOB_ORDER_SQL if status else "id DESC"
     return con.execute(
@@ -547,9 +574,11 @@ def count_job_groups(
     mismatches: str = "include",
     gone: str = "include",
     applied: str = "include",
+    old: str = "include",
+    stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
 ) -> int:
     """How many companies the grouped view holds."""
-    where, params = _job_filters(status, mismatches, gone, applied)
+    where, params = _job_filters(status, mismatches, gone, applied, old, stale_age_days)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     return con.execute(
         f"{_ranked_jobs_cte(where_sql)}"
@@ -568,6 +597,8 @@ def list_company_siblings(
     mismatches: str = "include",
     gone: str = "include",
     applied: str = "include",
+    old: str = "include",
+    stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
     per_company: int = SIBLINGS_PER_COMPANY,
 ) -> list[sqlite3.Row]:
     """The postings a grouped row stands in front of, best-ranked first.
@@ -578,7 +609,7 @@ def list_company_siblings(
     are."""
     if not company_keys:
         return []
-    where, params = _job_filters(status, mismatches, gone, applied)
+    where, params = _job_filters(status, mismatches, gone, applied, old, stale_age_days)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     placeholders = ",".join("?" * len(company_keys))
     return con.execute(
@@ -597,10 +628,12 @@ def count_jobs(
     mismatches: str = "include",
     gone: str = "include",
     applied: str = "include",
+    old: str = "include",
+    stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
 ) -> int:
     """How many postings a `list_jobs` call with the same filters would have,
     ignoring its page limit — the total a paged view has to print."""
-    where, params = _job_filters(status, mismatches, gone, applied)
+    where, params = _job_filters(status, mismatches, gone, applied, old, stale_age_days)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     return con.execute(
         f"SELECT COUNT(*) FROM jobs{where_sql}", params
@@ -614,6 +647,8 @@ def list_jobs(
     mismatches: str = "include",
     gone: str = "include",
     applied: str = "include",
+    old: str = "include",
+    stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
     offset: int = 0,
 ) -> list[sqlite3.Row]:
     """List postings. mismatches: 'include' (default), 'exclude' (hide the
@@ -621,7 +656,7 @@ def list_jobs(
     (just the hidden pile — keeps mismatches reachable regardless of how
     many better-scored rows fill the page limit). `gone` takes the same three
     values over postings whose ad the source says is no longer there."""
-    where, params = _job_filters(status, mismatches, gone, applied)
+    where, params = _job_filters(status, mismatches, gone, applied, old, stale_age_days)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     # The age-adjusted score is SELECTED as well as ordered on, so the number
     # the UI prints is the very number that decided the row's position — two
@@ -746,6 +781,34 @@ def set_apply_channel(
         "UPDATE jobs SET apply_channel=?, ats_vendor=?, apply_url=? WHERE id=?",
         (channel, vendor, apply_url, job_id),
     )
+
+
+# Facts a source states about a posting, in this table's vocabulary. The
+# writer accepts exactly these, so a source handing over a key nobody stores
+# fails loudly here instead of being dropped in silence.
+JOB_FACT_COLUMNS = ("work_strasse", "work_plz_ort", "salary_from", "salary_to",
+                    "salary_period", "temp_agency")
+
+
+def set_job_facts(con: sqlite3.Connection, job_id: int, facts: dict) -> int:
+    """Store what a source stated about a posting. Returns the column count.
+
+    Only values the source actually stated are written: a payload that omits a
+    field must never erase what an earlier one said, and the same function
+    therefore serves discovery and the daily liveness probe — which is how the
+    postings stored before these columns existed fill in without one extra
+    request. Additive metadata only: never status, never a draft."""
+    known = {key: value for key, value in (facts or {}).items()
+             if key in JOB_FACT_COLUMNS and value not in ("", None)}
+    unknown = set(facts or {}) - set(JOB_FACT_COLUMNS)
+    if unknown:
+        raise ValueError(f"unknown job facts: {sorted(unknown)}")
+    if not known:
+        return 0
+    assignments = ", ".join(f"{key}=?" for key in known)
+    con.execute(f"UPDATE jobs SET {assignments} WHERE id=?",
+                (*known.values(), job_id))
+    return len(known)
 
 
 def set_job_liveness(
@@ -938,6 +1001,19 @@ def count_applied_firm_jobs(con: sqlite3.Connection, status: str | None = None) 
     return con.execute(sql, params).fetchone()[0]
 
 
+def count_old_jobs(
+    con: sqlite3.Connection, status: str | None = None,
+    stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
+) -> int:
+    """How many postings the age filter would hide for this inbox view."""
+    sql = f"SELECT COUNT(*) FROM jobs WHERE {freshness.OLD_SQL}"
+    params: list = [stale_age_days]
+    if status:
+        sql += " AND status=?"
+        params.append(status)
+    return con.execute(sql, params).fetchone()[0]
+
+
 def jobs_needing_apply_channel(
     con: sqlite3.Connection, limit: int, min_score: int = 1
 ) -> list[sqlite3.Row]:
@@ -976,16 +1052,157 @@ def set_contact_email(
     """Adopt a human-confirmed application e-mail for a posting (from the
     web contact lookup). `source` records provenance (e.g. 'web_lookup'). The
     address becomes the send recipient only through the normal draft→queue path,
-    still behind real_send_enabled and the per-send human confirmation."""
+    still behind real_send_enabled and the per-send human confirmation.
+
+    An e-mail arriving is also the moment the posting stops being a form job —
+    so the channel is recomputed here rather than waiting for a resolve pass
+    that may never be run again on this row."""
     con.execute(
         "UPDATE jobs SET contact_email=?, contact_source=? WHERE id=?",
         (email, source, job_id),
     )
+    resolve_email_channels(con, job_id)
+
+
+# Statuses whose channel is still worth deciding. A posting already applied to,
+# skipped or filed as a duplicate is finished business — rewriting how one
+# would have applied to it changes nothing and would only rewrite history.
+_CHANNEL_STATUSES = ("new", "portal")
+
+
+def resolve_email_channels(
+    con: sqlite3.Connection, job_id: int | None = None
+) -> int:
+    """Record 'apply by e-mail' wherever a posting already holds one. Returns
+    the number of postings that changed.
+
+    A stored `contact_email` settles the question with no network at all: it is
+    the first rule of `apply_channel.classify` and the short-circuit
+    `apply_resolve.resolve` takes before it fetches anything. Nothing applied
+    that rule outside the resolver, so 81 of his Arbeitsagentur postings held an
+    application address and still read as unresolved — form jobs, in an app
+    whose whole pain is form jobs — while only 5 said 'direct_email'.
+
+    Only the CHANNEL is written: the ATS vendor and the resolved apply URL stay,
+    because they remain true about the posting and the row still offers to open
+    it.
+    """
+    statuses = ",".join("?" * len(_CHANNEL_STATUSES))
+    where_id = " AND id=?" if job_id is not None else ""
+    params = [apply_channel.CHANNEL_DIRECT_EMAIL, apply_channel.CHANNEL_DIRECT_EMAIL,
+              *_CHANNEL_STATUSES]
+    if job_id is not None:
+        params.append(job_id)
+    cur = con.execute(
+        "UPDATE jobs SET apply_channel=? "
+        "WHERE contact_email<>'' AND COALESCE(apply_channel,'')<>? "
+        f"AND status IN ({statuses}){where_id}",
+        params,
+    )
+    return cur.rowcount
 
 
 def count_jobs_by_status(con: sqlite3.Connection) -> dict[str, int]:
     rows = con.execute("SELECT status, COUNT(*) AS n FROM jobs GROUP BY status")
     return {row["status"]: row["n"] for row in rows}
+
+
+# --------------------------------------------------------------------------
+# Signatures — "has anything I display changed?" in one cheap query
+# --------------------------------------------------------------------------
+# A page polls one of these and rebuilds only when the value differs from what
+# it is showing (see ui/live.py). DERIVED rather than a version counter that
+# writers bump: a bump can be forgotten, and a forgotten bump is exactly the
+# silent staleness this mechanism exists to end — every write to these tables
+# moves one of the aggregates by construction.
+#
+# The jobs part is ONE scan with aggregates only; the per-status counts make a
+# status change visible even though the row count does not move (a transition
+# lowers one count and raises another, so only two opposite transitions inside
+# a single tick could cancel out). `status_history` is included through its id
+# alone because `set_status` writes an audit row for every application status
+# change — the one thing about a bewerbung a job row quotes.
+_JOBS_SIGNATURE_SQL = """
+SELECT COUNT(*), MAX(id), COUNT(match_score), TOTAL(match_score),
+       MAX(liveness_checked_at), TOTAL(liveness=?),
+       TOTAL(status='new'), TOTAL(status='portal'), TOTAL(status='applied'),
+       TOTAL(status='skipped'), TOTAL(status='duplicate'),
+       TOTAL(contact_email<>''), TOTAL(COALESCE(apply_channel,'')<>'')
+  FROM jobs
+"""
+
+# Drafts get the same treatment for the same reason, and NOT a MAX(updated_at):
+# the timestamp has second resolution, so two moves inside one second (a
+# discard and a re-draft, a test that writes both) would compare equal while
+# the queue shows something different.
+_DRAFTS_SIGNATURE_SQL = """
+SELECT COUNT(*), MAX(id), MAX(updated_at),
+       TOTAL(status='generating'), TOTAL(status='ready'),
+       TOTAL(status='approved'), TOTAL(status='sending'),
+       TOTAL(status='sent'), TOTAL(status='failed'),
+       TOTAL(status='discarded')
+  FROM drafts
+"""
+
+_APPLICATIONS_SIGNATURE_SQL = """
+SELECT (SELECT COUNT(*) FROM bewerbungen), (SELECT MAX(id) FROM bewerbungen),
+       (SELECT MAX(id) FROM status_history)
+"""
+
+
+def data_signature(con: sqlite3.Connection) -> tuple:
+    """What the pipeline pages (inbox, queue, dashboard, applications, cockpit)
+    are showing, compressed to one comparable tuple.
+
+    One signature for all of them on purpose: a page-specific one would have to
+    predict which writes it cares about, and being rebuilt by an unrelated
+    change costs a render nobody notices, while missing a related one is the
+    defect."""
+    return (
+        *con.execute(_JOBS_SIGNATURE_SQL, (LIVENESS_GONE,)).fetchone(),
+        *con.execute(_DRAFTS_SIGNATURE_SQL).fetchone(),
+        *con.execute(_APPLICATIONS_SIGNATURE_SQL).fetchone(),
+    )
+
+
+def job_signature(con: sqlite3.Connection, job_id: int) -> tuple | None:
+    """One posting's state, for a page that stands beside ONE form.
+
+    Per-posting rather than the whole pipeline: the apply cockpit sits open for
+    many minutes while he types into an employer's form, and rebuilding it every
+    time an unrelated posting is scored would move the buttons under his hand.
+    `None` when the posting is gone."""
+    row = con.execute(
+        "SELECT status, liveness, liveness_checked_at, contact_email, "
+        f"apply_channel, ats_vendor, apply_url, {_DRAFT_STATUS_SQL}, "
+        f"{_DRAFT_UPDATED_SQL} FROM jobs WHERE id=?",
+        (job_id,),
+    ).fetchone()
+    return None if row is None else tuple(row)
+
+
+def meter_signature(con: sqlite3.Connection) -> tuple:
+    """The Settings numbers that move on their own: LLM spend and today's
+    sends. Deliberately NOT the whole settings snapshot — the page must never
+    overwrite an input he is typing in, so only the meters are polled."""
+    return (
+        get_setting(con, "llm_calls", "0"),
+        get_setting(con, "llm_input_tokens", "0"),
+        get_setting(con, "llm_output_tokens", "0"),
+        get_setting(con, "llm_cost_usd", "0"),
+        count_outbound_today(con),
+    )
+
+
+def profiles_signature(con: sqlite3.Connection) -> tuple:
+    """What the search-profile list shows about the poller: when each profile
+    was last polled and what it said. A handful of rows, so the errors are
+    compared verbatim rather than through an aggregate that could hide one."""
+    return tuple(con.execute(
+        "SELECT COUNT(*), MAX(id), MAX(COALESCE(last_polled_at,'')), "
+        "GROUP_CONCAT(COALESCE(last_poll_error,''), '|') "
+        "FROM search_profiles"
+    ).fetchone())
 
 
 # --------------------------------------------------------------------------

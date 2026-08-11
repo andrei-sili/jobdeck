@@ -10,6 +10,7 @@ defensive parsing: a malformed item is logged and skipped, never fatal.
 import asyncio
 import base64
 import logging
+import math
 
 import httpx
 
@@ -118,6 +119,73 @@ def _place(item) -> str:
     if city and country and country.upper() != HOME_COUNTRY:
         return f"{city}, {country}"
     return city
+
+
+def _first_address(payload) -> dict:
+    """The `adresse` of the first work location, {} when there is none."""
+    locations = payload.get("stellenlokationen") if isinstance(payload, dict) else None
+    if not isinstance(locations, list) or not locations:
+        return {}
+    address = (locations[0] or {}).get("adresse")
+    return address if isinstance(address, dict) else {}
+
+
+def _amount(raw) -> str:
+    """A stated pay figure as a plain number, '' when it is not one.
+
+    Cents are KEPT: the same field carries 55000.0 for a yearly salary and
+    30.32 for an hourly one (measured live, 10 of 40 postings state a range),
+    so rounding to whole euros would silently misprice every hourly posting.
+    Stored as text, exactly like `published_at` — the board's own statement,
+    with the interpretation left to where it is used.
+    """
+    if isinstance(raw, bool) or raw is None:
+        return ""
+    try:
+        value = float(str(raw).replace(",", ".").strip())
+    except (TypeError, ValueError):
+        return ""
+    # json.loads accepts the non-standard `Infinity`/`NaN` literals, and
+    # "1e999" parses to inf, so a board answer really can carry one — and
+    # neither `inf <= 0` nor `nan <= 0` is true, so the bound below is not the
+    # guard. A figure that is not a finite number is not a pay figure.
+    if not math.isfinite(value) or value <= 0:
+        return ""
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def posting_facts(payload) -> dict:
+    """Structured facts of a detail payload, as the jobs table stores them.
+
+    Everything here was already being fetched and thrown away. It is a pure
+    function of the payload so the two callers that hold one — discovery and
+    the daily liveness probe — can both fill these columns, which is what lets
+    the existing stock heal without a single extra request.
+    """
+    if not isinstance(payload, dict):
+        return {}
+    address = _first_address(payload)
+    street = " ".join(part for part in (
+        str(address.get("strasse") or "").strip(),
+        str(address.get("hausnummer") or "").strip(),
+    ) if part)
+    plz_ort = " ".join(part for part in (
+        str(address.get("plz") or "").strip(),
+        str(address.get("ort") or "").strip(),
+    ) if part)
+    return {
+        "work_strasse": street,
+        "work_plz_ort": plz_ort,
+        "salary_from": _amount(payload.get("gehaltsspanneVon")),
+        "salary_to": _amount(payload.get("gehaltsspanneBis")),
+        # `verguetungsangabe`, NOT `artDerVerguetung`: probed live over 40 real
+        # postings, the latter says what SHAPE the figure has (GEHALTSSPANNE /
+        # FESTGEHALT) while the former says what it MEANS (JAHRESGEHALT /
+        # STUNDENLOHN) — and a range without that is unreadable, since 30.32
+        # and 55000 arrive in the same field.
+        "salary_period": str(payload.get("verguetungsangabe") or "").strip(),
+        "temp_agency": 1 if payload.get("istArbeitnehmerUeberlassung") else 0,
+    }
 
 
 class ArbeitsagenturSource:
@@ -230,6 +298,7 @@ class ArbeitsagenturSource:
             description = await self._fetch_page_text(external_url)
 
         posting.description = description
+        posting.facts = posting_facts(detail)
         posting.contact_email = extract_email(description)
         posting.remote = bool(
             detail.get("homeofficemoeglich")

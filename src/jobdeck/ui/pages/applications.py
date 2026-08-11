@@ -15,6 +15,7 @@ from jobdeck.constants import (
 )
 from jobdeck.dates import days_since
 from jobdeck.dedupe import find_duplicate_bewerbung, fold
+from jobdeck.ui import live
 from jobdeck.ui.helpers import open_in_system
 from jobdeck.ui.layout import frame
 
@@ -23,7 +24,14 @@ SEARCH_FIELDS = ("firma", "email", "ansprechpartner", "plz_ort")
 
 def _load():
     with db.db() as con:
-        return [dict(r) for r in db.list_bewerbungen(con)]
+        signature = db.data_signature(con)  # first: see jobs._load_jobs
+        return {"rows": [dict(r) for r in db.list_bewerbungen(con)],
+                "signature": signature}
+
+
+def _signature() -> tuple:
+    with db.db() as con:
+        return db.data_signature(con)
 
 
 def _save(row_id, values, new_status):
@@ -72,6 +80,7 @@ async def applications_page():
                 .props("dense").classes("w-44")
             ui.space()
             count_label = ui.label("").classes("text-sm text-gray-500")
+            live_host = ui.row().classes("items-center")
             ui.button("CSV export", icon="download", on_click=lambda: do_export()) \
                 .props("outline")
 
@@ -107,7 +116,9 @@ async def applications_page():
             return STATUS_COLORS.get(row.get("status") or "", "#ffffff")
 
         async def refresh():
-            state["rows"] = await run.io_bound(_load)
+            view = await run.io_bound(_load)
+            live_view.mark(view["signature"])
+            state["rows"] = view["rows"]
             apply_filter()
 
         def apply_filter(query=None, status=None):
@@ -181,6 +192,24 @@ async def applications_page():
                     await refresh()
 
                 async def delete():
+                    """A real application, its status history and its links to
+                    the sent e-mail — one unconfirmed click removed all of it."""
+                    with ui.dialog() as confirm, ui.card():
+                        ui.label(f"Bewerbung bei „{data.get('firma')}“ "
+                                 f"löschen?").classes("font-bold")
+                        ui.label("Der Verlauf und die Verknüpfung zur "
+                                 "gesendeten E-Mail gehen mit. Das lässt sich "
+                                 "nicht rückgängig machen.").classes("text-sm")
+                        with ui.row().classes("justify-end gap-2 w-full"):
+                            ui.button("Abbrechen",
+                                      on_click=lambda: confirm.submit(False)) \
+                                .props("flat")
+                            ui.button("Löschen", icon="delete",
+                                      on_click=lambda: confirm.submit(True)) \
+                                .props("color=negative")
+                    confirm.open()
+                    if not await confirm:
+                        return
                     await run.io_bound(_delete, data["id"])
                     dialog.close()
                     await refresh()
@@ -189,7 +218,8 @@ async def applications_page():
                     with ui.row():
                         if data.get("id"):
                             ui.button("Delete", on_click=delete) \
-                                .props("flat color=negative")
+                                .props("flat color=negative") \
+                                .mark("delete-application")
                             if data.get("dokument"):
                                 ui.button(
                                     "Open document",
@@ -207,5 +237,12 @@ async def applications_page():
 
         with ui.row():
             ui.button("New application", icon="add", on_click=lambda: edit_dialog(None))
+
+        # Every real send records an application here — from the queue, from
+        # auto-send and from the cockpit's "Beworben — eintragen". Sending in one
+        # tab and looking here in another showed nothing until a reload, and the
+        # due-date colouring was computed from that same stale snapshot.
+        with live_host:
+            live_view = live.watch(_signature, refresh, busy=live.dialog_open)
 
         await refresh()

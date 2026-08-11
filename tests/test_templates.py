@@ -76,3 +76,47 @@ def test_token_shaped_values_stay_literal():
 def test_missing_body_token_is_an_error():
     with pytest.raises(templates.TemplateError):
         templates.render_letter("<p>{{BETREFF}}</p>", _values())
+
+
+# ---------------------------------------------------------------------------
+# Which address the letter's {{STRASSE}} / {{PLZ_ORT}} block carries
+# ---------------------------------------------------------------------------
+def _job_row(**over):
+    row = {"contact_strasse": "", "contact_plz_ort": "", "work_strasse": "",
+           "work_plz_ort": "", "temp_agency": 0}
+    row.update(over)
+    return row
+
+
+def test_an_address_the_posting_states_wins():
+    """It was extracted from the text the employer wrote — where a posting
+    names a postal address, that is where it wants applications."""
+    address = templates.letter_address(_job_row(
+        contact_strasse="Musterweg 3", contact_plz_ort="12345 Musterstadt",
+        work_strasse="Musterstraße 26", work_plz_ort="54321 Beispielstadt"))
+    assert address == ("Musterweg 3", "12345 Musterstadt")
+
+
+def test_the_board_address_stands_in_when_the_posting_states_none():
+    """725 of his 769 postings state no address at all, so the block was
+    simply empty — and the alternative was an LLM reading prose."""
+    assert templates.letter_address(_job_row(
+        work_strasse="Musterstraße 26", work_plz_ort="54321 Beispielstadt")) \
+        == ("Musterstraße 26", "54321 Beispielstadt")
+
+
+def test_a_staffing_firm_never_lends_its_client_s_address_to_the_letter():
+    """Under Arbeitnehmerüberlassung the employer is the staffing firm and the
+    work location is somebody else's site: the letter would be addressed to a
+    company that is not the recipient."""
+    assert templates.letter_address(_job_row(
+        work_strasse="Musterstraße 26", work_plz_ort="54321 Beispielstadt",
+        temp_agency=1)) == ("", "")
+
+
+def test_a_half_stated_posting_address_is_not_completed_from_the_board():
+    """Mixing two sources into one address block is how a real street lands
+    under the wrong postcode."""
+    assert templates.letter_address(_job_row(
+        contact_plz_ort="12345 Musterstadt", work_strasse="Musterstraße 26",
+        work_plz_ort="54321 Beispielstadt")) == ("", "12345 Musterstadt")

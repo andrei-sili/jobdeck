@@ -10,6 +10,7 @@ import pytest
 from nicegui import ui
 from nicegui.elements.markdown import prepare_content
 
+from jobdeck import freshness
 from jobdeck.ui import helpers
 from jobdeck.ui.helpers import openable_url, posting_markdown
 from jobdeck.ui.pages import jobs
@@ -271,10 +272,12 @@ def test_the_working_inbox_hides_every_pile_and_each_view_shows_one():
     # application: all three are FACTS about the posting, so all three hide it
     # — and opening one pile is a separate VIEW, not a filter stacked on another
     assert jobs._PILE_FILTERS[jobs.PILE_NONE] == {
-        "mismatches": "exclude", "gone": "exclude", "applied": "exclude"}
+        "mismatches": "exclude", "gone": "exclude", "applied": "exclude",
+        "old": "exclude"}
     assert jobs._PILE_FILTERS[jobs.PILE_MISMATCHES]["mismatches"] == "only"
     assert jobs._PILE_FILTERS[jobs.PILE_DEAD]["gone"] == "only"
     assert jobs._PILE_FILTERS[jobs.PILE_APPLIED]["applied"] == "only"
+    assert jobs._PILE_FILTERS[jobs.PILE_OLD]["old"] == "only"
     for pile, filters in jobs._PILE_FILTERS.items():
         only = [k for k, v in filters.items() if v == "only"]
         assert len(only) == (0 if pile == jobs.PILE_NONE else 1), pile
@@ -317,7 +320,8 @@ def test_a_posting_he_has_acted_on_is_never_hidden_from_its_own_view(con, data_d
     portal = jobs._load_jobs("portal", jobs.PILE_NONE, 0)
     assert [r["id"] for r in portal["rows"]] == [job_id]
     assert portal["filters"] == {"mismatches": "include", "gone": "include",
-                                 "applied": "include"}
+                                 "applied": "include", "old": "include",
+                                 "stale_age_days": freshness.DEFAULT_STALE_AGE_DAYS}
     # while the working inbox still hides it
     assert db.count_jobs(con, "new", gone="exclude") == 0
 
@@ -452,13 +456,15 @@ def test_the_group_that_represents_a_company_is_chosen_by_the_aged_score(
 ):
     import datetime
     today = datetime.date.today()
-    stale_star = _company_job(con, "s1", "Firma", 92,
-                              (today - datetime.timedelta(days=150)).isoformat())
+    # 40 days: aged enough to lose 12 points, still inside the working list
+    # (past the age threshold it would be in the "Alte Anzeigen" pile instead)
+    stale_star = _company_job(con, "s1", "Firma", 85,
+                              (today - datetime.timedelta(days=40)).isoformat())
     fresh_good = _company_job(con, "s2", "Firma", 78,
                               (today - datetime.timedelta(days=1)).isoformat())
     con.commit()
     view = jobs._load_jobs("new", jobs.PILE_NONE, 0)
-    # 92 aged to 72 loses to a fresh 78: the row that represents the company is
+    # 85 aged to 73 loses to a fresh 78: the row that represents the company is
     # the one the ordering actually prefers, not the one with the raw high score
     assert [r["id"] for r in view["rows"]] == [fresh_good]
     assert [r["id"] for r in view["siblings"][view["rows"][0]["company_key"]]] \
@@ -814,11 +820,12 @@ def _unhosted_ui_calls(path):
     Before an await the sender's slot is alive by definition, so a synchronous
     click handler navigating straight away is fine."""
     tree = ast.parse(pathlib.Path(path).read_text())
-    page = next(n for n in ast.walk(tree)
-                if isinstance(n, ast.AsyncFunctionDef) and n.name.endswith("_page"))
+    # The whole module, not just the @ui.page function: the cockpit builds its
+    # rows from a module-level `_render`, and a rule that only looked inside the
+    # page function would pass it without reading a line of it.
     hosted = {
         node.lineno
-        for stmt in ast.walk(page) if isinstance(stmt, ast.With)
+        for stmt in ast.walk(tree) if isinstance(stmt, ast.With)
         and any(ast.unparse(i.context_expr) == "overlay" for i in stmt.items)
         for node in ast.walk(stmt) if hasattr(node, "lineno")
     }
@@ -826,8 +833,8 @@ def _unhosted_ui_calls(path):
     # Sync helpers count too: `say` is a plain def, and dropping its
     # `with overlay:` restores the whole defect while every async handler
     # still looks innocent.
-    scopes = [page] + [n for n in ast.walk(page)
-                       if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    scopes = [n for n in ast.walk(tree)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
     for func in scopes:
         own = list(_own_statements(func))
         awaits = [n.lineno for n in own if isinstance(n, ast.Await)]
@@ -845,7 +852,11 @@ def _unhosted_ui_calls(path):
     return sorted(set(offenders))
 
 
-@pytest.mark.parametrize("page_module", ["jobs.py", "queue.py"])
+# Every page that CLEARS a container and rebuilds it. `applications.py` is
+# deliberately absent: its refresh assigns `table.rows` and deletes no element,
+# so no handler's slot can die under it.
+@pytest.mark.parametrize("page_module",
+                         ["jobs.py", "queue.py", "profiles.py", "cockpit.py"])
 def test_nothing_is_shown_on_a_slot_that_may_already_be_gone(page_module):
     """The defect CLASS, not the one place it was found. A handler runs in the
     slot of the element that fired it; any refresh — its own, a concurrent
@@ -861,13 +872,14 @@ def test_nothing_is_shown_on_a_slot_that_may_already_be_gone(page_module):
         + " (use say(...) for messages, `with overlay:` for the rest)")
 
 
-@pytest.mark.parametrize("page_module", ["jobs.py", "queue.py"])
+@pytest.mark.parametrize("page_module",
+                         ["jobs.py", "queue.py", "profiles.py", "cockpit.py"])
 def test_the_slot_rule_is_actually_binding(page_module):
     """A scan that finds no candidates would pass on any code at all."""
     source = (pathlib.Path(jobs.__file__).parent / page_module).read_text()
     assert source.count("with overlay") >= 2, "nothing is hosted"
     assert "def say(" in source, "the page has no safe way to notify"
-    assert source.count("say(") >= 5, "messages are not routed through it"
+    assert source.count("say(") >= 4, "messages are not routed through it"
 
 
 def test_nothing_the_user_sees_is_built_on_a_slot_a_refresh_just_deleted():
@@ -954,3 +966,197 @@ def test_the_sql_filter_agrees_with_the_gate_on_every_shape(con, data_dir):
     assert by_gate, "the corpus produced no matches — the check would be vacuous"
     assert by_gate != {j[0] for j in con.execute("SELECT id FROM jobs")}, \
         "everything matched — the check would pass on a filter that never hides"
+
+
+# ---------------------------------------------------------------------------
+# The age pile: past a configurable threshold a posting leaves the working
+# list — counted, one click away, never deleted (his decision, 2026-08-11).
+# ---------------------------------------------------------------------------
+def _aged(con, ext, days, score=80, company="Firma"):
+    import datetime
+    when = (datetime.date.today() - datetime.timedelta(days=days)).isoformat()
+    return _company_job(con, ext, f"{company} {ext}", score, when)
+
+
+def test_a_posting_past_the_threshold_leaves_the_working_list(con, data_dir):
+    fresh = _aged(con, "f1", days=3)
+    old = _aged(con, "o1", days=90)
+    con.commit()
+
+    working = jobs._load_jobs("new", jobs.PILE_NONE, 0)
+    assert [r["id"] for r in working["rows"]] == [fresh]
+    assert working["old"] == 1
+    assert working["stale_age_days"] == freshness.DEFAULT_STALE_AGE_DAYS
+
+    pile = jobs._load_jobs("new", jobs.PILE_OLD, 0)
+    assert [r["id"] for r in pile["rows"]] == [old]
+
+
+def test_a_posting_without_a_date_is_never_called_old(con, data_dir):
+    """Absence of information is not evidence of staleness — the same rule the
+    age penalty follows. Jooble states no publication date at all."""
+    undated = _company_job(con, "u1", "Firma u1", 80)
+    con.commit()
+
+    assert [r["id"] for r in jobs._load_jobs("new", jobs.PILE_NONE, 0)["rows"]] \
+        == [undated]
+    assert jobs._load_jobs("new", jobs.PILE_OLD, 0)["rows"] == []
+
+
+def test_the_threshold_he_sets_is_the_one_the_query_uses(con, data_dir):
+    from jobdeck import db
+    _aged(con, "m1", days=20)
+    db.set_setting(con, "stale_age_days", "14")
+    con.commit()
+
+    view = jobs._load_jobs("new", jobs.PILE_NONE, 0)
+    assert view["rows"] == [] and view["old"] == 1
+    assert view["stale_age_days"] == 14
+    assert "älter als 14 Tage" in jobs._hidden_line(
+        view["filters"], 0, 0, 0, view["old"], view["stale_age_days"])
+
+
+def test_an_unreadable_threshold_falls_back_instead_of_hiding_everything(
+        con, data_dir):
+    from jobdeck import db
+    fresh = _aged(con, "k1", days=3)
+    db.set_setting(con, "stale_age_days", "")   # hand-edited, or never set
+    con.commit()
+
+    assert [r["id"] for r in jobs._load_jobs("new", jobs.PILE_NONE, 0)["rows"]] \
+        == [fresh]
+    assert freshness.stale_age_setting("nonsense") == \
+        freshness.DEFAULT_STALE_AGE_DAYS
+    assert freshness.stale_age_setting("0") == freshness.DEFAULT_STALE_AGE_DAYS
+
+
+def test_an_old_posting_is_never_deleted_only_moved(con, data_dir):
+    from jobdeck import db
+    old = _aged(con, "d1", days=200)
+    con.commit()
+
+    jobs._load_jobs("new", jobs.PILE_NONE, 0)
+
+    assert db.get_job(con, old) is not None
+    assert db.get_job(con, old)["status"] == "new"
+
+
+# ---------------------------------------------------------------------------
+# What the row says about pay and about Arbeitnehmerüberlassung
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("job, expected", [
+    ({"salary_from": "37000", "salary_to": "47000",
+      "salary_period": "JAHRESGEHALT"},
+     "Gehalt: 37.000 – 47.000 € (Jahresgehalt)"),
+    ({"salary_from": "37000", "salary_to": "", "salary_period": ""},
+     "Gehalt: 37.000 €"),
+    ({"salary_from": "", "salary_to": "45000", "salary_period": "JAHRESGEHALT"},
+     "Gehalt: 45.000 € (Jahresgehalt)"),
+    # an hourly wage arrives in the same field as a yearly salary — measured
+    # live: 30.32 to 33.69 €/h. Printed as "30 – 33" it is a different offer.
+    ({"salary_from": "30.32", "salary_to": "33.69",
+      "salary_period": "STUNDENLOHN"},
+     "Gehalt: 30,32 – 33,69 € (Stundenlohn)"),
+    # the board's own code, when it is not one we can name, stays off the row
+    ({"salary_from": "55000", "salary_to": "", "salary_period": "GEHALTSSPANNE"},
+     "Gehalt: 55.000 €"),
+    # the board states a range on a minority of postings; the rest say nothing
+    ({"salary_from": "", "salary_to": "", "salary_period": ""}, ""),
+])
+def test_the_row_states_the_pay_range_the_board_gave(job, expected):
+    assert jobs._salary_line(job) == expected
+
+
+@pytest.mark.parametrize("stored", ["inf", "-inf", "nan", "1e999", "kaputt"])
+def test_a_row_can_never_be_unrenderable_because_of_what_was_stored(stored):
+    """The renderer reads a value from the database, and a row that raises
+    takes the whole inbox down with it — `int(float("inf"))` raises
+    OverflowError, `int(float("nan"))` a ValueError."""
+    assert jobs._euro(stored) == ""
+    assert jobs._salary_line(
+        {"salary_from": stored, "salary_to": "", "salary_period": ""}) == ""
+
+
+# ---------------------------------------------------------------------------
+# What a page hands to a worker thread must be callable with what it hands it.
+# `run.io_bound(f)` calls f() in a thread; the TypeError from a wrong arity is
+# caught by NiceGUI and written to the log, so the button simply does nothing
+# and says nothing. That is how "Send now" — the app's primary send path — was
+# silently inert on this branch after `_send_status` gained a parameter.
+# ---------------------------------------------------------------------------
+def _io_bound_calls():
+    """Every `run.io_bound(name, *args)` in the UI package, as (path, node)."""
+    ui_dir = pathlib.Path(jobs.__file__).parent.parent
+    found = []
+    for path in sorted(ui_dir.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "io_bound"
+                    and node.args):
+                found.append((path, node))
+    return found
+
+
+def _accepts(func_node: ast.FunctionDef, count: int) -> bool:
+    """Can this def be called with `count` positional arguments?"""
+    spec = func_node.args
+    positional = spec.posonlyargs + spec.args
+    required = len(positional) - len(spec.defaults)
+    return required <= count and (count <= len(positional) or spec.vararg)
+
+
+def test_every_io_bound_call_matches_the_arity_of_what_it_calls():
+    import importlib
+
+    calls = _io_bound_calls()
+    assert len(calls) >= 15, "the scan found almost nothing — it would pass vacuously"
+    checked = 0
+    for path, node in calls:
+        target = node.args[0]
+        if not isinstance(target, ast.Name):
+            continue  # a lambda or an attribute — nothing to look up by name
+        module = importlib.import_module(
+            f"jobdeck.ui.pages.{path.stem}" if path.parent.name == "pages"
+            else f"jobdeck.ui.{path.stem}")
+        defs = {n.name: n for n in ast.walk(ast.parse(path.read_text()))
+                if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)}
+        func = defs.get(target.id)
+        if func is None or not hasattr(module, target.id):
+            continue  # not a module-level function of this file
+        given = len(node.args) - 1
+        assert _accepts(func, given), (
+            f"{path.name}:{node.lineno} calls {target.id} with {given} "
+            f"argument(s) through run.io_bound, but its definition needs more — "
+            f"the TypeError would be swallowed into the log and the control "
+            f"would silently do nothing")
+        checked += 1
+    assert checked >= 10, "nothing was actually checked — the lookup is broken"
+
+
+def test_an_old_posting_never_leaks_back_as_a_sibling(con, data_dir):
+    """A grouped row lists the OTHER postings of its company, and that query
+    takes the same filters. It needs a company with two visible postings to
+    reach at all — with one, the row simply stands alone."""
+    import datetime
+    today = datetime.date.today()
+    best = _company_job(con, "s1", "Firma", 88,
+                        (today - datetime.timedelta(days=2)).isoformat())
+    second = _company_job(con, "s2", "Firma", 80,
+                          (today - datetime.timedelta(days=3)).isoformat())
+    old = _company_job(con, "s3", "Firma", 92,
+                       (today - datetime.timedelta(days=90)).isoformat())
+    con.commit()
+
+    working = jobs._load_jobs("new", jobs.PILE_NONE, 0)
+
+    assert [r["id"] for r in working["rows"]] == [best]
+    key = working["rows"][0]["company_key"]
+    assert [r["id"] for r in working["siblings"][key]] == [second], \
+        "the old posting came back under the company row it was hidden from"
+    assert working["rows"][0]["company_count"] == 2
+
+    # …and in the pile the old posting is the row, with no fresh sibling
+    pile = jobs._load_jobs("new", jobs.PILE_OLD, 0)
+    assert [r["id"] for r in pile["rows"]] == [old]
+    assert pile["siblings"] == {}

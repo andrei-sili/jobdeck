@@ -1,14 +1,15 @@
 """Job inbox: discovered postings with per-job actions."""
 
 import logging
+import math
 import pathlib
 
 from nicegui import run, ui
 
-from jobdeck import apply_channel, db
+from jobdeck import apply_channel, db, freshness
 from jobdeck.dedupe import duplicates_for_jobs
 from jobdeck.services import apply_resolve, contact_lookup, drafting, liveness, mappe
-from jobdeck.ui import helpers
+from jobdeck.ui import helpers, live
 from jobdeck.ui.helpers import (
     open_in_system,
     openable_url,
@@ -34,11 +35,16 @@ PAGE_SIZE = 50
 # leave it unreachable once better-scored rows fill the page.
 PILE_NONE, PILE_MISMATCHES, PILE_DEAD = "", "mismatches", "dead"
 PILE_APPLIED = "applied_firm"
+PILE_OLD = "old"
+_INCLUDE_ALL = {"mismatches": "include", "gone": "include", "applied": "include",
+                "old": "include"}
 _PILE_FILTERS = {
-    PILE_NONE: {"mismatches": "exclude", "gone": "exclude", "applied": "exclude"},
-    PILE_MISMATCHES: {"mismatches": "only", "gone": "include", "applied": "include"},
-    PILE_DEAD: {"mismatches": "include", "gone": "only", "applied": "include"},
-    PILE_APPLIED: {"mismatches": "include", "gone": "include", "applied": "only"},
+    PILE_NONE: {"mismatches": "exclude", "gone": "exclude", "applied": "exclude",
+                "old": "exclude"},
+    PILE_MISMATCHES: {**_INCLUDE_ALL, "mismatches": "only"},
+    PILE_DEAD: {**_INCLUDE_ALL, "gone": "only"},
+    PILE_APPLIED: {**_INCLUDE_ALL, "applied": "only"},
+    PILE_OLD: {**_INCLUDE_ALL, "old": "only"},
 }
 
 # ONE control for the three views, deliberately not two switches. Mutual
@@ -51,6 +57,7 @@ PILE_LABELS = {
     PILE_MISMATCHES: "Mismatches",
     PILE_DEAD: "Dead ads",
     PILE_APPLIED: "Schon beworben",
+    PILE_OLD: "Alte Anzeigen",
 }
 
 
@@ -60,6 +67,7 @@ _EMPTY_VIEW = {
     PILE_DEAD: "No dead postings — every ad checked so far is still online.",
     PILE_APPLIED: "Keine Stelle bei einer Firma, bei der du dich schon "
                   "beworben hast.",
+    PILE_OLD: "Keine alten Anzeigen — alles in der Arbeitsliste ist frisch.",
 }
 
 
@@ -71,14 +79,15 @@ def _view_filters(pile: str, status: str) -> dict:
     job ("I applied — record it"), so hiding it would hide that button. Only the
     `new` view hides; every other filter shows what it contains."""
     if pile == PILE_NONE and status != "new":
-        return {"mismatches": "include", "gone": "include", "applied": "include"}
+        return dict(_INCLUDE_ALL)
     return _PILE_FILTERS[pile]
 
 
-def _hidden_line(filters: dict, mismatches: int, dead: int, applied: int = 0) -> str:
+def _hidden_line(filters: dict, mismatches: int, dead: int, applied: int = 0,
+                 old: int = 0, stale_age_days: int = 0) -> str:
     """What this view is not showing, derived from the filters it actually used
-    so the label cannot contradict the list. Two independent statements, never
-    a total: a posting can be both a mismatch and offline."""
+    so the label cannot contradict the list. Independent statements, never a
+    total: a posting can be a mismatch AND offline AND old."""
     parts = []
     if filters["mismatches"] == "exclude" and mismatches:
         parts.append(f"{mismatches} mismatches hidden")
@@ -93,6 +102,10 @@ def _hidden_line(filters: dict, mismatches: int, dead: int, applied: int = 0) ->
     elif filters["applied"] == "only":
         parts.append(f"{applied} Stellen bei Firmen, bei denen du dich "
                      "schon beworben hast")
+    if filters.get("old") == "exclude" and old:
+        parts.append(f"{old} älter als {stale_age_days} Tage hidden")
+    elif filters.get("old") == "only":
+        parts.append(f"{old} Anzeigen älter als {stale_age_days} Tage")
     return " · ".join(parts)
 
 
@@ -132,8 +145,18 @@ def _load_jobs(status: str, pile: str, page: int, collapse: bool = True) -> dict
     user's feet, and asking for page 5 of a two-page list must show the last
     page rather than an empty one."""
     with db.db() as con:
+        # The signature is read FIRST, before a single row. sqlite3 runs each
+        # SELECT in its own read snapshot, so a poll or a liveness pass
+        # committing between the two reads would otherwise marry STALE rows to
+        # a FRESH signature — and the watcher would then record that signature
+        # as "what the page is showing" and never rebuild. This order can only
+        # fail the safe way: one rebuild nobody needed.
+        signature = db.data_signature(con)
         status_arg = None if status == "all" else status
-        filters = _view_filters(pile, status)
+        stale_age_days = freshness.stale_age_setting(
+            db.get_setting(con, "stale_age_days", ""))
+        filters = {**_view_filters(pile, status),
+                   "stale_age_days": stale_age_days}
         count = db.count_job_groups if collapse else db.count_jobs
         total = count(con, status_arg, **filters)
         pages = max(1, -(-total // PAGE_SIZE))
@@ -150,6 +173,7 @@ def _load_jobs(status: str, pile: str, page: int, collapse: bool = True) -> dict
         # dedupe.duplicates_for_jobs for why the stored flag cannot answer it.
         on_screen = rows + [r for group in siblings.values() for r in group]
         return {
+            "signature": signature,
             "applied": duplicates_for_jobs(con, on_screen),
             "rows": rows,
             "siblings": siblings,
@@ -158,6 +182,8 @@ def _load_jobs(status: str, pile: str, page: int, collapse: bool = True) -> dict
             "mismatches": db.count_mismatches(con, status_arg),
             "dead": db.count_gone_jobs(con, status_arg),
             "applied_firm": db.count_applied_firm_jobs(con, status_arg),
+            "old": db.count_old_jobs(con, status_arg, stale_age_days),
+            "stale_age_days": stale_age_days,
             "total": total,
             "page": page,
             "pages": pages,
@@ -175,6 +201,12 @@ def _range_line(page: int, total: int, shown: int, collapse: bool) -> str:
     first = page * PAGE_SIZE + 1
     unit = "Firmen" if collapse else "Stellen"
     return f"{first}–{first + shown - 1} von {total} {unit}"
+
+
+def _signature() -> tuple:
+    """One cheap read of everything this page's rows can say (see ui/live.py)."""
+    with db.db() as con:
+        return db.data_signature(con)
 
 
 def _set_status(job_id: int, status: str):
@@ -261,22 +293,50 @@ def _claim_is_running(job: dict) -> bool:
             and not drafting.claim_is_stale(job["draft_updated_at"]))
 
 
-def _applied_line(already: dict) -> str:
-    """'⚠ Bewerbung … am 12.06. — Absage' for a firm the gate would refuse.
+# What the board's period code means, in the language the row is written in.
+# An unknown code prints NOTHING rather than shouting an enum at him: the
+# figures still stand on their own, and the vocabulary is somebody else's.
+_SALARY_PERIODS = {
+    "JAHRESGEHALT": "Jahresgehalt",
+    "MONATSGEHALT": "Monatsgehalt",
+    "WOCHENGEHALT": "Wochengehalt",
+    "STUNDENLOHN": "Stundenlohn",
+}
 
-    Only ONE application per company is possible, so this row can never become
-    one. It says WHICH application and how it ended, because that is the
-    difference between a company still deciding and one that already said no."""
-    parts = []
-    when = str(already.get("gesendet_am") or "")[:10]
-    if when:
-        parts.append(f"am {when}")
-    status = str(already.get("status") or "").strip()
-    if status:
-        parts.append(status)
-    detail = f" ({' · '.join(parts)})" if parts else ""
-    return (f"⚠ Bei {already.get('firma') or 'dieser Firma'} hast du dich "
-            f"bereits beworben{detail} — eine Bewerbung pro Firma.")
+
+def _euro(raw: str) -> str:
+    """A stored figure in German notation: 55000 → '55.000', 30.32 → '30,32'.
+
+    Cents survive because they have to: the same field carries a yearly salary
+    and an hourly wage, and 30.32 €/h printed as '30' is a different offer.
+
+    TOTAL by construction — it renders a value read from the database, and a row
+    that cannot be rendered takes the whole inbox down with it. `int(inf)` and
+    `int(nan)` raise, so the conversion happens inside the guard."""
+    try:
+        value = float(raw)
+        if not math.isfinite(value):
+            return ""
+        whole = f"{int(value):,}".replace(",", ".")
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    cents = round(value % 1, 2)
+    return whole if not cents else f"{whole},{f'{cents:.2f}'[2:]}"
+
+
+def _salary_line(job: dict) -> str:
+    """'Gehalt: 55.000 – 65.000 € (Jahresgehalt)' — '' when none was stated.
+
+    The Arbeitsagentur states a pay range on a minority of postings (10 of 40
+    probed live) and the app threw it away; where it exists it is the one fact
+    he otherwise has to open the ad to learn."""
+    figures = [_euro(str(job[key] or "").strip())
+               for key in ("salary_from", "salary_to")]
+    span = " – ".join(figure for figure in figures if figure)
+    if not span:
+        return ""
+    period = _SALARY_PERIODS.get(str(job["salary_period"] or "").strip().upper(), "")
+    return f"Gehalt: {span} €" + (f" ({period})" if period else "")
 
 
 def _openable_url(job: dict) -> str:
@@ -297,6 +357,13 @@ async def jobs_page():
         applied: dict[int, dict] = {}
         page = {"value": 0}
         refresh_gen = {"n": 0}  # rapid filter/switch flips: last request wins
+        # How many postings he has expanded to read. A rebuild collapses every
+        # one of them, so while this is above zero the live watcher defers.
+        reading = {"rows": 0}
+        # First element of the page: an update notice under fifty rows is an
+        # update notice nobody sees. The filters live at the bottom (they always
+        # have), so this cannot ride along with them.
+        header = ui.row().classes("w-full items-center gap-2")
         container = ui.column().classes("w-full gap-2")
         pager = ui.row().classes("items-center gap-2")
         # Feedback has to outlive the row that asked for it. A handler runs in
@@ -329,9 +396,12 @@ async def jobs_page():
                 return  # superseded — a newer refresh already owns the view
             page["value"] = view["page"]  # the loader clamped it to what exists
             container.clear()
+            reading["rows"] = 0  # every expansion just died with the container
+            live_view.mark(view["signature"])
             hidden_label.set_text(
                 _hidden_line(view["filters"], view["mismatches"], view["dead"],
-                             view["applied_firm"]))
+                             view["applied_firm"], view["old"],
+                             view["stale_age_days"]))
             with container:
                 if not view["rows"]:
                     ui.label(_EMPTY_VIEW[pile["value"]]).classes("text-gray-500")
@@ -361,6 +431,10 @@ async def jobs_page():
             page["value"] += step
             await refresh()
 
+        def track_reading(event) -> None:
+            """Count the postings he currently has open."""
+            reading["rows"] = max(0, reading["rows"] + (1 if event.value else -1))
+
         def render_job(job: dict, siblings: list[dict] = ()):
             remote = " · remote" if job["remote"] else ""
             head = (f"{job['title']}  —  {job['company']}"
@@ -368,7 +442,10 @@ async def jobs_page():
             others = job.get("company_count", 1) - 1
             if others > 0:
                 head += f"  +{others}"
-            with ui.expansion(head).classes("w-full border rounded"):
+            # An open row is him READING a posting: the live watcher must not
+            # pull the list out from under it (see ui/live.py).
+            with ui.expansion(head, on_value_change=track_reading) \
+                    .classes("w-full border rounded"):
                 ui.label(f"Source: {job['source']} · found {job['fetched_at'][:16]} · "
                          f"status: {job['status']}").classes("text-xs text-gray-500")
                 if job["match_reason"]:
@@ -378,6 +455,16 @@ async def jobs_page():
                     )
                 if job["contact_email"]:
                     ui.label(f"Contact: {job['contact_email']}").classes("text-sm")
+                salary = _salary_line(job)
+                if salary:
+                    ui.label(salary).classes("text-sm text-gray-700")
+                if job["temp_agency"]:
+                    # The employer is a staffing firm and the work happens at a
+                    # client's site — worth knowing before writing a letter, and
+                    # the reason the letter never borrows this posting's address.
+                    ui.label("⚠ Arbeitnehmerüberlassung — der Arbeitsort "
+                             "gehört zu einem Kundenbetrieb.") \
+                        .classes("text-sm text-amber-700")
                 if job["liveness"] == liveness.LIVENESS_GONE:
                     checked = (job["liveness_checked_at"] or "")[:10]
                     ui.label(f"⚠ Anzeige offline — beim letzten Abruf am "
@@ -385,7 +472,7 @@ async def jobs_page():
                         .classes("text-sm text-red-700")
                 already = applied.get(job["id"])
                 if already:
-                    ui.label(_applied_line(already)).classes(
+                    ui.label(helpers.applied_line(already)).classes(
                         "text-sm text-amber-700")
                 draft_text, draft_classes = _draft_line(
                     job["draft_status"], job["draft_updated_at"])
@@ -430,8 +517,6 @@ async def jobs_page():
                         draft_button.on_click(
                             lambda j=job, b=draft_button: draft(j, button=b))
                     if job["status"] == "new":
-                        ui.button("Apply via portal", icon="language",
-                                  on_click=lambda j=job: mark_portal(j)).props("outline")
                         if not job["contact_email"]:
                             ui.button("Kontakt-E-Mail suchen", icon="alternate_email",
                                       on_click=lambda j=job: find_email(j)).props("outline")
@@ -614,17 +699,6 @@ async def jobs_page():
                     ui.button("Schließen", on_click=dialog.close).props("flat")
             dialog.open()
 
-        async def mark_portal(job: dict):
-            await run.io_bound(_set_status, job["id"], "portal")
-            open_url = _openable_url(job)
-            await refresh()
-            if not open_url:
-                say("No safe URL stored for this posting — open it manually.",
-                    type="warning")
-                return
-            with overlay:  # navigate.to needs a live slot exactly like notify
-                ui.navigate.to(open_url, new_tab=True)
-
         async def skip(job: dict):
             await run.io_bound(_set_status, job["id"], "skipped")
             await refresh()
@@ -647,11 +721,12 @@ async def jobs_page():
                 PILE_LABELS,
                 value=PILE_NONE,
                 on_change=lambda e: set_pile(e.value),
-            ).mark("pile-toggle").tooltip("The three hidden piles: postings scored 0 for violating "
+            ).mark("pile-toggle").tooltip("The four hidden piles: postings scored 0 for violating "
                       "a hard requirement, postings whose ad the board says is "
-                      "gone, and postings at a company an application already "
+                      "gone, postings at a company an application already "
                       "went to — only one per company is possible, so those "
-                      "can never become one. Hidden from the working list, "
+                      "can never become one — and postings older than the age "
+                      "you set in Settings. Hidden from the working list, "
                       "never deleted.")
             ui.switch(
                 "Group by company",
@@ -660,6 +735,15 @@ async def jobs_page():
             ).tooltip("One row per company, showing its best-scored posting — "
                       "only one application per company is possible anyway")
             hidden_label = ui.label().classes("text-xs text-gray-500")
+        # Postings arrive hourly, scores land every ten minutes and the liveness
+        # pass runs 90 s after every start — all of it invisible until this. It
+        # rebuilds only when the data really changed, and never while he has a
+        # posting open or a dialog on screen.
+        with header:
+            live_view = live.watch(
+                _signature, refresh,
+                busy=lambda: reading["rows"] > 0 or live.dialog_open(),
+            )
 
         async def set_collapse(value: bool):
             collapse["value"] = value
