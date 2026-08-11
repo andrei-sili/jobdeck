@@ -299,3 +299,53 @@ async def test_a_reconnect_does_not_kill_the_self_refresh(user: User, con,
              company="Zweite GmbH")
     await _tick(user)
     await user.should_see("Django Entwickler")
+
+
+async def test_a_closed_dialog_does_not_freeze_the_page(user: User, con,
+                                                        data_dir):
+    """Pages keep exactly one dialog element alive after closing it, so
+    "does a dialog EXIST" would be true forever after the first one — and the
+    page would defer every update for the rest of its life."""
+    job_id = _posting(con)
+    db.upsert_draft(con, job_id, {
+        "status": "ready", "betreff": "Bewerbung als Python Entwickler",
+        "recipient": "jobs@beispiel.example"})
+    con.commit()
+    await user.open("/jobs")
+    user.find("Draft application").click()
+    await asyncio.sleep(0.2)
+    await user.should_see("Draft — Python Entwickler")
+    user.find("Close").click()
+    await asyncio.sleep(0.2)
+    assert any(isinstance(e, ui.dialog) for e in user.client.elements.values()), \
+        "the dialog element is gone, so this proves nothing"
+
+    _posting(con, external_id="e2", title="Django Entwickler",
+             company="Zweite GmbH")
+    await _tick(user)
+
+    await user.should_see("Django Entwickler")
+
+
+async def test_the_reading_counter_survives_a_rebuild_with_a_row_open(
+        user: User, con, data_dir):
+    """Every row action ends in a refresh, and a rebuild destroys the open
+    expansions WITHOUT firing their value-change handlers — so without the
+    reset the counter never returns to zero and the page defers every future
+    update for the rest of the session."""
+    _posting(con)
+    await user.open("/jobs")
+    await user.should_see("Python Entwickler")
+    _expansions(user)[0].set_value(True)
+    await asyncio.sleep(0.2)
+
+    # a row action: it refreshes the list from inside the open expansion
+    user.find("Skip").click()
+    await asyncio.sleep(0.3)
+    await user.should_not_see("Python Entwickler")
+
+    _posting(con, external_id="e2", title="Django Entwickler",
+             company="Zweite GmbH")
+    await _tick(user)
+
+    await user.should_see("Django Entwickler")

@@ -205,3 +205,77 @@ async def test_send_now_reaches_the_confirmation_with_the_resolved_recipient(
     await user.should_see("Send this application?")
     await user.should_see("TEST send: probe@example.org")
     assert db.count_outbound_today(con) == 0, "nothing may be sent by a test"
+
+
+# ---------------------------------------------------------------------------
+# Settings that reach the queries they configure
+# ---------------------------------------------------------------------------
+async def test_the_age_threshold_he_types_is_the_one_that_gets_saved(
+        user: User, con, data_dir):
+    """Every test of the threshold so far wrote the setting directly, so the
+    input could have been disconnected from it with the suite green."""
+    await user.open("/settings")
+    field = next(e for e in user.client.elements.values()
+                 if isinstance(e, ui.number)
+                 and "alt nach" in (e.props.get("label") or ""))
+    field.set_value(21)
+    await asyncio.sleep(0.1)
+
+    user.find(marker="save-tunables").click()
+    await asyncio.sleep(0.3)
+
+    assert db.get_setting(con, "stale_age_days", "") == "21"
+
+
+# ---------------------------------------------------------------------------
+# The warning that stands between him and a refused send
+# ---------------------------------------------------------------------------
+async def test_the_queue_shows_the_duplicate_warning_on_the_row(
+        user: User, con, data_dir):
+    job_id = _posting(con, company="Beispiel GmbH")
+    db.upsert_draft(con, job_id, {
+        "status": "ready", "recipient": "jobs@beispiel.example",
+        "betreff": "Bewerbung als Python Entwickler",
+        "email_body": "Guten Tag,", "anschreiben_body": "Sehr geehrte Damen,",
+        "pdf_path": "/tmp/mappe.pdf"})
+    db.add_bewerbung(con, {"gesendet_am": "2026-06-12", "firma": "Beispiel GmbH",
+                           "email": "", "kanal": "E-Mail", "status": "Absage"})
+    con.commit()
+
+    await user.open("/queue")
+
+    await user.should_see("bereits beworben")
+    await user.should_see("Absage")
+
+
+async def test_the_send_confirmation_repeats_the_duplicate_warning(
+        user: User, con, data_dir):
+    """The last statement before the press — and the send path refuses it a
+    second later anyway."""
+    job_id = _posting(con, company="Beispiel GmbH")
+    db.upsert_draft(con, job_id, {
+        "status": "ready", "recipient": "jobs@beispiel.example",
+        "betreff": "Bewerbung als Python Entwickler",
+        "email_body": "Guten Tag,", "anschreiben_body": "Sehr geehrte Damen,",
+        "pdf_path": "/tmp/mappe.pdf"})
+    db.add_bewerbung(con, {"gesendet_am": "2026-06-12", "firma": "Beispiel GmbH",
+                           "email": "", "kanal": "E-Mail", "status": "Absage"})
+    db.set_setting(con, "test_recipient", "probe@example.org")
+    con.commit()
+    await user.open("/queue")
+    user.find("Review & send").click()
+    await asyncio.sleep(0.2)
+
+    user.find("Send now").click()
+    await asyncio.sleep(0.3)
+
+    # scoped to the dialog: the row behind it carries the same sentence, so a
+    # page-wide search would pass with the dialog's own line deleted
+    confirm = next(e for e in user.client.elements.values()
+                   if isinstance(e, ui.dialog) and e.value
+                   and any("Send this application?" in getattr(d, "text", "")
+                           for d in e.descendants()))
+    shown = [getattr(el, "text", "") for el in confirm.descendants()]
+    assert any("Send this application?" in (t or "") for t in shown)
+    assert any("bereits beworben" in (t or "") for t in shown), \
+        "the last screen before the press does not repeat the warning"

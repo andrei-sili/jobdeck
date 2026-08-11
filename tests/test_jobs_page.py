@@ -1132,3 +1132,31 @@ def test_every_io_bound_call_matches_the_arity_of_what_it_calls():
             f"would silently do nothing")
         checked += 1
     assert checked >= 10, "nothing was actually checked — the lookup is broken"
+
+
+def test_an_old_posting_never_leaks_back_as_a_sibling(con, data_dir):
+    """A grouped row lists the OTHER postings of its company, and that query
+    takes the same filters. It needs a company with two visible postings to
+    reach at all — with one, the row simply stands alone."""
+    import datetime
+    today = datetime.date.today()
+    best = _company_job(con, "s1", "Firma", 88,
+                        (today - datetime.timedelta(days=2)).isoformat())
+    second = _company_job(con, "s2", "Firma", 80,
+                          (today - datetime.timedelta(days=3)).isoformat())
+    old = _company_job(con, "s3", "Firma", 92,
+                       (today - datetime.timedelta(days=90)).isoformat())
+    con.commit()
+
+    working = jobs._load_jobs("new", jobs.PILE_NONE, 0)
+
+    assert [r["id"] for r in working["rows"]] == [best]
+    key = working["rows"][0]["company_key"]
+    assert [r["id"] for r in working["siblings"][key]] == [second], \
+        "the old posting came back under the company row it was hidden from"
+    assert working["rows"][0]["company_count"] == 2
+
+    # …and in the pile the old posting is the row, with no fresh sibling
+    pile = jobs._load_jobs("new", jobs.PILE_OLD, 0)
+    assert [r["id"] for r in pile["rows"]] == [old]
+    assert pile["siblings"] == {}

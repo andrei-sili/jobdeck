@@ -193,7 +193,7 @@ async def settings_page():
                     str(freshness.stale_age_setting(stale_age.value)))
                 ui.notify("Saved", type="positive")
 
-            ui.button("Save", on_click=save)
+            ui.button("Save", on_click=save).mark("save-tunables")
 
         with ui.card().classes("w-full"):
             ui.label("Application").classes("font-bold")

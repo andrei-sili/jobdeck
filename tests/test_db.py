@@ -424,3 +424,80 @@ def test_a_corrected_temp_agency_flag_can_go_back_to_zero(con):
     db.set_job_facts(con, job_id, {"temp_agency": 0})
 
     assert db.get_job(con, job_id)["temp_agency"] == 0
+
+
+def test_bootstrap_reclassifies_the_stock_it_finds(con, data_dir):
+    """The startup self-heal is what turned 82 of his postings from apparent
+    form jobs into e-mail applications; without a test the call itself could be
+    dropped with the suite green."""
+    job_id = _add_job(con, contact_email="bewerbung@firma.de")
+    con.execute("UPDATE jobs SET apply_channel='' WHERE id=?", (job_id,))
+    con.commit()
+
+    db.bootstrap()
+
+    assert db.get_job(con, job_id)["apply_channel"] == "direct_email"
+
+
+def test_a_posting_he_opened_as_a_form_still_converts(con):
+    """'portal' is where a posting sits while he fills a form — precisely the
+    row an address arriving later should rescue."""
+    job_id = _add_job(con, contact_email="bewerbung@firma.de")
+    con.execute("UPDATE jobs SET apply_channel='', status='portal' WHERE id=?",
+                (job_id,))
+
+    assert db.resolve_email_channels(con) == 1
+    assert db.get_job(con, job_id)["apply_channel"] == "direct_email"
+
+
+def test_resolving_a_channel_alone_changes_the_data_signature(con):
+    """The resolve-channels batch writes nothing but apply_channel, so that
+    term is the only thing that can tell an open page the batch happened."""
+    job_id = _add_job(con, contact_email="")
+    con.commit()
+    before = db.data_signature(con)
+
+    db.set_apply_channel(con, job_id, "ats_form", "JOIN", "https://join.com/x")
+    con.commit()
+
+    assert db.data_signature(con) != before
+
+
+def test_the_hidden_old_count_answers_for_one_view_at_a_time(con):
+    """The count sits next to the list and must describe the same view: an old
+    posting he already skipped is not hidden FROM the 'new' inbox."""
+    import datetime
+    old = (datetime.date.today() - datetime.timedelta(days=90)).isoformat()
+    fresh_id = _add_job(con, external_id="a")
+    skipped_id = _add_job(con, external_id="b")
+    for job_id in (fresh_id, skipped_id):
+        con.execute("UPDATE jobs SET published_on=? WHERE id=?", (old, job_id))
+    con.execute("UPDATE jobs SET status='skipped' WHERE id=?", (skipped_id,))
+    con.commit()
+
+    assert db.count_old_jobs(con, "new", 45) == 1
+    assert db.count_old_jobs(con, None, 45) == 2
+
+
+def test_the_cockpit_signature_follows_the_posting_not_only_its_draft(con):
+    """The cockpit watches one posting because the AD can die and the
+    application can be recorded elsewhere while he is at the form."""
+    job_id = _add_job(con)
+    con.commit()
+    seen = db.job_signature(con, job_id)
+
+    for write in (
+        lambda: db.set_job_liveness(con, job_id, "gone"),
+        lambda: db.set_job_status(con, job_id, "portal"),
+        lambda: db.set_contact_email(con, job_id, "neu@firma.de", "web_lookup"),
+        lambda: db.set_apply_channel(con, job_id, "ats_form", "JOIN", "https://x"),
+    ):
+        write()
+        con.commit()
+        current = db.job_signature(con, job_id)
+        assert current != seen, "the cockpit would not notice this"
+        seen = current
+
+
+def test_the_cockpit_signature_of_a_vanished_posting_is_nothing(con):
+    assert db.job_signature(con, 999999) is None
