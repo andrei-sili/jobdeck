@@ -68,7 +68,9 @@ def _emailable(con, **over):
     return job_id
 
 
-async def _press(user: User, key: str) -> None:
+async def _press(user: User, key: str, *, action: str = "keydown",
+                 repeat: bool = False, ctrlKey: bool = False,
+                 metaKey: bool = False, altKey: bool = False) -> None:
     """A key, through NiceGUI's own inbound event path.
 
     Not the page's handler called directly: the framework is what decides a
@@ -80,9 +82,9 @@ async def _press(user: User, key: str) -> None:
     with user.client:
         keyboard._handle_key(GenericEventArguments(
             sender=keyboard, client=user.client, args={
-                "action": "keydown", "repeat": False, "key": key,
+                "action": action, "repeat": repeat, "key": key,
                 "code": f"Key{key.upper()}", "location": 0,
-                "altKey": False, "ctrlKey": False, "metaKey": False,
+                "altKey": altKey, "ctrlKey": ctrlKey, "metaKey": metaKey,
                 "shiftKey": False}))
     await asyncio.sleep(0.4)
 
@@ -553,3 +555,184 @@ async def test_leaving_the_view_and_coming_back_is_when_it_empties(
     await asyncio.sleep(0.3)
 
     await user.should_not_see("Zweite Stelle")
+
+
+# --------------------------------------------------------------------------
+# What the review panel found in the running screen
+# --------------------------------------------------------------------------
+async def test_a_row_is_not_a_button_or_the_keyboard_dies_on_the_first_click(
+        user: User, con, data_dir):
+    """`ui.keyboard`'s `ignore` is a CLIENT-side rule reading
+    document.activeElement, and a browser focuses a <button> on mousedown. With
+    rows as buttons, clicking a posting to read it silently killed every
+    shortcut while the strip above kept advertising them."""
+    _posting(con)
+    await user.open("/")
+    await user.should_see("Beispiel GmbH")
+
+    keyboard = next(e for e in user.client.elements.values()
+                    if isinstance(e, ui.keyboard))
+    ignored = {t.lower() for t in keyboard.props["ignore"]}
+    rows = _rows(user)
+    assert rows, "no rows rendered"
+    for row in rows:
+        assert row.tag not in ignored, (
+            f"a row is a <{row.tag}>, which ui.keyboard ignores — clicking one "
+            f"would switch the shortcuts off")
+        assert row.props.get("role") == "option"
+
+
+async def test_a_held_key_acts_once_and_not_thirty_times(user: User, con,
+                                                          data_dir):
+    """Auto-repeat fires about thirty events a second. Holding ⏎ on a posting
+    whose channel is unresolved would fire a burst of concurrent resolutions at
+    one employer's host."""
+    job_id = _posting(con)
+    await user.open("/")
+    await user.should_see("Beispiel GmbH")
+
+    await _press(user, "x", repeat=True)
+
+    assert con.execute("SELECT status FROM jobs WHERE id=?",
+                       (job_id,)).fetchone()[0] == "new"
+
+
+@pytest.mark.parametrize("modifier", ["ctrlKey", "metaKey", "altKey"])
+async def test_a_shortcut_with_a_modifier_is_the_browsers_business(
+        user: User, con, data_dir, modifier):
+    job_id = _posting(con)
+    await user.open("/")
+    await user.should_see("Beispiel GmbH")
+
+    await _press(user, "x", **{modifier: True})
+
+    assert con.execute("SELECT status FROM jobs WHERE id=?",
+                       (job_id,)).fetchone()[0] == "new"
+
+
+async def test_a_key_release_does_not_act_a_second_time(user: User, con,
+                                                        data_dir):
+    """NiceGUI registers keydown AND keyup; without the guard every shortcut
+    fires twice — one j moves two rows, one s toggles a bookmark on and off."""
+    job_id = _posting(con)
+    await user.open("/")
+    await user.should_see("Beispiel GmbH")
+
+    await _press(user, "s", action="keyup")
+
+    assert con.execute("SELECT bookmarked_at FROM jobs WHERE id=?",
+                       (job_id,)).fetchone()[0] == ""
+
+
+async def test_a_key_under_an_open_dialog_never_reaches_the_list(
+        user: User, con, data_dir, monkeypatch):
+    """Reaching for the close button and hitting 'x' skipped the posting behind
+    the dialog — and the refresh rebuilt the list beneath the still-open
+    dialog, so nothing on screen flickered."""
+    from jobdeck.ui.pages import jobs as jobs_page
+
+    async def finished_draft(job_id):
+        return {"ok": True, "error": "", "draft": {
+            "recipient": "jobs@beispiel.example", "betreff": "Bewerbung",
+            "email_body": "…", "anschreiben_body": "…", "llm_model": "stub",
+            "pdf_path": ""}}
+
+    monkeypatch.setattr(jobs_page.drafting, "draft_for_job", finished_draft)
+    job_id = _emailable(con)
+    await user.open("/")
+    user.find("Bewerbung per E-Mail erstellen").click()
+    await asyncio.sleep(0.3)
+    await user.should_see("Entwurf — Python Entwickler")
+
+    await _press(user, "x")
+
+    assert con.execute("SELECT status FROM jobs WHERE id=?",
+                       (job_id,)).fetchone()[0] == "new"
+
+
+async def test_x_lands_on_the_row_that_took_its_place(user: User, con, data_dir):
+    """Jumping back to the top made triaging a fifty-row page cost O(n²)
+    keystrokes, on the screen whose stated purpose is keyboard triage."""
+    ids = []
+    for n, score in enumerate((90, 80, 70)):
+        job_id = _posting(con, external_id=f"e{n}", title=f"Stelle {n}",
+                          company=f"Firma {n}")
+        db.set_job_score(con, job_id, score, "passt")
+        ids.append(job_id)
+    con.commit()
+    await user.open("/")
+    await user.should_see("Stelle 0")
+
+    await _press(user, "j")            # onto the middle row
+    await _press(user, "x")            # …and away with it
+
+    await user.should_not_see("Stelle 1")
+    selected = _selected(user)
+    assert len(selected) == 1
+    names = [str(getattr(d, "text", "")) for d in selected[0].descendants()]
+    assert "Firma 2" in names, f"landed on {names} instead of the next row"
+
+
+async def test_a_tick_that_changes_nothing_here_redraws_nothing(
+        user: User, con, data_dir):
+    """The signature is global by design, so a score landing on a posting he is
+    not looking at moves it. Redrawing anyway empties two scroll containers and
+    loses his place in a two-page advert."""
+    _posting(con)
+    await user.open("/")
+    await user.should_see("Beispiel GmbH")
+    row, reader_text = _rows(user)[0], None
+    reader_text = next(e for e in user.client.elements.values()
+                       if isinstance(e, ui.markdown))
+
+    # a write that moves the shared signature without touching this page
+    db.record_llm_usage(con, input_tokens=10, output_tokens=5, cost_usd=0.01)
+    db.add_bewerbung(con, {"firma": "Ganz Andere GmbH", "status": "Gesendet"})
+    con.commit()
+    await _tick(user)
+
+    assert _rows(user)[0] is row, "the list was rebuilt for nothing"
+    assert next(e for e in user.client.elements.values()
+                if isinstance(e, ui.markdown)) is reader_text, \
+        "the advert he is reading was rebuilt for nothing"
+
+
+async def test_a_posting_that_falls_out_of_the_view_stays_in_the_reader(
+        user: User, con, data_dir):
+    """Scored 0 while he reads it: the old code silently retargeted the pane to
+    a different posting mid-paragraph."""
+    job_id = _posting(con)
+    other = _posting(con, external_id="e2", title="Zweite Stelle",
+                     company="Beta GmbH")
+    db.set_job_score(con, job_id, 90, "passt")      # so he lands on this one
+    db.set_job_score(con, other, 70, "passt weniger")
+    con.commit()
+    await user.open("/")
+    await user.should_see("Beispiel GmbH")
+
+    db.set_job_score(con, job_id, 0, "harte Anforderung verletzt")
+    con.commit()
+    await _tick(user)
+
+    await user.should_see("Beispiel GmbH")
+    await user.should_see("aus dieser Ansicht gefallen")
+
+
+async def test_the_other_postings_of_a_company_are_listed_and_openable(
+        user: User, con, data_dir):
+    """One row stands for a company, which makes choosing WHICH posting to
+    apply with a real decision — and the row alone gives him nothing to decide
+    with. One employer holds 27 of his postings."""
+    best = _posting(con, title="Beste Stelle", company="Eine GmbH")
+    other = _posting(con, external_id="e2", title="Andere Stelle",
+                     company="Eine GmbH")
+    db.set_job_score(con, best, 90, "passt")
+    db.set_job_score(con, other, 70, "passt weniger")
+    con.commit()
+    await user.open("/")
+
+    await user.should_see("Beste Stelle")
+    await user.should_see("1 weitere Stelle bei Eine GmbH")
+    await user.should_see("Andere Stelle")       # by title, in the reader
+    await user.should_see("öffnen")              # with its own link
+    await user.should_not_see("Top 10")
