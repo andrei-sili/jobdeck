@@ -873,3 +873,29 @@ async def test_the_search_box_really_filters_and_waits_for_him_to_finish(
     await user.should_see("Django Entwickler")
     await user.should_not_see("Java Entwickler")
     await user.should_see("gefiltert nach „Django“")
+
+
+async def test_the_daily_probe_pass_does_not_rebuild_the_advert_he_is_reading(
+        user: User, con, data_dir):
+    """The liveness pass re-stamps hundreds of rows in a couple of minutes.
+    Every one of those ticks used to rebuild the reading pane along with the
+    list, because the probe stamp sat in the row's fingerprint while nothing on
+    screen shows it for a posting that is still online."""
+    job_id = _posting(con)
+    other = _posting(con, external_id="e2", title="Zweite Stelle",
+                     company="Beta GmbH")
+    db.set_job_score(con, job_id, 90, "passt")
+    db.set_job_score(con, other, 70, "auch")
+    con.commit()
+    await user.open("/")
+    await user.should_see("Beispiel GmbH")
+    advert = next(e for e in user.client.elements.values()
+                  if isinstance(e, ui.markdown))
+
+    db.set_job_liveness(con, other, "alive")     # the pass, on another row
+    con.commit()
+    await _tick(user)
+
+    assert next(e for e in user.client.elements.values()
+                if isinstance(e, ui.markdown)) is advert, \
+        "the advert he is reading was rebuilt by a probe on another posting"

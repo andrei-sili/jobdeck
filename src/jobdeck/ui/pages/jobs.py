@@ -600,15 +600,20 @@ def _row_fingerprint(job: dict) -> tuple:
     is not looking at moves it — so most ticks change nothing this page shows.
     Redrawing anyway empties two scroll containers and loses his place in a
     two-page advert."""
-    return tuple(job.get(key) for key in (
+    drawn = tuple(job.get(key) for key in (
         "id", "company", "title", "effective_score", "match_score", "age_days",
         "match_reason", "status", "apply_channel", "ats_vendor", "apply_url",
         "url", "contact_email", "draft_status", "draft_updated_at", "liveness",
-        "liveness_checked_at", "opened_at", "bookmarked_at", "temp_agency",
-        "salary_from", "salary_to", "salary_period", "description", "refnr",
-        "location", "published_on", "fetched_at", "source", "company_count",
-        "company_key",
+        "opened_at", "bookmarked_at", "temp_agency", "salary_from", "salary_to",
+        "salary_period", "description", "refnr", "location", "published_on",
+        "fetched_at", "source", "company_count", "company_key",
     ))
+    # The probe stamp is drawn only inside the offline warning, and the daily
+    # liveness pass re-stamps hundreds of rows in a couple of minutes. Counting
+    # it always would rebuild the advert he is reading once every thirty
+    # seconds for the whole length of that pass, changing nothing on screen.
+    return drawn + ((job.get("liveness_checked_at"),)
+                    if job.get("liveness") == liveness.LIVENESS_GONE else ())
 
 
 def _wants_a_letter(job: dict, already: dict | None) -> bool:
@@ -745,11 +750,21 @@ async def jobs_page():
             # looking at moves it — so most ticks change nothing this page
             # shows. Compare what would be drawn and draw nothing when it is
             # the same.
-            page_state = (new_order, [_row_fingerprint(r) for r in view["rows"]],
-                          selected, view["total"], view["page"],
-                          bool(dropped), sorted(applied) != sorted(view["applied"]))
-            unchanged = not force and page_state == drawn.get("state")
-            drawn["state"] = page_state
+            fingerprints = {row["id"]: _row_fingerprint(row) for row in view["rows"]}
+            list_state = (new_order, list(fingerprints.values()), selected,
+                          view["total"], view["page"],
+                          [(job_id, siblings_key(view, job_id))
+                           for job_id in new_order])
+            reader_state = (selected, fingerprints.get(selected),
+                            _row_fingerprint(dropped) if dropped else None,
+                            view["applied"].get(selected))
+            # Two comparisons, not one: the daily liveness pass re-stamps
+            # hundreds of rows in a couple of minutes, and every one of those
+            # ticks was rebuilding the advert he is reading along with the list
+            # it belongs to.
+            list_same = not force and list_state == drawn.get("list")
+            reader_same = not force and reader_state == drawn.get("reader")
+            drawn["list"], drawn["reader"] = list_state, reader_state
 
             applied.clear()
             applied.update(view["applied"])
@@ -766,16 +781,26 @@ async def jobs_page():
                 # gone, aged past the threshold. Keeping it in the pane and
                 # saying so beats swapping a different posting under his eyes.
                 shown[dropped["id"]] = dropped
-            if unchanged:
-                return
             range_label.set_text(_range_line(
                 view["page"], view["total"], len(view["rows"])))
             hidden_label.set_text(_hidden_line(
                 view["view"], view["counts"], view["stale_age_days"],
                 search=view["search"]))
-            render_rows(view)
-            render_pager(view)
-            render_reader(gone=dropped is not None)
+            if not list_same:
+                render_rows(view)
+                render_pager(view)
+            if not reader_same:
+                render_reader(gone=dropped is not None)
+
+        def siblings_key(view: dict, job_id: int):
+            """What the row's sibling note and the reader's sibling list draw."""
+            row = next((r for r in view["rows"] if r["id"] == job_id), None)
+            if row is None:
+                return ()
+            group = view["siblings"].get(row.get("company_key"), [])
+            return (row.get("company_count"),
+                    tuple((s["id"], s["title"], s["effective_score"])
+                          for s in group))
 
         def _next_selection(fresh: dict, new_order: list) -> tuple:
             """(the id to show, the row that fell out from under him or None).
