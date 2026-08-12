@@ -88,6 +88,16 @@ def test_a_status_change_changes_the_data_signature(con, data_dir):
     assert db.data_signature(con) != before
 
 
+def test_setting_a_posting_aside_changes_the_data_signature(con, data_dir):
+    """He can mark a posting in one tab; the other has to notice, or its
+    Vorgemerkt count and its list would disagree with the database."""
+    job_id = _job(con)
+    before = db.data_signature(con)
+    db.set_bookmark(con, job_id, True)
+    con.commit()
+    assert db.data_signature(con) != before
+
+
 def test_an_adopted_contact_email_changes_the_data_signature(con, data_dir):
     job_id = _job(con)
     before = db.data_signature(con)
@@ -204,3 +214,13 @@ def test_every_loader_reads_its_signature_before_the_data_it_describes():
                 f"signature — a write landing between the two would be lost")
             checked.append(f"{path.name}:{func.name}")
     assert len(checked) >= 4, f"the scan found almost nothing: {checked}"
+
+
+def test_reading_a_posting_changes_the_data_signature(con, data_dir):
+    """"Neu" is a count of what he has not opened, so another tab has to see
+    him open one — otherwise its rail keeps promising work already done."""
+    job_id = _job(con)
+    before = db.data_signature(con)
+    db.mark_job_opened(con, job_id)
+    con.commit()
+    assert db.data_signature(con) != before

@@ -501,3 +501,143 @@ def test_the_cockpit_signature_follows_the_posting_not_only_its_draft(con):
 
 def test_the_cockpit_signature_of_a_vanished_posting_is_nothing(con):
     assert db.job_signature(con, 999999) is None
+
+
+# ---------------------------------------------------------------------------
+# Vorgemerkt — a posting he sets aside by hand (schema v8)
+# ---------------------------------------------------------------------------
+def test_a_posting_can_be_set_aside_and_released_again(con):
+    job_id = _add_job(con)
+    assert db.set_bookmark(con, job_id, True) is True
+    assert con.execute(
+        "SELECT bookmarked_at FROM jobs WHERE id=?", (job_id,)
+    ).fetchone()[0] != ""
+
+    assert db.set_bookmark(con, job_id, False) is False
+    assert con.execute(
+        "SELECT bookmarked_at FROM jobs WHERE id=?", (job_id,)
+    ).fetchone()[0] == ""
+
+
+def test_marking_an_already_marked_posting_does_not_move_it(con, monkeypatch):
+    """The pile is ordered by when he set each posting aside, so a second press
+    on a row already in it must not jump that row to the front."""
+    job_id = _add_job(con)
+    monkeypatch.setattr(db, "_now", lambda: "2026-08-01T09:00:00")
+    db.set_bookmark(con, job_id, True)
+    monkeypatch.setattr(db, "_now", lambda: "2026-08-12T18:00:00")
+    db.set_bookmark(con, job_id, True)
+
+    assert con.execute(
+        "SELECT bookmarked_at FROM jobs WHERE id=?", (job_id,)
+    ).fetchone()[0] == "2026-08-01T09:00:00"
+
+
+def test_the_mark_is_independent_of_what_he_did_with_the_posting(con):
+    """Setting one aside is not acting on it: the mark outlives a status
+    change, so the pile keeps a posting he later applied to or skipped."""
+    job_id = _add_job(con)
+    db.set_bookmark(con, job_id, True)
+    db.set_job_status(con, job_id, "skipped")
+    con.commit()
+
+    assert db.count_bookmarked_jobs(con) == 1
+    rows = db.list_jobs(con, "skipped", bookmarked="only")
+    assert [r["id"] for r in rows] == [job_id]
+
+
+def test_the_bookmark_filter_splits_the_list_in_two(con):
+    marked = _add_job(con, external_id="A")
+    plain = _add_job(con, external_id="B", company="Andere GmbH")
+    db.set_bookmark(con, marked, True)
+    con.commit()
+
+    assert [r["id"] for r in db.list_jobs(con, "new", bookmarked="only")] == [marked]
+    assert [r["id"] for r in db.list_jobs(con, "new", bookmarked="exclude")] == [plain]
+    assert {r["id"] for r in db.list_jobs(con, "new")} == {marked, plain}
+
+
+def test_the_bookmark_filter_reaches_the_grouped_view_too(con):
+    """Grouping by company runs its own query; a filter that only reached the
+    flat list would show a pile the grouped page said was empty."""
+    marked = _add_job(con, external_id="A", company="Eine GmbH")
+    _add_job(con, external_id="B", company="Andere GmbH")
+    db.set_bookmark(con, marked, True)
+    con.commit()
+
+    assert db.count_job_groups(con, "new", bookmarked="only") == 1
+    groups = db.list_job_groups(con, "new", bookmarked="only")
+    assert [r["id"] for r in groups] == [marked]
+
+
+def test_an_unknown_bookmark_filter_value_raises(con):
+    with pytest.raises(ValueError, match="bookmarked"):
+        db.list_jobs(con, "new", bookmarked="maybe")
+
+
+def test_counting_what_he_set_aside_ignores_status(con):
+    first = _add_job(con, external_id="A")
+    second = _add_job(con, external_id="B", company="Andere GmbH")
+    _add_job(con, external_id="C", company="Dritte GmbH")
+    db.set_bookmark(con, first, True)
+    db.set_bookmark(con, second, True)
+    db.set_job_status(con, second, "applied")
+    con.commit()
+
+    assert db.count_bookmarked_jobs(con) == 2
+
+
+# ---------------------------------------------------------------------------
+# Neu — the half of the list he has not looked at yet (schema v8)
+# ---------------------------------------------------------------------------
+def test_opening_a_posting_records_that_he_read_it(con):
+    job_id = _add_job(con)
+    assert con.execute(
+        "SELECT opened_at FROM jobs WHERE id=?", (job_id,)
+    ).fetchone()[0] == ""
+
+    db.mark_job_opened(con, job_id)
+    assert con.execute(
+        "SELECT opened_at FROM jobs WHERE id=?", (job_id,)
+    ).fetchone()[0] != ""
+
+
+def test_reading_a_posting_again_does_not_restamp_it(con, monkeypatch):
+    """The list asks "have I looked at this", not "when last" — re-stamping
+    would make the order move under him as he reads down it."""
+    job_id = _add_job(con)
+    monkeypatch.setattr(db, "_now", lambda: "2026-08-01T09:00:00")
+    db.mark_job_opened(con, job_id)
+    monkeypatch.setattr(db, "_now", lambda: "2026-08-12T18:00:00")
+    db.mark_job_opened(con, job_id)
+
+    assert con.execute(
+        "SELECT opened_at FROM jobs WHERE id=?", (job_id,)
+    ).fetchone()[0] == "2026-08-01T09:00:00"
+
+
+def test_the_unread_filter_splits_the_list_in_two(con):
+    read = _add_job(con, external_id="A")
+    unread = _add_job(con, external_id="B", company="Andere GmbH")
+    db.mark_job_opened(con, read)
+    con.commit()
+
+    assert [r["id"] for r in db.list_jobs(con, "new", opened="only")] == [read]
+    assert [r["id"] for r in db.list_jobs(con, "new", opened="exclude")] == [unread]
+    assert db.count_jobs(con, "new", opened="exclude") == 1
+
+
+def test_the_unread_filter_reaches_the_grouped_view_too(con):
+    read = _add_job(con, external_id="A", company="Eine GmbH")
+    unread = _add_job(con, external_id="B", company="Andere GmbH")
+    db.mark_job_opened(con, read)
+    con.commit()
+
+    assert db.count_job_groups(con, "new", opened="exclude") == 1
+    assert [r["id"] for r in
+            db.list_job_groups(con, "new", opened="exclude")] == [unread]
+
+
+def test_an_unknown_opened_filter_value_raises(con):
+    with pytest.raises(ValueError, match="opened"):
+        db.list_jobs(con, "new", opened="perhaps")

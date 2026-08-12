@@ -456,6 +456,7 @@ APPLIED_FIRM_SQL = """(
 def _job_filters(
     status: str | None, mismatches: str, gone: str, applied: str = "include",
     old: str = "include", stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
+    bookmarked: str = "include", opened: str = "include",
 ) -> tuple[list[str], list]:
     """WHERE fragments + bound values shared by the list and the count, so a
     page can never be filtered differently from the total printed beside it.
@@ -464,7 +465,8 @@ def _job_filters(
     falling through would SHOW a pile the caller asked to hide, and a hidden
     pile exists precisely because its rows should not be acted on."""
     for name, value in (("mismatches", mismatches), ("gone", gone),
-                        ("applied", applied), ("old", old)):
+                        ("applied", applied), ("old", old),
+                        ("bookmarked", bookmarked), ("opened", opened)):
         if value not in ("include", "exclude", "only"):
             raise ValueError(f"{name}={value!r}: expected include/exclude/only")
     where, params = [], []
@@ -492,6 +494,22 @@ def _job_filters(
     elif old == "only":
         where.append(freshness.OLD_SQL)
         params.append(stale_age_days)
+    # Set aside by hand. Unlike the four piles above this is not a fact about
+    # the posting but a decision of his, so it never hides anything by itself —
+    # 'only' is the whole point, 'exclude' exists just so the vocabulary is the
+    # same three words everywhere.
+    if bookmarked == "exclude":
+        where.append("bookmarked_at=''")
+    elif bookmarked == "only":
+        where.append("bookmarked_at<>''")
+    # 'only' here means "not yet opened" — the unread half of an inbox. Named
+    # after the column rather than after the view so the three words keep
+    # meaning the same thing: 'only' is always "just the rows the column is
+    # true of", and it is the caller that decides which half it wants.
+    if opened == "exclude":
+        where.append("opened_at=''")
+    elif opened == "only":
+        where.append("opened_at<>''")
     return where, params
 
 
@@ -548,6 +566,8 @@ def list_job_groups(
     applied: str = "include",
     old: str = "include",
     stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
+    bookmarked: str = "include",
+    opened: str = "include",
     offset: int = 0,
 ) -> list[sqlite3.Row]:
     """One row per company: its best-ranked posting, plus `company_count`.
@@ -557,7 +577,8 @@ def list_job_groups(
     never silently reorders the page under the user. Only the ranking WITHIN a
     company is always by score, because something has to choose which posting
     represents it."""
-    where, params = _job_filters(status, mismatches, gone, applied, old, stale_age_days)
+    where, params = _job_filters(status, mismatches, gone, applied, old,
+                                 stale_age_days, bookmarked, opened)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     order = _JOB_ORDER_SQL if status else "id DESC"
     return con.execute(
@@ -576,9 +597,12 @@ def count_job_groups(
     applied: str = "include",
     old: str = "include",
     stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
+    bookmarked: str = "include",
+    opened: str = "include",
 ) -> int:
     """How many companies the grouped view holds."""
-    where, params = _job_filters(status, mismatches, gone, applied, old, stale_age_days)
+    where, params = _job_filters(status, mismatches, gone, applied, old,
+                                 stale_age_days, bookmarked, opened)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     return con.execute(
         f"{_ranked_jobs_cte(where_sql)}"
@@ -599,6 +623,8 @@ def list_company_siblings(
     applied: str = "include",
     old: str = "include",
     stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
+    bookmarked: str = "include",
+    opened: str = "include",
     per_company: int = SIBLINGS_PER_COMPANY,
 ) -> list[sqlite3.Row]:
     """The postings a grouped row stands in front of, best-ranked first.
@@ -609,7 +635,8 @@ def list_company_siblings(
     are."""
     if not company_keys:
         return []
-    where, params = _job_filters(status, mismatches, gone, applied, old, stale_age_days)
+    where, params = _job_filters(status, mismatches, gone, applied, old,
+                                 stale_age_days, bookmarked, opened)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     placeholders = ",".join("?" * len(company_keys))
     return con.execute(
@@ -630,10 +657,13 @@ def count_jobs(
     applied: str = "include",
     old: str = "include",
     stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
+    bookmarked: str = "include",
+    opened: str = "include",
 ) -> int:
     """How many postings a `list_jobs` call with the same filters would have,
     ignoring its page limit — the total a paged view has to print."""
-    where, params = _job_filters(status, mismatches, gone, applied, old, stale_age_days)
+    where, params = _job_filters(status, mismatches, gone, applied, old,
+                                 stale_age_days, bookmarked, opened)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     return con.execute(
         f"SELECT COUNT(*) FROM jobs{where_sql}", params
@@ -649,6 +679,8 @@ def list_jobs(
     applied: str = "include",
     old: str = "include",
     stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
+    bookmarked: str = "include",
+    opened: str = "include",
     offset: int = 0,
 ) -> list[sqlite3.Row]:
     """List postings. mismatches: 'include' (default), 'exclude' (hide the
@@ -656,7 +688,8 @@ def list_jobs(
     (just the hidden pile — keeps mismatches reachable regardless of how
     many better-scored rows fill the page limit). `gone` takes the same three
     values over postings whose ad the source says is no longer there."""
-    where, params = _job_filters(status, mismatches, gone, applied, old, stale_age_days)
+    where, params = _job_filters(status, mismatches, gone, applied, old,
+                                 stale_age_days, bookmarked, opened)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     # The age-adjusted score is SELECTED as well as ordered on, so the number
     # the UI prints is the very number that decided the row's position — two
@@ -700,6 +733,36 @@ def set_job_status(
             "UPDATE jobs SET status=?, bewerbung_id=? WHERE id=?",
             (status, bewerbung_id, job_id),
         )
+
+
+def set_bookmark(con: sqlite3.Connection, job_id: int, marked: bool) -> bool:
+    """Set a posting aside, or take the mark off again. Returns the new state.
+
+    Independent of `status`: setting one aside is not acting on it. The
+    timestamp is only rewritten when the mark is newly set, so re-marking an
+    already-marked posting cannot move it to the top of the pile it is already
+    in."""
+    if marked:
+        con.execute(
+            "UPDATE jobs SET bookmarked_at=? WHERE id=? AND bookmarked_at=''",
+            (_now(), job_id),
+        )
+    else:
+        con.execute("UPDATE jobs SET bookmarked_at='' WHERE id=?", (job_id,))
+    return marked
+
+
+def mark_job_opened(con: sqlite3.Connection, job_id: int) -> None:
+    """Record that he has now read this posting.
+
+    Written once and never rewritten: the question the list asks is "have I
+    looked at this yet", not "when did I last look", and re-stamping it on
+    every visit would turn a stable order into one that moves while he reads
+    down it."""
+    con.execute(
+        "UPDATE jobs SET opened_at=? WHERE id=? AND opened_at=''",
+        (_now(), job_id),
+    )
 
 
 def set_job_score(
@@ -1014,6 +1077,17 @@ def count_old_jobs(
     return con.execute(sql, params).fetchone()[0]
 
 
+def count_bookmarked_jobs(con: sqlite3.Connection) -> int:
+    """How many postings he has set aside, across every status.
+
+    Deliberately not narrowed to one status: the mark survives applying and
+    skipping, and a count that quietly dropped those would disagree with the
+    view it labels."""
+    return con.execute(
+        "SELECT COUNT(*) FROM jobs WHERE bookmarked_at<>''"
+    ).fetchone()[0]
+
+
 def jobs_needing_apply_channel(
     con: sqlite3.Connection, limit: int, min_score: int = 1
 ) -> list[sqlite3.Row]:
@@ -1127,7 +1201,8 @@ SELECT COUNT(*), MAX(id), COUNT(match_score), TOTAL(match_score),
        MAX(liveness_checked_at), TOTAL(liveness=?),
        TOTAL(status='new'), TOTAL(status='portal'), TOTAL(status='applied'),
        TOTAL(status='skipped'), TOTAL(status='duplicate'),
-       TOTAL(contact_email<>''), TOTAL(COALESCE(apply_channel,'')<>'')
+       TOTAL(contact_email<>''), TOTAL(COALESCE(apply_channel,'')<>''),
+       TOTAL(bookmarked_at<>''), TOTAL(opened_at<>'')
   FROM jobs
 """
 
