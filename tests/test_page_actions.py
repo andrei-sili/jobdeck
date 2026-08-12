@@ -51,7 +51,7 @@ async def test_the_inbox_offers_one_way_into_a_form_application(
     await user.open("/")
     await user.should_see("Python Entwickler")
 
-    await user.should_see("Formular ausfüllen")
+    await user.should_see("Formular öffnen")
     await user.should_not_see("Apply via portal")
 
 

@@ -13,7 +13,7 @@ from jobdeck.ai import scoring
 from jobdeck.ai.drafting import clean_title
 from jobdeck.dedupe import duplicates_for_jobs
 from jobdeck.services import apply_resolve, contact_lookup, drafting, liveness, mappe
-from jobdeck.ui import helpers, live
+from jobdeck.ui import draft_editor, helpers, live
 from jobdeck.ui.helpers import (
     open_in_system,
     openable_url,
@@ -162,6 +162,126 @@ class Action:
 
 _FORM_CHANNELS = (apply_channel.CHANNEL_ATS, apply_channel.CHANNEL_BOARD,
                   apply_channel.CHANNEL_COMPANY_SITE)
+
+
+# ---------------------------------------------------------------------------
+# Everything an application to THIS posting needs, as steps.
+#
+# One button was not enough. An application is three or four acts — write the
+# letter, build the Mappe, send it or open the employer's form, record it — and
+# which of them apply depends on whether the posting gave us an e-mail address.
+# Hiding the rest behind other screens is what made recording a form
+# application a detour through the cockpit.
+# ---------------------------------------------------------------------------
+STEP_RESOLVE = "resolve"
+STEP_DRAFT = "draft"
+STEP_MAPPE = "mappe"
+STEP_SEND = "send"
+STEP_FORM = "form"
+STEP_RECORD = "record"
+
+
+@dataclass(frozen=True)
+class Step:
+    """One act of applying: what it is called, whether it is done, and — when
+    it cannot be pressed — why not."""
+
+    key: str
+    label: str
+    done: bool = False
+    enabled: bool = True
+    reason: str = ""
+
+
+def _blocking_reason(job: dict, already: dict | None) -> str:
+    """Why no application can be made here at all, '' when one can."""
+    status = str(job.get("status") or "")
+    if status == "applied":
+        return "Diese Anzeige ist schon als Bewerbung eingetragen."
+    if already:
+        return helpers.applied_line(already)
+    if status == "duplicate":
+        return ("Diese Anzeige gehört zu einer Firma, bei der schon eine "
+                "Bewerbung liegt.")
+    if status == "skipped":
+        return "Du hattest sie weggelegt — erst zurück in die Arbeitsliste."
+    return ""
+
+
+def apply_steps(job: dict, already: dict | None = None) -> list[Step]:
+    """The acts this posting needs, in the order they happen.
+
+    By E-MAIL: write the letter, then check and send it — the editor builds the
+    Mappe on the way. By FORM: write the letter, build the Mappe to upload,
+    open the employer's page, and record it yourself when you have filled it
+    in. Nothing here fills a form; that is a settled decision."""
+    blocked = _blocking_reason(job, already)
+    draft_status = str(job.get("draft_status") or "")
+    channel = str(job.get("apply_channel") or "")
+    by_email = bool(job.get("contact_email")
+                    or channel == apply_channel.CHANNEL_DIRECT_EMAIL)
+    has_letter = draft_status in ("ready", "approved", "sending", "sent")
+    writing = (draft_status == "generating"
+               and not drafting.claim_is_stale(job.get("draft_updated_at")))
+    steps: list[Step] = []
+
+    if not channel:
+        steps.append(Step(STEP_RESOLVE, "Kanal ermitteln", enabled=not blocked,
+                          reason=blocked or "Noch unbekannt, wie man sich hier "
+                                            "bewirbt."))
+    steps.append(Step(
+        STEP_DRAFT,
+        "Anschreiben neu schreiben" if has_letter else
+        ("E-Mail-Bewerbung schreiben" if by_email else "Anschreiben schreiben"),
+        done=has_letter,
+        enabled=not blocked and not writing,
+        reason=blocked or ("Wird gerade geschrieben — etwa eine Minute."
+                           if writing else ""),
+    ))
+    if by_email:
+        steps.append(Step(
+            STEP_SEND, "Prüfen und senden", done=draft_status == "sent",
+            enabled=bool(has_letter) and not blocked,
+            reason=blocked or ("" if has_letter
+                               else "Erst das Anschreiben schreiben."),
+        ))
+    else:
+        steps.append(Step(
+            STEP_MAPPE, "Mappe erstellen", done=bool(job.get("pdf_path")),
+            enabled=bool(has_letter) and not blocked,
+            reason=blocked or ("" if has_letter
+                               else "Erst das Anschreiben schreiben."),
+        ))
+        # Blocked too, and not only for tidiness: opening the form MOVES the
+        # posting to `portal`, which is the app's record that an application
+        # has started — at a company where one already exists, that is the one
+        # thing that must not begin. Reading the advert is still a press away
+        # in the triage row, and that one changes nothing.
+        steps.append(Step(
+            STEP_FORM, "Formular öffnen",
+            done=str(job.get("status") or "") == "portal",
+            enabled=bool(_openable_url(job)) and not blocked,
+            reason=blocked or ("" if _openable_url(job)
+                               else "Diese Anzeige nennt keine Adresse zum "
+                                    "Öffnen."),
+        ))
+    steps.append(Step(
+        STEP_RECORD, "Beworben eintragen",
+        done=str(job.get("status") or "") == "applied",
+        enabled=not blocked,
+        reason=blocked or "Drück das erst, wenn die Bewerbung wirklich raus ist.",
+    ))
+    return steps
+
+
+def _next_step(steps: list[Step]) -> int:
+    """Which step is the one to press now — the first that is neither done nor
+    refused. Only that one is drawn solid; the rest stay available but quiet,
+    so the screen suggests an order without forbidding another."""
+    for index, step in enumerate(steps):
+        if not step.done and step.enabled:
+            return index
+    return -1
 
 
 def primary_action(job: dict, already: dict | None = None) -> Action:
@@ -603,7 +723,8 @@ def _row_fingerprint(job: dict) -> tuple:
     drawn = tuple(job.get(key) for key in (
         "id", "company", "title", "effective_score", "match_score", "age_days",
         "match_reason", "status", "apply_channel", "ats_vendor", "apply_url",
-        "url", "contact_email", "draft_status", "draft_updated_at", "liveness",
+        "url", "contact_email", "draft_status", "draft_updated_at", "pdf_path",
+        "liveness",
         "opened_at", "bookmarked_at", "temp_agency", "salary_from", "salary_to",
         "salary_period", "description", "refnr", "location", "published_on",
         "fetched_at", "source", "company_count", "company_key",
@@ -999,25 +1120,32 @@ async def jobs_page():
                     ui.label(value)
 
         def _render_primary(job: dict, already: dict | None) -> None:
-            action = primary_action(job, already)
-            with ui.row().classes("items-center gap-3 mt-6 flex-wrap"):
-                button = ui.button(action.label).props("no-caps")
-                button.set_enabled(action.enabled)
-                if action.enabled:
-                    button.on_click(
-                        lambda _=None, j=job, a=action, b=button: run_action(a, j, b))
-                if action.reason:
-                    ui.label(action.reason).classes("jd-reason")
-                if _wants_a_letter(job, already):
-                    # The cockpit parks beside the employer's form and lists
-                    # what is missing — but it cannot write an Anschreiben, and
-                    # the German market is form-first (28 of his 65
-                    # applications went that way). Without this the only route
-                    # left was the batch button in Settings.
-                    letter = ui.button("Anschreiben schreiben") \
-                        .props("outline no-caps")
-                    letter.on_click(
-                        lambda _=None, j=job, b=letter: draft(j, button=b))
+            """Every act this posting needs, on the screen it is read from.
+
+            The whole toolkit rather than one polymorphic button: an
+            application is three or four acts, and hiding the rest behind
+            other screens is what made recording a form application a detour."""
+            steps = apply_steps(job, already)
+            following = _next_step(steps)
+            with ui.row().classes("items-start gap-3 mt-6 flex-wrap"):
+                for index, step in enumerate(steps):
+                    # Each reason sits UNDER its own button rather than in a
+                    # list below them all: repeating the label to say which
+                    # step a line belongs to put the same words on screen
+                    # twice, and a tooltip cannot be reached from the keyboard.
+                    with ui.column().classes("gap-1 items-start max-w-64"):
+                        button = ui.button(
+                            ("✓ " if step.done else "") + step.label)
+                        button.props("no-caps" + (
+                            "" if index == following else " outline"))
+                        button.set_enabled(step.enabled)
+                        if step.enabled:
+                            button.on_click(
+                                lambda _=None, j=job, k=step.key, b=button:
+                                    run_step(k, j, b))
+                        if step.reason and not step.done:
+                            ui.label(step.reason).classes("jd-reason")
+
 
         # ------------------------------------------------------------------
         # what the controls do
@@ -1111,6 +1239,72 @@ async def jobs_page():
                         .props("no-caps")
             confirm.open()
             return bool(await confirm)
+
+        async def run_step(key: str, job: dict, button) -> None:
+            """Do one act of applying, from the screen he read the posting on."""
+            if key == STEP_RESOLVE:
+                await resolve_channel(job)
+            elif key == STEP_DRAFT:
+                await draft(job, force=True, button=button)
+            elif key == STEP_MAPPE:
+                await build_mappe(job, button)
+            elif key == STEP_SEND:
+                await open_draft_editor(job)
+            elif key == STEP_FORM:
+                await open_form(job)
+            elif key == STEP_RECORD:
+                await confirm_applied(job)
+
+        async def build_mappe(job: dict, button) -> None:
+            """The PDF he uploads to an employer's form."""
+            say("Bewerbungsmappe wird gebaut…")
+            if button is not None:
+                button.disable()
+            result = await mappe.create_mappe(job["id"])
+            await refresh(force=True)
+            overlay.clear()
+            with overlay:
+                if not result["ok"]:
+                    say(result["error"], type="warning", multi_line=True)
+                    return
+                say(helpers.mappe_summary(result, with_anlagen=True),
+                    type="positive", multi_line=True)
+                if result["warning"]:
+                    say(result["warning"], type="warning", multi_line=True)
+
+        async def open_draft_editor(job: dict) -> None:
+            """The one editor — the same the review queue opens."""
+            row = await run.io_bound(draft_editor.load, job["id"])
+            if row is None:
+                say("Kein Entwurf zu dieser Anzeige.", type="warning")
+                return
+            overlay.clear()
+            with overlay:
+                draft_editor.open_editor(
+                    row, overlay=overlay, say=say, on_change=forced_refresh,
+                    already_applied=applied.get(job["id"]))
+
+        async def forced_refresh() -> None:
+            await refresh(force=True)
+
+        async def open_form(job: dict) -> None:
+            """Open the employer's page and remember that he started applying.
+
+            The app never fills a form — that is settled — but opening one IS
+            the start of an application, so the posting moves to `portal` and
+            leaves the working list while he is at it."""
+            url = _openable_url(job)
+            if not url:
+                say("Diese Anzeige nennt keine Adresse zum Öffnen.",
+                    type="warning")
+                return
+            await run.io_bound(_set_status, job["id"], "portal")
+            await refresh(force=True)
+            overlay.clear()
+            with overlay:
+                ui.navigate.to(url, new_tab=True)
+                say("Trag die Bewerbung ein, sobald du das Formular "
+                    "abgeschickt hast.", type="positive", multi_line=True)
 
         async def run_action(action: Action, job: dict, button) -> None:
             if action.key == ACTION_RESOLVE:
@@ -1356,8 +1550,14 @@ async def jobs_page():
             dialog.open()
 
         async def confirm_applied(job: dict):
-            bewerbung_id = await run.io_bound(_confirm_applied, job["id"],
-                                              "Online-Portal")
+            kanal = ("E-Mail" if job.get("contact_email")
+                     or job.get("apply_channel") == apply_channel.CHANNEL_DIRECT_EMAIL
+                     else "Online-Portal")
+            # He asked for it to go, so it goes: without this the posting would
+            # be treated as one that fell out of the view by itself and stay in
+            # the reading pane behind a note.
+            _hold_place(job["id"])
+            bewerbung_id = await run.io_bound(_confirm_applied, job["id"], kanal)
             await refresh(force=True)
             if bewerbung_id is None:
                 say("Blockiert: bei dieser Firma liegt schon eine Bewerbung",

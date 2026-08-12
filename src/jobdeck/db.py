@@ -431,6 +431,12 @@ _DRAFT_UPDATED_SQL = (
     "(SELECT d.updated_at FROM drafts d WHERE d.job_id=jobs.id "
     "ORDER BY d.id DESC LIMIT 1)"
 )
+# The Mappe this posting already has. A screen that offers to build one has to
+# know whether it exists, and on the form path the PDF is the thing he uploads.
+_DRAFT_PDF_SQL = (
+    "(SELECT d.pdf_path FROM drafts d WHERE d.job_id=jobs.id "
+    "ORDER BY d.id DESC LIMIT 1)"
+)
 
 
 # A posting at a company an application already went to. Only ONE application
@@ -592,7 +598,8 @@ def _ranked_jobs_cte(where_sql: str) -> str:
         f" {freshness.effective_score_sql()} AS effective_score,"
         f" {_COMPANY_KEY_SQL} AS company_key,"
         f" {_DRAFT_STATUS_SQL} AS draft_status,"
-        f" {_DRAFT_UPDATED_SQL} AS draft_updated_at"
+        f" {_DRAFT_UPDATED_SQL} AS draft_updated_at,"
+        f" {_DRAFT_PDF_SQL} AS pdf_path"
         f" FROM jobs{where_sql}"
         "), ranked AS ("
         " SELECT *, ROW_NUMBER() OVER ranking AS rank_in_company,"
@@ -768,7 +775,8 @@ def list_jobs(
     derived = (f"{freshness.AGE_SQL} AS age_days, "
                f"{freshness.effective_score_sql()} AS effective_score, "
                f"{_DRAFT_STATUS_SQL} AS draft_status, "
-               f"{_DRAFT_UPDATED_SQL} AS draft_updated_at")
+               f"{_DRAFT_UPDATED_SQL} AS draft_updated_at, "
+               f"{_DRAFT_PDF_SQL} AS pdf_path")
     order = _JOB_ORDER_SQL if status else "id DESC"
     return con.execute(
         f"SELECT *, {derived} FROM jobs{where_sql} "

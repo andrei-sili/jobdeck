@@ -21,7 +21,7 @@ pytest_plugins = ["nicegui.testing.user_plugin"]
 
 pytestmark = pytest.mark.nicegui_main_file("tests/nicegui_main.py")
 
-DRAFT_BUTTON = "Bewerbung per E-Mail erstellen"
+DRAFT_BUTTON = "E-Mail-Bewerbung schreiben"
 
 
 @pytest.fixture(autouse=True)
@@ -98,19 +98,24 @@ async def test_the_draft_button_stands_down_only_while_the_claim_is_alive(
     job_id = _posting(con)
     _claimed(con, job_id, minutes_ago=0.2)
     await user.open("/")
-    await user.should_not_see(DRAFT_BUTTON)
+    from nicegui import ui as _ui
+    writing = next(e for e in user.client.elements.values()
+                   if isinstance(e, _ui.button) and DRAFT_BUTTON in e.text)
+    assert writing.enabled is False, "a second draft could be paid for"
+    await user.should_see("Wird gerade geschrieben")
 
     # …and the moment the claim is old enough for _claim to take it over, the
-    # button is back — this is the way out of an abandoned draft.
+    # button is live again — this is the way out of an abandoned draft.
     con.execute("UPDATE drafts SET updated_at=? WHERE job_id=?", (
         (datetime.datetime.now()
          - datetime.timedelta(minutes=drafting.CLAIM_TIMEOUT_MIN + 1)
          ).isoformat(timespec="seconds"), job_id))
     con.commit()
     await user.open("/")
-    await user.should_see("Erneut schreiben")
+    live_again = next(e for e in user.client.elements.values()
+                      if isinstance(e, _ui.button) and DRAFT_BUTTON in e.text)
+    assert live_again.enabled is True, "an abandoned draft has no way back"
     await user.should_see("abgebrochen")
-    await user.should_not_see("etwa eine Minute")
 
 
 @pytest.mark.parametrize("status, expected", [
@@ -312,7 +317,11 @@ async def test_a_posting_at_a_firm_he_already_wrote_to_says_so(
     await user.should_see("bereits beworben")
     await user.should_see("Absage")
     await user.should_see("2026-06-12")
-    await user.should_not_see(DRAFT_BUTTON)
+    from nicegui import ui as _ui
+    blocked = [e for e in user.client.elements.values()
+               if isinstance(e, _ui.button) and DRAFT_BUTTON in e.text]
+    assert blocked and not any(b.enabled for b in blocked), \
+        "a draft is offered for a company that can never receive one"
 
 
 async def test_the_decorated_spelling_is_covered_by_the_same_warning(

@@ -1242,7 +1242,8 @@ def test_nothing_in_the_corpus_is_unreachable_from_the_named_views(con, data_dir
 # --------------------------------------------------------------------------
 def _row(**over) -> dict:
     row = {"id": 1, "status": "new", "draft_status": None,
-           "draft_updated_at": None, "apply_channel": "", "company": "Eine GmbH"}
+           "draft_updated_at": None, "apply_channel": "", "company": "Eine GmbH",
+           "contact_email": "", "pdf_path": "", "url": "", "apply_url": ""}
     row.update(over)
     return row
 
@@ -1429,3 +1430,87 @@ def test_the_advert_is_not_cut_where_his_corpus_lives():
     """His longest stored posting is about 28k characters; the cut existed at
     8k with no ellipsis, no note and no way to see the rest."""
     assert jobs.DESCRIPTION_LIMIT >= 40_000
+
+
+# --------------------------------------------------------------------------
+# Applying, as the acts it really takes
+# --------------------------------------------------------------------------
+def _steps(job, already=None):
+    return {s.key: s for s in jobs.apply_steps(job, already)}
+
+
+def test_an_email_posting_offers_writing_and_sending_and_nothing_else():
+    """By e-mail the editor builds the Mappe on the way, so there is no
+    separate step for it and no form to open."""
+    steps = _steps(_row(apply_channel="direct_email", contact_email="hr@x.de"))
+    assert list(steps) == [jobs.STEP_DRAFT, jobs.STEP_SEND, jobs.STEP_RECORD]
+    assert steps[jobs.STEP_DRAFT].label == "E-Mail-Bewerbung schreiben"
+    assert steps[jobs.STEP_SEND].enabled is False, "nothing to send yet"
+    assert "Anschreiben" in steps[jobs.STEP_SEND].reason
+
+
+def test_a_form_posting_offers_the_letter_the_mappe_and_the_link():
+    """The German market is form-first. He needs the PDF to upload and the
+    page to upload it on — and then to record it himself, because this app
+    never fills a form."""
+    steps = _steps(_row(apply_channel="ats_form", url="https://firma.de/stelle"))
+    assert list(steps) == [jobs.STEP_DRAFT, jobs.STEP_MAPPE, jobs.STEP_FORM,
+                           jobs.STEP_RECORD]
+    assert steps[jobs.STEP_MAPPE].enabled is False, "the Mappe needs the letter"
+    assert steps[jobs.STEP_FORM].enabled is True
+
+
+def test_an_unresolved_posting_is_asked_about_first():
+    steps = _steps(_row())
+    assert list(steps)[0] == jobs.STEP_RESOLVE
+    # …and once it is known, that step is gone rather than sitting there done
+    assert jobs.STEP_RESOLVE not in _steps(_row(apply_channel="ats_form"))
+
+
+def test_recording_is_offered_whatever_else_is_true():
+    """The detour that started this: a form filled in outside the app could
+    only be recorded by going through the cockpit."""
+    for job in (_row(), _row(apply_channel="ats_form"),
+                _row(apply_channel="direct_email", contact_email="hr@x.de"),
+                _row(status="portal")):
+        assert _steps(job)[jobs.STEP_RECORD].enabled is True
+
+
+def test_a_written_letter_marks_its_step_done_and_opens_the_next():
+    steps = _steps(_row(apply_channel="direct_email", contact_email="hr@x.de",
+                        draft_status="ready"))
+    assert steps[jobs.STEP_DRAFT].done is True
+    assert steps[jobs.STEP_DRAFT].label == "Anschreiben neu schreiben"
+    assert steps[jobs.STEP_SEND].enabled is True
+
+
+def test_a_built_mappe_marks_its_step_done():
+    steps = _steps(_row(apply_channel="ats_form", draft_status="ready",
+                        pdf_path="/tmp/mappe.pdf"))
+    assert steps[jobs.STEP_MAPPE].done is True
+
+
+@pytest.mark.parametrize("job, already", [
+    (_row(status="applied", apply_channel="ats_form"), None),
+    (_row(status="duplicate", apply_channel="ats_form"), None),
+    (_row(status="skipped", apply_channel="ats_form"), None),
+    (_row(apply_channel="ats_form", url="https://firma.de/x"),
+     {"firma": "Eine GmbH", "gesendet_am": "2026-06-12", "status": "Absage"}),
+])
+def test_where_no_application_can_happen_no_step_is_live(job, already):
+    """Including "Formular öffnen": opening it MOVES the posting to `portal`,
+    which is this app's record that an application has begun. Reading the
+    advert is still a press away in the triage row, and that changes nothing."""
+    steps = jobs.apply_steps(job, already)
+    assert steps, "the posting offers nothing at all"
+    assert not any(s.enabled for s in steps)
+    assert all(s.reason for s in steps if not s.done)
+
+
+def test_the_step_to_press_is_the_first_that_is_neither_done_nor_refused():
+    steps = jobs.apply_steps(_row(apply_channel="ats_form",
+                                  draft_status="ready",
+                                  url="https://firma.de/x"))
+    assert steps[jobs._next_step(steps)].key == jobs.STEP_MAPPE
+    assert jobs._next_step([jobs.Step("a", "A", done=True),
+                            jobs.Step("b", "B", enabled=False)]) == -1
