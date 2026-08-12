@@ -66,6 +66,56 @@ body { background: var(--paper); color: var(--ink); font-family: var(--jd-sans);
 .jd-view-count { margin-left:auto; font:400 11.5px/1.4 var(--jd-mono);
                  color: var(--ink-3); font-variant-numeric: tabular-nums; }
 
+/* ---- a screen that owns the viewport: a list and what it opens ------- */
+.jd-screen { height: 100vh; display: grid; grid-template-rows: auto 1fr; min-height: 0; }
+.jd-strip { display:flex; align-items:center; gap:12px; padding:10px 16px;
+            border-bottom:1px solid var(--rule); background: var(--surface-2); }
+.jd-strip-title { font:400 16px/1 var(--jd-serif); }
+.jd-panes { display:grid; grid-template-columns: 400px 1fr; min-height:0; }
+.jd-list { border-right:1px solid var(--rule); display:flex; flex-direction:column;
+           min-height:0; background: var(--surface-2); }
+.jd-rows { overflow-y:auto; min-height:0; flex:1; }
+.jd-reader { display:flex; flex-direction:column; min-height:0; background: var(--surface);
+             overflow-y:auto; }
+
+.jd-row { display:grid; grid-template-columns:4px 1fr; border-bottom:1px solid var(--rule);
+          cursor:pointer; background: var(--surface-2); width:100%; text-align:left;
+          border-top:0; border-left:0; border-right:0; padding:0; }
+.jd-row .jd-gutter { background:transparent; }
+.jd-row[data-unread="true"] .jd-gutter { background: var(--accent); }
+.jd-row[aria-selected="true"] { background: var(--surface); }
+.jd-row[aria-selected="true"] .jd-gutter { background: var(--accent-deep); }
+.jd-row-body { padding:10px 12px 9px; min-width:0; }
+.jd-firma { font:600 14px/1.25 var(--jd-sans); overflow:hidden; text-overflow:ellipsis;
+            white-space:nowrap; }
+.jd-row[data-unread="false"] .jd-firma { font-weight:400; color: var(--ink-2); }
+.jd-score { font:500 13.5px/1 var(--jd-mono); color: var(--ink-2);
+            font-variant-numeric: tabular-nums; }
+.jd-score.hi { color: var(--accent); }
+.jd-title { font:400 12.5px/1.35 var(--jd-sans); color: var(--ink-2);
+            overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.jd-meta { font:400 11px/1.5 var(--jd-mono); color: var(--ink-3);
+           overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.jd-siblings { padding:5px 12px 7px 16px; background: var(--surface-2);
+               border-bottom:1px solid var(--rule); font:400 11px/1.4 var(--jd-mono);
+               color: var(--ink-3); }
+
+.jd-ad { max-width:72ch; font-size:14px; line-height:1.65; }
+.jd-why { margin-top:24px; max-width:72ch; border:1px solid var(--rule); border-radius:8px;
+          padding:12px 15px; background: var(--surface-2); }
+.jd-note { border-left:2px solid var(--rule-2); padding:5px 0 5px 10px;
+           font-size:12.5px; color: var(--ink-2); }
+.jd-note.warn { border-color: var(--warn); color: var(--warn); }
+.jd-note.danger { border-color: var(--danger); color: var(--danger); }
+.jd-facts { display:grid; grid-template-columns:auto 1fr; gap:2px 16px;
+            font:400 12px/1.6 var(--jd-mono); color: var(--ink-2); }
+.jd-facts .k { color: var(--ink-3); }
+.jd-reason { font-size:12px; color: var(--warn); }
+@media (max-width: 1080px) {
+  .jd-panes { grid-template-columns: 1fr; }
+  .jd-screen { height: auto; }
+}
+
 /* ---- the foot: what may still leave today, and what the engine is at -- */
 .jd-flabel { font:600 9.5px/1 var(--jd-sans); letter-spacing:.13em;
              text-transform:uppercase; color: var(--ink-4); }

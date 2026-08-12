@@ -60,9 +60,41 @@ async def _tick(user: User) -> None:
     await asyncio.sleep(0.1)
 
 
-def _expansions(user: User):
+def _emailable(con, **over):
+    """A posting the screen offers to write an e-mail application for."""
+    job_id = _posting(con, **over)
+    db.set_apply_channel(con, job_id, "direct_email", "", "")
+    con.commit()
+    return job_id
+
+
+async def _press(user: User, key: str) -> None:
+    """A key, through NiceGUI's own inbound event path.
+
+    Not the page's handler called directly: the framework is what decides a
+    keystroke inside an input never reaches the page at all, and that rule is
+    exactly what a test of the keyboard has to exercise."""
+    from nicegui.events import GenericEventArguments
+    keyboard = next(e for e in user.client.elements.values()
+                    if isinstance(e, ui.keyboard))
+    with user.client:
+        keyboard._handle_key(GenericEventArguments(
+            sender=keyboard, client=user.client, args={
+                "action": "keydown", "repeat": False, "key": key,
+                "code": f"Key{key.upper()}", "location": 0,
+                "altKey": False, "ctrlKey": False, "metaKey": False,
+                "shiftKey": False}))
+    await asyncio.sleep(0.4)
+
+
+def _rows(user: User):
+    """The list's own rows, in the order they are drawn."""
     return [e for e in user.client.elements.values()
-            if isinstance(e, ui.expansion)]
+            if "jd-row" in getattr(e, "_classes", [])]
+
+
+def _selected(user: User):
+    return [e for e in _rows(user) if e.props.get("aria-selected") == "true"]
 
 
 async def test_a_posting_stored_by_the_poller_appears_by_itself(
@@ -82,63 +114,36 @@ async def test_a_posting_stored_by_the_poller_appears_by_itself(
 
 async def test_nothing_new_rebuilds_nothing(user: User, con, data_dir):
     """The gate is the signature, not the clock: an unchanged database must
-    leave the page exactly as it is, expansions and all."""
+    leave the page exactly as it is, down to the very row elements."""
     _posting(con)
     await user.open("/")
     await user.should_see("Python Entwickler")
-    expansion = _expansions(user)[0]
-    expansion.set_value(True)
-    await asyncio.sleep(0.1)
+    row = _rows(user)[0]
 
     await _tick(user)
 
-    assert _expansions(user)[0] is expansion, "the page was rebuilt for nothing"
-    assert expansion.value is True
+    assert _rows(user)[0] is row, "the page was rebuilt for nothing"
 
 
-async def test_a_posting_he_is_reading_is_not_pulled_out_from_under_him(
+async def test_the_posting_he_is_reading_survives_a_new_arrival(
         user: User, con, data_dir):
-    """A rebuild collapses every open expansion. While one is open the fresh
-    data waits behind the chip — and lands by itself once he closes the row."""
-    _posting(con)
+    """The old inbox had to HOLD BACK fresh data, because a rebuild collapsed
+    the expansion he was reading. A reading pane is not part of the list, so
+    the arrival simply lands and he keeps his place — the deferral that used to
+    be necessary is now the thing that would be in the way."""
+    first = _posting(con)
     await user.open("/")
     await user.should_see("Python Entwickler")
-    expansion = _expansions(user)[0]
-    expansion.set_value(True)
-    await asyncio.sleep(0.1)
+    assert [e.props.get("aria-selected") for e in _rows(user)] == ["true"]
 
     _posting(con, external_id="e2", title="Django Entwickler",
              company="Zweite GmbH")
     await _tick(user)
 
-    await user.should_not_see("Django Entwickler")
-    await user.should_see("Neue Daten")
-    assert expansion.value is True, "his open posting was collapsed"
-
-    expansion.set_value(False)
-    await asyncio.sleep(0.1)
-    await _tick(user)
-
-    await user.should_see("Django Entwickler")
-    await user.should_not_see("Neue Daten")
-
-
-async def test_the_chip_hands_over_the_waiting_data_when_pressed(
-        user: User, con, data_dir):
-    _posting(con)
-    await user.open("/")
-    await user.should_see("Python Entwickler")
-    _expansions(user)[0].set_value(True)
-    await asyncio.sleep(0.1)
-    _posting(con, external_id="e2", title="Django Entwickler",
-             company="Zweite GmbH")
-    await _tick(user)
-    await user.should_see("Neue Daten")
-
-    user.find("Neue Daten").click()
-    await asyncio.sleep(0.2)
-
-    await user.should_see("Django Entwickler")
+    await user.should_see("Django Entwickler")   # it landed by itself
+    await user.should_see("Python Entwickler")   # and he is still on his row
+    assert len(_selected(user)) == 1
+    assert db.get_job(con, first)["title"] == "Python Entwickler"
 
 
 async def test_the_dashboard_counts_an_application_recorded_elsewhere(
@@ -258,26 +263,31 @@ async def test_the_settings_forms_are_never_overwritten(user: User, con,
     assert field.value == "halb getippt@example.org"
 
 
-async def test_an_open_dialog_also_defers_the_rebuild(
-        user: User, con, data_dir):
+async def test_an_open_dialog_defers_the_rebuild(user: User, con, data_dir,
+                                                 monkeypatch):
     """A refresh deletes the list a dialog was opened over; the editor and the
     two `await confirm` flows would go with it."""
-    job_id = _posting(con)
-    db.upsert_draft(con, job_id, {
-        "status": "ready", "betreff": "Bewerbung als Python Entwickler",
-        "recipient": "jobs@beispiel.example"})
-    con.commit()
+    from jobdeck.ui.pages import jobs as jobs_page
+
+    async def finished_draft(job_id):
+        return {"ok": True, "error": "", "draft": {
+            "recipient": "jobs@beispiel.example", "betreff": "Bewerbung",
+            "email_body": "…", "anschreiben_body": "…", "llm_model": "stub",
+            "pdf_path": ""}}
+
+    monkeypatch.setattr(jobs_page.drafting, "draft_for_job", finished_draft)
+    _emailable(con)
     await user.open("/")
-    user.find("Draft application").click()
-    await asyncio.sleep(0.2)
-    await user.should_see("Draft — Python Entwickler")
+    user.find("Bewerbung per E-Mail erstellen").click()
+    await asyncio.sleep(0.3)
+    await user.should_see("Entwurf — Python Entwickler")
 
     _posting(con, external_id="e2", title="Django Entwickler",
              company="Zweite GmbH")
     await _tick(user)
 
     await user.should_not_see("Django Entwickler")
-    await user.should_see("Draft — Python Entwickler")
+    await user.should_see("Entwurf — Python Entwickler")
 
 
 async def test_a_reconnect_does_not_kill_the_self_refresh(user: User, con,
@@ -308,20 +318,25 @@ async def test_a_reconnect_does_not_kill_the_self_refresh(user: User, con,
 
 
 async def test_a_closed_dialog_does_not_freeze_the_page(user: User, con,
-                                                        data_dir):
+                                                        data_dir, monkeypatch):
     """Pages keep exactly one dialog element alive after closing it, so
     "does a dialog EXIST" would be true forever after the first one — and the
     page would defer every update for the rest of its life."""
-    job_id = _posting(con)
-    db.upsert_draft(con, job_id, {
-        "status": "ready", "betreff": "Bewerbung als Python Entwickler",
-        "recipient": "jobs@beispiel.example"})
-    con.commit()
+    from jobdeck.ui.pages import jobs as jobs_page
+
+    async def finished_draft(job_id):
+        return {"ok": True, "error": "", "draft": {
+            "recipient": "jobs@beispiel.example", "betreff": "Bewerbung",
+            "email_body": "…", "anschreiben_body": "…", "llm_model": "stub",
+            "pdf_path": ""}}
+
+    monkeypatch.setattr(jobs_page.drafting, "draft_for_job", finished_draft)
+    _emailable(con)
     await user.open("/")
-    user.find("Draft application").click()
-    await asyncio.sleep(0.2)
-    await user.should_see("Draft — Python Entwickler")
-    user.find("Close").click()
+    user.find("Bewerbung per E-Mail erstellen").click()
+    await asyncio.sleep(0.3)
+    await user.should_see("Entwurf — Python Entwickler")
+    user.find("Schließen").click()
     await asyncio.sleep(0.2)
     assert any(isinstance(e, ui.dialog) for e in user.client.elements.values()), \
         "the dialog element is gone, so this proves nothing"
@@ -333,20 +348,16 @@ async def test_a_closed_dialog_does_not_freeze_the_page(user: User, con,
     await user.should_see("Django Entwickler")
 
 
-async def test_the_reading_counter_survives_a_rebuild_with_a_row_open(
+async def test_a_row_action_leaves_the_page_able_to_update_itself(
         user: User, con, data_dir):
-    """Every row action ends in a refresh, and a rebuild destroys the open
-    expansions WITHOUT firing their value-change handlers — so without the
-    reset the counter never returns to zero and the page defers every future
-    update for the rest of the session."""
+    """Every row action ends in a refresh that deletes the element the action
+    was fired from. If that left the page believing he is still busy it would
+    defer every future update for the rest of the session."""
     _posting(con)
     await user.open("/")
     await user.should_see("Python Entwickler")
-    _expansions(user)[0].set_value(True)
-    await asyncio.sleep(0.2)
 
-    # a row action: it refreshes the list from inside the open expansion
-    user.find("Skip").click()
+    user.find("✕ kein Interesse").click()
     await asyncio.sleep(0.3)
     await user.should_not_see("Python Entwickler")
 
@@ -404,3 +415,97 @@ async def test_the_inboxs_old_address_still_lands_on_the_postings(
     _posting(con)
     await user.open("/jobs")
     await user.should_see("Python Entwickler")
+
+
+# --------------------------------------------------------------------------
+# The Posteingang: a list, a reading pane, and the keyboard between them
+# --------------------------------------------------------------------------
+async def test_the_advert_is_read_before_the_machine_has_its_say(
+        user: User, con, data_dir):
+    """His rule, and the reason the score panel moved: he reads the posting
+    first and only then sees what the app made of it."""
+    job_id = _posting(con)
+    db.set_job_score(con, job_id, 85, "Exakte Rollenübereinstimmung.")
+    con.execute("UPDATE jobs SET description=? WHERE id=?",
+                ("Wir suchen zum nächstmöglichen Zeitpunkt.", job_id))
+    con.commit()
+    await user.open("/")
+
+    await user.should_see("Wir suchen zum nächstmöglichen Zeitpunkt.")
+    # Elements carry increasing ids in creation order, so this is the order he
+    # meets them down the page.
+    advert = next(e for e in user.client.elements.values()
+                  if isinstance(e, ui.markdown))
+    verdict = next(e for e in user.client.elements.values()
+                   if str(getattr(e, "text", "")).startswith("WARUM"))
+    reasoning = next(e for e in user.client.elements.values()
+                     if "Exakte Rollenübereinstimmung" in str(getattr(e, "text", "")))
+    assert advert.id < verdict.id < reasoning.id, \
+        "the score's reasoning stands above the advert"
+
+
+async def test_the_keyboard_moves_the_selection_and_opens_what_it_lands_on(
+        user: User, con, data_dir):
+    """He works this list without the mouse; j and k are the whole point of a
+    permanent list beside a reading pane."""
+    _posting(con, title="Erste Stelle", company="Alpha GmbH")
+    _posting(con, external_id="e2", title="Zweite Stelle", company="Beta GmbH")
+    await user.open("/")
+    await user.should_see("Erste Stelle")
+
+    await _press(user, "j")
+    await user.should_see("Zweite Stelle")
+    assert len(_selected(user)) == 1
+
+    await _press(user, "k")
+    assert len(_selected(user)) == 1
+
+
+async def test_x_puts_a_posting_away_and_s_sets_it_aside(user: User, con,
+                                                         data_dir):
+    job_id = _posting(con)
+    await user.open("/")
+    await user.should_see("Beispiel GmbH")
+
+    await _press(user, "s")
+    assert con.execute("SELECT bookmarked_at FROM jobs WHERE id=?",
+                       (job_id,)).fetchone()[0] != ""
+
+    await _press(user, "x")
+    assert con.execute("SELECT status FROM jobs WHERE id=?",
+                       (job_id,)).fetchone()[0] == "skipped"
+    await user.should_not_see("Beispiel GmbH")
+
+
+async def test_the_keyboard_keeps_out_of_the_fields_he_types_in(user: User, con,
+                                                                data_dir):
+    """'x' typed into the search box must not throw the posting away. Only the
+    browser knows where the caret is, so this is the framework's rule and the
+    page has to ask for it — the shortcuts are worse than useless without it."""
+    _posting(con)
+    await user.open("/")
+    await user.should_see("Beispiel GmbH")
+    keyboard = next(e for e in user.client.elements.values()
+                    if isinstance(e, ui.keyboard))
+    assert set(keyboard.props["ignore"]) >= {"input", "textarea", "select"}
+
+
+async def test_reading_a_posting_marks_it_read_and_empties_neu(
+        user: User, con, data_dir):
+    """Selecting is reading: the row loses its unread mark and the Neu view —
+    and the count in the rail — shrink by one."""
+    job_id = _posting(con)
+    _posting(con, external_id="e2", title="Zweite Stelle", company="Beta GmbH")
+    await user.open("/")
+    await user.should_see("Beispiel GmbH")
+    # Opening the app selects the top row so the pane is not empty, but that
+    # is a preview, not reading: nothing is consumed until he moves.
+    assert con.execute("SELECT COUNT(*) FROM jobs WHERE opened_at<>''"
+                       ).fetchone()[0] == 0
+
+    await _press(user, "j")
+    await _press(user, "k")
+
+    assert con.execute("SELECT opened_at FROM jobs WHERE id=?",
+                       (job_id,)).fetchone()[0] != ""
+    assert [e.props.get("data-unread") for e in _rows(user)] == ["false", "false"]

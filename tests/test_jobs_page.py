@@ -671,9 +671,10 @@ def test_changing_the_view_always_returns_to_the_first_page(con, data_dir):
     """Page 3 of a different list means nothing — and an offset past the end
     would render an empty page until the user noticed."""
     source = pathlib.Path(jobs.__file__).read_text()
-    body = source[source.index("async def set_view"):]
-    body = body[:body.index("await refresh()")]
-    assert 'page["value"] = 0' in body, "set_view does not reset the page"
+    for handler in ("async def set_view", "async def set_search"):
+        body = source[source.index(handler):]
+        body = body[:body.index("await refresh()")]
+        assert 'state["page"] = 0' in body, f"{handler} does not reset the page"
 
     # and the loader is what makes a stale offset harmless either way
     for n in range(120):
@@ -758,16 +759,13 @@ def test_the_row_describes_the_same_draft_every_button_acts_on(con, data_dir):
     assert view["rows"][0]["draft_status"] == "ready"
 
 
-def test_the_draft_button_is_guarded_on_a_live_claim_not_on_a_status():
+def test_the_main_button_is_guarded_on_a_live_claim_not_on_a_status():
     """A row can say 'generating' long after the process holding the claim
-    died, and this button is the only thing that can restart it — see
-    tests/test_draft_visibility_pages.py for the rendered proof."""
+    died, and the main button is the only thing that can restart it — hiding it
+    for as long as the STATUS says 'generating' left a posting that could never
+    be drafted again. The outcome must also reach the screen: without a refresh
+    the reader would still claim the draft is being written after it finished."""
     source = pathlib.Path(jobs.__file__).read_text()
-    guard = source[:source.index('"Draft application"')]
-    guard = guard[guard.rindex('if (job["status"]'):]
-    assert "_claim_is_running(job)" in guard
-    # and the outcome reaches the row: without a refresh the line would still
-    # claim the draft is being written after it finished
     handler = source[source.index("async def draft("):]
     handler = handler[:handler.index("async def resolve_channel")]
     assert "await refresh()" in handler
@@ -779,15 +777,18 @@ def test_the_draft_button_is_guarded_on_a_live_claim_not_on_a_status():
     (drafting_module().CLAIM_TIMEOUT_MIN + 0.1, False),
     (600.0, False),
 ])
-def test_only_a_claim_the_reclaim_would_refuse_hides_the_button(age, running):
+def test_only_a_claim_the_reclaim_would_refuse_blocks_the_button(age, running):
     """The button must come back at exactly the moment drafting._claim would
     take the row over — one minute earlier and a second draft is paid for,
     one minute later and an abandoned draft is unrecoverable."""
     import datetime
     stamp = (datetime.datetime.now()
              - datetime.timedelta(minutes=age)).isoformat(timespec="seconds")
-    job = {"draft_status": "generating", "draft_updated_at": stamp}
-    assert jobs._claim_is_running(job) is running
+    job = {"status": "new", "draft_status": "generating",
+           "draft_updated_at": stamp}
+    action = jobs.primary_action(job)
+    assert action.enabled is not running
+    assert (action.key == jobs.ACTION_DRAFT) is not running
     assert ("abgebrochen" in jobs._draft_line("generating", stamp)[0]) is not running
 
 
@@ -795,8 +796,10 @@ def test_an_unreadable_claim_timestamp_reads_as_running():
     """A stored value we cannot parse is not evidence the process died — and
     treating it as dead would let a second claim start while the first is
     still spending money."""
-    assert jobs._claim_is_running(
-        {"draft_status": "generating", "draft_updated_at": "not a timestamp"})
+    action = jobs.primary_action(
+        {"status": "new", "draft_status": "generating",
+         "draft_updated_at": "not a timestamp"})
+    assert action.enabled is False
 
 
 _NESTED_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
@@ -1225,3 +1228,123 @@ def test_nothing_in_the_corpus_is_unreachable_from_the_named_views(con, data_dir
     for view in jobs.VIEWS:
         seen.update(r["id"] for r in jobs._load_jobs(view.key, 0)["rows"])
     assert seen == set(ids.values()) | {mismatch}
+
+
+# --------------------------------------------------------------------------
+# One primary action per posting
+# --------------------------------------------------------------------------
+def _row(**over) -> dict:
+    row = {"id": 1, "status": "new", "draft_status": None,
+           "draft_updated_at": None, "apply_channel": "", "company": "Eine GmbH"}
+    row.update(over)
+    return row
+
+
+@pytest.mark.parametrize("job, key, enabled", [
+    # 650 of his 803 postings are in exactly this state
+    (_row(), jobs.ACTION_RESOLVE, True),
+    (_row(apply_channel="direct_email"), jobs.ACTION_DRAFT, True),
+    (_row(apply_channel="ats_form"), jobs.ACTION_FORM, True),
+    (_row(apply_channel="board_apply"), jobs.ACTION_FORM, True),
+    (_row(apply_channel="company_site"), jobs.ACTION_FORM, True),
+    (_row(apply_channel="unknown"), jobs.ACTION_FORM, True),
+    (_row(status="portal"), jobs.ACTION_RECORD, True),
+    (_row(draft_status="ready"), jobs.ACTION_QUEUE, True),
+    (_row(draft_status="approved"), jobs.ACTION_QUEUE, True),
+    (_row(draft_status="sending"), jobs.ACTION_QUEUE, True),
+    (_row(draft_status="failed"), jobs.ACTION_DRAFT, True),
+    (_row(status="applied"), jobs.ACTION_NONE, False),
+    (_row(status="duplicate"), jobs.ACTION_NONE, False),
+])
+def test_every_state_of_a_posting_has_exactly_one_next_step(job, key, enabled):
+    action = jobs.primary_action(job)
+    assert (action.key, action.enabled) == (key, enabled)
+    assert action.label, "a button with no label"
+
+
+def test_a_blocked_action_says_why_beside_itself(con=None):
+    """Never a tooltip: he moves through this list with the keyboard, and a
+    tooltip is a thing only a mouse can find."""
+    blocked = [
+        jobs.primary_action(_row(status="applied")),
+        jobs.primary_action(_row(status="duplicate")),
+        jobs.primary_action(_row(), already={"firma": "Eine GmbH",
+                                             "gesendet_am": "2026-06-12",
+                                             "status": "Absage"}),
+    ]
+    for action in blocked:
+        assert action.enabled is False
+        assert action.reason, f"{action.label} refuses without saying why"
+
+
+def test_an_application_at_the_firm_outranks_every_channel(con=None):
+    """A posting at a company he has already written to can never become an
+    application — so nothing downstream may offer to start one."""
+    already = {"firma": "Eine GmbH", "gesendet_am": "2026-06-12",
+               "status": "Absage"}
+    for channel in ("direct_email", "ats_form", ""):
+        action = jobs.primary_action(_row(apply_channel=channel), already)
+        assert action.enabled is False
+        assert "bereits beworben" in action.reason
+
+
+# --------------------------------------------------------------------------
+# What a row and a reader state
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize("job, expected", [
+    ({"age_days": 34, "apply_channel": "", "source": "jooble"},
+     "34 T · Kanal offen · Jooble"),
+    ({"age_days": 0, "apply_channel": "direct_email", "source": "arbeitsagentur"},
+     "heute · E-Mail · BA"),
+    ({"age_days": 1, "apply_channel": "ats_form", "source": "arbeitnow"},
+     "1 T · Formular · Arbeitnow"),
+    ({"age_days": None, "apply_channel": "unknown", "source": ""},
+     "Datum ? · kein Weg"),
+    ({"age_days": 14, "apply_channel": "direct_email", "source": "arbeitsagentur",
+      "salary_from": "45000", "salary_to": "55000", "salary_period": "JAHRESGEHALT"},
+     "14 T · E-Mail · 45–55 T€ · BA"),
+])
+def test_the_row_line_states_only_facts_the_posting_carries(job, expected):
+    assert jobs.row_meta(job) == expected
+
+
+def test_an_hourly_wage_is_never_abbreviated_to_thousands():
+    """The same column carries 55000.0 for a year and 30.32 for an hour;
+    '30 T€' would be a different offer entirely."""
+    assert jobs._salary_short(
+        {"salary_from": "30.32", "salary_to": "35.50",
+         "salary_period": "STUNDENLOHN"}) == ""
+    assert jobs._salary_short(
+        {"salary_from": "45000", "salary_to": "55000",
+         "salary_period": "JAHRESGEHALT"}) == "45–55 T€"
+
+
+def test_the_facts_block_states_an_absence_rather_than_dropping_the_row():
+    """"Gehalt —" says the advert is silent; a row that simply vanished would
+    leave him wondering whether the app had lost it."""
+    facts = dict(jobs.reader_facts(
+        {"refnr": "", "location": "", "salary_from": "", "salary_to": "",
+         "salary_period": "", "apply_channel": "", "ats_vendor": "",
+         "published_on": "", "fetched_at": ""}))
+    assert facts["Refnr"] == "—"
+    assert facts["Ort"] == "—"
+    assert facts["Gehalt"] == "—"
+    assert facts["Kanal"] == "noch nicht ermittelt"
+
+
+def test_the_warnings_stand_above_the_advert_worst_first():
+    job = {"liveness": "gone", "liveness_checked_at": "2026-08-01T09:00:00",
+           "temp_agency": 1, "draft_status": None, "draft_updated_at": None}
+    already = {"firma": "Eine GmbH", "gesendet_am": "2026-06-12",
+               "status": "Absage"}
+    notes = jobs.reader_notes(job, already)
+    assert [kind for _, kind in notes] == ["danger", "danger", "warn"]
+    assert "bereits beworben" in notes[0][0]
+    assert "offline" in notes[1][0]
+    assert "Arbeitnehmerüberlassung" in notes[2][0]
+
+
+def test_a_quiet_posting_carries_no_warnings_at_all():
+    assert jobs.reader_notes(
+        {"liveness": "", "liveness_checked_at": "", "temp_agency": 0,
+         "draft_status": None, "draft_updated_at": None}, None) == []

@@ -21,7 +21,7 @@ pytest_plugins = ["nicegui.testing.user_plugin"]
 
 pytestmark = pytest.mark.nicegui_main_file("tests/nicegui_main.py")
 
-DRAFT_BUTTON = "Draft application"
+DRAFT_BUTTON = "Bewerbung per E-Mail erstellen"
 
 
 @pytest.fixture(autouse=True)
@@ -53,11 +53,19 @@ def user_error_records(caplog):
 
 
 def _posting(con, company="Beispiel GmbH", **over):
+    """A posting the screen offers to write an e-mail application for.
+
+    The channel is set because the main button is polymorphic now: with none
+    resolved the one thing to do here is "Kanal ermitteln", which is right for
+    650 of his 803 postings and wrong for every test about drafting."""
+    emailable = over.pop("emailable", True)
     job_id = db.insert_job_if_new(con, {
         "source": "stub", "external_id": over.pop("ext", "e1"),
         "title": "Python Entwickler", "company": company,
         "url": "https://beispiel.example/1", **over,
     })
+    if emailable and job_id is not None:
+        db.set_apply_channel(con, job_id, "direct_email", "", "")
     con.commit()
     return job_id
 
@@ -100,7 +108,7 @@ async def test_the_draft_button_stands_down_only_while_the_claim_is_alive(
          ).isoformat(timespec="seconds"), job_id))
     con.commit()
     await user.open("/")
-    await user.should_see(DRAFT_BUTTON)
+    await user.should_see("Erneut schreiben")
     await user.should_see("abgebrochen")
     await user.should_not_see("etwa eine Minute")
 
@@ -126,7 +134,7 @@ async def test_a_discarded_draft_leaves_the_row_as_it_found_it(
     con.commit()
     await user.open("/")
     await user.should_see(DRAFT_BUTTON)
-    await user.should_not_see("Entwurf")
+    await user.should_not_see("Entwurf fertig")
 
 
 # --------------------------------------------------------------------------
@@ -259,8 +267,10 @@ async def test_an_unexpected_failure_does_not_leave_the_button_dead(
     await user.open("/")
     user.find(DRAFT_BUTTON).click()
     await asyncio.sleep(0.3)
+    # the button is live again — the stub raised before drafting could mark
+    # the row failed, so the posting is exactly where it started
     await user.should_see(DRAFT_BUTTON)
-    await user.should_not_see("wird geschrieben…")
+    await user.should_not_see("wird geschrieben …")
     await user.should_see("unerwartet fehlgeschlagen")
 
     # The traceback must still reach the log — that is the only place the real
@@ -328,17 +338,23 @@ async def test_a_firm_he_never_wrote_to_is_left_alone(user: User, con, data_dir)
 
 
 async def test_opening_a_draft_twice_leaves_one_dialog_behind(
-        user: User, con, data_dir):
+        user: User, con, data_dir, monkeypatch):
     """`overlay.clear()` could be deleted with the suite green while every
     draft left its dialog parented to the host for the page's lifetime —
     contradicting the comment that says it keeps exactly one alive."""
     from nicegui import ui
 
-    job_id = _posting(con)
-    db.upsert_draft(con, job_id, {
-        "status": "ready", "betreff": "Bewerbung als Python Entwickler",
-        "recipient": "jobs@beispiel.example"})
-    con.commit()
+    from jobdeck.ui.pages import jobs as jobs_page
+
+    async def finished_draft(job_id):
+        return {"ok": True, "error": "", "draft": {
+            "recipient": "jobs@beispiel.example",
+            "betreff": "Bewerbung als Python Entwickler",
+            "email_body": "Sehr geehrte Damen und Herren,",
+            "anschreiben_body": "…", "llm_model": "stub", "pdf_path": ""}}
+
+    monkeypatch.setattr(jobs_page.drafting, "draft_for_job", finished_draft)
+    _posting(con)
     await user.open("/")
 
     def dialogs():
@@ -347,5 +363,7 @@ async def test_opening_a_draft_twice_leaves_one_dialog_behind(
 
     for _ in range(3):
         user.find(DRAFT_BUTTON).click()
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.3)
         assert len(dialogs()) == 1, f"{len(dialogs())} dialogs are alive at once"
+        user.find("Schließen").click()
+        await asyncio.sleep(0.1)

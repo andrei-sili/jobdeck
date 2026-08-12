@@ -9,6 +9,8 @@ from fastapi.responses import RedirectResponse
 from nicegui import app, run, ui
 
 from jobdeck import apply_channel, db, freshness
+from jobdeck.ai import scoring
+from jobdeck.ai.drafting import clean_title
 from jobdeck.dedupe import duplicates_for_jobs
 from jobdeck.services import apply_resolve, contact_lookup, drafting, liveness, mappe
 from jobdeck.ui import helpers, live
@@ -113,6 +115,83 @@ def _hidden_line(view: View, counts: dict, stale_age_days: int) -> str:
     return " · ".join(parts)
 
 
+# ---------------------------------------------------------------------------
+# One primary action per posting, and its whole state machine.
+#
+# 650 of his 803 postings sit in the FIRST state — the channel has never been
+# resolved — so a screen offering "apply" everywhere would be wrong on four
+# rows out of five. A blocked action states the reason NEXT TO ITSELF rather
+# than in a tooltip: he reads this list with the keyboard, and a tooltip is a
+# thing only a mouse can find.
+# ---------------------------------------------------------------------------
+ACTION_NONE = "none"
+ACTION_RESOLVE = "resolve"
+ACTION_DRAFT = "draft"
+ACTION_FORM = "form"
+ACTION_QUEUE = "queue"
+ACTION_RECORD = "record"
+
+
+@dataclass(frozen=True)
+class Action:
+    """What pressing the main button does here — and if it cannot, why not."""
+
+    key: str
+    label: str
+    reason: str = ""
+    enabled: bool = True
+
+
+_FORM_CHANNELS = (apply_channel.CHANNEL_ATS, apply_channel.CHANNEL_BOARD,
+                  apply_channel.CHANNEL_COMPANY_SITE)
+
+
+def primary_action(job: dict, already: dict | None = None) -> Action:
+    """The one thing to do with this posting next.
+
+    The order is the order of the pipeline, and the refusals come first: a
+    posting at a company he has already written to can never become an
+    application, so nothing further down may offer to start one."""
+    status = str(job.get("status") or "")
+    draft_status = str(job.get("draft_status") or "")
+    if status == "applied":
+        return Action(ACTION_NONE, "Beworben", "Diese Anzeige ist eingetragen.",
+                      enabled=False)
+    if already:
+        return Action(ACTION_NONE, "Bewerbung nicht möglich",
+                      helpers.applied_line(already), enabled=False)
+    if status == "duplicate":
+        return Action(ACTION_NONE, "Bewerbung nicht möglich",
+                      "Diese Anzeige gehört zu einer Firma, bei der schon eine "
+                      "Bewerbung liegt.", enabled=False)
+    if draft_status == "generating" and not drafting.claim_is_stale(
+            job.get("draft_updated_at")):
+        return Action(ACTION_NONE, "Wird geschrieben …",
+                      "Das dauert etwa eine Minute.", enabled=False)
+    if draft_status in ("ready", "approved"):
+        return Action(ACTION_QUEUE, "Prüfen und senden")
+    if draft_status == "sending":
+        return Action(ACTION_QUEUE, "Versand auflösen",
+                      "Ein Versand läuft — oder er ist stecken geblieben.")
+    if draft_status == "failed" or draft_status == "generating":
+        return Action(ACTION_DRAFT, "Erneut schreiben",
+                      "Der letzte Versuch ist nicht fertig geworden.")
+    if status == "portal":
+        return Action(ACTION_RECORD, "Als beworben eintragen",
+                      "Das Formular war offen — trag die Bewerbung ein, wenn "
+                      "du sie abgeschickt hast.")
+    channel = str(job.get("apply_channel") or "")
+    if not channel:
+        return Action(ACTION_RESOLVE, "Kanal ermitteln",
+                      "Noch unbekannt, wie man sich hier bewirbt.")
+    if channel == apply_channel.CHANNEL_DIRECT_EMAIL:
+        return Action(ACTION_DRAFT, "Bewerbung per E-Mail erstellen")
+    if channel in _FORM_CHANNELS:
+        return Action(ACTION_FORM, "Formular ausfüllen")
+    return Action(ACTION_FORM, "Anzeige öffnen und selbst prüfen",
+                  "Kein Bewerbungsweg gefunden — die Anzeige nennt keinen.")
+
+
 def _score_line(job: dict) -> str:
     """The score, and what its age did to it: ' · match 92 → 72 · 61 Tage alt'.
 
@@ -137,7 +216,67 @@ def _score_line(job: dict) -> str:
     return f" · match {score}{aged}"
 
 
-def _load_jobs(view_key: str, page: int) -> dict:
+_CHANNEL_SHORT = {
+    apply_channel.CHANNEL_DIRECT_EMAIL: "E-Mail",
+    apply_channel.CHANNEL_ATS: "Formular",
+    apply_channel.CHANNEL_BOARD: "Formular",
+    apply_channel.CHANNEL_COMPANY_SITE: "Formular",
+    apply_channel.CHANNEL_UNKNOWN: "kein Weg",
+}
+
+
+def _age_short(age: object) -> str:
+    """'heute', '1 T', '34 T', or a stated absence — never a silent blank."""
+    if age is None:
+        return "Datum ?"
+    days = int(age)
+    return "heute" if days <= 0 else f"{days} T"
+
+
+def row_meta(job: dict) -> str:
+    """'34 T · Formular · 45–55 T€ · BA' — one line of facts under a row.
+
+    Every part is a fact the posting really states. Nothing is guessed and
+    nothing is silently left out: an unresolved channel says so ("Kanal offen")
+    rather than looking like a form, because which of the two it turns out to
+    be decides whether an application here is one press or twenty minutes."""
+    parts = [_age_short(job.get("age_days"))]
+    channel = str(job.get("apply_channel") or "")
+    parts.append(_CHANNEL_SHORT.get(channel, "Kanal offen") if channel
+                 else "Kanal offen")
+    salary = _salary_short(job)
+    if salary:
+        parts.append(salary)
+    source = str(job.get("source") or "")
+    if source:
+        parts.append(_SOURCE_LABELS.get(source, source))
+    return " · ".join(parts)
+
+
+_SOURCE_LABELS = {"arbeitsagentur": "BA", "arbeitnow": "Arbeitnow",
+                  "jooble": "Jooble"}
+
+
+def _salary_short(job: dict) -> str:
+    """'45–55 T€' for a yearly range, '' for anything else.
+
+    Only the yearly shape is abbreviated: an hourly wage rounded to thousands
+    would be a different offer, and the reader states every figure in full."""
+    if str(job.get("salary_period") or "").strip().upper() != "JAHRESGEHALT":
+        return ""
+    figures = []
+    for key in ("salary_from", "salary_to"):
+        try:
+            value = float(str(job.get(key) or "").strip())
+        except (TypeError, ValueError):
+            return ""
+        if not math.isfinite(value) or value < 1000:
+            return ""
+        figures.append(f"{round(value / 1000)}")
+    return f"{figures[0]}–{figures[1]} T€" if len(figures) == 2 else ""
+
+
+def _load_jobs(view_key: str, page: int, search: str = "") -> dict:
     """One page of a named view, with everything needed to describe it.
 
     A row stands for a COMPANY — its best-ranked posting, with the others
@@ -161,7 +300,8 @@ def _load_jobs(view_key: str, page: int) -> dict:
         signature = db.data_signature(con)
         stale_age_days = freshness.stale_age_setting(
             db.get_setting(con, "stale_age_days", ""))
-        filters = {**view.filters, "stale_age_days": stale_age_days}
+        filters = {**view.filters, "stale_age_days": stale_age_days,
+                   "search": search}
         total = db.count_job_groups(con, view.status, **filters)
         pages = max(1, -(-total // PAGE_SIZE))
         page = min(max(page, 0), pages - 1)
@@ -226,6 +366,16 @@ def _load_draft(job_id: int):
         return dict(row) if row is not None else None
 
 
+def _mark_opened(job_id: int):
+    with db.db() as con:
+        db.mark_job_opened(con, job_id)
+
+
+def _set_bookmark(job_id: int, marked: bool):
+    with db.db() as con:
+        db.set_bookmark(con, job_id, marked)
+
+
 def _set_contact_email(job_id: int, email: str):
     with db.db() as con:
         db.set_contact_email(con, job_id, email, "web_lookup")
@@ -283,17 +433,6 @@ def _draft_line(draft_status: object, draft_updated_at: object = None
     return _DRAFT_LINES.get(str(draft_status or ""), ("", ""))
 
 
-def _claim_is_running(job: dict) -> bool:
-    """Is a draft for this posting being written RIGHT NOW?
-
-    Only then may the Draft button hide. `drafting._claim` re-claims a row
-    abandoned past CLAIM_TIMEOUT_MIN, and this button is the only surface
-    that can trigger it — hiding it for as long as the row merely says
-    'generating' left a crashed draft with no way back."""
-    return (job["draft_status"] == "generating"
-            and not drafting.claim_is_stale(job["draft_updated_at"]))
-
-
 # What the board's period code means, in the language the row is written in.
 # An unknown code prints NOTHING rather than shouting an enum at him: the
 # figures still stand on their own, and the vocabulary is somebody else's.
@@ -340,6 +479,48 @@ def _salary_line(job: dict) -> str:
     return f"Gehalt: {span} €" + (f" ({period})" if period else "")
 
 
+def reader_notes(job: dict, already: dict | None) -> list[tuple[str, str]]:
+    """The warnings that belong ABOVE the advert text, worst first.
+
+    Each is a fact the posting itself carries, and each changes whether reading
+    on is worth his time — so none of them may wait until after a wall of
+    prose."""
+    notes = []
+    if already:
+        notes.append((helpers.applied_line(already), "danger"))
+    if job.get("liveness") == liveness.LIVENESS_GONE:
+        checked = str(job.get("liveness_checked_at") or "")[:10]
+        notes.append((f"⚠ Anzeige offline — beim letzten Abruf am {checked} "
+                      f"nicht mehr vorhanden.", "danger"))
+    if job.get("temp_agency"):
+        # The employer is a staffing firm and the work happens at a client's
+        # site — worth knowing before writing a letter, and the reason the
+        # letter never borrows this posting's address.
+        notes.append(("⚠ Arbeitnehmerüberlassung — der Arbeitsort gehört zu "
+                      "einem Kundenbetrieb.", "warn"))
+    draft_text, _ = _draft_line(job.get("draft_status"),
+                                job.get("draft_updated_at"))
+    if draft_text:
+        notes.append((draft_text, "warn" if "⚠" in draft_text else ""))
+    return notes
+
+
+def reader_facts(job: dict) -> list[tuple[str, str]]:
+    """The short facts block, with '—' wherever the posting states nothing.
+
+    An empty row rather than a missing one: "Gehalt —" says the advert is
+    silent about pay, and a row that simply vanished would leave him wondering
+    whether the app had lost it."""
+    return [
+        ("Refnr", str(job.get("refnr") or "").strip() or "—"),
+        ("Ort", str(job.get("location") or "").strip() or "—"),
+        ("Gehalt", _salary_line(job).partition(": ")[2] or "—"),
+        ("Kanal", _apply_line(job) or "noch nicht ermittelt"),
+        ("Gefunden", str(job.get("published_on") or job.get("fetched_at")
+                         or "")[:10] or "—"),
+    ]
+
+
 def _openable_url(job: dict) -> str:
     """The URL a posting's buttons may hand to the browser, '' when none is
     safe. The resolved apply link wins over the raw feed URL."""
@@ -359,212 +540,345 @@ def legacy_jobs_page():
 
 @ui.page(STELLEN_PATH)
 async def jobs_page():
-    async with frame("Stellen", current="stellen"):
-        current = {"view": DEFAULT_VIEW}
+    async with frame("Stellen", current="stellen", padded=False):
+        state = {"view": DEFAULT_VIEW, "page": 0, "search": "",
+                 "selected": None}
+        # The rows currently on screen, by id — what the keyboard moves through
+        # and what the reader is drawn from, so both always describe the very
+        # page he is looking at rather than a query run again behind his back.
+        shown: dict[int, dict] = {}
+        order: list[int] = []
+        row_elements: dict = {}
         # What the duplicate gate says about the rows currently on screen,
         # refreshed with them. Not `jobs.duplicate_of`: that is written once at
         # discovery, so every application he sends makes more rows stale.
         applied: dict[int, dict] = {}
-        page = {"value": 0}
-        refresh_gen = {"n": 0}  # rapid filter/switch flips: last request wins
-        # How many postings he has expanded to read. A rebuild collapses every
-        # one of them, so while this is above zero the live watcher defers.
-        reading = {"rows": 0}
-        # First element of the page: an update notice under fifty rows is an
-        # update notice nobody sees. The filters live at the bottom (they always
-        # have), so this cannot ride along with them.
-        header = ui.row().classes("w-full items-center gap-2")
-        container = ui.column().classes("w-full gap-2")
-        pager = ui.row().classes("items-center gap-2")
+        refresh_gen = {"n": 0}   # rapid view flips: last request wins
+
         # Feedback has to outlive the row that asked for it. A handler runs in
-        # the slot of the button that fired it, and refresh() clears
-        # `container` — so a dialog or notification built after a refresh has
-        # no live parent and raises instead of appearing, silently swallowing
-        # the very error it was meant to report. This host is a sibling of the
-        # list, so no refresh can delete it; clearing it first keeps exactly
-        # one dialog alive at a time.
+        # the slot of the element that fired it, and a refresh clears the list —
+        # so a dialog or notification built afterwards has no live parent and
+        # raises instead of appearing, silently swallowing the very error it was
+        # meant to report. This host is a sibling of both panes.
         overlay = ui.column().classes("contents")
 
         def say(message: str, **kwargs) -> None:
-            """Tell the user something, from a slot no refresh can delete.
-
-            `ui.notify` needs a live parent, and a handler's own is the element
-            that fired it — which this page's refresh (and, in the queue, its
-            timer) removes. Every message goes through here so the question
-            "is my slot still alive?" never has to be asked at a call site."""
+            """Tell the user something, from a slot no refresh can delete."""
             with overlay:
                 ui.notify(message, **kwargs)
 
-        async def refresh():
+        with ui.column().classes("jd-screen w-full"):
+            with ui.row().classes("jd-strip"):
+                ui.label("Stellen").classes("jd-strip-title")
+                range_label = ui.label().classes("jd-meta")
+                hidden_label = ui.label().classes("jd-meta")
+                # The chip belongs at the top of the page, not beside the
+                # filters: an update notice under fifty rows is an update
+                # notice nobody sees.
+                chip_host = ui.row().classes("items-center ml-auto gap-2")
+                with chip_host:
+                    ui.label("j k bewegen · x kein Interesse · s merken · "
+                             "⏎ Hauptaktion").classes("jd-meta")
+            with ui.element("div").classes("jd-panes"):
+                with ui.element("div").classes("jd-list"):
+                    with ui.row().classes("items-center gap-2 p-2 border-b"):
+                        search_box = ui.input(placeholder="suchen …") \
+                            .props("dense outlined clearable").classes("flex-1")
+                        search_box.on_value_change(
+                            lambda e: set_search(e.value or ""))
+                        ui.select(
+                            {view.key: view.label for view in VIEWS},
+                            value=DEFAULT_VIEW,
+                            on_change=lambda e: set_view(e.value),
+                        ).mark("view-select").props("dense outlined borderless") \
+                            .classes("min-w-36")
+                    rows_host = ui.column().classes("jd-rows w-full gap-0")
+                    pager = ui.row().classes("items-center gap-2 p-2 border-t")
+                reader = ui.element("div").classes("jd-reader")
+
+        # ------------------------------------------------------------------
+        # loading and rendering
+        # ------------------------------------------------------------------
+        async def refresh() -> None:
             refresh_gen["n"] += 1
             gen = refresh_gen["n"]
-            view = await run.io_bound(_load_jobs, current["view"], page["value"])
-            if gen != refresh_gen["n"]:
-                return  # superseded — a newer refresh already owns the view
-            page["value"] = view["page"]  # the loader clamped it to what exists
-            container.clear()
-            reading["rows"] = 0  # every expansion just died with the container
+            view = await run.io_bound(
+                _load_jobs, state["view"], state["page"], state["search"])
+            if gen != refresh_gen["n"] or view is None:
+                return  # superseded, or the page is going away
+            state["page"] = view["page"]   # the loader clamped it to what exists
             live_view.mark(view["signature"])
+            applied.clear()
+            applied.update(view["applied"])
+            shown.clear()
+            order.clear()
+            for row in view["rows"]:
+                shown[row["id"]] = row
+                order.append(row["id"])
+            range_label.set_text(_range_line(
+                view["page"], view["total"], len(view["rows"])))
             hidden_label.set_text(_hidden_line(
                 view["view"], view["counts"], view["stale_age_days"]))
-            with container:
-                if not view["rows"]:
-                    ui.label(view["view"].empty).classes("text-gray-500")
-                applied.clear()
-                applied.update(view["applied"])
-                for job in view["rows"]:
-                    render_job(job, view["siblings"].get(job.get("company_key"), []))
+            # Keep his place across a rebuild: a posting that survived the
+            # reload stays open, and only a selection that no longer exists
+            # falls back to the top of the list.
+            if state["selected"] not in shown:
+                state["selected"] = order[0] if order else None
+            render_rows(view)
             render_pager(view)
+            render_reader()
 
-        def render_pager(view: dict):
+        def render_rows(view: dict) -> None:
+            rows_host.clear()
+            row_elements.clear()
+            with rows_host:
+                if not order:
+                    ui.label(view["view"].empty).classes("p-4 jd-meta")
+                for job_id in order:
+                    render_row(shown[job_id], view["siblings"])
+
+        def render_row(job: dict, siblings: dict) -> None:
+            row = ui.element("button").classes("jd-row").props(
+                f'data-unread={"false" if job["opened_at"] else "true"} '
+                f'aria-selected={"true" if job["id"] == state["selected"] else "false"}'
+            )
+            row_elements[job["id"]] = row
+            row.on("click", lambda _=None, j=job["id"]: select(j))
+            with row:
+                ui.element("span").classes("jd-gutter")
+                with ui.element("div").classes("jd-row-body"):
+                    with ui.row().classes("items-baseline gap-2 no-wrap w-full"):
+                        ui.label(job["company"] or "—").classes("jd-firma")
+                        score = job["effective_score"]
+                        ui.label("—" if score is None else str(score)).classes(
+                            "jd-score ml-auto" + (" hi" if (score or 0) >= 80 else ""))
+                    ui.label(clean_title(job["title"])).classes("jd-title")
+                    ui.label(row_meta(job)).classes("jd-meta")
+            others = job.get("company_count", 1) - 1
+            if others > 0:
+                listed = len(siblings.get(job["company_key"], ()))
+                stellen = "weitere Stelle" if others == 1 else "weitere Stellen"
+                shown_note = "" if others <= listed else f" (Top {listed})"
+                ui.label(f"↳ +{others} {stellen} bei dieser Firma{shown_note}") \
+                    .classes("jd-siblings w-full")
+
+        def render_pager(view: dict) -> None:
             pager.clear()
             with pager:
-                ui.label(_range_line(view["page"], view["total"],
-                                     len(view["rows"]))) \
-                    .classes("text-xs text-gray-500")
                 if view["pages"] <= 1:
                     return
                 ui.button(icon="chevron_left", on_click=lambda: turn_page(-1)) \
                     .props("flat dense").set_enabled(view["page"] > 0)
                 ui.label(f"Seite {view['page'] + 1}/{view['pages']}") \
-                    .classes("text-xs text-gray-500")
+                    .classes("jd-meta")
                 ui.button(icon="chevron_right", on_click=lambda: turn_page(1)) \
                     .props("flat dense") \
                     .set_enabled(view["page"] + 1 < view["pages"])
 
-        async def turn_page(step: int):
-            page["value"] += step
-            await refresh()
+        def render_reader() -> None:
+            reader.clear()
+            job = shown.get(state["selected"])
+            with reader:
+                if job is None:
+                    ui.label("Keine Anzeige ausgewählt.").classes("p-6 jd-meta")
+                    return
+                _render_reader(job, applied.get(job["id"]))
 
-        def track_reading(event) -> None:
-            """Count the postings he currently has open."""
-            reading["rows"] = max(0, reading["rows"] + (1 if event.value else -1))
-
-        def render_job(job: dict, siblings: list[dict] = ()):
-            remote = " · remote" if job["remote"] else ""
-            head = (f"{job['title']}  —  {job['company']}"
-                    f" ({job['location'] or 'n/a'}{remote}{_score_line(job)})")
-            others = job.get("company_count", 1) - 1
-            if others > 0:
-                head += f"  +{others}"
-            # An open row is him READING a posting: the live watcher must not
-            # pull the list out from under it (see ui/live.py).
-            with ui.expansion(head, on_value_change=track_reading) \
-                    .classes("w-full border rounded"):
-                ui.label(f"Source: {job['source']} · found {job['fetched_at'][:16]} · "
-                         f"status: {job['status']}").classes("text-xs text-gray-500")
-                if job["match_reason"]:
-                    mismatch = job["match_score"] == 0
-                    ui.label(f"Match: {job['match_reason']}").classes(
-                        "text-sm text-red-700" if mismatch else "text-sm text-gray-600"
-                    )
-                if job["contact_email"]:
-                    ui.label(f"Contact: {job['contact_email']}").classes("text-sm")
-                salary = _salary_line(job)
-                if salary:
-                    ui.label(salary).classes("text-sm text-gray-700")
-                if job["temp_agency"]:
-                    # The employer is a staffing firm and the work happens at a
-                    # client's site — worth knowing before writing a letter, and
-                    # the reason the letter never borrows this posting's address.
-                    ui.label("⚠ Arbeitnehmerüberlassung — der Arbeitsort "
-                             "gehört zu einem Kundenbetrieb.") \
-                        .classes("text-sm text-amber-700")
-                if job["liveness"] == liveness.LIVENESS_GONE:
-                    checked = (job["liveness_checked_at"] or "")[:10]
-                    ui.label(f"⚠ Anzeige offline — beim letzten Abruf am "
-                             f"{checked} nicht mehr vorhanden.") \
-                        .classes("text-sm text-red-700")
-                already = applied.get(job["id"])
-                if already:
-                    ui.label(helpers.applied_line(already)).classes(
-                        "text-sm text-amber-700")
-                draft_text, draft_classes = _draft_line(
-                    job["draft_status"], job["draft_updated_at"])
-                if draft_text:
-                    ui.label(draft_text).classes(draft_classes)
-                channel_line = _apply_line(job)
-                if channel_line:
-                    ui.label(channel_line).classes("text-sm text-blue-700")
-                if siblings:
-                    render_siblings(job, siblings)
-                description = job["description"] or "(no description available)"
-                ui.markdown(posting_markdown(description[:4000])).classes("text-sm")
-                with ui.row().classes("gap-2"):
+        def _render_reader(job: dict, already: dict | None) -> None:
+            with ui.column().classes("w-full gap-0 p-6"):
+                ui.label(job["company"] or "—").classes("text-xl jd-serif")
+                ui.label(clean_title(job["title"])).classes("text-base mt-1")
+                ui.label(row_meta(job) + _score_line(job)).classes("jd-meta mt-2")
+                # Triage first: the three things he does WITHOUT reading, so
+                # they are reachable before the text and again from the
+                # keyboard. The one action that commits him waits below it.
+                with ui.row().classes("gap-2 my-4 flex-wrap"):
+                    marked = bool(job["bookmarked_at"])
+                    ui.button("★ gemerkt" if marked else "☆ merken",
+                              on_click=lambda j=job["id"]: toggle_bookmark(j)) \
+                        .props("flat dense no-caps")
+                    ui.button("✕ kein Interesse",
+                              on_click=lambda j=job["id"]: not_interested(j)) \
+                        .props("flat dense no-caps") \
+                        .set_enabled(job["status"] == "new")
                     open_url = _openable_url(job)
                     if open_url:
-                        ui.button("Open posting", icon="open_in_new",
+                        ui.button("Anzeige öffnen",
                                   on_click=lambda u=open_url:
-                                      ui.navigate.to(u, new_tab=True)).props("outline")
-                    if not job["apply_channel"]:
-                        ui.button("Kanal ermitteln", icon="travel_explore",
-                                  on_click=lambda j=job: resolve_channel(j)).props("outline")
-                    if job["status"] in ("new", "portal"):
-                        # the cockpit is where a FORM application actually
-                        # happens; it opens the employer's page itself and
-                        # keeps every field one click away beside it
-                        ui.button("Formular ausfüllen", icon="assignment",
-                                  on_click=lambda j=job:
-                                      ui.navigate.to(f"/cockpit/{j['id']}")) \
-                            .props("outline")
-                    if (job["status"] in ("new", "portal")
-                            and not already
-                            and not _claim_is_running(job)):
-                        # also at the form stage: the cockpit's own gaps tell him
-                        # to draft, and opening a form moves the posting here.
-                        # While one is genuinely being written the button can
-                        # only refuse, so the line above says so instead — but
-                        # once the claim goes stale this is the ONLY way back.
-                        # `draft_button` is local to this render_job call, so the
-                        # closure sees this row's own button and no other.
-                        draft_button = ui.button("Draft application", icon="edit_note") \
-                            .props("outline")
-                        draft_button.on_click(
-                            lambda j=job, b=draft_button: draft(j, button=b))
-                    if job["status"] == "new":
-                        if not job["contact_email"]:
-                            ui.button("Kontakt-E-Mail suchen", icon="alternate_email",
-                                      on_click=lambda j=job: find_email(j)).props("outline")
-                        ui.button("Skip", icon="close",
-                                  on_click=lambda j=job: skip(j)).props("outline color=grey")
-                    if job["status"] == "portal":
-                        ui.button("I applied — record it", icon="check",
-                                  on_click=lambda j=job: confirm_applied(j)) \
-                            .props("color=positive")
+                                      ui.navigate.to(u, new_tab=True)) \
+                            .props("flat dense no-caps")
+                    if job["status"] == "new" and not job["contact_email"]:
+                        ui.button("Kontakt-E-Mail suchen",
+                                  on_click=lambda j=job: find_email(j)) \
+                            .props("flat dense no-caps")
+                for text, kind in reader_notes(job, already):
+                    ui.label(text).classes(f"jd-note {kind} mb-2")
+                _render_facts(job)
+                description = job["description"] or "(keine Beschreibung)"
+                ui.markdown(posting_markdown(description[:8000])) \
+                    .classes("jd-ad mt-4")
+                if scoring.looks_like_snippet(job["description"] or ""):
+                    ui.label(
+                        f"Diese Quelle liefert nur einen Ausschnitt "
+                        f"({len(job['description'] or '')} Zeichen) — der "
+                        f"vollständige Text steht beim Anbieter."
+                    ).classes("jd-note mt-3")
+                # AFTER the text, deliberately: he reads the advert first and
+                # only then sees what the machine made of it, and only then is
+                # offered the one action that commits him.
+                if job["match_reason"]:
+                    with ui.element("div").classes("jd-why"):
+                        ui.label(f"WARUM {job['effective_score']}") \
+                            .classes("jd-meta")
+                        ui.label(job["match_reason"]).classes("text-sm mt-1")
+                _render_primary(job, already)
 
-        def render_siblings(job: dict, siblings: list[dict]):
-            """The postings this row stands in front of: same company, lower
-            rank. Titles and scores only — one application per company means
-            these are context for choosing, not rows to act on."""
-            others = job.get("company_count", 1) - 1
-            shown = ("" if others <= len(siblings)
-                     else f" (die {len(siblings)} bestbewerteten)")
-            stellen = "weitere Stelle" if others == 1 else "weitere Stellen"
-            with ui.column().classes("gap-0 pl-3 border-l"):
-                ui.label(
-                    f"{others} {stellen} bei {job['company']}{shown} — "
-                    "eine Bewerbung pro Firma, deshalb steht hier die "
-                    "bestbewertete."
-                ).classes("text-xs text-gray-500")
-                for other in siblings:
-                    with ui.row().classes("items-center gap-2"):
-                        ui.label(f"{other['title']}{_score_line(other)}") \
-                            .classes("text-xs")
-                        other_url = _openable_url(other)
-                        if other_url:
-                            ui.button(
-                                icon="open_in_new",
-                                on_click=lambda u=other_url:
-                                    ui.navigate.to(u, new_tab=True),
-                            ).props("flat dense")
+        def _render_facts(job: dict) -> None:
+            with ui.element("div").classes("jd-facts mt-4"):
+                for key, value in reader_facts(job):
+                    ui.label(key).classes("k")
+                    ui.label(value)
 
+        def _render_primary(job: dict, already: dict | None) -> None:
+            action = primary_action(job, already)
+            with ui.row().classes("items-center gap-3 mt-6 flex-wrap"):
+                button = ui.button(action.label).props("no-caps")
+                button.set_enabled(action.enabled)
+                if action.enabled:
+                    button.on_click(
+                        lambda _=None, j=job, a=action, b=button: run_action(a, j, b))
+                if action.reason:
+                    ui.label(action.reason).classes("jd-reason")
+
+        # ------------------------------------------------------------------
+        # what the controls do
+        # ------------------------------------------------------------------
+        async def select(job_id: int) -> None:
+            """Open a posting in the reading pane, and record that he read it."""
+            if job_id not in shown:
+                return
+            state["selected"] = job_id
+            if not shown[job_id]["opened_at"]:
+                await run.io_bound(_mark_opened, job_id)
+                # Recorded on the row we are holding too, so the mark and the
+                # database agree without asking it again.
+                shown[job_id]["opened_at"] = "gelesen"
+            restamp_rows()
+            render_reader()
+
+        def restamp_rows() -> None:
+            """Re-stamp the selection and unread marks without rebuilding.
+
+            A rebuild on every keystroke would throw the list's scroll position
+            away, and moving down the list is the thing he does most."""
+            for job_id, element in row_elements.items():
+                element.props(
+                    f'data-unread={"false" if shown[job_id]["opened_at"] else "true"} '
+                    f'aria-selected={"true" if job_id == state["selected"] else "false"}'
+                )
+                element.update()
+
+        async def move(step: int) -> None:
+            if not order:
+                return
+            if state["selected"] in order:
+                index = order.index(state["selected"]) + step
+            else:
+                index = 0
+            await select(order[min(max(index, 0), len(order) - 1)])
+
+        async def turn_page(step: int) -> None:
+            state["page"] += step
+            state["selected"] = None
+            await refresh()
+
+        async def set_view(value: str) -> None:
+            """Move to another named view.
+
+            One assignment and one refresh: nothing here writes another control,
+            so no handler can be echoed back into this one — which is what made
+            the two pile switches rebuild the page forever."""
+            state["view"] = value or DEFAULT_VIEW
+            state["page"] = 0  # a different list: page 3 of it means nothing
+            state["selected"] = None
+            await refresh()
+
+        async def set_search(value: str) -> None:
+            state["search"] = value
+            state["page"] = 0
+            state["selected"] = None
+            await refresh()
+
+        async def run_action(action: Action, job: dict, button) -> None:
+            if action.key == ACTION_RESOLVE:
+                await resolve_channel(job)
+            elif action.key == ACTION_DRAFT:
+                await draft(job, button=button)
+            elif action.key == ACTION_FORM:
+                # From `overlay`, which is a sibling of both panes: a handler
+                # runs in the slot of the element that fired it, and a refresh
+                # racing this one would delete that slot before the navigation
+                # is built.
+                with overlay:
+                    ui.navigate.to(f"/cockpit/{job['id']}")
+            elif action.key == ACTION_QUEUE:
+                with overlay:
+                    ui.navigate.to("/queue")
+            elif action.key == ACTION_RECORD:
+                await confirm_applied(job)
+
+        async def on_key(event) -> None:
+            if not event.action.keydown:
+                return
+            if event.modifiers.ctrl or event.modifiers.meta or event.modifiers.alt:
+                return
+            key = str(event.key)
+            job = shown.get(state["selected"])
+            if key == "j" or key == "ArrowDown":
+                await move(1)
+            elif key == "k" or key == "ArrowUp":
+                await move(-1)
+            elif job is None:
+                return
+            elif key == "x":
+                await not_interested(job["id"])
+            elif key == "s":
+                await toggle_bookmark(job["id"])
+            elif key == "o":
+                url = _openable_url(job)
+                if url:
+                    with overlay:
+                        ui.navigate.to(url, new_tab=True)
+            elif key == "Enter":
+                action = primary_action(job, applied.get(job["id"]))
+                if action.enabled:
+                    await run_action(action, job, None)
+
+        async def toggle_bookmark(job_id: int) -> None:
+            job = shown.get(job_id)
+            if job is None:
+                return
+            await run.io_bound(_set_bookmark, job_id, not job["bookmarked_at"])
+            await refresh()
+
+        async def not_interested(job_id: int) -> None:
+            job = shown.get(job_id)
+            if job is None or job["status"] != "new":
+                return
+            await run.io_bound(_set_status, job_id, "skipped")
+            await refresh()
+
+        # ------------------------------------------------------------------
+        # the slow actions, unchanged in substance from the old inbox
+        # ------------------------------------------------------------------
         def show_draft(draft_row: dict, job: dict):
             with overlay, ui.dialog() as dialog, \
                     ui.card().classes("w-[720px] max-w-full"):
-                ui.label(f"Draft — {job['title']}").classes("font-bold")
+                ui.label(f"Entwurf — {clean_title(job['title'])}") \
+                    .classes("font-bold")
                 recipient = draft_row["recipient"] or \
-                    "no application e-mail found (portal or manual contact)"
-                ui.label(f"To: {recipient}").classes("text-sm text-gray-600")
+                    "keine Bewerbungs-E-Mail gefunden (Formular oder Kontakt fehlt)"
+                ui.label(f"An: {recipient}").classes("text-sm text-gray-600")
                 ui.input("Betreff", value=draft_row["betreff"]) \
                     .classes("w-full").props("readonly")
                 ui.textarea("E-Mail", value=draft_row["email_body"]) \
@@ -572,8 +886,8 @@ async def jobs_page():
                 ui.textarea("Anschreiben", value=draft_row["anschreiben_body"]) \
                     .classes("w-full").props("readonly autogrow")
                 ui.label(
-                    f"Model: {draft_row['llm_model']} · edit and send from "
-                    f"the Review queue"
+                    f"Modell: {draft_row['llm_model']} · bearbeiten und senden "
+                    f"in der Review queue"
                 ).classes("text-xs text-gray-500")
                 pdf_label = ui.label(
                     f"Mappe: {draft_row['pdf_path']}" if draft_row["pdf_path"]
@@ -581,42 +895,39 @@ async def jobs_page():
                 ).classes("text-xs text-gray-600")
                 with ui.row().classes("w-full justify-end gap-2"):
                     async def make_pdf():
-                        say("Creating Bewerbungsmappe…")
+                        say("Bewerbungsmappe wird gebaut…")
                         result = await mappe.create_mappe(job["id"])
                         if not result["ok"]:
-                            say(result["error"], type="warning",
-                                      multi_line=True)
+                            say(result["error"], type="warning", multi_line=True)
                             return
                         pdf_label.set_text(f"Mappe: {result['pdf_path']}")
-                        say(
-                            helpers.mappe_summary(result, with_anlagen=True),
-                            type="positive", multi_line=True,
-                        )
+                        say(helpers.mappe_summary(result, with_anlagen=True),
+                            type="positive", multi_line=True)
                         if result["warning"]:
-                            say(result["warning"], type="warning",
-                                      multi_line=True)
+                            say(result["warning"], type="warning", multi_line=True)
 
                     def open_pdf():
                         path = (pdf_label.text or "").removeprefix("Mappe: ")
                         if not path:
-                            say("create the Mappe first", type="warning")
+                            say("die Mappe zuerst bauen", type="warning")
                         elif not pathlib.Path(path).exists():
-                            say("the Mappe file is gone — create it "
-                                      "again", type="warning")
+                            say("die Mappe-Datei ist weg — neu bauen",
+                                type="warning")
                         else:
                             open_in_system(path)
 
-                    ui.button("Create PDF", icon="picture_as_pdf",
-                              on_click=make_pdf).props("outline")
-                    ui.button("Open PDF", icon="open_in_new",
-                              on_click=open_pdf).props("outline")
-                    ui.button("Re-draft", icon="refresh",
+                    ui.button("Mappe bauen", icon="picture_as_pdf",
+                              on_click=make_pdf).props("outline no-caps")
+                    ui.button("Mappe öffnen", icon="open_in_new",
+                              on_click=open_pdf).props("outline no-caps")
+                    ui.button("Neu schreiben", icon="refresh",
                               on_click=lambda: redraft(dialog, job)) \
-                        .props("outline")
+                        .props("outline no-caps")
                     ui.button("Review queue", icon="outbox",
                               on_click=lambda: ui.navigate.to("/queue")) \
-                        .props("outline")
-                    ui.button("Close", on_click=dialog.close).props("flat")
+                        .props("outline no-caps")
+                    ui.button("Schließen", on_click=dialog.close) \
+                        .props("flat no-caps")
             dialog.open()
 
         async def redraft(dialog, job: dict):
@@ -633,11 +944,11 @@ async def jobs_page():
                     with overlay:
                         show_draft(existing, job)
                     return
-            say("Drafting application…")
+            say("Bewerbung wird geschrieben…")
             if button is not None:
                 # A minute is long enough that a faded toast reads as "nothing
                 # happened" — the button that was pressed says what it is doing.
-                button.set_text("wird geschrieben…")
+                button.set_text("wird geschrieben …")
                 button.disable()
             try:
                 result = await drafting.draft_for_job(job["id"])
@@ -650,8 +961,8 @@ async def jobs_page():
                 result = {"ok": False, "draft": None,
                           "error": "Der Entwurf ist unerwartet fehlgeschlagen "
                                    "— Details stehen im Log."}
-            # The row carries the outcome from here on, whichever way it went —
-            # and everything the user sees afterwards is built in `overlay`,
+            # The reader carries the outcome from here on, whichever way it went
+            # — and everything the user sees afterwards is built in `overlay`,
             # because this refresh has just deleted the button we came from.
             await refresh()
             overlay.clear()
@@ -668,14 +979,14 @@ async def jobs_page():
                                  "ats_vendor": res["vendor"]})
             await refresh()
             say(label or "Kanal nicht ermittelbar",
-                      type="positive" if label else "warning")
+                type="positive" if label else "warning")
 
         async def find_email(job: dict):
             say("Kontakt-E-Mail wird gesucht…")
             res = await contact_lookup.lookup_and_propose(job["id"])
             if not res["email"]:
                 say("Keine verifizierte Bewerbungs-E-Mail gefunden",
-                          type="warning")
+                    type="warning")
                 return
             overlay.clear()
             with overlay, ui.dialog() as dialog, \
@@ -700,51 +1011,32 @@ async def jobs_page():
                 with ui.row().classes("w-full justify-end gap-2"):
                     if not res["generic"]:  # never adopt a generic info@ inbox
                         ui.button("Übernehmen", icon="check",
-                                  on_click=adopt).props("color=positive")
-                    ui.button("Schließen", on_click=dialog.close).props("flat")
+                                  on_click=adopt).props("color=positive no-caps")
+                    ui.button("Schließen", on_click=dialog.close) \
+                        .props("flat no-caps")
             dialog.open()
 
-        async def skip(job: dict):
-            await run.io_bound(_set_status, job["id"], "skipped")
-            await refresh()
-
         async def confirm_applied(job: dict):
-            bewerbung_id = await run.io_bound(_confirm_applied, job["id"], "Online-Portal")
+            bewerbung_id = await run.io_bound(_confirm_applied, job["id"],
+                                              "Online-Portal")
             await refresh()
             if bewerbung_id is None:
-                say("Blocked: you already applied at this company", type="warning")
+                say("Blockiert: bei dieser Firma liegt schon eine Bewerbung",
+                    type="warning")
             else:
-                say("Application recorded ✓", type="positive")
+                say("Bewerbung eingetragen ✓", type="positive")
 
-        with ui.row().classes("items-center gap-4"):
-            ui.select(
-                {view.key: view.label for view in VIEWS},
-                value=DEFAULT_VIEW,
-                label="Ansicht",
-                on_change=lambda e: set_view(e.value),
-            ).mark("view-select").props("dense outlined").classes("min-w-48") \
-                .tooltip("Eine Ansicht statt sechs Filtern und vier Schaltern. "
-                         "Nichts wird je gelöscht — was hier nicht steht, steht "
-                         "in einer der anderen Ansichten.")
-            hidden_label = ui.label().classes("text-xs text-gray-500")
         # Postings arrive hourly, scores land every ten minutes and the liveness
         # pass runs 90 s after every start — all of it invisible until this. It
-        # rebuilds only when the data really changed, and never while he has a
-        # posting open or a dialog on screen.
-        with header:
-            live_view = live.watch(
-                _signature, refresh,
-                busy=lambda: reading["rows"] > 0 or live.dialog_open(),
-            )
-
-        async def set_view(value: str):
-            """Move to another named view.
-
-            One assignment and one refresh: nothing here writes another control,
-            so no handler can be echoed back into this one — which is what made
-            the two pile switches rebuild the page forever."""
-            current["view"] = value or DEFAULT_VIEW
-            page["value"] = 0  # a different list: page 3 of it means nothing
-            await refresh()
-
+        # rebuilds only when the data really changed, and never while a dialog
+        # is on screen: the reading pane survives a rebuild by itself, so unlike
+        # the old expansions there is nothing here to yank out from under him.
+        with chip_host:
+            live_view = live.watch(_signature, refresh, busy=live.dialog_open)
+        # `ignore` is NiceGUI's own client-side rule and the only one that can
+        # work: a keystroke typed into the search box must never reach here, and
+        # only the browser knows where the caret is. Pinned by a test, because
+        # 'x' landing on the page while he types a company name would throw the
+        # posting away.
+        ui.keyboard(on_key=on_key, ignore=["input", "select", "button", "textarea"])
         await refresh()

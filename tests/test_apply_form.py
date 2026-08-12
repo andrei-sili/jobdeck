@@ -315,15 +315,20 @@ def test_the_cockpit_route_is_registered_by_the_app():
                for line in pathlib.Path(cockpit.__file__).read_text().splitlines())
 
 
-def test_the_inbox_offers_the_cockpit_exactly_where_a_form_is_filled():
+@pytest.mark.parametrize("channel", ["ats_form", "board_apply", "company_site",
+                                     "unknown"])
+def test_the_main_button_leads_into_the_cockpit_wherever_a_form_is_filled(channel):
+    """The cockpit is the ONE form path: it opens the employer's page itself
+    and keeps every field a click away beside it. Two controls for one act is
+    what "too many buttons" meant."""
     from jobdeck.ui.pages import jobs as jobs_page
+    action = jobs_page.primary_action(
+        {"status": "new", "apply_channel": channel})
+    assert action.key == jobs_page.ACTION_FORM
+    assert action.enabled
+
     source = pathlib.Path(jobs_page.__file__).read_text()
-    assert 'ui.navigate.to(f"/cockpit/{j[\'id\']}")' in source
-    # offered while applying is possible, and drafting stays reachable there —
-    # the cockpit's own gaps tell him to draft. Matched on the condition rather
-    # than the whole `if` line: the Draft button carries a second clause now
-    # (it hides while one is being written) and must still cover both statuses.
-    assert source.count('job["status"] in ("new", "portal")') == 2
+    assert 'ui.navigate.to(f"/cockpit/{job[\'id\']}")' in source
 
 
 @pytest.mark.parametrize("job, expected, why", [
