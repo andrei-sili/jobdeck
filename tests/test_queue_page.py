@@ -287,3 +287,39 @@ def test_the_shared_timer_is_cancelled_when_the_page_goes_away():
     tail = source[source.index("ui.timer("):]
     assert "on_disconnect(" in tail, "the timer outlives its page"
     assert "cancel()" in tail
+
+
+def test_building_the_mappe_refreshes_what_the_send_pins(con, data_dir):
+    """`create_mappe` ends in its own upsert_draft, and every upsert rewrites
+    `updated_at` — so the snapshot the dialog pins with `expect=` went stale
+    the moment the PDF was built, and the send that followed was refused with
+    "the draft changed since you reviewed it". Every time, on the path the
+    Stellen screen is built around: the last human gate before a real e-mail
+    became a dialog he learns to dismiss and press again."""
+    source = pathlib.Path(draft_editor.__file__).read_text()
+    body = source[source.index("async def make_pdf"):]
+    body = body[:body.index("def open_pdf")]
+    assert "await run.io_bound(load, job_id)" in body, (
+        "the editor keeps a pre-Mappe snapshot and pins it with expect=")
+    assert "current.update(" in body
+
+
+def test_a_draft_that_is_already_going_is_not_offered_a_send_button(con, data_dir):
+    """A draft in `sending` or `sent` is the record of what went out. Offering
+    "Send now" on one made the pre-send confirmation state "REAL send to the
+    company" for a message the service refuses inside its claim — and that
+    dialog's whole job is to be trustworthy."""
+    assert "sending" not in draft_editor.EDITABLE_STATUS
+    assert "sent" not in draft_editor.EDITABLE_STATUS
+    source = pathlib.Path(draft_editor.__file__).read_text()
+    guard = source[:source.index('"Send now"')]
+    assert 'if row["status"] in EDITABLE_STATUS:' in guard
+
+
+def test_the_duplicate_warning_in_the_confirmation_is_read_when_it_is_shown(
+        con, data_dir):
+    """An application to that company can land while the dialog sits open (an
+    auto-send tick, a second tab), and this line is the last statement before
+    the press."""
+    source = pathlib.Path(draft_editor.__file__).read_text()
+    assert "already_applied() if callable(already_applied)" in source

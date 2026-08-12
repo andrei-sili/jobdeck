@@ -65,7 +65,7 @@ def _save_draft(job_id: int, values: dict, clear_pdf: bool):
 
 
 def open_editor(row: dict, *, overlay, say, on_change,
-                already_applied: dict | None = None) -> None:
+                already_applied=None) -> None:
     """Open the draft for this posting over whatever screen asked for it.
 
     `overlay` is the caller's own host — a sibling of its list, because a
@@ -147,8 +147,19 @@ def open_editor(row: dict, *, overlay, say, on_change,
                 say(result["error"], type="warning",
                           multi_line=True)
                 return
-            current["pdf_path"] = result["pdf_path"]
-            pdf_label.set_text(f"Mappe: {result['pdf_path']}")
+            # `mappe` finishes with its own upsert_draft, and every upsert
+            # rewrites `updated_at` — so the snapshot this dialog pins with
+            # `expect=` went stale the moment the PDF was built, and the send
+            # that followed was refused with "the draft changed since you
+            # reviewed it". Every time, on the path this screen is built
+            # around, turning the last human gate before a real e-mail into a
+            # dialog he learns to dismiss and press again.
+            fresh = await run.io_bound(load, job_id)
+            if fresh is not None:
+                current.update(fresh)
+            else:
+                current["pdf_path"] = result["pdf_path"]
+            pdf_label.set_text(f"Mappe: {current['pdf_path']}")
             say(helpers.mappe_summary(result), type="positive")
             if result["warning"]:
                 say(result["warning"], type="warning",
@@ -187,10 +198,14 @@ def open_editor(row: dict, *, overlay, say, on_change,
                 ui.label(f"{mode}: {final}").classes(
                     "text-sm font-bold text-red-700" if not test_mode
                     else "text-sm font-bold text-amber-700")
-                already = already_applied
+                # Read HERE rather than when the dialog opened: an application
+                # to this company can land while it sits open (an auto-send
+                # tick, a second tab), and this is the last statement before
+                # the press. The gate inside the claim would refuse it a second
+                # later, but the point of this line is that he sees it first.
+                already = (already_applied() if callable(already_applied)
+                           else already_applied)
                 if already:
-                    # last statement before the press; the gate inside
-                    # the claim would refuse it a second later
                     ui.label(helpers.applied_line(already)) \
                         .classes("text-sm font-bold text-amber-700")
                 ui.label(f"Betreff: {current['betreff']}") \
@@ -255,7 +270,13 @@ def open_editor(row: dict, *, overlay, say, on_change,
             if row["status"] == "ready":
                 ui.button("Approve for auto-send", icon="schedule_send",
                           on_click=approve_from_editor).props("outline")
-            ui.button("Send now", icon="send", on_click=send_now) \
-                .props("color=positive")
+            if row["status"] in EDITABLE_STATUS:
+                # A draft that is sending or sent is the record of what went
+                # out. Offering "Send now" on one made the pre-send
+                # confirmation state "REAL send to the company" for a message
+                # the service refuses inside its own claim — and that dialog's
+                # whole job is to be trustworthy.
+                ui.button("Send now", icon="send", on_click=send_now) \
+                    .props("color=positive")
             ui.button("Close", on_click=dialog.close).props("flat")
     dialog.open()

@@ -321,13 +321,17 @@ def test_the_main_button_leads_into_the_cockpit_wherever_a_form_is_filled(channe
     and keeps every field a click away beside it. Two controls for one act is
     what "too many buttons" meant."""
     from jobdeck.ui.pages import jobs as jobs_page
-    action = jobs_page.primary_action(
-        {"status": "new", "apply_channel": channel})
-    assert action.key == jobs_page.ACTION_FORM
-    assert action.enabled
+    steps = {s.key: s for s in jobs_page.apply_steps(
+        {"status": "new", "apply_channel": channel, "contact_email": "",
+         "draft_status": None, "draft_updated_at": None, "pdf_path": "",
+         "url": "https://firma.de/stelle", "apply_url": "",
+         "company": "Eine GmbH"})}
+    assert jobs_page.STEP_FORM in steps
+    assert steps[jobs_page.STEP_FORM].enabled
 
     source = pathlib.Path(jobs_page.__file__).read_text()
-    assert 'ui.navigate.to(f"/cockpit/{job[\'id\']}")' in source
+    assert 'ui.navigate.to(url, new_tab=True)' in source, (
+        "the form step must open the employer's page through the shared gate")
 
 
 @pytest.mark.parametrize("job, expected, why", [

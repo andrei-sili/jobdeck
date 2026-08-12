@@ -786,11 +786,9 @@ def test_only_a_claim_the_reclaim_would_refuse_blocks_the_button(age, running):
     import datetime
     stamp = (datetime.datetime.now()
              - datetime.timedelta(minutes=age)).isoformat(timespec="seconds")
-    job = {"status": "new", "draft_status": "generating",
-           "draft_updated_at": stamp}
-    action = jobs.primary_action(job)
-    assert action.enabled is not running
-    assert (action.key == jobs.ACTION_DRAFT) is not running
+    steps = {s.key: s for s in jobs.apply_steps(
+        _row(draft_status="generating", draft_updated_at=stamp))}
+    assert steps[jobs.STEP_DRAFT].enabled is not running
     assert ("abgebrochen" in jobs._draft_line("generating", stamp)[0]) is not running
 
 
@@ -798,10 +796,9 @@ def test_an_unreadable_claim_timestamp_reads_as_running():
     """A stored value we cannot parse is not evidence the process died — and
     treating it as dead would let a second claim start while the first is
     still spending money."""
-    action = jobs.primary_action(
-        {"status": "new", "draft_status": "generating",
-         "draft_updated_at": "not a timestamp"})
-    assert action.enabled is False
+    steps = {s.key: s for s in jobs.apply_steps(
+        _row(draft_status="generating", draft_updated_at="not a timestamp"))}
+    assert steps[jobs.STEP_DRAFT].enabled is False
 
 
 _NESTED_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
@@ -1248,56 +1245,25 @@ def _row(**over) -> dict:
     return row
 
 
-@pytest.mark.parametrize("job, key, enabled", [
-    # 650 of his 803 postings are in exactly this state
-    (_row(), jobs.ACTION_RESOLVE, True),
-    (_row(apply_channel="direct_email"), jobs.ACTION_DRAFT, True),
-    (_row(apply_channel="ats_form"), jobs.ACTION_FORM, True),
-    (_row(apply_channel="board_apply"), jobs.ACTION_FORM, True),
-    (_row(apply_channel="company_site"), jobs.ACTION_FORM, True),
-    # resolved, and the answer was "no way" — so the honest offer is the
-    # advert itself, not a form the app has no address for
-    (_row(apply_channel="unknown"), jobs.ACTION_OPEN, True),
-    (_row(status="skipped"), jobs.ACTION_REVIVE, True),
-    (_row(status="skipped", apply_channel="direct_email"), jobs.ACTION_REVIVE, True),
-    (_row(status="portal"), jobs.ACTION_RECORD, True),
-    (_row(draft_status="ready"), jobs.ACTION_QUEUE, True),
-    (_row(draft_status="approved"), jobs.ACTION_QUEUE, True),
-    (_row(draft_status="sending"), jobs.ACTION_QUEUE, True),
-    (_row(draft_status="failed"), jobs.ACTION_DRAFT, True),
-    (_row(status="applied"), jobs.ACTION_NONE, False),
-    (_row(status="duplicate"), jobs.ACTION_NONE, False),
-])
-def test_every_state_of_a_posting_has_exactly_one_next_step(job, key, enabled):
-    action = jobs.primary_action(job)
-    assert (action.key, action.enabled) == (key, enabled)
-    assert action.label, "a button with no label"
-
-
-def test_a_blocked_action_says_why_beside_itself(con=None):
+def test_a_blocked_step_says_why_beside_itself():
     """Never a tooltip: he moves through this list with the keyboard, and a
     tooltip is a thing only a mouse can find."""
-    blocked = [
-        jobs.primary_action(_row(status="applied")),
-        jobs.primary_action(_row(status="duplicate")),
-        jobs.primary_action(_row(), already={"firma": "Eine GmbH",
-                                             "gesendet_am": "2026-06-12",
-                                             "status": "Absage"}),
-    ]
-    for action in blocked:
-        assert action.enabled is False
-        assert action.reason, f"{action.label} refuses without saying why"
+    for job in (_row(status="applied"), _row(status="duplicate")):
+        for step in jobs.apply_steps(job):
+            assert step.enabled is False
+            assert step.done or step.reason, \
+                f"{step.label} refuses without saying why"
 
 
-def test_an_application_at_the_firm_outranks_every_channel(con=None):
+def test_an_application_at_the_firm_outranks_every_channel():
     """A posting at a company he has already written to can never become an
     application — so nothing downstream may offer to start one."""
     already = {"firma": "Eine GmbH", "gesendet_am": "2026-06-12",
                "status": "Absage"}
     for channel in ("direct_email", "ats_form", ""):
-        action = jobs.primary_action(_row(apply_channel=channel), already)
-        assert action.enabled is False
-        assert "bereits beworben" in action.reason
+        steps = jobs.apply_steps(_row(apply_channel=channel), already)
+        assert not any(s.enabled for s in steps)
+        assert any("bereits beworben" in s.reason for s in steps)
 
 
 # --------------------------------------------------------------------------
@@ -1362,29 +1328,28 @@ def test_a_quiet_posting_carries_no_warnings_at_all():
          "draft_status": None, "draft_updated_at": None}, None) == []
 
 
-def test_a_posting_he_put_away_can_be_taken_back(con=None):
+def test_a_posting_he_put_away_offers_nothing_until_it_comes_back():
     """The "Kein Interesse" view had no exit at all: nothing wrote a status
     back to 'new', so pressing x on the wrong row was permanent — while the
-    channel arms below still offered to write an application for it."""
-    action = jobs.primary_action(_row(status="skipped", apply_channel="direct_email"))
-    assert action.key == jobs.ACTION_REVIVE
-    assert action.enabled is True
+    channel arms below still offered to write an application for it. The way
+    back is the triage row's own button; no apply step may be live meanwhile."""
+    steps = jobs.apply_steps(_row(status="skipped", apply_channel="direct_email"))
+    assert not any(s.enabled for s in steps)
+    assert any("weggelegt" in s.reason for s in steps)
 
 
 def test_a_form_posting_can_still_be_given_a_letter():
     """The cockpit parks beside the employer's form and cannot write an
-    Anschreiben; the German market is form-first. Without a second action the
-    only route left was a batch button on the Settings page."""
+    Anschreiben; the German market is form-first. Without this step the only
+    route left was a batch button on the Settings page."""
     for channel in ("ats_form", "board_apply", "company_site", "unknown"):
-        assert jobs._wants_a_letter(_row(apply_channel=channel), None), channel
-    # …and never where an application cannot happen, or is already under way
-    assert not jobs._wants_a_letter(_row(apply_channel="direct_email"), None)
-    assert not jobs._wants_a_letter(_row(status="applied"), None)
-    assert not jobs._wants_a_letter(
+        steps = {s.key: s for s in jobs.apply_steps(_row(apply_channel=channel))}
+        assert steps[jobs.STEP_DRAFT].enabled, channel
+    # …and never where an application cannot happen
+    assert not any(s.enabled for s in jobs.apply_steps(_row(status="applied")))
+    assert not any(s.enabled for s in jobs.apply_steps(
         _row(apply_channel="ats_form"),
-        {"firma": "Eine GmbH", "gesendet_am": "2026-06-12", "status": "Absage"})
-    assert not jobs._wants_a_letter(
-        _row(apply_channel="ats_form", draft_status="ready"), None)
+        {"firma": "Eine GmbH", "gesendet_am": "2026-06-12", "status": "Absage"}))
 
 
 def test_a_resolved_dead_end_is_described_the_same_way_everywhere():

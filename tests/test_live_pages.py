@@ -937,6 +937,11 @@ async def test_recording_from_the_reader_makes_the_posting_leave_for_good(
     await user.should_see("Beispiel GmbH")
 
     user.find("Beworben eintragen", kind=ui.button).click()
+    await asyncio.sleep(0.3)
+    # a one-way door: it asks, and names the company
+    await user.should_see("Bewerbung eintragen?")
+    await user.should_see("Beispiel GmbH")
+    user.find("Eintragen", kind=ui.button).click()
     await asyncio.sleep(0.4)
 
     row = con.execute("SELECT status, bewerbung_id FROM jobs WHERE id=?",
@@ -944,12 +949,21 @@ async def test_recording_from_the_reader_makes_the_posting_leave_for_good(
     assert row[0] == "applied" and row[1] is not None
     assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 1
     # gone from the list, and gone from the reading pane — not left behind
-    # under a "it fell out of this view" note, because he asked for it
-    await user.should_not_see("Beispiel GmbH")
+    # under a "it fell out of this view" note, because he asked for it.
+    # Asserted on the ROWS: a closed dialog stays alive as an element, so the
+    # company name is still somewhere in the tree.
+    def listed():
+        return [d.text for row in _rows(user) for d in row.descendants()
+                if isinstance(d, ui.label)]
+
+    assert not any("Beispiel GmbH" in t for t in listed())
+    reader = [e.text for e in user.client.elements.values()
+              if isinstance(e, ui.label) and "gefallen" in str(e.text)]
+    assert reader == [], "it was left in the reading pane behind a note"
 
     # …and it stays gone when the list re-reads itself
     await _tick(user)
-    await user.should_not_see("Beispiel GmbH")
+    assert not any("Beispiel GmbH" in t for t in listed())
 
 
 async def test_opening_the_form_records_that_the_application_started(
