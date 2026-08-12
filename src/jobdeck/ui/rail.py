@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 from nicegui import run, ui
 
-from jobdeck import config, db, freshness, gmail
+from jobdeck import config, constants, db, freshness, gmail
 from jobdeck.constants import BEANTWORTET_STATUS, OFFENE_STATUS
 from jobdeck.dates import days_since
 from jobdeck.services import liveness
@@ -32,7 +32,7 @@ BEWERBUNGEN_PATH = "/applications"
 EINSTELLUNGEN_PATH = "/settings"
 
 FOLLOW_UP_DEFAULT = 14
-SEND_CAP_DEFAULT = 15  # services/send.py's own default, kept in step by a test
+SEND_CAP_DEFAULT = int(constants.DEFAULT_DAILY_CAP)
 
 # How recently the poller must have run for the rail to call discovery live.
 # The scheduler wakes every five minutes, so anything inside that window is a

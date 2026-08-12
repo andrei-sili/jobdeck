@@ -29,7 +29,11 @@ import logging
 import pathlib
 
 from jobdeck import db, gmail, templates
-from jobdeck.constants import EMAIL_OUTBOUND, EMAIL_OUTBOUND_TEST
+from jobdeck.constants import (
+    DEFAULT_DAILY_CAP,
+    EMAIL_OUTBOUND,
+    EMAIL_OUTBOUND_TEST,
+)
 from jobdeck.dedupe import find_duplicate_bewerbung
 
 log = logging.getLogger(__name__)
@@ -50,12 +54,6 @@ def _error(message: str, kind: str = "draft") -> dict:
     draft it happened to pick."""
     return {"ok": False, "error": message, "kind": kind, "test_mode": False,
             "recipient": "", "draft": None}
-
-
-# How many messages may leave in a day when he has never said. Stated once:
-# the rail draws this budget as a row of boxes, and a second copy of the number
-# would let the bar promise a send the gate below refuses.
-DEFAULT_DAILY_CAP = "15"
 
 
 def _load_context(job_id: int) -> tuple[dict | None, dict | None, dict]:

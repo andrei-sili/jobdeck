@@ -867,7 +867,8 @@ def _unhosted_ui_calls(path):
 # deliberately absent: its refresh assigns `table.rows` and deletes no element,
 # so no handler's slot can die under it.
 @pytest.mark.parametrize("page_module",
-                         ["jobs.py", "queue.py", "profiles.py", "cockpit.py"])
+                         ["jobs.py", "queue.py", "profiles.py", "cockpit.py",
+                          "../draft_editor.py"])
 def test_nothing_is_shown_on_a_slot_that_may_already_be_gone(page_module):
     """The defect CLASS, not the one place it was found. A handler runs in the
     slot of the element that fired it; any refresh — its own, a concurrent
@@ -884,12 +885,16 @@ def test_nothing_is_shown_on_a_slot_that_may_already_be_gone(page_module):
 
 
 @pytest.mark.parametrize("page_module",
-                         ["jobs.py", "queue.py", "profiles.py", "cockpit.py"])
+                         ["jobs.py", "queue.py", "profiles.py", "cockpit.py",
+                          "../draft_editor.py"])
 def test_the_slot_rule_is_actually_binding(page_module):
     """A scan that finds no candidates would pass on any code at all."""
     source = (pathlib.Path(jobs.__file__).parent / page_module).read_text()
     assert source.count("with overlay") >= 2, "nothing is hosted"
-    assert "def say(" in source, "the page has no safe way to notify"
+    # A page owns its `say`; a shared component is HANDED one, together with
+    # the overlay it must build on — either way the call sites must use it.
+    assert "def say(" in source or "say," in source, \
+        "no safe way to notify anywhere in this module"
     assert source.count("say(") >= 4, "messages are not routed through it"
 
 

@@ -14,6 +14,7 @@ from pathlib import Path
 
 from jobdeck import apply_channel, backup, config, dates, freshness, migrations
 from jobdeck.constants import (
+    DEFAULT_DAILY_CAP,
     EMAIL_OUTBOUND,
     EMAIL_OUTBOUND_TEST,
     LIVENESS_GONE,
@@ -1481,6 +1482,44 @@ def record_send(
         " bewerbung_id=?, error='', updated_at=? WHERE id=?",
         (gmail_message_id, gmail_thread_id, bewerbung_id, _now(), draft_id),
     )
+
+
+_DRAFT_WITH_JOB_COLUMNS = """
+        SELECT d.*, j.title AS job_title, j.company AS job_company,
+               j.url AS job_url, j.match_score AS job_score,
+               j.location AS job_location, j.status AS job_status,
+               j.contact_email AS job_contact_email,
+               j.liveness AS job_liveness,
+               j.liveness_checked_at AS job_liveness_checked_at
+        FROM drafts d JOIN jobs j ON j.id = d.job_id
+"""
+
+
+def draft_with_job(con: sqlite3.Connection, job_id: int) -> sqlite3.Row | None:
+    """One posting's newest draft, with the job fields the editor shows.
+
+    `job_id` has no UNIQUE constraint on drafts — a posting can carry a
+    discarded draft and a live one — so this picks the newest, exactly as
+    `get_draft_by_job` does.
+    """
+    return con.execute(
+        _DRAFT_WITH_JOB_COLUMNS + " WHERE d.job_id=? ORDER BY d.id DESC LIMIT 1",
+        (job_id,),
+    ).fetchone()
+
+
+def send_mode(con: sqlite3.Connection) -> dict:
+    """Whether a send would be real, and what today's budget has left.
+
+    Shared because two screens now stand in front of the same send: the review
+    queue's banner and the pre-send confirmation wherever it is opened from.
+    """
+    return {
+        "real": get_setting(con, "real_send_enabled", "0") == "1",
+        "test_recipient": get_setting(con, "test_recipient", "").strip(),
+        "cap": get_setting(con, "daily_send_cap", DEFAULT_DAILY_CAP),
+        "sent_today": count_outbound_today(con),
+    }
 
 
 def list_drafts_with_jobs(

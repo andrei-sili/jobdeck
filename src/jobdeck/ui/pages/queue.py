@@ -7,14 +7,13 @@ the test recipient every message will actually go to.
 """
 
 import logging
-import pathlib
 
 from nicegui import run, ui
 
 from jobdeck import db
 from jobdeck.dedupe import duplicates_for_jobs
-from jobdeck.services import drafting, liveness, mappe, send
-from jobdeck.ui import helpers, live
+from jobdeck.services import drafting, liveness, send
+from jobdeck.ui import draft_editor, helpers, live
 from jobdeck.ui.helpers import open_in_system, openable_url
 from jobdeck.ui.layout import frame
 
@@ -36,7 +35,6 @@ EMPTY_TEXT = {
     "sent": "Nothing sent yet.",
     "discarded": "No discarded drafts.",
 }
-EDITABLE_STATUS = ("ready", "approved")
 
 # How often the queue re-reads itself while a draft is being written, so the
 # row becomes the finished application on its own.
@@ -65,15 +63,6 @@ def generating_line(updated_at: object) -> tuple[str, str]:
             "text-sm text-blue-700")
 
 
-def _send_status(con) -> dict:
-    return {
-        "real": db.get_setting(con, "real_send_enabled", "0") == "1",
-        "test_recipient": db.get_setting(con, "test_recipient", "").strip(),
-        "cap": db.get_setting(con, "daily_send_cap", "15"),
-        "sent_today": db.count_outbound_today(con),
-    }
-
-
 def _signature_of(con) -> tuple:
     """Everything this page states, cheaply comparable (see ui/live.py).
 
@@ -83,24 +72,15 @@ def _signature_of(con) -> tuple:
     over the drafts alone left both able to go stale while the page sat open,
     which is precisely the window (liveness runs 90 s after every start, then he
     sends) that warning was written for."""
-    return (db.data_signature(con), *sorted(_send_status(con).items()))
+    # The pipeline first, the sending mode after it — the same order every
+    # loader here reads in, and the reason the rule that pins it exists.
+    signature = db.data_signature(con)
+    return (signature, *sorted(db.send_mode(con).items()))
 
 
 def _signature() -> tuple:
     with db.db() as con:
         return _signature_of(con)
-
-
-def _current_send_status() -> dict:
-    """The sending mode on its own connection, for the pre-send check.
-
-    `_send_status` takes the connection its two other callers already hold; this
-    is the one caller that has none. Keeping the wrapper explicit is what makes
-    the arity visible — the version of this file that passed no connection at
-    all raised inside the io_bound thread, where NiceGUI logs the exception and
-    shows the user nothing, so "Send now" did nothing at all and said nothing."""
-    with db.db() as con:
-        return _send_status(con)
 
 
 def _load(filter_value: str) -> dict:
@@ -127,36 +107,10 @@ def _load(filter_value: str) -> dict:
                    if own.get(job_id) != match["id"]}
         return {
             "drafts": rows,
-            "status": _send_status(con),
+            "status": db.send_mode(con),
             "applied": applied,
             "signature": signature,
         }
-
-
-def _save_draft(job_id: int, values: dict, clear_pdf: bool):
-    """Persist editor changes. Returns (draft, error).
-
-    A dialog can stay open indefinitely while auto-send moves the draft
-    on: writing then would silently rewrite the record of what actually
-    went out, so an editable status is re-checked inside the write."""
-    with db.db() as con:
-        con.execute("BEGIN IMMEDIATE")
-        current = db.get_draft_by_job(con, job_id)
-        if current is None:
-            return None, "the draft is gone — refresh the queue"
-        if current["status"] not in EDITABLE_STATUS:
-            return dict(current), (
-                f"this draft is no longer editable (status: "
-                f"{current['status']}) — your changes were not saved"
-            )
-        if clear_pdf:
-            values = {**values, "pdf_path": ""}
-        if current["status"] == "approved":
-            # Approval is content-specific: auto-send must never transmit
-            # text the user changed after approving it.
-            values = {**values, "status": "ready"}
-        db.upsert_draft(con, job_id, values)
-        return dict(db.get_draft_by_job(con, job_id)), ""
 
 
 @ui.page("/queue")
@@ -426,192 +380,13 @@ async def queue_page():
             )
 
         def show_editor(row: dict):
-            job_id = row["job_id"]
-            current = dict(row)
-            overlay.clear()
-            with overlay, ui.dialog() as dialog, \
-                    ui.card().classes("w-[760px] max-w-full"):
-                ui.label(f"{row['job_company']} — {row['job_title']}") \
-                    .classes("font-bold")
-                hint = (f"posting contact: {row['job_contact_email']}"
-                        if row["job_contact_email"] else
-                        "no contact e-mail found in the posting")
-                recipient = ui.input(f"Recipient ({hint})",
-                                     value=row["recipient"]).classes("w-full")
-                betreff = ui.input("Betreff", value=row["betreff"]) \
-                    .classes("w-full")
-                email_body = ui.textarea("E-Mail", value=row["email_body"]) \
-                    .classes("w-full").props("autogrow")
-                anschreiben = ui.textarea("Anschreiben",
-                                          value=row["anschreiben_body"]) \
-                    .classes("w-full").props("autogrow")
-                pdf_label = ui.label(
-                    f"Mappe: {row['pdf_path']}" if row["pdf_path"]
-                    else "No Mappe PDF yet — required before sending."
-                ).classes("text-xs text-gray-600")
+            """The shared editor, over this page's own overlay.
 
-                async def save() -> bool:
-                    values = {
-                        "recipient": recipient.value.strip(),
-                        "betreff": betreff.value.strip(),
-                        "email_body": email_body.value,
-                        "anschreiben_body": anschreiben.value,
-                    }
-                    if all(current[k] == v for k, v in values.items()):
-                        return True
-                    # The Mappe PDF renders both the letter text and the
-                    # Betreff: editing either invalidates a built PDF.
-                    clear_pdf = bool(current["pdf_path"] and (
-                        values["anschreiben_body"] != current["anschreiben_body"]
-                        or values["betreff"] != current["betreff"]
-                    ))
-                    was_approved = current["status"] == "approved"
-                    updated, error = await run.io_bound(
-                        _save_draft, job_id, values, clear_pdf
-                    )
-                    if updated is not None:
-                        current.update(updated)
-                    if error:
-                        say(error, type="warning", multi_line=True)
-                        await refresh()
-                        return False
-                    if clear_pdf:
-                        pdf_label.set_text("No Mappe PDF yet — the text "
-                                           "changed; create it again.")
-                        say("Text changed — create the PDF again",
-                                  type="warning")
-                    if was_approved:
-                        say("Edited — the draft went back to ready; "
-                                  "approve it again for auto-send",
-                                  type="warning", multi_line=True)
-                    return True
-
-                async def save_only():
-                    if not await save():
-                        return
-                    say("Saved", type="positive")
-                    await refresh()
-
-                async def make_pdf():
-                    if not await save():
-                        return
-                    say("Creating Bewerbungsmappe…")
-                    result = await mappe.create_mappe(job_id)
-                    if not result["ok"]:
-                        say(result["error"], type="warning",
-                                  multi_line=True)
-                        return
-                    current["pdf_path"] = result["pdf_path"]
-                    pdf_label.set_text(f"Mappe: {result['pdf_path']}")
-                    say(helpers.mappe_summary(result), type="positive")
-                    if result["warning"]:
-                        say(result["warning"], type="warning",
-                                  multi_line=True)
-
-                def open_pdf():
-                    path = current.get("pdf_path", "")
-                    if not path:
-                        say("create the Mappe first", type="warning")
-                    elif not pathlib.Path(path).exists():
-                        say("the Mappe file is gone — create it again",
-                                  type="warning")
-                    else:
-                        open_in_system(path)
-
-                async def send_now():
-                    if not await save():
-                        return
-                    status = await run.io_bound(_current_send_status)
-                    final, test_mode, error = send.resolve_recipient(
-                        current["recipient"], {
-                            "real_send_enabled":
-                                "1" if status["real"] else "0",
-                            "test_recipient": status["test_recipient"],
-                        }
-                    )
-                    if error:
-                        say(error, type="warning", multi_line=True)
-                        return
-                    mode = ("TEST send" if test_mode
-                            else "REAL send to the company")
-                    attachment = (pathlib.Path(current["pdf_path"]).name
-                                  if current["pdf_path"] else "NONE")
-                    with overlay, ui.dialog() as confirm, ui.card():
-                        ui.label("Send this application?").classes("font-bold")
-                        ui.label(f"{mode}: {final}").classes(
-                            "text-sm font-bold text-red-700" if not test_mode
-                            else "text-sm font-bold text-amber-700")
-                        already = applied.get(job_id)
-                        if already:
-                            # last statement before the press; the gate inside
-                            # the claim would refuse it a second later
-                            ui.label(helpers.applied_line(already)) \
-                                .classes("text-sm font-bold text-amber-700")
-                        ui.label(f"Betreff: {current['betreff']}") \
-                            .classes("text-sm")
-                        ui.label(f"Attachment: {attachment}").classes("text-sm")
-                        with ui.row().classes("justify-end gap-2 w-full"):
-                            ui.button("Cancel",
-                                      on_click=lambda: confirm.submit(False)) \
-                                .props("flat")
-                            ui.button("Send", icon="send",
-                                      on_click=lambda: confirm.submit(True)) \
-                                .props("color=positive")
-                    confirm.open()
-                    if not await confirm:
-                        return
-                    say("Sending…")
-                    # Pin what the confirmation actually showed: between the
-                    # dialog and this call another tab could have edited the
-                    # draft or flipped the sending mode.
-                    result = await send.send_draft(job_id, expect={
-                        "updated_at": current["updated_at"],
-                        "recipient": current["recipient"],
-                        "betreff": current["betreff"],
-                        "email_body": current["email_body"],
-                        "anschreiben_body": current["anschreiben_body"],
-                        "pdf_path": current["pdf_path"],
-                        "test_mode": test_mode,
-                        "recipient_shown": final,
-                    })
-                    if not result["ok"]:
-                        say(result["error"], type="warning",
-                                  multi_line=True)
-                        await refresh()
-                        return
-                    say(
-                        f"{'TEST sent' if result['test_mode'] else 'Sent'} "
-                        f"to {result['recipient']} ✓", type="positive",
-                    )
-                    dialog.close()
-                    await refresh()
-
-                async def approve_from_editor():
-                    if not await save():
-                        return
-                    result = await run.io_bound(send.approve, job_id)
-                    if not result["ok"]:
-                        say(result["error"], type="warning",
-                                  multi_line=True)
-                        return
-                    say("Approved — auto-send will pick it up",
-                              type="positive")
-                    dialog.close()
-                    await refresh()
-
-                with ui.row().classes("w-full justify-end gap-2"):
-                    ui.button("Save", icon="save", on_click=save_only) \
-                        .props("outline")
-                    ui.button("Create PDF", icon="picture_as_pdf",
-                              on_click=make_pdf).props("outline")
-                    ui.button("Open PDF", icon="open_in_new",
-                              on_click=open_pdf).props("outline")
-                    if row["status"] == "ready":
-                        ui.button("Approve for auto-send", icon="schedule_send",
-                                  on_click=approve_from_editor).props("outline")
-                    ui.button("Send now", icon="send", on_click=send_now) \
-                        .props("color=positive")
-                    ui.button("Close", on_click=dialog.close).props("flat")
-            dialog.open()
+            One implementation, because it is the last screen before a message
+            leaves: it resolves the recipient, shows what is about to go out and
+            pins it with `expect=`. Stellen opens the very same one."""
+            draft_editor.open_editor(
+                row, overlay=overlay, say=say, on_change=refresh,
+                already_applied=applied.get(row["job_id"]))
 
         await refresh()

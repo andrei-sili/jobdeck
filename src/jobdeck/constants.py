@@ -60,6 +60,11 @@ LIVENESS_GONE = "gone"
 # Lifecycle of an AI-generated application draft
 DRAFT_STATUS = ["generating", "ready", "failed", "approved", "sending", "sent", "discarded"]
 
+# How many messages may leave in a day when he has never said. Stated once, in
+# the layer both the send gate and the screens that draw the budget can see: a
+# second copy would let a bar promise a send the gate below it refuses.
+DEFAULT_DAILY_CAP = "15"
+
 # email_log.direction values. Test sends (real sending OFF) get their own
 # direction: they must never look like a real application in the audit log,
 # but still count toward the daily cap — the account's reputation does not

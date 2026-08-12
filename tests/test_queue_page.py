@@ -6,7 +6,7 @@ import pathlib
 
 from jobdeck import db
 from jobdeck.services import drafting
-from jobdeck.ui import helpers, live
+from jobdeck.ui import draft_editor, helpers, live
 from jobdeck.ui.pages import queue
 
 
@@ -40,7 +40,7 @@ def test_editing_an_approved_draft_returns_it_to_ready(con, data_dir):
     user changed after approving it."""
     job_id = _job_with_draft(con, status="approved")
 
-    draft, error = queue._save_draft(job_id, _edit(), clear_pdf=False)
+    draft, error = draft_editor._save_draft(job_id, _edit(), clear_pdf=False)
     assert error == ""
     assert draft["status"] == "ready"
     assert draft["email_body"] == "Guten Tag,\n\nneuer Text."
@@ -50,7 +50,7 @@ def test_editing_an_approved_draft_returns_it_to_ready(con, data_dir):
 def test_editing_a_ready_draft_keeps_it_ready(con, data_dir):
     job_id = _job_with_draft(con, status="ready")
 
-    draft, error = queue._save_draft(job_id, _edit(), clear_pdf=False)
+    draft, error = draft_editor._save_draft(job_id, _edit(), clear_pdf=False)
     assert error == "" and draft["status"] == "ready"
 
 
@@ -59,7 +59,7 @@ def test_a_stale_dialog_cannot_rewrite_a_sent_draft(con, data_dir):
     falsify the record of what actually went out."""
     job_id = _job_with_draft(con, status="sent")
 
-    draft, error = queue._save_draft(job_id, _edit(), clear_pdf=False)
+    draft, error = draft_editor._save_draft(job_id, _edit(), clear_pdf=False)
     assert "no longer editable" in error
     assert draft["status"] == "sent"
     stored = db.get_draft_by_job(con, job_id)
@@ -69,7 +69,7 @@ def test_a_stale_dialog_cannot_rewrite_a_sent_draft(con, data_dir):
 def test_a_stale_dialog_cannot_rewrite_a_sending_draft(con, data_dir):
     job_id = _job_with_draft(con, status="sending")
 
-    _, error = queue._save_draft(job_id, _edit(), clear_pdf=False)
+    _, error = draft_editor._save_draft(job_id, _edit(), clear_pdf=False)
     assert "no longer editable" in error
     assert db.get_draft_by_job(con, job_id)["email_body"] \
         == "Guten Tag,\n\nanbei meine Bewerbung."
@@ -78,7 +78,7 @@ def test_a_stale_dialog_cannot_rewrite_a_sending_draft(con, data_dir):
 def test_clear_pdf_drops_the_stale_mappe(con, data_dir):
     job_id = _job_with_draft(con)
 
-    draft, error = queue._save_draft(job_id, _edit(), clear_pdf=True)
+    draft, error = draft_editor._save_draft(job_id, _edit(), clear_pdf=True)
     assert error == "" and draft["pdf_path"] == ""
 
 
@@ -88,7 +88,7 @@ def test_missing_draft_is_reported(con, data_dir):
     })
     con.commit()
 
-    draft, error = queue._save_draft(job_id, _edit(), clear_pdf=False)
+    draft, error = draft_editor._save_draft(job_id, _edit(), clear_pdf=False)
     assert draft is None and "gone" in error
 
 
