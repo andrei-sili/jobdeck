@@ -276,7 +276,8 @@ def _salary_short(job: dict) -> str:
     return f"{figures[0]}–{figures[1]} T€" if len(figures) == 2 else ""
 
 
-def _load_jobs(view_key: str, page: int, search: str = "") -> dict:
+def _load_jobs(view_key: str, page: int, search: str = "",
+               keep_ids: tuple[int, ...] = ()) -> dict:
     """One page of a named view, with everything needed to describe it.
 
     A row stands for a COMPANY — its best-ranked posting, with the others
@@ -301,7 +302,7 @@ def _load_jobs(view_key: str, page: int, search: str = "") -> dict:
         stale_age_days = freshness.stale_age_setting(
             db.get_setting(con, "stale_age_days", ""))
         filters = {**view.filters, "stale_age_days": stale_age_days,
-                   "search": search}
+                   "search": search, "keep_ids": keep_ids}
         total = db.count_job_groups(con, view.status, **filters)
         pages = max(1, -(-total // PAGE_SIZE))
         page = min(max(page, 0), pages - 1)
@@ -549,6 +550,10 @@ async def jobs_page():
         shown: dict[int, dict] = {}
         order: list[int] = []
         row_elements: dict = {}
+        # What he has opened during this sitting. The "Neu" view hides what he
+        # has read, so without this the posting he is reading would drop out of
+        # the list on the next tick and take the reading pane with it.
+        read_here: set[int] = set()
         # What the duplicate gate says about the rows currently on screen,
         # refreshed with them. Not `jobs.duplicate_of`: that is written once at
         # discovery, so every application he sends makes more rows stale.
@@ -603,7 +608,8 @@ async def jobs_page():
             refresh_gen["n"] += 1
             gen = refresh_gen["n"]
             view = await run.io_bound(
-                _load_jobs, state["view"], state["page"], state["search"])
+                _load_jobs, state["view"], state["page"], state["search"],
+                tuple(read_here))
             if gen != refresh_gen["n"] or view is None:
                 return  # superseded, or the page is going away
             state["page"] = view["page"]   # the loader clamped it to what exists
@@ -758,6 +764,7 @@ async def jobs_page():
             if job_id not in shown:
                 return
             state["selected"] = job_id
+            read_here.add(job_id)
             if not shown[job_id]["opened_at"]:
                 await run.io_bound(_mark_opened, job_id)
                 # Recorded on the row we are holding too, so the mark and the
@@ -801,6 +808,7 @@ async def jobs_page():
             state["view"] = value or DEFAULT_VIEW
             state["page"] = 0  # a different list: page 3 of it means nothing
             state["selected"] = None
+            read_here.clear()   # coming back to Neu is when it should have emptied
             await refresh()
 
         async def set_search(value: str) -> None:

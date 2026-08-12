@@ -703,3 +703,33 @@ def test_in_arbeit_reaches_the_grouped_view_too(con):
 def test_an_unknown_drafting_filter_value_raises(con):
     with pytest.raises(ValueError, match="in_progress"):
         db.list_jobs(con, "new", in_progress="sometimes")
+
+
+def test_a_posting_he_just_read_can_be_held_in_the_unread_view(con):
+    """Reading a posting in an unread-only view would otherwise drop it out of
+    the list under his cursor on the next refresh, taking the reading pane with
+    it. The rows named here stay put; everything else obeys the filter."""
+    read = _add_job(con, external_id="A")
+    other_read = _add_job(con, external_id="B", company="Andere GmbH")
+    unread = _add_job(con, external_id="C", company="Dritte GmbH")
+    db.mark_job_opened(con, read)
+    db.mark_job_opened(con, other_read)
+    con.commit()
+
+    assert [r["id"] for r in db.list_jobs(con, "new", opened="exclude")] == [unread]
+    held = db.list_jobs(con, "new", opened="exclude", keep_ids=(read,))
+    assert {r["id"] for r in held} == {read, unread}, \
+        "the one he is reading stays; the one he read earlier does not"
+    assert db.count_jobs(con, "new", opened="exclude", keep_ids=(read,)) == 2
+
+
+def test_holding_a_row_does_not_smuggle_it_past_the_other_filters(con):
+    """It is an exception to ONE arm. A posting he read is still hidden if it
+    also violates a hard requirement — that is a fact about the posting."""
+    read_mismatch = _add_job(con, external_id="A")
+    db.set_job_score(con, read_mismatch, 0, "harte Anforderung verletzt")
+    db.mark_job_opened(con, read_mismatch)
+    con.commit()
+
+    assert db.list_jobs(con, "new", opened="exclude", mismatches="exclude",
+                        keep_ids=(read_mismatch,)) == []

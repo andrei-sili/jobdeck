@@ -509,3 +509,47 @@ async def test_reading_a_posting_marks_it_read_and_empties_neu(
     assert con.execute("SELECT opened_at FROM jobs WHERE id=?",
                        (job_id,)).fetchone()[0] != ""
     assert [e.props.get("data-unread") for e in _rows(user)] == ["false", "false"]
+
+
+async def test_the_posting_he_opens_does_not_vanish_from_the_new_view(
+        user: User, con, data_dir):
+    """Found in the running app: "Neu" hides what he has read, so the moment
+    the next tick landed, the posting he had just clicked dropped out of the
+    list and the reading pane jumped back to the top of it."""
+    top = _posting(con, title="Erste Stelle", company="Alpha GmbH")
+    second = _posting(con, external_id="e2", title="Zweite Stelle",
+                      company="Beta GmbH")
+    db.set_job_score(con, top, 90, "sehr gut")
+    db.set_job_score(con, second, 80, "gut")
+    con.commit()
+    await user.open("/")
+    await user.should_see("Zweite Stelle")
+
+    await _press(user, "j")            # he moves onto the second row: read
+    await _tick(user)                  # …and the watcher runs
+
+    await user.should_see("Zweite Stelle")
+    assert [e.props.get("aria-selected") for e in _rows(user)] == ["false", "true"]
+    assert con.execute("SELECT opened_at FROM jobs WHERE id=?",
+                       (second,)).fetchone()[0] != ""
+
+
+async def test_leaving_the_view_and_coming_back_is_when_it_empties(
+        user: User, con, data_dir):
+    top = _posting(con, title="Erste Stelle", company="Alpha GmbH")
+    second = _posting(con, external_id="e2", title="Zweite Stelle",
+                      company="Beta GmbH")
+    db.set_job_score(con, top, 90, "sehr gut")
+    db.set_job_score(con, second, 80, "gut")
+    con.commit()
+    await user.open("/")
+    await _press(user, "j")
+    await user.should_see("Zweite Stelle")
+
+    select = next(iter(user.find(marker="view-select").elements))
+    select.set_value("offen")
+    await asyncio.sleep(0.3)
+    select.set_value("neu")
+    await asyncio.sleep(0.3)
+
+    await user.should_not_see("Zweite Stelle")

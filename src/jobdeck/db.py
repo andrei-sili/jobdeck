@@ -475,6 +475,7 @@ def _job_filters(
     old: str = "include", stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
     bookmarked: str = "include", opened: str = "include",
     in_progress: str = "include", search: str = "",
+    keep_ids: tuple[int, ...] = (),
 ) -> tuple[list[str], list]:
     """WHERE fragments + bound values shared by the list and the count, so a
     page can never be filtered differently from the total printed beside it.
@@ -526,7 +527,17 @@ def _job_filters(
     # meaning the same thing: 'only' is always "just the rows the column is
     # true of", and it is the caller that decides which half it wants.
     if opened == "exclude":
-        where.append("opened_at=''")
+        # `keep_ids` is what makes an inbox usable: reading a posting in the
+        # "Neu" view would otherwise drop it out of the list under his cursor
+        # the moment the next tick ran, taking the reading pane with it. The
+        # rows he opened during this sitting stay where they are; they are gone
+        # the next time he opens the view, which is when he expects it.
+        if keep_ids:
+            places = ",".join("?" * len(keep_ids))
+            where.append(f"(opened_at='' OR jobs.id IN ({places}))")
+            params.extend(keep_ids)
+        else:
+            where.append("opened_at=''")
     elif opened == "only":
         where.append("opened_at<>''")
     # A plain substring over the two fields a person searches by. SQLite's LIKE
@@ -603,6 +614,7 @@ def list_job_groups(
     opened: str = "include",
     in_progress: str = "include",
     search: str = "",
+    keep_ids: tuple[int, ...] = (),
     offset: int = 0,
 ) -> list[sqlite3.Row]:
     """One row per company: its best-ranked posting, plus `company_count`.
@@ -614,7 +626,7 @@ def list_job_groups(
     represents it."""
     where, params = _job_filters(status, mismatches, gone, applied, old,
                                  stale_age_days, bookmarked, opened,
-                                 in_progress, search)
+                                 in_progress, search, keep_ids)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     order = _JOB_ORDER_SQL if status else "id DESC"
     return con.execute(
@@ -637,11 +649,12 @@ def count_job_groups(
     opened: str = "include",
     in_progress: str = "include",
     search: str = "",
+    keep_ids: tuple[int, ...] = (),
 ) -> int:
     """How many companies the grouped view holds."""
     where, params = _job_filters(status, mismatches, gone, applied, old,
                                  stale_age_days, bookmarked, opened,
-                                 in_progress, search)
+                                 in_progress, search, keep_ids)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     return con.execute(
         f"{_ranked_jobs_cte(where_sql)}"
@@ -666,6 +679,7 @@ def list_company_siblings(
     opened: str = "include",
     in_progress: str = "include",
     search: str = "",
+    keep_ids: tuple[int, ...] = (),
     per_company: int = SIBLINGS_PER_COMPANY,
 ) -> list[sqlite3.Row]:
     """The postings a grouped row stands in front of, best-ranked first.
@@ -678,7 +692,7 @@ def list_company_siblings(
         return []
     where, params = _job_filters(status, mismatches, gone, applied, old,
                                  stale_age_days, bookmarked, opened,
-                                 in_progress, search)
+                                 in_progress, search, keep_ids)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     placeholders = ",".join("?" * len(company_keys))
     return con.execute(
@@ -703,12 +717,13 @@ def count_jobs(
     opened: str = "include",
     in_progress: str = "include",
     search: str = "",
+    keep_ids: tuple[int, ...] = (),
 ) -> int:
     """How many postings a `list_jobs` call with the same filters would have,
     ignoring its page limit — the total a paged view has to print."""
     where, params = _job_filters(status, mismatches, gone, applied, old,
                                  stale_age_days, bookmarked, opened,
-                                 in_progress, search)
+                                 in_progress, search, keep_ids)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     return con.execute(
         f"SELECT COUNT(*) FROM jobs{where_sql}", params
@@ -728,6 +743,7 @@ def list_jobs(
     opened: str = "include",
     in_progress: str = "include",
     search: str = "",
+    keep_ids: tuple[int, ...] = (),
     offset: int = 0,
 ) -> list[sqlite3.Row]:
     """List postings. mismatches: 'include' (default), 'exclude' (hide the
@@ -737,7 +753,7 @@ def list_jobs(
     values over postings whose ad the source says is no longer there."""
     where, params = _job_filters(status, mismatches, gone, applied, old,
                                  stale_age_days, bookmarked, opened,
-                                 in_progress, search)
+                                 in_progress, search, keep_ids)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     # The age-adjusted score is SELECTED as well as ordered on, so the number
     # the UI prints is the very number that decided the row's position — two
