@@ -453,10 +453,28 @@ APPLIED_FIRM_SQL = """(
         SELECT jd_norm(b.email) FROM bewerbungen b WHERE jd_norm(b.email) <> '')))"""
 
 
+# A posting whose application is UNDER WAY. Two ways that happens and they are
+# one fact from his side: a draft is being written or waiting to be sent, or he
+# has opened the employer's form, which the app records by moving the posting to
+# `portal`. A screen that showed only the first would lose every form
+# application between opening the form and recording it — which is most of them.
+#
+# The draft statuses are listed rather than negated so a NEW one has to be
+# classified deliberately: silently counting an unknown draft state as work in
+# progress is how a screen starts lying.
+OPEN_DRAFT_STATUSES = ("generating", "ready", "failed", "approved", "sending")
+_IN_PROGRESS_SQL = (
+    "(jobs.status='portal' OR EXISTS ("
+    "SELECT 1 FROM drafts d WHERE d.job_id=jobs.id AND d.status IN ("
+    + ",".join("?" * len(OPEN_DRAFT_STATUSES)) + ")))"
+)
+
+
 def _job_filters(
     status: str | None, mismatches: str, gone: str, applied: str = "include",
     old: str = "include", stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
     bookmarked: str = "include", opened: str = "include",
+    in_progress: str = "include",
 ) -> tuple[list[str], list]:
     """WHERE fragments + bound values shared by the list and the count, so a
     page can never be filtered differently from the total printed beside it.
@@ -466,7 +484,8 @@ def _job_filters(
     pile exists precisely because its rows should not be acted on."""
     for name, value in (("mismatches", mismatches), ("gone", gone),
                         ("applied", applied), ("old", old),
-                        ("bookmarked", bookmarked), ("opened", opened)):
+                        ("bookmarked", bookmarked), ("opened", opened),
+                        ("in_progress", in_progress)):
         if value not in ("include", "exclude", "only"):
             raise ValueError(f"{name}={value!r}: expected include/exclude/only")
     where, params = [], []
@@ -510,6 +529,12 @@ def _job_filters(
         where.append("opened_at=''")
     elif opened == "only":
         where.append("opened_at<>''")
+    if in_progress == "exclude":
+        where.append(f"NOT {_IN_PROGRESS_SQL}")
+        params.extend(OPEN_DRAFT_STATUSES)
+    elif in_progress == "only":
+        where.append(_IN_PROGRESS_SQL)
+        params.extend(OPEN_DRAFT_STATUSES)
     return where, params
 
 
@@ -568,6 +593,7 @@ def list_job_groups(
     stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
     bookmarked: str = "include",
     opened: str = "include",
+    in_progress: str = "include",
     offset: int = 0,
 ) -> list[sqlite3.Row]:
     """One row per company: its best-ranked posting, plus `company_count`.
@@ -578,7 +604,8 @@ def list_job_groups(
     company is always by score, because something has to choose which posting
     represents it."""
     where, params = _job_filters(status, mismatches, gone, applied, old,
-                                 stale_age_days, bookmarked, opened)
+                                 stale_age_days, bookmarked, opened,
+                                 in_progress)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     order = _JOB_ORDER_SQL if status else "id DESC"
     return con.execute(
@@ -599,10 +626,12 @@ def count_job_groups(
     stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
     bookmarked: str = "include",
     opened: str = "include",
+    in_progress: str = "include",
 ) -> int:
     """How many companies the grouped view holds."""
     where, params = _job_filters(status, mismatches, gone, applied, old,
-                                 stale_age_days, bookmarked, opened)
+                                 stale_age_days, bookmarked, opened,
+                                 in_progress)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     return con.execute(
         f"{_ranked_jobs_cte(where_sql)}"
@@ -625,6 +654,7 @@ def list_company_siblings(
     stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
     bookmarked: str = "include",
     opened: str = "include",
+    in_progress: str = "include",
     per_company: int = SIBLINGS_PER_COMPANY,
 ) -> list[sqlite3.Row]:
     """The postings a grouped row stands in front of, best-ranked first.
@@ -636,7 +666,8 @@ def list_company_siblings(
     if not company_keys:
         return []
     where, params = _job_filters(status, mismatches, gone, applied, old,
-                                 stale_age_days, bookmarked, opened)
+                                 stale_age_days, bookmarked, opened,
+                                 in_progress)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     placeholders = ",".join("?" * len(company_keys))
     return con.execute(
@@ -659,11 +690,13 @@ def count_jobs(
     stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
     bookmarked: str = "include",
     opened: str = "include",
+    in_progress: str = "include",
 ) -> int:
     """How many postings a `list_jobs` call with the same filters would have,
     ignoring its page limit — the total a paged view has to print."""
     where, params = _job_filters(status, mismatches, gone, applied, old,
-                                 stale_age_days, bookmarked, opened)
+                                 stale_age_days, bookmarked, opened,
+                                 in_progress)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     return con.execute(
         f"SELECT COUNT(*) FROM jobs{where_sql}", params
@@ -681,6 +714,7 @@ def list_jobs(
     stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
     bookmarked: str = "include",
     opened: str = "include",
+    in_progress: str = "include",
     offset: int = 0,
 ) -> list[sqlite3.Row]:
     """List postings. mismatches: 'include' (default), 'exclude' (hide the
@@ -689,7 +723,8 @@ def list_jobs(
     many better-scored rows fill the page limit). `gone` takes the same three
     values over postings whose ad the source says is no longer there."""
     where, params = _job_filters(status, mismatches, gone, applied, old,
-                                 stale_age_days, bookmarked, opened)
+                                 stale_age_days, bookmarked, opened,
+                                 in_progress)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     # The age-adjusted score is SELECTED as well as ordered on, so the number
     # the UI prints is the very number that decided the row's position — two

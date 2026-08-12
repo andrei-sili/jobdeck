@@ -641,3 +641,65 @@ def test_the_unread_filter_reaches_the_grouped_view_too(con):
 def test_an_unknown_opened_filter_value_raises(con):
     with pytest.raises(ValueError, match="opened"):
         db.list_jobs(con, "new", opened="perhaps")
+
+
+# ---------------------------------------------------------------------------
+# In Arbeit — a posting whose application is under way
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("status", db.OPEN_DRAFT_STATUSES)
+def test_a_draft_still_going_puts_its_posting_in_arbeit(con, status):
+    job_id = _add_job(con)
+    db.upsert_draft(con, job_id, {"status": status})
+    con.commit()
+
+    assert [r["id"] for r in db.list_jobs(con, None, in_progress="only")] == [job_id]
+    assert db.count_jobs(con, None, in_progress="exclude") == 0
+
+
+@pytest.mark.parametrize("status", ["discarded", "sent"])
+def test_a_finished_or_discarded_draft_is_no_longer_in_arbeit(con, status):
+    """Thrown away or already gone: either way there is nothing left to do
+    about it here, and a view that kept promising work would never empty."""
+    job_id = _add_job(con)
+    db.upsert_draft(con, job_id, {"status": status})
+    con.commit()
+
+    assert db.list_jobs(con, None, in_progress="only") == []
+    assert [r["id"] for r in db.list_jobs(con, None, in_progress="exclude")] == [job_id]
+
+
+def test_a_posting_with_no_draft_at_all_is_not_in_arbeit(con):
+    job_id = _add_job(con)
+    con.commit()
+    assert db.list_jobs(con, None, in_progress="only") == []
+    assert [r["id"] for r in db.list_jobs(con, None, in_progress="exclude")] == [job_id]
+
+
+def test_the_newest_draft_is_not_the_one_that_decides(con):
+    """`job_id` has no UNIQUE constraint, so a posting can carry a discarded
+    draft AND a live one — it is in Arbeit if ANY draft is still going."""
+    job_id = _add_job(con)
+    for status in ("ready", "discarded"):
+        con.execute(
+            "INSERT INTO drafts (job_id, status, created_at, updated_at) "
+            "VALUES (?, ?, '2026-08-12T10:00:00', '2026-08-12T10:00:00')",
+            (job_id, status),
+        )
+    con.commit()
+
+    assert [r["id"] for r in db.list_jobs(con, None, in_progress="only")] == [job_id]
+
+
+def test_in_arbeit_reaches_the_grouped_view_too(con):
+    working = _add_job(con, external_id="A", company="Eine GmbH")
+    _add_job(con, external_id="B", company="Andere GmbH")
+    db.upsert_draft(con, working, {"status": "ready"})
+    con.commit()
+
+    assert db.count_job_groups(con, None, in_progress="only") == 1
+    assert [r["id"] for r in db.list_job_groups(con, None, in_progress="only")] == [working]
+
+
+def test_an_unknown_drafting_filter_value_raises(con):
+    with pytest.raises(ValueError, match="in_progress"):
+        db.list_jobs(con, "new", in_progress="sometimes")

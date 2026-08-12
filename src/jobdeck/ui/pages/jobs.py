@@ -3,6 +3,7 @@
 import logging
 import math
 import pathlib
+from dataclasses import dataclass
 
 from fastapi.responses import RedirectResponse
 from nicegui import app, run, ui
@@ -21,93 +22,94 @@ from jobdeck.ui.rail import STELLEN_PATH
 
 log = logging.getLogger(__name__)
 
-FILTERS = ["new", "portal", "duplicate", "skipped", "applied", "all"]
-
 # One page of postings. It used to be a hard limit of 100 with no way past it,
 # which left 187 of his 287 open postings unreachable in the UI entirely — and
-# no number on screen said so. Quasar renders an expansion's content EAGERLY, so
-# a page is a real cost: pages plus a printed total beat one long list.
+# no number on screen said so.
 PAGE_SIZE = 50
 
-# Two piles are hidden from the working inbox, on the same terms: a score-0
-# mismatch violates a stated hard requirement, and a 'gone' posting's ad is no
-# longer online. Both are FACTS about the posting, so they hide it — and neither
-# ever deletes it. Opening a pile is a separate VIEW of just that pile, not a
-# filter that stacks with the other: mixing either back into the list would
-# leave it unreachable once better-scored rows fill the page.
-PILE_NONE, PILE_MISMATCHES, PILE_DEAD = "", "mismatches", "dead"
-PILE_APPLIED = "applied_firm"
-PILE_OLD = "old"
-_INCLUDE_ALL = {"mismatches": "include", "gone": "include", "applied": "include",
-                "old": "include"}
-_PILE_FILTERS = {
-    PILE_NONE: {"mismatches": "exclude", "gone": "exclude", "applied": "exclude",
-                "old": "exclude"},
-    PILE_MISMATCHES: {**_INCLUDE_ALL, "mismatches": "only"},
-    PILE_DEAD: {**_INCLUDE_ALL, "gone": "only"},
-    PILE_APPLIED: {**_INCLUDE_ALL, "applied": "only"},
-    PILE_OLD: {**_INCLUDE_ALL, "old": "only"},
-}
-
-# ONE control for the three views, deliberately not two switches. Mutual
-# exclusion between two switches means the handler writes the OTHER switch, and
-# NiceGUI fires that server-side write as a background task — so two clicks read
-# in one socket turn make the two switches echo each other into an endless
-# refresh loop. A single value cannot disagree with itself.
-PILE_LABELS = {
-    PILE_NONE: "Arbeitsliste",
-    PILE_MISMATCHES: "Mismatches",
-    PILE_DEAD: "Dead ads",
-    PILE_APPLIED: "Schon beworben",
-    PILE_OLD: "Alte Anzeigen",
-}
+# ONE list of named views, replacing six status filters, four pile switches and
+# a grouping toggle. Those controls could be combined into states that describe
+# nothing ("applied postings, mismatches only"), and the two pile switches had
+# to be mutually exclusive — which is what made them echo each other into an
+# endless refresh loop. A single value cannot disagree with itself, and a view
+# he can name is a view he can find his way back to.
+#
+# Everything a view does is stated here as data: which status it stands on and
+# what it does with each pile. A screen that computed its filters in the handler
+# is a screen whose printed total can disagree with its own rows.
+_WORKING = {"mismatches": "exclude", "gone": "exclude", "applied": "exclude",
+            "old": "exclude"}
+_EVERYTHING = {"mismatches": "include", "gone": "include", "applied": "include",
+               "old": "include"}
 
 
-_EMPTY_VIEW = {
-    PILE_NONE: "Nothing here. Run a search profile to discover jobs.",
-    PILE_MISMATCHES: "No mismatches — nothing is hidden.",
-    PILE_DEAD: "No dead postings — every ad checked so far is still online.",
-    PILE_APPLIED: "Keine Stelle bei einer Firma, bei der du dich schon "
-                  "beworben hast.",
-    PILE_OLD: "Keine alten Anzeigen — alles in der Arbeitsliste ist frisch.",
-}
+@dataclass(frozen=True)
+class View:
+    """One named way of looking at the corpus."""
+
+    key: str
+    label: str
+    status: str | None   # None: whatever he did with it, this view still holds it
+    filters: dict
+    empty: str
 
 
-def _view_filters(pile: str, status: str) -> dict:
-    """The pile filters this view really uses.
+VIEWS = (
+    View("neu", "Neu", "new", {**_WORKING, "opened": "exclude"},
+         "Nichts Neues — du hast alles gesehen, was in der Arbeitsliste steht."),
+    View("offen", "Alle offen", "new", _WORKING,
+         "Die Arbeitsliste ist leer. Ein Suchprofil füllt sie wieder."),
+    View("vorgemerkt", "Vorgemerkt", None, {**_EVERYTHING, "bookmarked": "only"},
+         "Nichts vorgemerkt. Mit „s“ legst du eine Anzeige hier ab."),
+    View("in_arbeit", "In Arbeit", None, {**_EVERYTHING, "in_progress": "only"},
+         "Keine Bewerbung in Arbeit."),
+    View("beworben", "Beworben", "applied", _EVERYTHING,
+         "Noch keine Bewerbung aus einer Anzeige heraus."),
+    View("kein_interesse", "Kein Interesse", "skipped", _EVERYTHING,
+         "Du hast noch keine Anzeige weggelegt."),
+    View("passt_nicht", "Passt nicht", "new", {**_EVERYTHING, "mismatches": "only"},
+         "Keine Anzeige verletzt eine harte Anforderung."),
+    View("alt", "Alt", "new", {**_EVERYTHING, "old": "only"},
+         "Keine alten Anzeigen — alles in der Arbeitsliste ist frisch."),
+    View("offline", "Offline", "new", {**_EVERYTHING, "gone": "only"},
+         "Keine tote Anzeige — alles Geprüfte steht noch online."),
+    View("firma_kontaktiert", "Firma schon kontaktiert", "new",
+         {**_EVERYTHING, "applied": "only"},
+         "Keine Stelle bei einer Firma, bei der du dich schon beworben hast."),
+    View("doppelt", "Doppelt", "duplicate", _EVERYTHING,
+         "Keine Anzeige wurde als Doppelte einer Bewerbung erkannt."),
+)
+DEFAULT_VIEW = VIEWS[0].key
+_BY_KEY = {view.key: view for view in VIEWS}
 
-    Hiding is for the WORKING list. Once he has acted on a posting — opened its
-    portal, applied, skipped it — its row carries the action that finishes the
-    job ("I applied — record it"), so hiding it would hide that button. Only the
-    `new` view hides; every other filter shows what it contains."""
-    if pile == PILE_NONE and status != "new":
-        return dict(_INCLUDE_ALL)
-    return _PILE_FILTERS[pile]
+
+def view_for(key: str) -> View:
+    """The named view, falling back to the default rather than raising.
+
+    The key reaches here from a control and one day from a URL; an unknown one
+    is a screen he cannot open, and the default is always a safe answer."""
+    return _BY_KEY.get(key, _BY_KEY[DEFAULT_VIEW])
 
 
-def _hidden_line(filters: dict, mismatches: int, dead: int, applied: int = 0,
-                 old: int = 0, stale_age_days: int = 0) -> str:
+def _hidden_line(view: View, counts: dict, stale_age_days: int) -> str:
     """What this view is not showing, derived from the filters it actually used
     so the label cannot contradict the list. Independent statements, never a
     total: a posting can be a mismatch AND offline AND old."""
     parts = []
-    if filters["mismatches"] == "exclude" and mismatches:
-        parts.append(f"{mismatches} mismatches hidden")
-    elif filters["mismatches"] == "only":
-        parts.append(f"{mismatches} mismatches — hard requirement violated")
-    if filters["gone"] == "exclude" and dead:
-        parts.append(f"{dead} dead hidden")
-    elif filters["gone"] == "only":
-        parts.append(f"{dead} postings whose ad is gone")
-    if filters["applied"] == "exclude" and applied:
-        parts.append(f"{applied} bei schon beworbenen Firmen hidden")
-    elif filters["applied"] == "only":
-        parts.append(f"{applied} Stellen bei Firmen, bei denen du dich "
-                     "schon beworben hast")
-    if filters.get("old") == "exclude" and old:
-        parts.append(f"{old} älter als {stale_age_days} Tage hidden")
-    elif filters.get("old") == "only":
-        parts.append(f"{old} Anzeigen älter als {stale_age_days} Tage")
+    for arm, count_key, hidden, only in (
+        ("mismatches", "mismatches", "{n} passen nicht",
+         "{n} verletzen eine harte Anforderung"),
+        ("gone", "dead", "{n} offline", "{n} Anzeigen sind offline"),
+        ("applied", "applied_firm", "{n} bei schon beworbenen Firmen",
+         "{n} Stellen bei Firmen, bei denen du dich schon beworben hast"),
+        ("old", "old", f"{{n}} älter als {stale_age_days} Tage",
+         f"{{n}} Anzeigen älter als {stale_age_days} Tage"),
+    ):
+        count = counts.get(count_key, 0)
+        if view.filters.get(arm) == "exclude" and count:
+            parts.append(hidden.format(n=count) + " ausgeblendet")
+        elif view.filters.get(arm) == "only":
+            parts.append(only.format(n=count))
     return " · ".join(parts)
 
 
@@ -135,17 +137,20 @@ def _score_line(job: dict) -> str:
     return f" · match {score}{aged}"
 
 
-def _load_jobs(status: str, pile: str, page: int, collapse: bool = True) -> dict:
-    """One page of the current view, with everything needed to describe it.
+def _load_jobs(view_key: str, page: int) -> dict:
+    """One page of a named view, with everything needed to describe it.
 
-    Collapsed, a row stands for a COMPANY — its best-ranked posting, with the
-    others listed beneath it. The count and the page therefore both count
-    companies, so the printed range stays true to what is on screen.
+    A row stands for a COMPANY — its best-ranked posting, with the others
+    listed beneath it. Only one application per company is possible anyway, so
+    the count and the page both count companies and the printed range stays
+    true to what is on screen. It is no longer a toggle: a screen that could be
+    switched between two units is a screen whose numbers need explaining.
 
     The page number is clamped HERE, against the total this very query saw: a
-    filter change or a background poll can shrink the result set under the
-    user's feet, and asking for page 5 of a two-page list must show the last
-    page rather than an empty one."""
+    view change or a background poll can shrink the result set under the user's
+    feet, and asking for page 5 of a two-page list must show the last page
+    rather than an empty one."""
+    view = view_for(view_key)
     with db.db() as con:
         # The signature is read FIRST, before a single row. sqlite3 runs each
         # SELECT in its own read snapshot, so a poll or a liveness pass
@@ -154,37 +159,33 @@ def _load_jobs(status: str, pile: str, page: int, collapse: bool = True) -> dict
         # as "what the page is showing" and never rebuild. This order can only
         # fail the safe way: one rebuild nobody needed.
         signature = db.data_signature(con)
-        status_arg = None if status == "all" else status
         stale_age_days = freshness.stale_age_setting(
             db.get_setting(con, "stale_age_days", ""))
-        filters = {**_view_filters(pile, status),
-                   "stale_age_days": stale_age_days}
-        count = db.count_job_groups if collapse else db.count_jobs
-        total = count(con, status_arg, **filters)
+        filters = {**view.filters, "stale_age_days": stale_age_days}
+        total = db.count_job_groups(con, view.status, **filters)
         pages = max(1, -(-total // PAGE_SIZE))
         page = min(max(page, 0), pages - 1)
-        listing = db.list_job_groups if collapse else db.list_jobs
-        rows = [dict(r) for r in listing(
-            con, status_arg, limit=PAGE_SIZE, offset=page * PAGE_SIZE, **filters)]
+        rows = [dict(r) for r in db.list_job_groups(
+            con, view.status, limit=PAGE_SIZE, offset=page * PAGE_SIZE, **filters)]
+        keys = [r["company_key"] for r in rows if r["company_count"] > 1]
         siblings: dict[str, list[dict]] = {}
-        if collapse:
-            keys = [r["company_key"] for r in rows if r["company_count"] > 1]
-            for row in db.list_company_siblings(con, keys, status_arg, **filters):
-                siblings.setdefault(row["company_key"], []).append(dict(row))
+        for row in db.list_company_siblings(con, keys, view.status, **filters):
+            siblings.setdefault(row["company_key"], []).append(dict(row))
         # Asked of the duplicate gate itself, for the rows on screen — see
         # dedupe.duplicates_for_jobs for why the stored flag cannot answer it.
         on_screen = rows + [r for group in siblings.values() for r in group]
         return {
             "signature": signature,
+            "view": view,
             "applied": duplicates_for_jobs(con, on_screen),
             "rows": rows,
             "siblings": siblings,
-            "filters": filters,
-            "collapse": collapse,
-            "mismatches": db.count_mismatches(con, status_arg),
-            "dead": db.count_gone_jobs(con, status_arg),
-            "applied_firm": db.count_applied_firm_jobs(con, status_arg),
-            "old": db.count_old_jobs(con, status_arg, stale_age_days),
+            "counts": {
+                "mismatches": db.count_mismatches(con, view.status),
+                "dead": db.count_gone_jobs(con, view.status),
+                "applied_firm": db.count_applied_firm_jobs(con, view.status),
+                "old": db.count_old_jobs(con, view.status, stale_age_days),
+            },
             "stale_age_days": stale_age_days,
             "total": total,
             "page": page,
@@ -192,17 +193,15 @@ def _load_jobs(status: str, pile: str, page: int, collapse: bool = True) -> dict
         }
 
 
-def _range_line(page: int, total: int, shown: int, collapse: bool) -> str:
+def _range_line(page: int, total: int, shown: int) -> str:
     """'51–100 von 266 Firmen' — where in the pipeline this page sits.
 
-    The unit is named because it changes with the grouping toggle: a grouped
-    page counts companies while the hidden-pile counts beside it are postings,
-    and an unlabelled pair of numbers invites comparing them."""
+    The unit is named because a row is a COMPANY while the pile counts beside
+    it are POSTINGS, and an unlabelled pair of numbers invites comparing them."""
     if not total:
         return ""
     first = page * PAGE_SIZE + 1
-    unit = "Firmen" if collapse else "Stellen"
-    return f"{first}–{first + shown - 1} von {total} {unit}"
+    return f"{first}–{first + shown - 1} von {total} Firmen"
 
 
 def _signature() -> tuple:
@@ -361,9 +360,7 @@ def legacy_jobs_page():
 @ui.page(STELLEN_PATH)
 async def jobs_page():
     async with frame("Stellen", current="stellen"):
-        status_filter = {"value": "new"}
-        pile = {"value": PILE_NONE}
-        collapse = {"value": True}
+        current = {"view": DEFAULT_VIEW}
         # What the duplicate gate says about the rows currently on screen,
         # refreshed with them. Not `jobs.duplicate_of`: that is written once at
         # discovery, so every application he sends makes more rows stale.
@@ -401,23 +398,18 @@ async def jobs_page():
         async def refresh():
             refresh_gen["n"] += 1
             gen = refresh_gen["n"]
-            view = await run.io_bound(
-                _load_jobs, status_filter["value"], pile["value"], page["value"],
-                collapse["value"],
-            )
+            view = await run.io_bound(_load_jobs, current["view"], page["value"])
             if gen != refresh_gen["n"]:
                 return  # superseded — a newer refresh already owns the view
             page["value"] = view["page"]  # the loader clamped it to what exists
             container.clear()
             reading["rows"] = 0  # every expansion just died with the container
             live_view.mark(view["signature"])
-            hidden_label.set_text(
-                _hidden_line(view["filters"], view["mismatches"], view["dead"],
-                             view["applied_firm"], view["old"],
-                             view["stale_age_days"]))
+            hidden_label.set_text(_hidden_line(
+                view["view"], view["counts"], view["stale_age_days"]))
             with container:
                 if not view["rows"]:
-                    ui.label(_EMPTY_VIEW[pile["value"]]).classes("text-gray-500")
+                    ui.label(view["view"].empty).classes("text-gray-500")
                 applied.clear()
                 applied.update(view["applied"])
                 for job in view["rows"]:
@@ -428,7 +420,7 @@ async def jobs_page():
             pager.clear()
             with pager:
                 ui.label(_range_line(view["page"], view["total"],
-                                     len(view["rows"]), view["collapse"])) \
+                                     len(view["rows"]))) \
                     .classes("text-xs text-gray-500")
                 if view["pages"] <= 1:
                     return
@@ -725,28 +717,15 @@ async def jobs_page():
                 say("Application recorded ✓", type="positive")
 
         with ui.row().classes("items-center gap-4"):
-            ui.toggle(
-                FILTERS,
-                value="new",
-                on_change=lambda e: set_filter(e.value),
-            )
-            ui.toggle(
-                PILE_LABELS,
-                value=PILE_NONE,
-                on_change=lambda e: set_pile(e.value),
-            ).mark("pile-toggle").tooltip("The four hidden piles: postings scored 0 for violating "
-                      "a hard requirement, postings whose ad the board says is "
-                      "gone, postings at a company an application already "
-                      "went to — only one per company is possible, so those "
-                      "can never become one — and postings older than the age "
-                      "you set in Settings. Hidden from the working list, "
-                      "never deleted.")
-            ui.switch(
-                "Group by company",
-                value=True,
-                on_change=lambda e: set_collapse(e.value),
-            ).tooltip("One row per company, showing its best-scored posting — "
-                      "only one application per company is possible anyway")
+            ui.select(
+                {view.key: view.label for view in VIEWS},
+                value=DEFAULT_VIEW,
+                label="Ansicht",
+                on_change=lambda e: set_view(e.value),
+            ).mark("view-select").props("dense outlined").classes("min-w-48") \
+                .tooltip("Eine Ansicht statt sechs Filtern und vier Schaltern. "
+                         "Nichts wird je gelöscht — was hier nicht steht, steht "
+                         "in einer der anderen Ansichten.")
             hidden_label = ui.label().classes("text-xs text-gray-500")
         # Postings arrive hourly, scores land every ten minutes and the liveness
         # pass runs 90 s after every start — all of it invisible until this. It
@@ -758,22 +737,13 @@ async def jobs_page():
                 busy=lambda: reading["rows"] > 0 or live.dialog_open(),
             )
 
-        async def set_collapse(value: bool):
-            collapse["value"] = value
-            page["value"] = 0  # companies and postings are not the same count
-            await refresh()
-
-        async def set_filter(value: str):
-            status_filter["value"] = value
-            page["value"] = 0  # a different list: page 3 of it means nothing
-            await refresh()
-
-        async def set_pile(value: str):
-            """Switch between the working list and one of the hidden piles.
+        async def set_view(value: str):
+            """Move to another named view.
 
             One assignment and one refresh: nothing here writes another control,
-            so no handler can be echoed back into this one."""
-            pile["value"] = value or PILE_NONE
+            so no handler can be echoed back into this one — which is what made
+            the two pile switches rebuild the page forever."""
+            current["view"] = value or DEFAULT_VIEW
             page["value"] = 0  # a different list: page 3 of it means nothing
             await refresh()
 

@@ -40,11 +40,10 @@ def _keep_the_package_importable():
     sys.modules.update(saved)
 
 
-async def _open_pile(user: User, pile: str | None = None):
-    """Switch the inbox to the 'already applied' pile through its real control."""
-    from jobdeck.ui.pages import jobs as jobs_page
-    toggle = next(iter(user.find(marker="pile-toggle").elements))
-    toggle.set_value(pile if pile is not None else jobs_page.PILE_APPLIED)
+async def _open_view(user: User, view_key: str = "firma_kontaktiert"):
+    """Switch the list to a named view through its real control."""
+    select = next(iter(user.find(marker="view-select").elements))
+    select.set_value(view_key)
     await asyncio.sleep(0.3)
 
 
@@ -294,11 +293,11 @@ async def test_a_posting_at_a_firm_he_already_wrote_to_says_so(
     # is a fact about the posting, exactly like a score-0 mismatch
     await user.open("/")
     await user.should_not_see("Beispiel GmbH")
-    await user.should_see("bei schon beworbenen Firmen hidden")
+    await user.should_see("bei schon beworbenen Firmen ausgeblendet")
 
     # …and one click away, saying why, with nothing inviting him to spend a
     # draft on an application that can never be sent
-    await _open_pile(user)
+    await _open_view(user)
     await user.should_see("Beispiel GmbH")
     await user.should_see("bereits beworben")
     await user.should_see("Absage")
@@ -314,7 +313,7 @@ async def test_the_decorated_spelling_is_covered_by_the_same_warning(
                            "email": "", "kanal": "E-Mail", "status": "Absage"})
     con.commit()
     await user.open("/")
-    await _open_pile(user)
+    await _open_view(user)
     await user.should_see("bereits beworben")
 
 
