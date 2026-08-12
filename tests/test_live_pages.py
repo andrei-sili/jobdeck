@@ -1005,3 +1005,32 @@ async def test_the_editor_the_queue_uses_opens_over_the_list_too(
 
     await user.should_see("Bewerbung als Python Entwickler")
     await user.should_see("Send now")
+
+
+async def test_an_application_landing_while_the_editor_is_open_reaches_the_confirmation(
+        user: User, con, data_dir):
+    """The last statement before a real send. Read when the confirmation is
+    BUILT, not when the editor opened: an auto-send tick or a second tab can
+    write that company's application while the dialog sits there."""
+    job_id = _emailable(con)
+    db.upsert_draft(con, job_id, {
+        "status": "ready", "recipient": "jobs@beispiel.example",
+        "betreff": "Bewerbung als Python Entwickler",
+        "email_body": "Sehr geehrte Damen und Herren,"})
+    db.set_setting(con, "test_recipient", "probe@example.org")
+    con.commit()
+    await user.open("/")
+    user.find("Prüfen und senden", kind=ui.button).click()
+    await asyncio.sleep(0.4)
+    await user.should_see("Send now")
+
+    # …and now somebody else applies at that company
+    db.add_bewerbung(con, {"gesendet_am": "2026-08-12", "firma": "Beispiel GmbH",
+                           "email": "", "kanal": "E-Mail", "status": "Gesendet"})
+    con.commit()
+
+    user.find("Send now", kind=ui.button).click()
+    await asyncio.sleep(0.4)
+
+    await user.should_see("Send this application?")
+    await user.should_see("bereits beworben")

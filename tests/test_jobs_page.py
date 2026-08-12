@@ -1479,3 +1479,29 @@ def test_the_step_to_press_is_the_first_that_is_neither_done_nor_refused():
     assert steps[jobs._next_step(steps)].key == jobs.STEP_MAPPE
     assert jobs._next_step([jobs.Step("a", "A", done=True),
                             jobs.Step("b", "B", enabled=False)]) == -1
+
+
+def test_a_posting_whose_form_he_opened_can_come_back():
+    """`portal` is written the moment a form is opened, and nothing else brought
+    a posting back from it — opening a form he then decided against took the
+    posting out of the working list for good. It is not a REFUSAL, though: he
+    may still finish that application, so every step stays live."""
+    steps = jobs.apply_steps(_row(status="portal", apply_channel="ats_form",
+                                  url="https://firma.de/x"))
+    assert steps[-1].key == jobs.STEP_RECORD
+    assert steps[-1].enabled is True
+    assert jobs._blocking_reason(_row(status="portal"), None) == ""
+
+
+def test_a_letter_already_on_its_way_says_where_to_resolve_it():
+    """Both branches, not only the e-mail one: an `ats_form` posting whose
+    draft is `sending` used to render a disabled "Mappe erstellen" telling him
+    to write the letter that was at that moment being sent."""
+    for channel, key in (("direct_email", jobs.STEP_SEND),
+                         ("ats_form", jobs.STEP_MAPPE)):
+        steps = {s.key: s for s in jobs.apply_steps(
+            _row(apply_channel=channel,
+                 contact_email="hr@x.de" if channel == "direct_email" else "",
+                 draft_status="sending"))}
+        assert steps[key].enabled is False
+        assert "Review queue" in steps[key].reason, (channel, steps[key].reason)

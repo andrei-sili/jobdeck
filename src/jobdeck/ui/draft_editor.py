@@ -15,6 +15,7 @@ import pathlib
 from nicegui import run, ui
 
 from jobdeck import db
+from jobdeck.dedupe import duplicates_for_jobs
 from jobdeck.services import mappe, send
 from jobdeck.ui import helpers
 from jobdeck.ui.helpers import open_in_system
@@ -64,8 +65,23 @@ def _save_draft(job_id: int, values: dict, clear_pdf: bool):
         return dict(db.get_draft_by_job(con, job_id)), ""
 
 
-def open_editor(row: dict, *, overlay, say, on_change,
-                already_applied=None) -> None:
+def applied_at_this_company(job_id: int) -> dict | None:
+    """The application that already went to this posting's company, or None.
+
+    Asked HERE, of the database, at the moment the confirmation is built. It
+    used to be handed in by the caller — first as a snapshot taken when the
+    editor opened, then as a callable over the caller's cached dict — and both
+    were stale by construction: the page cannot refresh while a dialog is open,
+    which is exactly the window an auto-send tick or a second tab uses. The
+    gate inside the claim reads the same table; this is so he sees it first."""
+    with db.db() as con:
+        job = db.get_job(con, job_id)
+        if job is None:
+            return None
+        return duplicates_for_jobs(con, [dict(job)]).get(job_id)
+
+
+def open_editor(row: dict, *, overlay, say, on_change) -> None:
     """Open the draft for this posting over whatever screen asked for it.
 
     `overlay` is the caller's own host — a sibling of its list, because a
@@ -178,6 +194,19 @@ def open_editor(row: dict, *, overlay, say, on_change,
         async def send_now():
             if not await save():
                 return
+            # The draft can move while this dialog sits open — auto-send picks
+            # it up, another tab sends it. `save()` returns early when nothing
+            # was typed, so without this the confirmation would state "REAL
+            # send to the company" for a message the claim then refuses.
+            latest = await run.io_bound(load, job_id)
+            if latest is None or latest["status"] not in EDITABLE_STATUS:
+                say(f"Dieser Entwurf ist nicht mehr sendbar (Status: "
+                    f"{latest['status'] if latest else 'weg'}) — "
+                    f"in der Review queue auflösen.",
+                    type="warning", multi_line=True)
+                await on_change()
+                return
+            current.update(latest)
             status = await run.io_bound(_current_send_status)
             final, test_mode, error = send.resolve_recipient(
                 current["recipient"], {
@@ -193,6 +222,7 @@ def open_editor(row: dict, *, overlay, say, on_change,
                     else "REAL send to the company")
             attachment = (pathlib.Path(current["pdf_path"]).name
                           if current["pdf_path"] else "NONE")
+            already = await run.io_bound(applied_at_this_company, job_id)
             with overlay, ui.dialog() as confirm, ui.card():
                 ui.label("Send this application?").classes("font-bold")
                 ui.label(f"{mode}: {final}").classes(
@@ -203,8 +233,6 @@ def open_editor(row: dict, *, overlay, say, on_change,
                 # tick, a second tab), and this is the last statement before
                 # the press. The gate inside the claim would refuse it a second
                 # later, but the point of this line is that he sees it first.
-                already = (already_applied() if callable(already_applied)
-                           else already_applied)
                 if already:
                     ui.label(helpers.applied_line(already)) \
                         .classes("text-sm font-bold text-amber-700")

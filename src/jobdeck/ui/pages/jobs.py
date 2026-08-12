@@ -233,7 +233,8 @@ def apply_steps(job: dict, already: dict | None = None) -> list[Step]:
         steps.append(Step(
             STEP_MAPPE, "Mappe erstellen", done=bool(job.get("pdf_path")),
             enabled=has_letter and not blocked,
-            reason=blocked or ("" if has_letter
+            reason=blocked or ("" if has_letter else
+                               "In der Review queue auflösen." if letter_gone
                                else "Erst das Anschreiben schreiben."),
         ))
         # Blocked too, and not only for tidiness: opening the form MOVES the
@@ -990,7 +991,11 @@ async def jobs_page():
                     ui.button("★ gemerkt" if marked else "☆ merken",
                               on_click=lambda j=job["id"]: toggle_bookmark(j)) \
                         .props("flat dense no-caps")
-                    if job["status"] == "skipped":
+                    if job["status"] in ("skipped", "portal"):
+                        # `portal` is written the moment a form is opened, and
+                        # nothing else brought a posting back from it: opening
+                        # a form he then decided against took the posting out
+                        # of the working list for good.
                         ui.button("↩ zurück in die Arbeitsliste",
                                   on_click=lambda j=job["id"]: revive(j)) \
                             .props("flat dense no-caps")
@@ -1009,6 +1014,15 @@ async def jobs_page():
                     if job["status"] == "new" and not job["contact_email"]:
                         ui.button("Kontakt-E-Mail suchen",
                                   on_click=lambda j=job: find_email(j)) \
+                            .props("flat dense no-caps")
+                    if not _by_email(job) and not _blocking_reason(job, already):
+                        # The cockpit is not retired: it is the only screen
+                        # that holds the applicant fields ready to paste into
+                        # an employer's form, and deleting the last route into
+                        # it left Settings still promising it is a click away.
+                        ui.button("Formular-Daten",
+                                  on_click=lambda j=job["id"]:
+                                      open_cockpit(j)) \
                             .props("flat dense no-caps")
                 for text, kind in reader_notes(job, already):
                     ui.label(text).classes(f"jd-note {kind} mb-2")
@@ -1210,11 +1224,14 @@ async def jobs_page():
             overlay.clear()
             with overlay:
                 draft_editor.open_editor(
-                    row, overlay=overlay, say=say, on_change=forced_refresh,
-                    already_applied=applied.get(job["id"]))
+                    row, overlay=overlay, say=say, on_change=forced_refresh)
 
         async def forced_refresh() -> None:
             await refresh(force=True)
+
+        def open_cockpit(job_id: int) -> None:
+            """The clipboard beside an employer's form."""
+            ui.navigate.to(f"/cockpit/{job_id}")
 
         async def open_form(job: dict) -> None:
             """Open the employer's page and remember that he started applying.
@@ -1292,7 +1309,7 @@ async def jobs_page():
         async def revive(job_id: int) -> None:
             """Put a posting he had put away back into the working list."""
             job = shown.get(job_id)
-            if job is None or job["status"] != "skipped":
+            if job is None or job["status"] not in ("skipped", "portal"):
                 return
             _hold_place(job_id)
             await run.io_bound(_set_status, job_id, "new")

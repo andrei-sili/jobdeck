@@ -386,7 +386,6 @@ async def queue_page():
             leaves: it resolves the recipient, shows what is about to go out and
             pins it with `expect=`. Stellen opens the very same one."""
             draft_editor.open_editor(
-                row, overlay=overlay, say=say, on_change=refresh,
-                already_applied=applied.get(row["job_id"]))
+                row, overlay=overlay, say=say, on_change=refresh)
 
         await refresh()

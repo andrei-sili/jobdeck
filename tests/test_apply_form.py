@@ -316,10 +316,13 @@ def test_the_cockpit_route_is_registered_by_the_app():
 
 
 @pytest.mark.parametrize("channel", ["ats_form", "board_apply", "company_site"])
-def test_the_main_button_leads_into_the_cockpit_wherever_a_form_is_filled(channel):
-    """The cockpit is the ONE form path: it opens the employer's page itself
-    and keeps every field a click away beside it. Two controls for one act is
-    what "too many buttons" meant."""
+def test_a_form_posting_offers_the_employers_page_and_the_clipboard_beside_it(
+        channel):
+    """Two things, and they are not the same: "Formular öffnen" opens the
+    employer's page (and records that an application has started), while the
+    cockpit holds the applicant fields ready to paste into it. Deleting the
+    last route into the cockpit left Settings still promising it is one click
+    away."""
     from jobdeck.ui.pages import jobs as jobs_page
     steps = {s.key: s for s in jobs_page.apply_steps(
         {"status": "new", "apply_channel": channel, "contact_email": "",
@@ -332,6 +335,8 @@ def test_the_main_button_leads_into_the_cockpit_wherever_a_form_is_filled(channe
     source = pathlib.Path(jobs_page.__file__).read_text()
     assert 'ui.navigate.to(url, new_tab=True)' in source, (
         "the form step must open the employer's page through the shared gate")
+    assert 'ui.navigate.to(f"/cockpit/{job_id}")' in source, (
+        "no route into the cockpit is left anywhere in the UI")
 
 
 @pytest.mark.parametrize("job, expected, why", [

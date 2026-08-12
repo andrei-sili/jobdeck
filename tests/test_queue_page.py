@@ -316,10 +316,31 @@ def test_a_draft_that_is_already_going_is_not_offered_a_send_button(con, data_di
     assert 'if row["status"] in EDITABLE_STATUS:' in guard
 
 
-def test_the_duplicate_warning_in_the_confirmation_is_read_when_it_is_shown(
-        con, data_dir):
-    """An application to that company can land while the dialog sits open (an
-    auto-send tick, a second tab), and this line is the last statement before
-    the press."""
-    source = pathlib.Path(draft_editor.__file__).read_text()
-    assert "already_applied() if callable(already_applied)" in source
+def test_the_editor_asks_the_database_rather_than_being_told(con, data_dir):
+    """Handed in, this was stale by construction — twice. First a snapshot
+    taken when the editor opened, then a callable over the caller's cached
+    dict, which cannot refresh while a dialog is open. That window is exactly
+    the one an auto-send tick uses. No caller may hand it in at all."""
+    import ast
+    ui_dir = pathlib.Path(draft_editor.__file__).parent
+    checked = 0
+    for path in sorted(ui_dir.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if (isinstance(node, ast.Call)
+                    and ast.unparse(node.func).endswith("open_editor")):
+                assert not any(k.arg == "already_applied" for k in node.keywords), \
+                    f"{path.name} tells the editor who has been applied to"
+                checked += 1
+    assert checked >= 2, "the scan found almost nothing"
+
+    job_id = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "e1", "title": "Dev",
+        "company": "Eine GmbH"})
+    con.commit()
+    assert draft_editor.applied_at_this_company(job_id) is None
+    db.add_bewerbung(con, {"gesendet_am": "2026-06-12", "firma": "Eine GmbH",
+                           "kanal": "E-Mail", "status": "Absage"})
+    con.commit()
+    found = draft_editor.applied_at_this_company(job_id)
+    assert found is not None and found["firma"] == "Eine GmbH"
+    assert draft_editor.applied_at_this_company(999999) is None
