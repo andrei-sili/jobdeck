@@ -544,9 +544,15 @@ def _job_filters(
     # folds ASCII case only, which is what a search box needs; folding through
     # jd_norm would call a Python callback once per row for a query he retypes
     # on every keystroke.
-    if search:
-        where.append("(jobs.title LIKE ? OR jobs.company LIKE ?)")
-        pattern = f"%{search.strip()}%"
+    term = str(search or "").strip()
+    if term:
+        # ESCAPE, because % and _ are wildcards and he types them: searching
+        # "100%" without this returns every posting containing "100", and a
+        # single "_" returns the whole corpus. The guard tests the STRIPPED
+        # value too — a query of spaces used to append "%%" and filter nothing.
+        pattern = "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        where.append("(jobs.title LIKE ? ESCAPE '\\' "
+                     "OR jobs.company LIKE ? ESCAPE '\\')")
         params.extend((pattern, pattern))
     if in_progress == "exclude":
         where.append(f"NOT {_IN_PROGRESS_SQL}")
@@ -1245,6 +1251,17 @@ def count_jobs_by_status(con: sqlite3.Connection) -> dict[str, int]:
     return {row["status"]: row["n"] for row in rows}
 
 
+def count_active_profiles(con: sqlite3.Connection) -> int:
+    """How many search profiles are switched on.
+
+    Its own read because `profiles_signature` cannot see a profile being
+    deactivated — it carries COUNT, MAX(id), the poll stamps and the errors,
+    none of which move when `active` flips."""
+    return con.execute(
+        "SELECT COUNT(*) FROM search_profiles WHERE active=1"
+    ).fetchone()[0]
+
+
 def count_unscored_jobs(con: sqlite3.Connection) -> int:
     """New postings still waiting for a match score — the scoring backlog."""
     return con.execute(
@@ -1267,22 +1284,24 @@ def poll_progress(con: sqlite3.Connection) -> tuple[int, str, int]:
 
 
 def liveness_progress(
-    con: sqlite3.Connection, sources: tuple[str, ...]
+    con: sqlite3.Connection, sources: tuple[str, ...], min_score: int = 1
 ) -> tuple[str, int]:
-    """(when a posting was last probed, how many have never been probed).
+    """(when a posting was last probed, how many the pass has still to reach).
 
-    Counted over the postings the pass can actually reach, which is why the
-    askable sources are passed in rather than assumed here: Jooble's URLs are
-    all robots-disallowed, so counting its postings as pending would show a
-    backlog that will never move."""
+    Counted over exactly what `jobs_needing_liveness_check` would select — the
+    askable sources, the statuses it looks at, AND the mismatch floor. Leaving
+    the floor out counted every score-0 posting as pending, which the pass will
+    never probe: a backlog that can never reach zero, pulsing on every screen
+    forever."""
     if not sources:
         return "", 0
     row = con.execute(
         "SELECT MAX(COALESCE(liveness_checked_at,'')), "
         "TOTAL(COALESCE(liveness_checked_at,'')='') "
         f"FROM jobs WHERE source IN ({','.join('?' * len(sources))}) "
-        f"AND status IN ({','.join('?' * len(LIVENESS_STATUSES))})",
-        (*sources, *LIVENESS_STATUSES),
+        f"AND status IN ({','.join('?' * len(LIVENESS_STATUSES))}) "
+        "AND (match_score IS NULL OR match_score>=?)",
+        (*sources, *LIVENESS_STATUSES, min_score),
     ).fetchone()
     return str(row[0] or ""), int(row[1])
 
@@ -1658,3 +1677,8 @@ def record_llm_usage(
         "printf('%.6f', CAST(value AS REAL) + CAST(excluded.value AS REAL))",
         ("llm_cost_usd", float(cost_usd)),
     )
+    # WHEN, not just how much. The rail says whether the machine is working
+    # right now, and a backlog is not evidence of a worker — with AI spend
+    # switched off the queue never moves and nothing else records the
+    # difference between "scoring is running" and "scoring will never run".
+    set_setting(con, "llm_last_call_at", _now())

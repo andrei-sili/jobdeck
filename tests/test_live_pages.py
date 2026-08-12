@@ -384,7 +384,7 @@ async def test_the_rail_states_the_corpus_it_is_standing_next_to(
 
     await user.should_see("Unterlagen")
     await user.should_see("2 neu")
-    await user.should_see("2 gefunden · 2 in Arbeit")
+    await user.should_see("2 Anzeigen · 2 von 2 Firmen offen")
     await user.should_see("Gmail liest mit — Phase 3")
 
 
@@ -393,12 +393,12 @@ async def test_the_rail_follows_the_engine_without_being_asked(
     """A posting arriving in the background moves the count in the bar, from
     whichever screen he happens to be standing on."""
     await user.open("/settings")
-    await user.should_see("0 gefunden · 0 in Arbeit")
+    await user.should_see("0 Anzeigen · 0 von 0 Firmen offen")
 
     _posting(con)
     await _tick(user)
 
-    await user.should_see("1 gefunden · 1 in Arbeit")
+    await user.should_see("1 Anzeigen · 1 von 1 Firmen offen")
 
 
 async def test_the_rail_marks_the_screen_he_is_on(user: User, con, data_dir):

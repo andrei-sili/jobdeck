@@ -1249,7 +1249,11 @@ def _row(**over) -> dict:
     (_row(apply_channel="ats_form"), jobs.ACTION_FORM, True),
     (_row(apply_channel="board_apply"), jobs.ACTION_FORM, True),
     (_row(apply_channel="company_site"), jobs.ACTION_FORM, True),
-    (_row(apply_channel="unknown"), jobs.ACTION_FORM, True),
+    # resolved, and the answer was "no way" — so the honest offer is the
+    # advert itself, not a form the app has no address for
+    (_row(apply_channel="unknown"), jobs.ACTION_OPEN, True),
+    (_row(status="skipped"), jobs.ACTION_REVIVE, True),
+    (_row(status="skipped", apply_channel="direct_email"), jobs.ACTION_REVIVE, True),
     (_row(status="portal"), jobs.ACTION_RECORD, True),
     (_row(draft_status="ready"), jobs.ACTION_QUEUE, True),
     (_row(draft_status="approved"), jobs.ACTION_QUEUE, True),
@@ -1350,3 +1354,73 @@ def test_a_quiet_posting_carries_no_warnings_at_all():
     assert jobs.reader_notes(
         {"liveness": "", "liveness_checked_at": "", "temp_agency": 0,
          "draft_status": None, "draft_updated_at": None}, None) == []
+
+
+def test_a_posting_he_put_away_can_be_taken_back(con=None):
+    """The "Kein Interesse" view had no exit at all: nothing wrote a status
+    back to 'new', so pressing x on the wrong row was permanent — while the
+    channel arms below still offered to write an application for it."""
+    action = jobs.primary_action(_row(status="skipped", apply_channel="direct_email"))
+    assert action.key == jobs.ACTION_REVIVE
+    assert action.enabled is True
+
+
+def test_a_form_posting_can_still_be_given_a_letter():
+    """The cockpit parks beside the employer's form and cannot write an
+    Anschreiben; the German market is form-first. Without a second action the
+    only route left was a batch button on the Settings page."""
+    for channel in ("ats_form", "board_apply", "company_site", "unknown"):
+        assert jobs._wants_a_letter(_row(apply_channel=channel), None), channel
+    # …and never where an application cannot happen, or is already under way
+    assert not jobs._wants_a_letter(_row(apply_channel="direct_email"), None)
+    assert not jobs._wants_a_letter(_row(status="applied"), None)
+    assert not jobs._wants_a_letter(
+        _row(apply_channel="ats_form"),
+        {"firma": "Eine GmbH", "gesendet_am": "2026-06-12", "status": "Absage"})
+    assert not jobs._wants_a_letter(
+        _row(apply_channel="ats_form", draft_status="ready"), None)
+
+
+def test_a_resolved_dead_end_is_described_the_same_way_everywhere():
+    """One screen said "kein Weg", "noch nicht ermittelt" and "kein
+    Bewerbungsweg gefunden" about one posting, and the middle one was false —
+    the channel HAD been resolved."""
+    job = _row(apply_channel="unknown", ats_vendor="")
+    assert jobs._apply_line(job) == "Kein Bewerbungsweg gefunden"
+    assert dict(jobs.reader_facts({**job, "refnr": "", "location": "",
+                                   "salary_from": "", "salary_to": "",
+                                   "salary_period": "", "published_on": "",
+                                   "fetched_at": ""}))["Kanal"] \
+        == "Kein Bewerbungsweg gefunden"
+
+
+def test_the_verdict_is_headed_with_the_score_it_reasons_about():
+    """The model was asked about the posting, not about its age. Heading its
+    paragraph with the aged number produced "WARUM 72" over an argument for a
+    near-perfect match that never mentions how old the advert is."""
+    assert jobs._verdict_heading({"match_score": 92, "effective_score": 92}) \
+        == "WARUM 92"
+    assert jobs._verdict_heading({"match_score": 92, "effective_score": 72}) \
+        == "WARUM 92 · durch das Alter noch 72"
+
+
+def test_the_line_under_the_list_owns_up_to_the_search_and_the_read_pile():
+    """It claimed to be "derived from the filters it actually used" while
+    ignoring the two that define the landing view: the search box and the
+    postings he has already read."""
+    line = jobs._hidden_line(jobs.view_for("neu"),
+                             {"read": 186, "mismatches": 335, "dead": 74,
+                              "applied_firm": 0, "old": 129},
+                             45, search=" django ")
+    assert line.startswith("gefiltert nach „django“")
+    assert "186 schon gelesen ausgeblendet" in line
+    # and "Alle offen" hides the piles but not the read ones
+    assert "schon gelesen" not in jobs._hidden_line(
+        jobs.view_for("offen"), {"read": 186, "mismatches": 0, "dead": 0,
+                                 "applied_firm": 0, "old": 0}, 45)
+
+
+def test_the_advert_is_not_cut_where_his_corpus_lives():
+    """His longest stored posting is about 28k characters; the cut existed at
+    8k with no ellipsis, no note and no way to see the rest."""
+    assert jobs.DESCRIPTION_LIMIT >= 40_000

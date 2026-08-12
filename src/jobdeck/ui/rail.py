@@ -125,8 +125,10 @@ def facts() -> dict:
             "signature": signature,
             "profiles": db.poll_progress(con),
             "unscored": db.count_unscored_jobs(con),
+            "last_scored": db.get_setting(con, "llm_last_call_at", ""),
             "liveness": db.liveness_progress(con, liveness.probeable_sources()),
             "jobs_total": db.count_jobs(con),
+            "companies_total": db.count_job_groups(con, "new"),
             "working": db.count_job_groups(con, "new", **working),
             "unread": db.count_job_groups(con, "new", opened="exclude", **working),
             "bookmarked": db.count_bookmarked_jobs(con),
@@ -141,12 +143,27 @@ def facts() -> dict:
         }
 
 
+# The settings and files the rail states but no table signature can see. It is
+# the surface this redesign added to END silent staleness, so it must not be
+# stale itself: connecting Gmail on the very page beside it used to leave it
+# reading "Gmail fehlt" for the life of the page.
+_WATCHED_SETTINGS = ("follow_up_days", "daily_send_cap", "stale_age_days")
+
+
 def _signature(con) -> tuple:
-    """What the rail shows, compressed. Three existing signatures rather than a
-    fourth query: the rail quotes the pipeline, the poller and the send meter,
-    and each of those already has one."""
-    return (*db.data_signature(con), *db.profiles_signature(con),
-            *db.meter_signature(con))
+    """What the rail shows, compressed. The three shared signatures cover the
+    pipeline, the poller and the send meter; the rest are read here because
+    nothing else looks at them."""
+    return (
+        *db.data_signature(con),
+        *db.profiles_signature(con),
+        *db.meter_signature(con),
+        # profiles_signature cannot see a profile being switched off, and
+        # `poll_progress` counts only the active ones.
+        db.count_active_profiles(con),
+        *(db.get_setting(con, key, "") for key in _WATCHED_SETTINGS),
+        *(present for _name, present in connections()),
+    )
 
 
 def signature() -> tuple:
@@ -199,9 +216,9 @@ def rubrics(view: dict, current: str, now: datetime.datetime) -> list[Rubric]:
             key="unterlagen",
             label="Unterlagen",
             path=UNTERLAGEN_PATH,
-            count=f"{active} Profile",
-            sub=(f"{poll_errors} Quelle ohne Antwort" if poll_errors == 1 else
-                 f"{poll_errors} Quellen ohne Antwort" if poll_errors else
+            count=f"{active} Profil" if active == 1 else f"{active} Profile",
+            sub=(f"{poll_errors} Profil ohne Antwort" if poll_errors == 1 else
+                 f"{poll_errors} Profile ohne Antwort" if poll_errors else
                  f"zuletzt gesucht {_clock(last_polled, now)}" if last_polled else
                  "noch nie gesucht"),
             fill=1.0 if active else 0.0,
@@ -212,15 +229,25 @@ def rubrics(view: dict, current: str, now: datetime.datetime) -> list[Rubric]:
             label="Stellen",
             path=STELLEN_PATH,
             count=f"{view['unread']} neu",
-            sub=f"{view['jobs_total']} gefunden · {view['working']} in Arbeit",
-            fill=_share(view["working"], view["jobs_total"]),
+            # Both units named, and the bar divides LIKE BY LIKE. Printing
+            # "803 gefunden · 166 in Arbeit" invited the reading that 637 were
+            # filtered out, when most of the difference is simply postings
+            # collapsing into companies — and the bar was companies ÷ postings,
+            # so it would have read about 25 % with every pile empty.
+            sub=f"{view['jobs_total']} Anzeigen · "
+                f"{view['working']} von {view['companies_total']} Firmen offen",
+            fill=_share(view["working"], view["companies_total"]),
         ),
         Rubric(
             key="bewerbungen",
             label="Bewerbungen",
             path=BEWERBUNGEN_PATH,
-            count=f"{silent} still" if silent else f"{total} gesendet",
-            sub=f"{total} gesendet · {answered} beantwortet",
+            count=(f"{silent} ohne Antwort" if silent
+                   else f"{total} Bewerbungen"),
+            # "gesendet" would be a claim about this app: the register holds
+            # every application he has ever recorded, including the ones
+            # imported from the old tracker.
+            sub=f"{total} Bewerbungen · {answered} beantwortet",
             fill=_share(answered, total),
             amber=bool(silent),
         ),
@@ -257,20 +284,30 @@ def pulse(view: dict, now: datetime.datetime) -> list[Pulse]:
     """
     _active, last_polled, _errors = view["profiles"]
     last_checked, unchecked = view["liveness"]
-    since_poll = _minutes_since(last_polled, now)
     unscored = view["unscored"]
     return [
-        Pulse("Suche",
-              _clock(last_polled, now) or "noch nie",
-              "run" if since_poll is not None and since_poll <= RUNNING_WITHIN_MIN
-              else "ok" if since_poll is not None else "idle"),
+        Pulse("Suche", _clock(last_polled, now) or "noch nie",
+              _beat(last_polled, now)),
+        # The animated dot means "something ran just now". A BACKLOG is not
+        # evidence of a worker: with AI spend switched off — his own default —
+        # a queue of twelve pulsed forever while nothing was ever going to
+        # score them.
         Pulse("Bewertung",
               f"{unscored} offen" if unscored else "alles bewertet",
-              "run" if unscored else "ok"),
+              _beat(view["last_scored"], now)),
         Pulse("Anzeigen-Prüfung",
-              f"{unchecked} offen" if unchecked else _clock(last_checked, now) or "nie",
-              "run" if unchecked else "ok" if last_checked else "idle"),
+              f"{unchecked} offen" if unchecked
+              else _clock(last_checked, now) or "nie",
+              _beat(last_checked, now)),
     ]
+
+
+def _beat(iso: str, now: datetime.datetime) -> str:
+    """'run' while it is happening, 'ok' once it has, 'idle' if it never has."""
+    since = _minutes_since(iso, now)
+    if since is None:
+        return "idle"
+    return "run" if since <= RUNNING_WITHIN_MIN else "ok"
 
 
 def budget(view: dict) -> tuple[int, int]:
@@ -305,7 +342,7 @@ def _render(view: dict, current: str, now: datetime.datetime) -> None:
 
 def _render_foot(view: dict, now: datetime.datetime) -> None:
     used, cap = budget(view)
-    ui.label("Heute versendbar").classes("jd-flabel")
+    ui.label("Heute gesendet").classes("jd-flabel")
     with ui.row().classes("items-center gap-1 mb-3"):
         for index in range(min(cap, BUDGET_BOXES)):
             ui.element("i").classes(

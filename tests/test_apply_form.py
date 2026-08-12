@@ -315,8 +315,7 @@ def test_the_cockpit_route_is_registered_by_the_app():
                for line in pathlib.Path(cockpit.__file__).read_text().splitlines())
 
 
-@pytest.mark.parametrize("channel", ["ats_form", "board_apply", "company_site",
-                                     "unknown"])
+@pytest.mark.parametrize("channel", ["ats_form", "board_apply", "company_site"])
 def test_the_main_button_leads_into_the_cockpit_wherever_a_form_is_filled(channel):
     """The cockpit is the ONE form path: it opens the employer's page itself
     and keeps every field a click away beside it. Two controls for one act is

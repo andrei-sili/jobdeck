@@ -119,8 +119,16 @@ def duplicates_for_jobs(con: sqlite3.Connection, jobs: list) -> dict[int, dict]:
     found = {}
     for job in jobs:
         match = _first_match(rows, job["company"], job["contact_email"])
-        if match is not None:
-            found[job["id"]] = match
+        if match is None:
+            continue
+        # A posting that BECAME this application is not blocked by it. Without
+        # this, every row in the "Beworben" view carried a red warning about
+        # its own application, which reads as a duplicate-send error rather
+        # than as the record he opened.
+        own = job["bewerbung_id"] if "bewerbung_id" in job.keys() else None
+        if own is not None and own == match["id"]:
+            continue
+        found[job["id"]] = match
     return found
 
 

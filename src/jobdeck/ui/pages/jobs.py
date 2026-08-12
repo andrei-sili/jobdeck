@@ -29,6 +29,13 @@ log = logging.getLogger(__name__)
 # no number on screen said so.
 PAGE_SIZE = 50
 
+# How much of an advert is rendered. Markdown of a whole posting is cheap; the
+# reason for a bound at all is that a scraped description is untrusted and can
+# be arbitrarily long. Well above the longest thing his corpus holds (his
+# longest is ~28k characters), and where it does bite, the reader says so
+# instead of simply stopping mid-sentence.
+DESCRIPTION_LIMIT = 40_000
+
 # ONE list of named views, replacing six status filters, four pile switches and
 # a grouping toggle. Those controls could be combined into states that describe
 # nothing ("applied postings, mismatches only"), and the two pile switches had
@@ -139,6 +146,8 @@ ACTION_DRAFT = "draft"
 ACTION_FORM = "form"
 ACTION_QUEUE = "queue"
 ACTION_RECORD = "record"
+ACTION_REVIVE = "revive"
+ACTION_OPEN = "open"
 
 
 @dataclass(frozen=True)
@@ -163,6 +172,12 @@ def primary_action(job: dict, already: dict | None = None) -> Action:
     application, so nothing further down may offer to start one."""
     status = str(job.get("status") or "")
     draft_status = str(job.get("draft_status") or "")
+    if status == "skipped":
+        # He put it away himself, and nothing else could put it back: the
+        # "Kein Interesse" view had no exit at all, while the channel arms
+        # below still cheerfully offered to write an application for it.
+        return Action(ACTION_REVIVE, "Zurück in die Arbeitsliste",
+                      "Du hattest sie weggelegt.")
     if status == "applied":
         return Action(ACTION_NONE, "Beworben", "Diese Anzeige ist eingetragen.",
                       enabled=False)
@@ -197,7 +212,7 @@ def primary_action(job: dict, already: dict | None = None) -> Action:
         return Action(ACTION_DRAFT, "Bewerbung per E-Mail erstellen")
     if channel in _FORM_CHANNELS:
         return Action(ACTION_FORM, "Formular ausfüllen")
-    return Action(ACTION_FORM, "Anzeige öffnen und selbst prüfen",
+    return Action(ACTION_OPEN, "Anzeige öffnen und selbst prüfen",
                   "Kein Bewerbungsweg gefunden — die Anzeige nennt keinen.")
 
 
@@ -417,6 +432,11 @@ def _apply_line(job: dict) -> str:
         return f"Bewerbung über {vendor}" if vendor else "Bewerbung über ein Portal"
     if channel == apply_channel.CHANNEL_COMPANY_SITE:
         return "Bewerbung: Formular auf der Firmen-Website"
+    if channel == apply_channel.CHANNEL_UNKNOWN:
+        # Resolved, and the answer was "no way". Saying "noch nicht ermittelt"
+        # here made one screen describe the same posting three ways, one of
+        # them false.
+        return "Kein Bewerbungsweg gefunden"
     return ""
 
 
@@ -580,6 +600,19 @@ def _row_fingerprint(job: dict) -> tuple:
         "location", "published_on", "fetched_at", "source", "company_count",
         "company_key",
     ))
+
+
+def _wants_a_letter(job: dict, already: dict | None) -> bool:
+    """Should this posting offer to write an Anschreiben as a SECOND action?
+
+    Only where the primary action leads to a form: an e-mail application is
+    the letter, and a posting that cannot become an application at all must
+    not be offered one."""
+    if already or str(job.get("status") or "") not in ("new", "portal"):
+        return False
+    if str(job.get("draft_status") or "") in db.OPEN_DRAFT_STATUSES:
+        return False
+    return primary_action(job, already).key in (ACTION_FORM, ACTION_OPEN)
 
 
 def _openable_url(job: dict) -> str:
@@ -862,10 +895,16 @@ async def jobs_page():
                     ui.button("★ gemerkt" if marked else "☆ merken",
                               on_click=lambda j=job["id"]: toggle_bookmark(j)) \
                         .props("flat dense no-caps")
-                    ui.button("✕ kein Interesse",
-                              on_click=lambda j=job["id"]: not_interested(j)) \
-                        .props("flat dense no-caps") \
-                        .set_enabled(job["status"] == "new")
+                    if job["status"] == "skipped":
+                        ui.button("↩ zurück in die Arbeitsliste",
+                                  on_click=lambda j=job["id"]: revive(j)) \
+                            .props("flat dense no-caps")
+                    else:
+                        ui.button("✕ kein Interesse",
+                                  on_click=lambda j=job["id"]:
+                                      not_interested(j)) \
+                            .props("flat dense no-caps") \
+                            .set_enabled(job["status"] == "new")
                     open_url = _openable_url(job)
                     if open_url:
                         ui.button("Anzeige öffnen",
@@ -880,8 +919,18 @@ async def jobs_page():
                     ui.label(text).classes(f"jd-note {kind} mb-2")
                 _render_facts(job)
                 description = job["description"] or "(keine Beschreibung)"
-                ui.markdown(posting_markdown(description[:8000])) \
+                ui.markdown(posting_markdown(description[:DESCRIPTION_LIMIT])) \
                     .classes("jd-ad mt-4")
+                if len(description) > DESCRIPTION_LIMIT:
+                    # The screen exists to show the whole advert. Where it
+                    # cannot, it says so — the requirements section it cut may
+                    # be the half that decides.
+                    ui.label(
+                        f"Der Text ist hier bei {DESCRIPTION_LIMIT:,}"
+                        .replace(",", ".") +
+                        f" von {len(description):,}".replace(",", ".") +
+                        " Zeichen abgeschnitten — der Rest steht beim Anbieter."
+                    ).classes("jd-note warn mt-3")
                 if scoring.looks_like_snippet(job["description"] or ""):
                     ui.label(
                         f"Diese Quelle liefert nur einen Ausschnitt "
@@ -914,6 +963,16 @@ async def jobs_page():
                         lambda _=None, j=job, a=action, b=button: run_action(a, j, b))
                 if action.reason:
                     ui.label(action.reason).classes("jd-reason")
+                if _wants_a_letter(job, already):
+                    # The cockpit parks beside the employer's form and lists
+                    # what is missing — but it cannot write an Anschreiben, and
+                    # the German market is form-first (28 of his 65
+                    # applications went that way). Without this the only route
+                    # left was the batch button in Settings.
+                    letter = ui.button("Anschreiben schreiben") \
+                        .props("outline no-caps")
+                    letter.on_click(
+                        lambda _=None, j=job, b=letter: draft(j, button=b))
 
         # ------------------------------------------------------------------
         # what the controls do
@@ -1011,6 +1070,16 @@ async def jobs_page():
         async def run_action(action: Action, job: dict, button) -> None:
             if action.key == ACTION_RESOLVE:
                 await resolve_channel(job)
+            elif action.key == ACTION_REVIVE:
+                await revive(job["id"])
+            elif action.key == ACTION_OPEN:
+                url = _openable_url(job)
+                with overlay:
+                    if url:
+                        ui.navigate.to(url, new_tab=True)
+                    else:
+                        say("Diese Anzeige hat keine Adresse, die geöffnet "
+                            "werden kann.", type="warning")
             elif action.key == ACTION_DRAFT:
                 await draft(job, button=button)
             elif action.key == ACTION_FORM:
@@ -1074,6 +1143,15 @@ async def jobs_page():
                 return
             _hold_place(job_id)
             await run.io_bound(_set_bookmark, job_id, not job["bookmarked_at"])
+            await refresh(force=True)
+
+        async def revive(job_id: int) -> None:
+            """Put a posting he had put away back into the working list."""
+            job = shown.get(job_id)
+            if job is None or job["status"] != "skipped":
+                return
+            _hold_place(job_id)
+            await run.io_bound(_set_status, job_id, "new")
             await refresh(force=True)
 
         async def not_interested(job_id: int) -> None:

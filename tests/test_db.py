@@ -1,6 +1,7 @@
 import pytest
 
 from jobdeck import db
+from jobdeck.dedupe import duplicates_for_jobs
 
 
 def _add_app(con, firma="Testfirma GmbH", email="jobs@testfirma.de", status="Gesendet"):
@@ -733,3 +734,33 @@ def test_holding_a_row_does_not_smuggle_it_past_the_other_filters(con):
 
     assert db.list_jobs(con, "new", opened="exclude", mismatches="exclude",
                         keep_ids=(read_mismatch,)) == []
+
+def test_a_posting_is_not_warned_about_its_own_application(con):
+    """Every row of the "Beworben" view carried a red "you already applied
+    here" about the application that row itself produced, which reads as a
+    duplicate-send error rather than as the record he opened."""
+    job_id = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "e1", "title": "Dev",
+        "company": "Eine GmbH"})
+    bewerbung_id = db.apply_job(con, job_id, kanal="E-Mail")
+    con.commit()
+
+    rows = [dict(r) for r in db.list_jobs(con, "applied")]
+    assert rows and rows[0]["bewerbung_id"] == bewerbung_id
+    assert duplicates_for_jobs(con, rows) == {}
+
+
+def test_another_posting_at_that_company_is_still_warned(con):
+    """The gate itself is untouched: a SECOND posting at the same company can
+    never become an application and still says so."""
+    first = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "e1", "title": "Dev",
+        "company": "Eine GmbH"})
+    db.apply_job(con, first, kanal="E-Mail")
+    second = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "e2", "title": "Andere Rolle",
+        "company": "Eine GmbH"})
+    con.commit()
+
+    rows = [dict(r) for r in db.list_jobs(con, "new")]
+    assert list(duplicates_for_jobs(con, rows)) == [second]

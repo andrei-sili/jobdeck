@@ -24,8 +24,10 @@ def _view(**over) -> dict:
         "signature": (),
         "profiles": (2, "2026-08-12T17:58:00", 0),
         "unscored": 0,
+        "last_scored": "2026-08-12T14:38:00",
         "liveness": ("2026-08-12T09:04:00", 0),
         "jobs_total": 803,
+        "companies_total": 640,
         "working": 198,
         "unread": 41,
         "bookmarked": 7,
@@ -56,18 +58,28 @@ def test_the_spine_has_exactly_the_five_rubrics_he_chose():
         "unterlagen", "stellen", "bewerbungen", "antworten", "einstellungen"]
 
 
-def test_stellen_states_the_whole_corpus_and_the_working_part_of_it():
-    """"803 gefunden · 198 in Arbeit" is the honest pair: the four hidden piles
-    are the difference between them, and hiding that difference is what made
-    the old inbox feel like it was holding out on him."""
+def test_stellen_names_both_units_and_compares_like_with_like():
+    """Postings and companies are different populations. Printing them as one
+    sentence invited the reading that 605 postings had been filtered out, when
+    most of the gap is postings collapsing into companies — and the bar was
+    companies divided by POSTINGS, so it would have read about a quarter with
+    every pile empty."""
     rubric = _rubric(_view(), "stellen")
     assert rubric.count == "41 neu"
-    assert rubric.sub == "803 gefunden · 198 in Arbeit"
-    assert round(rubric.fill, 3) == round(198 / 803, 3)
+    assert rubric.sub == "803 Anzeigen · 198 von 640 Firmen offen"
+    assert round(rubric.fill, 3) == round(198 / 640, 3)
+
+
+def test_the_bar_would_be_full_if_no_pile_hid_anything():
+    """The property the old arithmetic could not have: an empty pile set means
+    a full bar."""
+    rubric = _rubric(_view(working=640, companies_total=640), "stellen")
+    assert rubric.fill == 1.0
 
 
 def test_an_empty_corpus_does_not_divide_by_zero():
-    rubric = _rubric(_view(jobs_total=0, working=0, unread=0), "stellen")
+    rubric = _rubric(_view(jobs_total=0, companies_total=0, working=0, unread=0),
+                     "stellen")
     assert rubric.fill == 0.0
     assert rubric.count == "0 neu"
 
@@ -78,15 +90,15 @@ def test_bewerbungen_leads_with_what_is_still_silent():
     view = _view(apps=[_app(gesendet_am="2026-06-10"), _app(gesendet_am="2026-06-11"),
                        _app(status="Absage", gesendet_am="2026-06-12")])
     rubric = _rubric(view, "bewerbungen")
-    assert rubric.count == "2 still"
+    assert rubric.count == "2 ohne Antwort"
     assert rubric.amber is True
-    assert rubric.sub == "3 gesendet · 1 beantwortet"
+    assert rubric.sub == "3 Bewerbungen · 1 beantwortet"
 
 
 def test_bewerbungen_stays_quiet_when_nothing_is_overdue():
     view = _view(apps=[_app(gesendet_am="2026-08-11")])
     rubric = _rubric(view, "bewerbungen")
-    assert rubric.count == "1 gesendet"
+    assert rubric.count == "1 Bewerbungen"
     assert rubric.amber is False
 
 
@@ -94,14 +106,18 @@ def test_an_application_answered_long_ago_is_not_counted_as_silent():
     """Silence is about waiting, not about age: a rejection from June is
     finished business."""
     view = _view(apps=[_app(status="Absage", gesendet_am="2026-05-01")])
-    assert _rubric(view, "bewerbungen").count == "1 gesendet"
+    assert _rubric(view, "bewerbungen").count == "1 Bewerbungen"
 
 
 def test_unterlagen_reports_a_source_that_stopped_answering():
     rubric = _rubric(_view(profiles=(2, "2026-08-12T17:58:00", 1)), "unterlagen")
     assert rubric.count == "2 Profile"
-    assert rubric.sub == "1 Quelle ohne Antwort"
+    assert rubric.sub == "1 Profil ohne Antwort"
     assert rubric.amber is True
+
+
+def test_one_profile_is_not_called_profile_plural():
+    assert _rubric(_view(profiles=(1, "", 0)), "unterlagen").count == "1 Profil"
 
 
 def test_unterlagen_says_so_when_nothing_has_ever_been_searched():
@@ -159,18 +175,31 @@ def test_a_source_never_polled_reads_as_idle():
     assert (beat.state, beat.detail) == ("idle", "noch nie")
 
 
-def test_the_scoring_backlog_is_stated_as_work_outstanding():
-    beats = rail.pulse(_view(unscored=12), NOW)
-    assert (beats[1].detail, beats[1].state) == ("12 offen", "run")
+def test_the_scoring_backlog_is_stated_without_claiming_a_worker():
+    """A queue is not evidence that anything is draining it: with AI spend
+    switched off — his own default — a backlog of twelve pulsed forever while
+    nothing was ever going to score them."""
+    beats = rail.pulse(_view(unscored=12, last_scored="2026-08-01T09:00:00"), NOW)
+    assert (beats[1].detail, beats[1].state) == ("12 offen", "ok")
+
+
+def test_a_call_that_just_happened_is_what_makes_the_dot_move():
+    beats = rail.pulse(_view(unscored=12, last_scored="2026-08-12T17:58:00"), NOW)
+    assert beats[1].state == "run"
+
+
+def test_scoring_that_has_never_run_reads_as_idle():
+    beats = rail.pulse(_view(unscored=12, last_scored=""), NOW)
+    assert (beats[1].detail, beats[1].state) == ("12 offen", "idle")
 
 
 def test_nothing_left_to_score_says_so():
     beats = rail.pulse(_view(unscored=0), NOW)
-    assert (beats[1].detail, beats[1].state) == ("alles bewertet", "ok")
+    assert beats[1].detail == "alles bewertet"
 
 
 def test_the_liveness_pass_reports_what_it_has_not_reached_yet():
-    beats = rail.pulse(_view(liveness=("2026-08-12T09:04:00", 313)), NOW)
+    beats = rail.pulse(_view(liveness=("2026-08-12T17:58:00", 313)), NOW)
     assert (beats[2].detail, beats[2].state) == ("313 offen", "run")
 
 
