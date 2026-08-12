@@ -4,7 +4,8 @@ import logging
 import math
 import pathlib
 
-from nicegui import run, ui
+from fastapi.responses import RedirectResponse
+from nicegui import app, run, ui
 
 from jobdeck import apply_channel, db, freshness
 from jobdeck.dedupe import duplicates_for_jobs
@@ -16,6 +17,7 @@ from jobdeck.ui.helpers import (
     posting_markdown,
 )
 from jobdeck.ui.layout import frame
+from jobdeck.ui.rail import STELLEN_PATH
 
 log = logging.getLogger(__name__)
 
@@ -345,9 +347,20 @@ def _openable_url(job: dict) -> str:
     return openable_url(job["apply_url"] or job["url"] or "")
 
 
-@ui.page("/jobs")
+@app.get("/jobs")
+def legacy_jobs_page():
+    """The inbox's old address. Postings are the screen he opens the app for,
+    so they took the home route; a bookmark or an old link still lands.
+
+    An HTTP redirect rather than a page that draws nothing and then navigates:
+    the moved address should answer as moved, and a page whose only job is to
+    jump renders an empty screen first."""
+    return RedirectResponse(STELLEN_PATH)
+
+
+@ui.page(STELLEN_PATH)
 async def jobs_page():
-    with frame("Job inbox"):
+    async with frame("Stellen", current="stellen"):
         status_filter = {"value": "new"}
         pile = {"value": PILE_NONE}
         collapse = {"value": True}

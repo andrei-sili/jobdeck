@@ -140,6 +140,12 @@ _PROBES = {
 }
 
 
+def probeable_sources() -> tuple[str, ...]:
+    """The sources this pass can ask about at all — for anything that has to
+    count what is still pending without keeping a second copy of the registry."""
+    return tuple(_PROBES)
+
+
 def is_probeable(source: str) -> bool:
     """True when this source can be asked at all."""
     return source in _PROBES

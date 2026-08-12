@@ -42,15 +42,21 @@ def _posting(con, external_id="e1", title="Python Entwickler",
 
 
 async def _tick(user: User) -> None:
-    """Fire the page's live timer by hand — the interval is half a minute.
+    """Fire every live timer on the page by hand — the interval is half a minute.
+
+    EVERY one, not the first: since the redesign a screen carries two watchers,
+    its own and the rail's, and picking one by position would silently start
+    testing the wrong thing the moment the render order changed.
 
     Inside the client context, which is what NiceGUI's own timer loop enters
     before every invocation (`Timer._get_context`); the tick reads the page's
     elements to decide whether he is busy."""
-    timer = next(e for e in user.client.elements.values()
-                 if isinstance(e, ui.timer))
+    timers = [e for e in list(user.client.elements.values())
+              if isinstance(e, ui.timer)]
+    assert timers, "the page has no live timer at all"
     with user.client:
-        await timer.callback()
+        for timer in timers:
+            await timer.callback()
     await asyncio.sleep(0.1)
 
 
@@ -64,7 +70,7 @@ async def test_a_posting_stored_by_the_poller_appears_by_itself(
     """The literal complaint: profiles poll hourly and 50-100 postings a day
     arrived into a list that only a click would ever re-read."""
     _posting(con)
-    await user.open("/jobs")
+    await user.open("/")
     await user.should_see("Python Entwickler")
 
     _posting(con, external_id="e2", title="Django Entwickler",
@@ -78,7 +84,7 @@ async def test_nothing_new_rebuilds_nothing(user: User, con, data_dir):
     """The gate is the signature, not the clock: an unchanged database must
     leave the page exactly as it is, expansions and all."""
     _posting(con)
-    await user.open("/jobs")
+    await user.open("/")
     await user.should_see("Python Entwickler")
     expansion = _expansions(user)[0]
     expansion.set_value(True)
@@ -95,7 +101,7 @@ async def test_a_posting_he_is_reading_is_not_pulled_out_from_under_him(
     """A rebuild collapses every open expansion. While one is open the fresh
     data waits behind the chip — and lands by itself once he closes the row."""
     _posting(con)
-    await user.open("/jobs")
+    await user.open("/")
     await user.should_see("Python Entwickler")
     expansion = _expansions(user)[0]
     expansion.set_value(True)
@@ -120,7 +126,7 @@ async def test_a_posting_he_is_reading_is_not_pulled_out_from_under_him(
 async def test_the_chip_hands_over_the_waiting_data_when_pressed(
         user: User, con, data_dir):
     _posting(con)
-    await user.open("/jobs")
+    await user.open("/")
     await user.should_see("Python Entwickler")
     _expansions(user)[0].set_value(True)
     await asyncio.sleep(0.1)
@@ -137,9 +143,9 @@ async def test_the_chip_hands_over_the_waiting_data_when_pressed(
 
 async def test_the_dashboard_counts_an_application_recorded_elsewhere(
         user: User, con, data_dir):
-    """It was rendered once and never again — the home screen that never moves
-    is the strongest single reason the app read as dead."""
-    await user.open("/")
+    """It was rendered once and never again — a screen that never moves is the
+    strongest single reason the app read as dead."""
+    await user.open("/dashboard")
     await user.should_see("Applications")
 
     db.add_bewerbung(con, {"gesendet_am": "2026-08-11", "firma": "Beispiel GmbH",
@@ -261,7 +267,7 @@ async def test_an_open_dialog_also_defers_the_rebuild(
         "status": "ready", "betreff": "Bewerbung als Python Entwickler",
         "recipient": "jobs@beispiel.example"})
     con.commit()
-    await user.open("/jobs")
+    await user.open("/")
     user.find("Draft application").click()
     await asyncio.sleep(0.2)
     await user.should_see("Draft — Python Entwickler")
@@ -281,7 +287,7 @@ async def test_a_reconnect_does_not_kill_the_self_refresh(user: User, con,
     back. Cancelling the timer there is irreversible, so the page came back,
     rendered fine, and never updated again."""
     _posting(con)
-    await user.open("/jobs")
+    await user.open("/")
     await user.should_see("Python Entwickler")
     timer = next(e for e in user.client.elements.values()
                  if isinstance(e, ui.timer))
@@ -311,7 +317,7 @@ async def test_a_closed_dialog_does_not_freeze_the_page(user: User, con,
         "status": "ready", "betreff": "Bewerbung als Python Entwickler",
         "recipient": "jobs@beispiel.example"})
     con.commit()
-    await user.open("/jobs")
+    await user.open("/")
     user.find("Draft application").click()
     await asyncio.sleep(0.2)
     await user.should_see("Draft — Python Entwickler")
@@ -334,7 +340,7 @@ async def test_the_reading_counter_survives_a_rebuild_with_a_row_open(
     reset the counter never returns to zero and the page defers every future
     update for the rest of the session."""
     _posting(con)
-    await user.open("/jobs")
+    await user.open("/")
     await user.should_see("Python Entwickler")
     _expansions(user)[0].set_value(True)
     await asyncio.sleep(0.2)
@@ -349,3 +355,52 @@ async def test_the_reading_counter_survives_a_rebuild_with_a_row_open(
     await _tick(user)
 
     await user.should_see("Django Entwickler")
+
+
+# --------------------------------------------------------------------------
+# The rail, on every screen
+# --------------------------------------------------------------------------
+async def test_the_rail_states_the_corpus_it_is_standing_next_to(
+        user: User, con, data_dir):
+    """The bar is the answer to "the app never tells me anything": it has to
+    carry real numbers on the very first paint, not after a tick."""
+    _posting(con)
+    _posting(con, external_id="e2", title="Django Entwickler",
+             company="Zweite GmbH")
+    await user.open("/")
+
+    await user.should_see("Unterlagen")
+    await user.should_see("2 neu")
+    await user.should_see("2 gefunden · 2 in Arbeit")
+    await user.should_see("Gmail liest mit — Phase 3")
+
+
+async def test_the_rail_follows_the_engine_without_being_asked(
+        user: User, con, data_dir):
+    """A posting arriving in the background moves the count in the bar, from
+    whichever screen he happens to be standing on."""
+    await user.open("/settings")
+    await user.should_see("0 gefunden · 0 in Arbeit")
+
+    _posting(con)
+    await _tick(user)
+
+    await user.should_see("1 gefunden · 1 in Arbeit")
+
+
+async def test_the_rail_marks_the_screen_he_is_on(user: User, con, data_dir):
+    await user.open("/settings")
+    marked = [e for e in user.client.elements.values()
+              if e.props.get("data-current") == "true"]
+    names = [next(d.text for d in e.descendants() if isinstance(d, ui.label))
+             for e in marked]
+    assert names == ["Einstellungen"], "exactly one rubric is marked, and it is this one"
+
+
+async def test_the_inboxs_old_address_still_lands_on_the_postings(
+        user: User, con, data_dir):
+    """/jobs was the inbox for the whole of phase 1 and 2 — his own bookmarks
+    point at it."""
+    _posting(con)
+    await user.open("/jobs")
+    await user.should_see("Python Entwickler")

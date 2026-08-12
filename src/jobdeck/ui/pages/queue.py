@@ -161,7 +161,7 @@ def _save_draft(job_id: int, values: dict, clear_pdf: bool):
 
 @ui.page("/queue")
 async def queue_page():
-    with frame("Review queue"):
+    async with frame("Review queue", current="bewerbungen"):
         filter_state = {"value": "open"}
         refresh_gen = {"n": 0}  # rapid filter flips: last request wins
         shown = {"live_claim": False}

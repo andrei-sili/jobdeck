@@ -52,6 +52,12 @@ def _error(message: str, kind: str = "draft") -> dict:
             "recipient": "", "draft": None}
 
 
+# How many messages may leave in a day when he has never said. Stated once:
+# the rail draws this budget as a row of boxes, and a second copy of the number
+# would let the bar promise a send the gate below refuses.
+DEFAULT_DAILY_CAP = "15"
+
+
 def _load_context(job_id: int) -> tuple[dict | None, dict | None, dict]:
     with db.db() as con:
         draft = db.get_draft_by_job(con, job_id)
@@ -59,7 +65,8 @@ def _load_context(job_id: int) -> tuple[dict | None, dict | None, dict]:
         settings = {
             "real_send_enabled": db.get_setting(con, "real_send_enabled", "0"),
             "test_recipient": db.get_setting(con, "test_recipient", "").strip(),
-            "daily_send_cap": db.get_setting(con, "daily_send_cap", "15"),
+            "daily_send_cap": db.get_setting(
+                con, "daily_send_cap", DEFAULT_DAILY_CAP),
             "applicant_name": db.get_setting(con, "applicant_name", "").strip(),
             "gmail_address": db.get_setting(con, "gmail_address", "").strip(),
         }
@@ -317,7 +324,7 @@ def _send_draft(job_id: int, expect: dict | None = None) -> dict:
         if dup is not None:
             return _error("you already applied at this company — see "
                           "Applications before sending again")
-    cap = int(settings["daily_send_cap"] or "15")
+    cap = int(settings["daily_send_cap"] or DEFAULT_DAILY_CAP)
     if settings["sent_today"] >= cap:
         return _error(f"daily send cap reached ({settings['sent_today']}/{cap})"
                       f" — sending continues tomorrow, or raise the cap in "

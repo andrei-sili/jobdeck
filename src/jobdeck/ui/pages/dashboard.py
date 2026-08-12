@@ -79,9 +79,14 @@ def _render(view: dict) -> None:
                 .classes("text-sm")
 
 
-@ui.page("/")
+# Off the rail as of the redesign: its three cards are being absorbed by the
+# rubrics that own them (the follow-up list by Bewerbungen, the counters by the
+# rail itself). It keeps a route while that is still true of only some of them —
+# deleting a screen before its replacement exists is how a working app loses a
+# feature in the middle of a redesign.
+@ui.page("/dashboard")
 async def dashboard_page():
-    with frame("Dashboard"):
+    async with frame("Dashboard"):
         # It was rendered once and never again: the follow-up list is computed
         # from "today", applications are recorded by the queue, the cockpit and
         # auto-send, and "New jobs found" moves on every poll. A home screen

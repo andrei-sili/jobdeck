@@ -78,7 +78,7 @@ def _claimed(con, job_id, minutes_ago: float):
 async def test_the_inbox_row_says_a_draft_is_being_written(user: User, con, data_dir):
     job_id = _posting(con)
     _claimed(con, job_id, minutes_ago=0.2)
-    await user.open("/jobs")
+    await user.open("/")
     await user.should_see("Beispiel GmbH")
     await user.should_see("wird gerade geschrieben")
 
@@ -90,7 +90,7 @@ async def test_the_draft_button_stands_down_only_while_the_claim_is_alive(
     a crash became a posting that could never be drafted again."""
     job_id = _posting(con)
     _claimed(con, job_id, minutes_ago=0.2)
-    await user.open("/jobs")
+    await user.open("/")
     await user.should_not_see(DRAFT_BUTTON)
 
     # …and the moment the claim is old enough for _claim to take it over, the
@@ -100,7 +100,7 @@ async def test_the_draft_button_stands_down_only_while_the_claim_is_alive(
          - datetime.timedelta(minutes=drafting.CLAIM_TIMEOUT_MIN + 1)
          ).isoformat(timespec="seconds"), job_id))
     con.commit()
-    await user.open("/jobs")
+    await user.open("/")
     await user.should_see(DRAFT_BUTTON)
     await user.should_see("abgebrochen")
     await user.should_not_see("etwa eine Minute")
@@ -116,7 +116,7 @@ async def test_the_inbox_row_states_every_other_draft_state(
     job_id = _posting(con)
     db.upsert_draft(con, job_id, {"status": status})
     con.commit()
-    await user.open("/jobs")
+    await user.open("/")
     await user.should_see(expected)
 
 
@@ -125,7 +125,7 @@ async def test_a_discarded_draft_leaves_the_row_as_it_found_it(
     job_id = _posting(con)
     db.upsert_draft(con, job_id, {"status": "discarded"})
     con.commit()
-    await user.open("/jobs")
+    await user.open("/")
     await user.should_see(DRAFT_BUTTON)
     await user.should_not_see("Entwurf")
 
@@ -208,7 +208,7 @@ async def test_an_abandoned_claim_tells_both_screens_the_same_thing(
     await user.open("/queue")
     await user.should_see("abgebrochen")
     await user.should_not_see("Die Zeile aktualisiert sich")
-    await user.open("/jobs")
+    await user.open("/")
     await user.should_see("abgebrochen")
 
 
@@ -228,7 +228,7 @@ async def test_the_pressed_button_says_what_it_is_doing_for_the_whole_wait(
 
     monkeypatch.setattr(jobs_page.drafting, "draft_for_job", slow_draft)
     _posting(con)
-    await user.open("/jobs")
+    await user.open("/")
     await user.should_see(DRAFT_BUTTON)
 
     user.find(DRAFT_BUTTON).click()
@@ -257,7 +257,7 @@ async def test_an_unexpected_failure_does_not_leave_the_button_dead(
 
     monkeypatch.setattr(jobs_page.drafting, "draft_for_job", exploding_draft)
     _posting(con)
-    await user.open("/jobs")
+    await user.open("/")
     user.find(DRAFT_BUTTON).click()
     await asyncio.sleep(0.3)
     await user.should_see(DRAFT_BUTTON)
@@ -292,7 +292,7 @@ async def test_a_posting_at_a_firm_he_already_wrote_to_says_so(
 
     # it is OUT of the working list: it can never become an application, which
     # is a fact about the posting, exactly like a score-0 mismatch
-    await user.open("/jobs")
+    await user.open("/")
     await user.should_not_see("Beispiel GmbH")
     await user.should_see("bei schon beworbenen Firmen hidden")
 
@@ -313,7 +313,7 @@ async def test_the_decorated_spelling_is_covered_by_the_same_warning(
     db.add_bewerbung(con, {"gesendet_am": "2026-06-12", "firma": "Beispiel GmbH",
                            "email": "", "kanal": "E-Mail", "status": "Absage"})
     con.commit()
-    await user.open("/jobs")
+    await user.open("/")
     await _open_pile(user)
     await user.should_see("bereits beworben")
 
@@ -323,7 +323,7 @@ async def test_a_firm_he_never_wrote_to_is_left_alone(user: User, con, data_dir)
     db.add_bewerbung(con, {"gesendet_am": "2026-06-12", "firma": "Andere GmbH",
                            "email": "", "kanal": "E-Mail", "status": "Absage"})
     con.commit()
-    await user.open("/jobs")
+    await user.open("/")
     await user.should_not_see("bereits beworben")
     await user.should_see(DRAFT_BUTTON)
 
@@ -340,7 +340,7 @@ async def test_opening_a_draft_twice_leaves_one_dialog_behind(
         "status": "ready", "betreff": "Bewerbung als Python Entwickler",
         "recipient": "jobs@beispiel.example"})
     con.commit()
-    await user.open("/jobs")
+    await user.open("/")
 
     def dialogs():
         return [e for e in user.client.elements.values()

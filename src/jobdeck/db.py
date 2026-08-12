@@ -1181,6 +1181,47 @@ def count_jobs_by_status(con: sqlite3.Connection) -> dict[str, int]:
     return {row["status"]: row["n"] for row in rows}
 
 
+def count_unscored_jobs(con: sqlite3.Connection) -> int:
+    """New postings still waiting for a match score — the scoring backlog."""
+    return con.execute(
+        "SELECT COUNT(*) FROM jobs WHERE status='new' AND match_score IS NULL"
+    ).fetchone()[0]
+
+
+def poll_progress(con: sqlite3.Connection) -> tuple[int, str, int]:
+    """(active profiles, when one was last polled, how many last failed).
+
+    What the rail says about discovery. The error COUNT rather than the text:
+    the rail has one line, and "2 Quellen melden einen Fehler" sends him to the
+    page that states them."""
+    row = con.execute(
+        "SELECT COUNT(*), MAX(COALESCE(last_polled_at,'')), "
+        "TOTAL(COALESCE(last_poll_error,'')<>'') "
+        "FROM search_profiles WHERE active=1"
+    ).fetchone()
+    return int(row[0]), str(row[1] or ""), int(row[2])
+
+
+def liveness_progress(
+    con: sqlite3.Connection, sources: tuple[str, ...]
+) -> tuple[str, int]:
+    """(when a posting was last probed, how many have never been probed).
+
+    Counted over the postings the pass can actually reach, which is why the
+    askable sources are passed in rather than assumed here: Jooble's URLs are
+    all robots-disallowed, so counting its postings as pending would show a
+    backlog that will never move."""
+    if not sources:
+        return "", 0
+    row = con.execute(
+        "SELECT MAX(COALESCE(liveness_checked_at,'')), "
+        "TOTAL(COALESCE(liveness_checked_at,'')='') "
+        f"FROM jobs WHERE source IN ({','.join('?' * len(sources))}) "
+        f"AND status IN ({','.join('?' * len(LIVENESS_STATUSES))})",
+        (*sources, *LIVENESS_STATUSES),
+    ).fetchone()
+    return str(row[0] or ""), int(row[1])
+
 # --------------------------------------------------------------------------
 # Signatures — "has anything I display changed?" in one cheap query
 # --------------------------------------------------------------------------

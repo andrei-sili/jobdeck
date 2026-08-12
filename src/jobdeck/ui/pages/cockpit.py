@@ -75,7 +75,7 @@ def _channel_line(job: dict) -> str:
 
 @ui.page("/cockpit/{job_id}")
 async def cockpit_page(job_id: int):
-    with frame("Bewerbung ausfüllen"):
+    async with frame("Bewerbung ausfüllen", current="stellen"):
         # This screen is designed to SIT OPEN beside an employer's form for
         # many minutes, and it was a one-shot render: a draft started from the
         # inbox never filled these rows, the liveness pass could mark the ad
