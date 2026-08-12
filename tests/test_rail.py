@@ -11,8 +11,7 @@ import pathlib
 
 import pytest
 
-from jobdeck import db
-from jobdeck.services import send
+from jobdeck import constants, db
 from jobdeck.ui import rail
 
 NOW = datetime.datetime(2026, 8, 12, 18, 0, 0)
@@ -250,7 +249,7 @@ def test_a_usable_setting_is_honoured():
 def test_the_rails_send_cap_default_is_the_send_services_own():
     """Two defaults for one number would let the bar promise a budget the send
     path refuses."""
-    assert str(rail.SEND_CAP_DEFAULT) == send.DEFAULT_DAILY_CAP
+    assert str(rail.SEND_CAP_DEFAULT) == constants.DEFAULT_DAILY_CAP
 
 
 # ---------------------------------------------------------------------------

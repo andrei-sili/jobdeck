@@ -6,7 +6,7 @@ import pathlib
 
 from jobdeck import db
 from jobdeck.services import drafting
-from jobdeck.ui import helpers, live
+from jobdeck.ui import draft_editor, helpers, live
 from jobdeck.ui.pages import queue
 
 
@@ -40,7 +40,7 @@ def test_editing_an_approved_draft_returns_it_to_ready(con, data_dir):
     user changed after approving it."""
     job_id = _job_with_draft(con, status="approved")
 
-    draft, error = queue._save_draft(job_id, _edit(), clear_pdf=False)
+    draft, error = draft_editor._save_draft(job_id, _edit(), clear_pdf=False)
     assert error == ""
     assert draft["status"] == "ready"
     assert draft["email_body"] == "Guten Tag,\n\nneuer Text."
@@ -50,7 +50,7 @@ def test_editing_an_approved_draft_returns_it_to_ready(con, data_dir):
 def test_editing_a_ready_draft_keeps_it_ready(con, data_dir):
     job_id = _job_with_draft(con, status="ready")
 
-    draft, error = queue._save_draft(job_id, _edit(), clear_pdf=False)
+    draft, error = draft_editor._save_draft(job_id, _edit(), clear_pdf=False)
     assert error == "" and draft["status"] == "ready"
 
 
@@ -59,7 +59,7 @@ def test_a_stale_dialog_cannot_rewrite_a_sent_draft(con, data_dir):
     falsify the record of what actually went out."""
     job_id = _job_with_draft(con, status="sent")
 
-    draft, error = queue._save_draft(job_id, _edit(), clear_pdf=False)
+    draft, error = draft_editor._save_draft(job_id, _edit(), clear_pdf=False)
     assert "no longer editable" in error
     assert draft["status"] == "sent"
     stored = db.get_draft_by_job(con, job_id)
@@ -69,7 +69,7 @@ def test_a_stale_dialog_cannot_rewrite_a_sent_draft(con, data_dir):
 def test_a_stale_dialog_cannot_rewrite_a_sending_draft(con, data_dir):
     job_id = _job_with_draft(con, status="sending")
 
-    _, error = queue._save_draft(job_id, _edit(), clear_pdf=False)
+    _, error = draft_editor._save_draft(job_id, _edit(), clear_pdf=False)
     assert "no longer editable" in error
     assert db.get_draft_by_job(con, job_id)["email_body"] \
         == "Guten Tag,\n\nanbei meine Bewerbung."
@@ -78,7 +78,7 @@ def test_a_stale_dialog_cannot_rewrite_a_sending_draft(con, data_dir):
 def test_clear_pdf_drops_the_stale_mappe(con, data_dir):
     job_id = _job_with_draft(con)
 
-    draft, error = queue._save_draft(job_id, _edit(), clear_pdf=True)
+    draft, error = draft_editor._save_draft(job_id, _edit(), clear_pdf=True)
     assert error == "" and draft["pdf_path"] == ""
 
 
@@ -88,7 +88,7 @@ def test_missing_draft_is_reported(con, data_dir):
     })
     con.commit()
 
-    draft, error = queue._save_draft(job_id, _edit(), clear_pdf=False)
+    draft, error = draft_editor._save_draft(job_id, _edit(), clear_pdf=False)
     assert draft is None and "gone" in error
 
 
@@ -287,3 +287,60 @@ def test_the_shared_timer_is_cancelled_when_the_page_goes_away():
     tail = source[source.index("ui.timer("):]
     assert "on_disconnect(" in tail, "the timer outlives its page"
     assert "cancel()" in tail
+
+
+def test_building_the_mappe_refreshes_what_the_send_pins(con, data_dir):
+    """`create_mappe` ends in its own upsert_draft, and every upsert rewrites
+    `updated_at` — so the snapshot the dialog pins with `expect=` went stale
+    the moment the PDF was built, and the send that followed was refused with
+    "the draft changed since you reviewed it". Every time, on the path the
+    Stellen screen is built around: the last human gate before a real e-mail
+    became a dialog he learns to dismiss and press again."""
+    source = pathlib.Path(draft_editor.__file__).read_text()
+    body = source[source.index("async def make_pdf"):]
+    body = body[:body.index("def open_pdf")]
+    assert "await run.io_bound(load, job_id)" in body, (
+        "the editor keeps a pre-Mappe snapshot and pins it with expect=")
+    assert "current.update(" in body
+
+
+def test_a_draft_that_is_already_going_is_not_offered_a_send_button(con, data_dir):
+    """A draft in `sending` or `sent` is the record of what went out. Offering
+    "Send now" on one made the pre-send confirmation state "REAL send to the
+    company" for a message the service refuses inside its claim — and that
+    dialog's whole job is to be trustworthy."""
+    assert "sending" not in draft_editor.EDITABLE_STATUS
+    assert "sent" not in draft_editor.EDITABLE_STATUS
+    source = pathlib.Path(draft_editor.__file__).read_text()
+    guard = source[:source.index('"Send now"')]
+    assert 'if row["status"] in EDITABLE_STATUS:' in guard
+
+
+def test_the_editor_asks_the_database_rather_than_being_told(con, data_dir):
+    """Handed in, this was stale by construction — twice. First a snapshot
+    taken when the editor opened, then a callable over the caller's cached
+    dict, which cannot refresh while a dialog is open. That window is exactly
+    the one an auto-send tick uses. No caller may hand it in at all."""
+    import ast
+    ui_dir = pathlib.Path(draft_editor.__file__).parent
+    checked = 0
+    for path in sorted(ui_dir.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if (isinstance(node, ast.Call)
+                    and ast.unparse(node.func).endswith("open_editor")):
+                assert not any(k.arg == "already_applied" for k in node.keywords), \
+                    f"{path.name} tells the editor who has been applied to"
+                checked += 1
+    assert checked >= 2, "the scan found almost nothing"
+
+    job_id = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "e1", "title": "Dev",
+        "company": "Eine GmbH"})
+    con.commit()
+    assert draft_editor.applied_at_this_company(job_id) is None
+    db.add_bewerbung(con, {"gesendet_am": "2026-06-12", "firma": "Eine GmbH",
+                           "kanal": "E-Mail", "status": "Absage"})
+    con.commit()
+    found = draft_editor.applied_at_this_company(job_id)
+    assert found is not None and found["firma"] == "Eine GmbH"
+    assert draft_editor.applied_at_this_company(999999) is None

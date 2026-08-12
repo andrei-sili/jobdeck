@@ -13,7 +13,7 @@ from jobdeck.ai import scoring
 from jobdeck.ai.drafting import clean_title
 from jobdeck.dedupe import duplicates_for_jobs
 from jobdeck.services import apply_resolve, contact_lookup, drafting, liveness, mappe
-from jobdeck.ui import helpers, live
+from jobdeck.ui import draft_editor, helpers, live
 from jobdeck.ui.helpers import (
     open_in_system,
     openable_url,
@@ -140,80 +140,143 @@ def _hidden_line(view: View, counts: dict, stale_age_days: int,
 # than in a tooltip: he reads this list with the keyboard, and a tooltip is a
 # thing only a mouse can find.
 # ---------------------------------------------------------------------------
-ACTION_NONE = "none"
-ACTION_RESOLVE = "resolve"
-ACTION_DRAFT = "draft"
-ACTION_FORM = "form"
-ACTION_QUEUE = "queue"
-ACTION_RECORD = "record"
-ACTION_REVIVE = "revive"
-ACTION_OPEN = "open"
-
-
-@dataclass(frozen=True)
-class Action:
-    """What pressing the main button does here — and if it cannot, why not."""
-
-    key: str
-    label: str
-    reason: str = ""
-    enabled: bool = True
-
-
 _FORM_CHANNELS = (apply_channel.CHANNEL_ATS, apply_channel.CHANNEL_BOARD,
                   apply_channel.CHANNEL_COMPANY_SITE)
 
 
-def primary_action(job: dict, already: dict | None = None) -> Action:
-    """The one thing to do with this posting next.
+# ---------------------------------------------------------------------------
+# Everything an application to THIS posting needs, as steps.
+#
+# One button was not enough. An application is three or four acts — write the
+# letter, build the Mappe, send it or open the employer's form, record it — and
+# which of them apply depends on whether the posting gave us an e-mail address.
+# Hiding the rest behind other screens is what made recording a form
+# application a detour through the cockpit.
+# ---------------------------------------------------------------------------
+STEP_RESOLVE = "resolve"
+STEP_DRAFT = "draft"
+STEP_MAPPE = "mappe"
+STEP_SEND = "send"
+STEP_FORM = "form"
+STEP_RECORD = "record"
 
-    The order is the order of the pipeline, and the refusals come first: a
-    posting at a company he has already written to can never become an
-    application, so nothing further down may offer to start one."""
+
+@dataclass(frozen=True)
+class Step:
+    """One act of applying: what it is called, whether it is done, and — when
+    it cannot be pressed — why not."""
+
+    key: str
+    label: str
+    done: bool = False
+    enabled: bool = True
+    reason: str = ""
+
+
+def _blocking_reason(job: dict, already: dict | None) -> str:
+    """Why no application can be made here at all, '' when one can."""
     status = str(job.get("status") or "")
-    draft_status = str(job.get("draft_status") or "")
-    if status == "skipped":
-        # He put it away himself, and nothing else could put it back: the
-        # "Kein Interesse" view had no exit at all, while the channel arms
-        # below still cheerfully offered to write an application for it.
-        return Action(ACTION_REVIVE, "Zurück in die Arbeitsliste",
-                      "Du hattest sie weggelegt.")
     if status == "applied":
-        return Action(ACTION_NONE, "Beworben", "Diese Anzeige ist eingetragen.",
-                      enabled=False)
+        return "Diese Anzeige ist schon als Bewerbung eingetragen."
     if already:
-        return Action(ACTION_NONE, "Bewerbung nicht möglich",
-                      helpers.applied_line(already), enabled=False)
+        return helpers.applied_line(already)
     if status == "duplicate":
-        return Action(ACTION_NONE, "Bewerbung nicht möglich",
-                      "Diese Anzeige gehört zu einer Firma, bei der schon eine "
-                      "Bewerbung liegt.", enabled=False)
-    if draft_status == "generating" and not drafting.claim_is_stale(
-            job.get("draft_updated_at")):
-        return Action(ACTION_NONE, "Wird geschrieben …",
-                      "Das dauert etwa eine Minute.", enabled=False)
-    if draft_status in ("ready", "approved"):
-        return Action(ACTION_QUEUE, "Prüfen und senden")
-    if draft_status == "sending":
-        return Action(ACTION_QUEUE, "Versand auflösen",
-                      "Ein Versand läuft — oder er ist stecken geblieben.")
-    if draft_status == "failed" or draft_status == "generating":
-        return Action(ACTION_DRAFT, "Erneut schreiben",
-                      "Der letzte Versuch ist nicht fertig geworden.")
-    if status == "portal":
-        return Action(ACTION_RECORD, "Als beworben eintragen",
-                      "Das Formular war offen — trag die Bewerbung ein, wenn "
-                      "du sie abgeschickt hast.")
+        return ("Diese Anzeige gehört zu einer Firma, bei der schon eine "
+                "Bewerbung liegt.")
+    if status == "skipped":
+        return "Du hattest sie weggelegt — erst zurück in die Arbeitsliste."
+    return ""
+
+
+def apply_steps(job: dict, already: dict | None = None) -> list[Step]:
+    """The acts this posting needs, in the order they happen.
+
+    By E-MAIL: write the letter, then check and send it — the editor builds the
+    Mappe on the way. By FORM: write the letter, build the Mappe to upload,
+    open the employer's page, and record it yourself when you have filled it
+    in. Nothing here fills a form; that is a settled decision."""
+    blocked = _blocking_reason(job, already)
+    draft_status = str(job.get("draft_status") or "")
     channel = str(job.get("apply_channel") or "")
+    by_email = _by_email(job)
+    # What may still be checked and sent from HERE. A draft that is sending or
+    # sent is the record of what went out; resolving one belongs to the review
+    # queue, which is the only screen that can tell the two apart.
+    has_letter = draft_status in draft_editor.EDITABLE_STATUS
+    letter_gone = draft_status in ("sending", "sent")
+    writing = (draft_status == "generating"
+               and not drafting.claim_is_stale(job.get("draft_updated_at")))
+    steps: list[Step] = []
+
     if not channel:
-        return Action(ACTION_RESOLVE, "Kanal ermitteln",
-                      "Noch unbekannt, wie man sich hier bewirbt.")
-    if channel == apply_channel.CHANNEL_DIRECT_EMAIL:
-        return Action(ACTION_DRAFT, "Bewerbung per E-Mail erstellen")
-    if channel in _FORM_CHANNELS:
-        return Action(ACTION_FORM, "Formular ausfüllen")
-    return Action(ACTION_OPEN, "Anzeige öffnen und selbst prüfen",
-                  "Kein Bewerbungsweg gefunden — die Anzeige nennt keinen.")
+        steps.append(Step(STEP_RESOLVE, "Kanal ermitteln", enabled=not blocked,
+                          reason=blocked or "Noch unbekannt, wie man sich hier "
+                                            "bewirbt."))
+    steps.append(Step(
+        STEP_DRAFT,
+        "Anschreiben neu schreiben" if has_letter else
+        ("E-Mail-Bewerbung schreiben" if by_email else "Anschreiben schreiben"),
+        done=has_letter or letter_gone,
+        enabled=not blocked and not writing and not letter_gone,
+        reason=blocked or ("Wird gerade geschrieben — etwa eine Minute."
+                           if writing else ""),
+    ))
+    if by_email:
+        steps.append(Step(
+            STEP_SEND, "Prüfen und senden", done=draft_status == "sent",
+            enabled=has_letter and not blocked,
+            reason=blocked or ("" if has_letter else
+                               "In der Review queue auflösen." if letter_gone
+                               else "Erst das Anschreiben schreiben."),
+        ))
+    else:
+        steps.append(Step(
+            STEP_MAPPE, "Mappe erstellen", done=bool(job.get("pdf_path")),
+            enabled=has_letter and not blocked,
+            reason=blocked or ("" if has_letter else
+                               "In der Review queue auflösen." if letter_gone
+                               else "Erst das Anschreiben schreiben."),
+        ))
+        # Blocked too, and not only for tidiness: opening the form MOVES the
+        # posting to `portal`, which is the app's record that an application
+        # has started — at a company where one already exists, that is the one
+        # thing that must not begin. Reading the advert is still a press away
+        # in the triage row, and that one changes nothing.
+        steps.append(Step(
+            STEP_FORM, "Formular öffnen",
+            done=str(job.get("status") or "") == "portal",
+            enabled=bool(_openable_url(job)) and not blocked,
+            reason=blocked or ("" if _openable_url(job)
+                               else "Diese Anzeige nennt keine Adresse zum "
+                                    "Öffnen."),
+        ))
+    steps.append(Step(
+        STEP_RECORD, "Beworben eintragen",
+        done=str(job.get("status") or "") == "applied",
+        enabled=not blocked,
+        reason=blocked or "Drück das erst, wenn die Bewerbung wirklich raus ist.",
+    ))
+    return steps
+
+
+def _by_email(job: dict) -> bool:
+    """Does an application to this posting go by e-mail?
+
+    One definition, because two things read it: which steps the screen offers,
+    and what the ledger records as the channel — and the ledger is the table
+    the duplicate gate reads."""
+    return bool(job.get("contact_email")
+                or job.get("apply_channel") == apply_channel.CHANNEL_DIRECT_EMAIL)
+
+
+def _next_step(steps: list[Step]) -> int:
+    """Which step is the one to press now — the first that is neither done nor
+    refused. Only that one is drawn solid; the rest stay available but quiet,
+    so the screen suggests an order without forbidding another."""
+    for index, step in enumerate(steps):
+        if not step.done and step.enabled:
+            return index
+    return -1
 
 
 def _score_line(job: dict, with_age: bool = True) -> str:
@@ -394,9 +457,9 @@ def _set_status(job_id: int, status: str):
         db.set_job_status(con, job_id, status)
 
 
-def _confirm_applied(job_id: int, kanal: str):
+def _confirm_applied(job_id: int, kanal: str, dokument: str = ""):
     with db.db() as con:
-        return db.apply_job(con, job_id, kanal=kanal)
+        return db.apply_job(con, job_id, kanal=kanal, dokument=dokument)
 
 
 def _load_draft(job_id: int):
@@ -603,7 +666,8 @@ def _row_fingerprint(job: dict) -> tuple:
     drawn = tuple(job.get(key) for key in (
         "id", "company", "title", "effective_score", "match_score", "age_days",
         "match_reason", "status", "apply_channel", "ats_vendor", "apply_url",
-        "url", "contact_email", "draft_status", "draft_updated_at", "liveness",
+        "url", "contact_email", "draft_status", "draft_updated_at", "pdf_path",
+        "liveness",
         "opened_at", "bookmarked_at", "temp_agency", "salary_from", "salary_to",
         "salary_period", "description", "refnr", "location", "published_on",
         "fetched_at", "source", "company_count", "company_key",
@@ -616,23 +680,10 @@ def _row_fingerprint(job: dict) -> tuple:
                     if job.get("liveness") == liveness.LIVENESS_GONE else ())
 
 
-def _wants_a_letter(job: dict, already: dict | None) -> bool:
-    """Should this posting offer to write an Anschreiben as a SECOND action?
-
-    Only where the primary action leads to a form: an e-mail application is
-    the letter, and a posting that cannot become an application at all must
-    not be offered one."""
-    if already or str(job.get("status") or "") not in ("new", "portal"):
-        return False
-    if str(job.get("draft_status") or "") in db.OPEN_DRAFT_STATUSES:
-        return False
-    return primary_action(job, already).key in (ACTION_FORM, ACTION_OPEN)
-
-
 def _openable_url(job: dict) -> str:
     """The URL a posting's buttons may hand to the browser, '' when none is
     safe. The resolved apply link wins over the raw feed URL."""
-    return openable_url(job["apply_url"] or job["url"] or "")
+    return openable_url(job.get("apply_url") or job.get("url") or "")
 
 
 @app.get("/jobs")
@@ -940,7 +991,11 @@ async def jobs_page():
                     ui.button("★ gemerkt" if marked else "☆ merken",
                               on_click=lambda j=job["id"]: toggle_bookmark(j)) \
                         .props("flat dense no-caps")
-                    if job["status"] == "skipped":
+                    if job["status"] in ("skipped", "portal"):
+                        # `portal` is written the moment a form is opened, and
+                        # nothing else brought a posting back from it: opening
+                        # a form he then decided against took the posting out
+                        # of the working list for good.
                         ui.button("↩ zurück in die Arbeitsliste",
                                   on_click=lambda j=job["id"]: revive(j)) \
                             .props("flat dense no-caps")
@@ -959,6 +1014,15 @@ async def jobs_page():
                     if job["status"] == "new" and not job["contact_email"]:
                         ui.button("Kontakt-E-Mail suchen",
                                   on_click=lambda j=job: find_email(j)) \
+                            .props("flat dense no-caps")
+                    if not _by_email(job) and not _blocking_reason(job, already):
+                        # The cockpit is not retired: it is the only screen
+                        # that holds the applicant fields ready to paste into
+                        # an employer's form, and deleting the last route into
+                        # it left Settings still promising it is a click away.
+                        ui.button("Formular-Daten",
+                                  on_click=lambda j=job["id"]:
+                                      open_cockpit(j)) \
                             .props("flat dense no-caps")
                 for text, kind in reader_notes(job, already):
                     ui.label(text).classes(f"jd-note {kind} mb-2")
@@ -999,25 +1063,32 @@ async def jobs_page():
                     ui.label(value)
 
         def _render_primary(job: dict, already: dict | None) -> None:
-            action = primary_action(job, already)
-            with ui.row().classes("items-center gap-3 mt-6 flex-wrap"):
-                button = ui.button(action.label).props("no-caps")
-                button.set_enabled(action.enabled)
-                if action.enabled:
-                    button.on_click(
-                        lambda _=None, j=job, a=action, b=button: run_action(a, j, b))
-                if action.reason:
-                    ui.label(action.reason).classes("jd-reason")
-                if _wants_a_letter(job, already):
-                    # The cockpit parks beside the employer's form and lists
-                    # what is missing — but it cannot write an Anschreiben, and
-                    # the German market is form-first (28 of his 65
-                    # applications went that way). Without this the only route
-                    # left was the batch button in Settings.
-                    letter = ui.button("Anschreiben schreiben") \
-                        .props("outline no-caps")
-                    letter.on_click(
-                        lambda _=None, j=job, b=letter: draft(j, button=b))
+            """Every act this posting needs, on the screen it is read from.
+
+            The whole toolkit rather than one polymorphic button: an
+            application is three or four acts, and hiding the rest behind
+            other screens is what made recording a form application a detour."""
+            steps = apply_steps(job, already)
+            following = _next_step(steps)
+            with ui.row().classes("items-start gap-3 mt-6 flex-wrap"):
+                for index, step in enumerate(steps):
+                    # Each reason sits UNDER its own button rather than in a
+                    # list below them all: repeating the label to say which
+                    # step a line belongs to put the same words on screen
+                    # twice, and a tooltip cannot be reached from the keyboard.
+                    with ui.column().classes("gap-1 items-start max-w-64"):
+                        button = ui.button(
+                            ("✓ " if step.done else "") + step.label)
+                        button.props("no-caps" + (
+                            "" if index == following else " outline"))
+                        button.set_enabled(step.enabled)
+                        if step.enabled:
+                            button.on_click(
+                                lambda _=None, j=job, k=step.key, b=button:
+                                    run_step(k, j, b))
+                        if step.reason and not step.done:
+                            ui.label(step.reason).classes("jd-reason")
+
 
         # ------------------------------------------------------------------
         # what the controls do
@@ -1085,7 +1156,7 @@ async def jobs_page():
             state["selected"] = None
             await refresh(force=True)
 
-        async def ask_before_spending(action: Action, job: dict) -> bool:
+        async def ask_before_spending(step: Step, job: dict) -> bool:
             """The keyboard asks before an action costs money.
 
             ⏎ is the one control on this screen whose meaning changes with the
@@ -1093,7 +1164,7 @@ async def jobs_page():
             "open this", and on a direct-e-mail posting that is a Sonnet call
             of about nine cents and forty seconds. A button he clicked carries
             its own label and needs no second question."""
-            if action.key != ACTION_DRAFT:
+            if step.key != STEP_DRAFT:
                 return True
             overlay.clear()
             with overlay, ui.dialog() as confirm, ui.card():
@@ -1112,33 +1183,80 @@ async def jobs_page():
             confirm.open()
             return bool(await confirm)
 
-        async def run_action(action: Action, job: dict, button) -> None:
-            if action.key == ACTION_RESOLVE:
+        async def run_step(key: str, job: dict, button) -> None:
+            """Do one act of applying, from the screen he read the posting on."""
+            if key == STEP_RESOLVE:
                 await resolve_channel(job)
-            elif action.key == ACTION_REVIVE:
-                await revive(job["id"])
-            elif action.key == ACTION_OPEN:
-                url = _openable_url(job)
-                with overlay:
-                    if url:
-                        ui.navigate.to(url, new_tab=True)
-                    else:
-                        say("Diese Anzeige hat keine Adresse, die geöffnet "
-                            "werden kann.", type="warning")
-            elif action.key == ACTION_DRAFT:
-                await draft(job, button=button)
-            elif action.key == ACTION_FORM:
-                # From `overlay`, which is a sibling of both panes: a handler
-                # runs in the slot of the element that fired it, and a refresh
-                # racing this one would delete that slot before the navigation
-                # is built.
-                with overlay:
-                    ui.navigate.to(f"/cockpit/{job['id']}")
-            elif action.key == ACTION_QUEUE:
-                with overlay:
-                    ui.navigate.to("/queue")
-            elif action.key == ACTION_RECORD:
+            elif key == STEP_DRAFT:
+                await draft(job, force=True, button=button)
+            elif key == STEP_MAPPE:
+                await build_mappe(job, button)
+            elif key == STEP_SEND:
+                await open_draft_editor(job)
+            elif key == STEP_FORM:
+                await open_form(job)
+            elif key == STEP_RECORD:
                 await confirm_applied(job)
+
+        async def build_mappe(job: dict, button) -> None:
+            """The PDF he uploads to an employer's form."""
+            say("Bewerbungsmappe wird gebaut…")
+            if button is not None:
+                button.disable()
+            result = await mappe.create_mappe(job["id"])
+            await refresh(force=True)
+            overlay.clear()
+            with overlay:
+                if not result["ok"]:
+                    say(result["error"], type="warning", multi_line=True)
+                    return
+                say(helpers.mappe_summary(result, with_anlagen=True),
+                    type="positive", multi_line=True)
+                if result["warning"]:
+                    say(result["warning"], type="warning", multi_line=True)
+
+        async def open_draft_editor(job: dict) -> None:
+            """The one editor — the same the review queue opens."""
+            row = await run.io_bound(draft_editor.load, job["id"])
+            if row is None:
+                say("Kein Entwurf zu dieser Anzeige.", type="warning")
+                return
+            overlay.clear()
+            with overlay:
+                draft_editor.open_editor(
+                    row, overlay=overlay, say=say, on_change=forced_refresh)
+
+        async def forced_refresh() -> None:
+            await refresh(force=True)
+
+        def open_cockpit(job_id: int) -> None:
+            """The clipboard beside an employer's form."""
+            ui.navigate.to(f"/cockpit/{job_id}")
+
+        async def open_form(job: dict) -> None:
+            """Open the employer's page and remember that he started applying.
+
+            The app never fills a form — that is settled — but opening one IS
+            the start of an application, so the posting moves to `portal` and
+            leaves the working list while he is at it."""
+            url = _openable_url(job)
+            if not url:
+                say("Diese Anzeige nennt keine Adresse zum Öffnen.",
+                    type="warning")
+                return
+            await run.io_bound(_set_status, job["id"], "portal")
+            # The posting leaves this view, so the reader keeps the copy it was
+            # holding — and that copy still said `new`, which renders "kein
+            # Interesse" instead of the way back. The second after the click is
+            # exactly when he wants the undo.
+            if job["id"] in shown:
+                shown[job["id"]]["status"] = "portal"
+            await refresh(force=True)
+            overlay.clear()
+            with overlay:
+                ui.navigate.to(url, new_tab=True)
+                say("Trag die Bewerbung ein, sobald du das Formular "
+                    "abgeschickt hast.", type="positive", multi_line=True)
 
         async def on_key(event) -> None:
             if not event.action.keydown or event.action.repeat:
@@ -1173,9 +1291,13 @@ async def jobs_page():
                     with overlay:
                         ui.navigate.to(url, new_tab=True)
             elif key == "Enter":
-                action = primary_action(job, applied.get(job["id"]))
-                if action.enabled and await ask_before_spending(action, job):
-                    await run_action(action, job, None)
+                # The very step the solid button runs. Two state machines on
+                # one screen agree only by parallel construction, and this one
+                # can reach a send.
+                steps = apply_steps(job, applied.get(job["id"]))
+                index = _next_step(steps)
+                if index >= 0 and await ask_before_spending(steps[index], job):
+                    await run_step(steps[index].key, job, None)
 
         def _hold_place(job_id: int) -> None:
             """Remember where in the list he acted, so the row that takes that
@@ -1191,10 +1313,38 @@ async def jobs_page():
             await refresh(force=True)
 
         async def revive(job_id: int) -> None:
-            """Put a posting he had put away back into the working list."""
+            """Put a posting back into the working list.
+
+            From `portal` it asks first, and the question is not "are you
+            sure": `portal` is the app's ONLY record that an application at
+            that company may already be out, and an unrecorded form
+            submission is invisible to every gate there is. Pressing this
+            after actually applying would erase the one hint and let a second
+            application through."""
             job = shown.get(job_id)
-            if job is None or job["status"] != "skipped":
+            if job is None or job["status"] not in ("skipped", "portal"):
                 return
+            if job["status"] == "portal":
+                overlay.clear()
+                with overlay, ui.dialog() as ask, ui.card():
+                    ui.label("Du hattest das Formular geöffnet.") \
+                        .classes("font-bold")
+                    ui.label(f"{job['company']} — hast du dich beworben?") \
+                        .classes("text-sm")
+                    with ui.row().classes("justify-end gap-2 w-full"):
+                        ui.button("Nein, zurück in die Liste",
+                                  on_click=lambda: ask.submit("back")) \
+                            .props("flat no-caps")
+                        ui.button("Ja, eintragen",
+                                  on_click=lambda: ask.submit("record")) \
+                            .props("color=positive no-caps")
+                ask.open()
+                answer = await ask
+                if answer == "record":
+                    await confirm_applied(job)
+                    return
+                if answer != "back":
+                    return
             _hold_place(job_id)
             await run.io_bound(_set_status, job_id, "new")
             await refresh(force=True)
@@ -1356,8 +1506,40 @@ async def jobs_page():
             dialog.open()
 
         async def confirm_applied(job: dict):
-            bewerbung_id = await run.io_bound(_confirm_applied, job["id"],
-                                              "Online-Portal")
+            # A one-way door on a row of adjacent buttons. `apply_job` writes
+            # into the very table the duplicate gate reads, so a mis-click
+            # burns that company's single application slot and takes the
+            # posting out of the pipeline — and nothing in the app puts a
+            # status back from 'applied'.
+            overlay.clear()
+            with overlay, ui.dialog() as confirm, ui.card():
+                ui.label("Bewerbung eintragen?").classes("font-bold")
+                ui.label(f"{job['company']} — {clean_title(job['title'])}") \
+                    .classes("text-sm")
+                ui.label("Das trägt eine gesendete Bewerbung ein und nimmt die "
+                         "Anzeige aus der Arbeitsliste. Eine Bewerbung pro "
+                         "Firma — danach ist diese Firma vergeben.") \
+                    .classes("text-sm text-gray-600")
+                with ui.row().classes("justify-end gap-2 w-full"):
+                    ui.button("Abbrechen",
+                              on_click=lambda: confirm.submit(False)) \
+                        .props("flat no-caps")
+                    ui.button("Eintragen",
+                              on_click=lambda: confirm.submit(True)) \
+                        .props("color=positive no-caps")
+            confirm.open()
+            if not await confirm:
+                return
+            # FINDING 6: what the ledger records is the way it actually went,
+            # and the Mappe that went with it — the duplicate gate reads this
+            # table, so its rows have to be true.
+            kanal = ("E-Mail" if _by_email(job) else "Online-Portal")
+            # He asked for it to go, so it goes: without this the posting would
+            # be treated as one that fell out of the view by itself and stay in
+            # the reading pane behind a note.
+            _hold_place(job["id"])
+            bewerbung_id = await run.io_bound(
+                _confirm_applied, job["id"], kanal, str(job.get("pdf_path") or ""))
             await refresh(force=True)
             if bewerbung_id is None:
                 say("Blockiert: bei dieser Firma liegt schon eine Bewerbung",

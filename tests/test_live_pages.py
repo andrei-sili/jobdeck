@@ -280,7 +280,7 @@ async def test_an_open_dialog_defers_the_rebuild(user: User, con, data_dir,
     monkeypatch.setattr(jobs_page.drafting, "draft_for_job", finished_draft)
     _emailable(con)
     await user.open("/")
-    user.find("Bewerbung per E-Mail erstellen").click()
+    user.find("E-Mail-Bewerbung schreiben").click()
     await asyncio.sleep(0.3)
     await user.should_see("Entwurf — Python Entwickler")
 
@@ -335,7 +335,7 @@ async def test_a_closed_dialog_does_not_freeze_the_page(user: User, con,
     monkeypatch.setattr(jobs_page.drafting, "draft_for_job", finished_draft)
     _emailable(con)
     await user.open("/")
-    user.find("Bewerbung per E-Mail erstellen").click()
+    user.find("E-Mail-Bewerbung schreiben").click()
     await asyncio.sleep(0.3)
     await user.should_see("Entwurf — Python Entwickler")
     user.find("Schließen").click()
@@ -640,7 +640,7 @@ async def test_a_key_under_an_open_dialog_never_reaches_the_list(
     monkeypatch.setattr(jobs_page.drafting, "draft_for_job", finished_draft)
     job_id = _emailable(con)
     await user.open("/")
-    user.find("Bewerbung per E-Mail erstellen").click()
+    user.find("E-Mail-Bewerbung schreiben").click()
     await asyncio.sleep(0.3)
     await user.should_see("Entwurf — Python Entwickler")
 
@@ -825,12 +825,15 @@ async def test_a_refused_action_renders_disabled_and_says_why(
     select.set_value("firma_kontaktiert")
     await asyncio.sleep(0.3)
 
-    await user.should_see("Bewerbung nicht möglich")
-    button = next(e for e in user.client.elements.values()
-                  if isinstance(e, ui.button) and e.text == "Bewerbung nicht möglich")
-    assert button.enabled is False, "the refusal is offered as a live button"
+    steps = [e for e in user.client.elements.values()
+             if isinstance(e, ui.button)
+             and any(word in e.text for word in
+                     ("schreiben", "Mappe", "Formular", "eintragen", "senden"))]
+    assert steps, "no apply step is rendered at all"
+    assert all(not b.enabled for b in steps), \
+        "an application that cannot happen is offered as a live button"
     reasons = _classed(user, "jd-reason")
-    assert reasons and "bereits beworben" in reasons[0].text
+    assert reasons and any("bereits beworben" in r.text for r in reasons)
 
 
 async def test_the_warnings_stand_above_the_advert_on_the_screen(
@@ -899,3 +902,209 @@ async def test_the_daily_probe_pass_does_not_rebuild_the_advert_he_is_reading(
     assert next(e for e in user.client.elements.values()
                 if isinstance(e, ui.markdown)) is advert, \
         "the advert he is reading was rebuilt by a probe on another posting"
+
+
+# --------------------------------------------------------------------------
+# Applying without leaving the screen he reads on
+# --------------------------------------------------------------------------
+async def test_a_form_posting_carries_its_whole_toolkit_in_the_reader(
+        user: User, con, data_dir):
+    """His complaint, in one assertion: everything an application needs, on
+    the screen where he reads the posting."""
+    job_id = _posting(con)
+    db.set_apply_channel(con, job_id, "ats_form", "JOIN",
+                         "https://join.com/companies/x/1/apply")
+    con.commit()
+    await user.open("/")
+
+    await user.should_see("Anschreiben schreiben")
+    await user.should_see("Mappe erstellen")
+    await user.should_see("Formular öffnen")
+    await user.should_see("Beworben eintragen")
+
+
+async def test_recording_from_the_reader_makes_the_posting_leave_for_good(
+        user: User, con, data_dir):
+    """The detour that started this: he filled a form on the employer's site
+    and there was no way to record it from here at all."""
+    job_id = _posting(con)
+    other = _posting(con, external_id="e2", title="Zweite Stelle",
+                     company="Beta GmbH")
+    db.set_job_score(con, job_id, 90, "passt")     # so he lands on this one
+    db.set_job_score(con, other, 70, "auch")
+    con.commit()
+    await user.open("/")
+    await user.should_see("Beispiel GmbH")
+
+    user.find("Beworben eintragen", kind=ui.button).click()
+    await asyncio.sleep(0.3)
+    # a one-way door: it asks, and names the company
+    await user.should_see("Bewerbung eintragen?")
+    await user.should_see("Beispiel GmbH")
+    user.find("Eintragen", kind=ui.button).click()
+    await asyncio.sleep(0.4)
+
+    row = con.execute("SELECT status, bewerbung_id FROM jobs WHERE id=?",
+                      (job_id,)).fetchone()
+    assert row[0] == "applied" and row[1] is not None
+    assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 1
+    # gone from the list, and gone from the reading pane — not left behind
+    # under a "it fell out of this view" note, because he asked for it.
+    # Asserted on the ROWS: a closed dialog stays alive as an element, so the
+    # company name is still somewhere in the tree.
+    def listed():
+        return [d.text for row in _rows(user) for d in row.descendants()
+                if isinstance(d, ui.label)]
+
+    assert not any("Beispiel GmbH" in t for t in listed())
+    reader = [e.text for e in user.client.elements.values()
+              if isinstance(e, ui.label) and "gefallen" in str(e.text)]
+    assert reader == [], "it was left in the reading pane behind a note"
+
+    # …and it stays gone when the list re-reads itself
+    await _tick(user)
+    assert not any("Beispiel GmbH" in t for t in listed())
+
+
+async def test_opening_the_form_records_that_the_application_started(
+        user: User, con, data_dir, monkeypatch):
+    """Opening an employer's form is the moment an application begins; the
+    posting moves to `portal` and leaves the working list while he is at it."""
+    job_id = _posting(con)
+    db.set_apply_channel(con, job_id, "ats_form", "JOIN",
+                         "https://join.com/companies/x/1/apply")
+    con.commit()
+    await user.open("/")
+
+    # the navigation itself is the browser's business; what this pins is that
+    # the app records the application as started before handing it over
+    opened = []
+    monkeypatch.setattr(ui.navigate, "to",
+                        lambda url, **kw: opened.append(url))
+    user.find("Formular öffnen").click()
+    await asyncio.sleep(0.4)
+
+    assert con.execute("SELECT status FROM jobs WHERE id=?",
+                       (job_id,)).fetchone()[0] == "portal"
+    assert opened == ["https://join.com/companies/x/1/apply"]
+
+
+async def test_the_editor_the_queue_uses_opens_over_the_list_too(
+        user: User, con, data_dir):
+    """One editor, not two: it is the last screen before a message leaves."""
+    job_id = _emailable(con)
+    db.upsert_draft(con, job_id, {
+        "status": "ready", "recipient": "jobs@beispiel.example",
+        "betreff": "Bewerbung als Python Entwickler",
+        "email_body": "Sehr geehrte Damen und Herren,"})
+    con.commit()
+    await user.open("/")
+
+    user.find("Prüfen und senden").click()
+    await asyncio.sleep(0.4)
+
+    await user.should_see("Bewerbung als Python Entwickler")
+    await user.should_see("Send now")
+
+
+async def test_an_application_landing_while_the_editor_is_open_reaches_the_confirmation(
+        user: User, con, data_dir):
+    """The last statement before a real send. Read when the confirmation is
+    BUILT, not when the editor opened: an auto-send tick or a second tab can
+    write that company's application while the dialog sits there."""
+    job_id = _emailable(con)
+    db.upsert_draft(con, job_id, {
+        "status": "ready", "recipient": "jobs@beispiel.example",
+        "betreff": "Bewerbung als Python Entwickler",
+        "email_body": "Sehr geehrte Damen und Herren,"})
+    db.set_setting(con, "test_recipient", "probe@example.org")
+    con.commit()
+    await user.open("/")
+    user.find("Prüfen und senden", kind=ui.button).click()
+    await asyncio.sleep(0.4)
+    await user.should_see("Send now")
+
+    # …and now somebody else applies at that company
+    db.add_bewerbung(con, {"gesendet_am": "2026-08-12", "firma": "Beispiel GmbH",
+                           "email": "", "kanal": "E-Mail", "status": "Gesendet"})
+    con.commit()
+
+    user.find("Send now", kind=ui.button).click()
+    await asyncio.sleep(0.4)
+
+    await user.should_see("Send this application?")
+    await user.should_see("bereits beworben")
+
+
+async def test_the_way_back_is_on_screen_the_second_after_the_form_opens(
+        user: User, con, data_dir, monkeypatch):
+    """Opening a form writes `portal`, and the posting leaves the view — so the
+    reader keeps the copy it was holding, which still said `new` and rendered
+    "kein Interesse" instead of the way back. The moment he wants the undo is
+    the second after the click."""
+    job_id = _posting(con)
+    db.set_apply_channel(con, job_id, "ats_form", "JOIN",
+                         "https://join.com/companies/x/1/apply")
+    con.commit()
+    await user.open("/")
+    # patched AFTER the page is open: the user fixture navigates too
+    monkeypatch.setattr(ui.navigate, "to", lambda url, **kw: None)
+
+    user.find("Formular öffnen", kind=ui.button).click()
+    await asyncio.sleep(0.4)
+
+    await user.should_see("zurück in die Arbeitsliste")
+    assert con.execute("SELECT status FROM jobs WHERE id=?",
+                       (job_id,)).fetchone()[0] == "portal"
+
+
+async def test_undoing_an_opened_form_asks_what_actually_happened(
+        user: User, con, data_dir, monkeypatch):
+    """`portal` is the app's ONLY record that an application at that company
+    may already be out, and an unrecorded form submission is invisible to every
+    gate. Pressing this after actually applying would erase the one hint."""
+    job_id = _posting(con)
+    db.set_apply_channel(con, job_id, "ats_form", "JOIN",
+                         "https://join.com/companies/x/1/apply")
+    con.commit()
+    await user.open("/")
+    monkeypatch.setattr(ui.navigate, "to", lambda url, **kw: None)
+    user.find("Formular öffnen", kind=ui.button).click()
+    await asyncio.sleep(0.4)
+
+    user.find("zurück in die Arbeitsliste", kind=ui.button).click()
+    await asyncio.sleep(0.3)
+    await user.should_see("hast du dich beworben?")
+
+    # "yes" hands it to the recording path, which asks its own question
+    user.find("Ja, eintragen", kind=ui.button).click()
+    await asyncio.sleep(0.3)
+    await user.should_see("Bewerbung eintragen?")
+    user.find("Eintragen", kind=ui.button).click()
+    await asyncio.sleep(0.4)
+
+    assert con.execute("SELECT status FROM jobs WHERE id=?",
+                       (job_id,)).fetchone()[0] == "applied"
+    assert con.execute("SELECT kanal FROM bewerbungen").fetchone()[0] \
+        == "Online-Portal"
+
+
+async def test_saying_no_puts_it_back_without_recording_anything(
+        user: User, con, data_dir, monkeypatch):
+    job_id = _posting(con)
+    db.set_apply_channel(con, job_id, "ats_form", "JOIN",
+                         "https://join.com/companies/x/1/apply")
+    con.commit()
+    await user.open("/")
+    monkeypatch.setattr(ui.navigate, "to", lambda url, **kw: None)
+    user.find("Formular öffnen", kind=ui.button).click()
+    await asyncio.sleep(0.4)
+
+    user.find("zurück in die Arbeitsliste", kind=ui.button).click()
+    await asyncio.sleep(0.3)
+    user.find("Nein, zurück in die Liste", kind=ui.button).click()
+    await asyncio.sleep(0.4)
+
+    assert con.execute("SELECT status FROM jobs WHERE id=?",
+                       (job_id,)).fetchone()[0] == "new"
+    assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 0
