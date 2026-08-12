@@ -45,8 +45,10 @@ async def test_the_inbox_offers_one_way_into_a_form_application(
     """"Apply via portal" opened the raw posting and marked it 'portal' from
     the row; the cockpit does both and is where the form work happens. Two
     controls for one act is what "too many buttons" meant."""
-    _posting(con)
-    await user.open("/jobs")
+    job_id = _posting(con)
+    db.set_apply_channel(con, job_id, "ats_form", "JOIN", "https://join.com/x")
+    con.commit()
+    await user.open("/")
     await user.should_see("Python Entwickler")
 
     await user.should_see("Formular ausfüllen")
@@ -172,10 +174,10 @@ async def test_a_temp_agency_posting_says_so_on_the_row(user: User, con,
                                    "salary_period": "Jahresgehalt"})
     con.commit()
 
-    await user.open("/jobs")
+    await user.open("/")
 
     await user.should_see("Arbeitnehmerüberlassung")
-    await user.should_see("Gehalt: 37.000 € (Jahresgehalt)")
+    await user.should_see("37.000 € (Jahresgehalt)")
 
 
 # ---------------------------------------------------------------------------

@@ -88,6 +88,16 @@ def test_a_status_change_changes_the_data_signature(con, data_dir):
     assert db.data_signature(con) != before
 
 
+def test_setting_a_posting_aside_changes_the_data_signature(con, data_dir):
+    """He can mark a posting in one tab; the other has to notice, or its
+    Vorgemerkt count and its list would disagree with the database."""
+    job_id = _job(con)
+    before = db.data_signature(con)
+    db.set_bookmark(con, job_id, True)
+    con.commit()
+    assert db.data_signature(con) != before
+
+
 def test_an_adopted_contact_email_changes_the_data_signature(con, data_dir):
     job_id = _job(con)
     before = db.data_signature(con)
@@ -167,17 +177,25 @@ def test_a_poll_error_changes_the_profiles_signature(con, data_dir):
 # --------------------------------------------------------------------------
 # The order inside a loader is load-bearing
 # --------------------------------------------------------------------------
-def _db_calls(func) -> list[str]:
-    """`db.<name>(...)` calls inside a function, in source order, minus the
-    connection itself."""
-    names = []
+def _signature_or_data_calls(func) -> list[str]:
+    """Every read a loader makes, in source order, tagged by what it is.
+
+    A signature read is anything whose call ends in `_signature` — the rail's
+    own helper composes three of the shared ones and is the loader's first
+    statement, so a rule that only recognised `db.*_signature` would skip that
+    loader entirely rather than check it."""
+    found = []
     for node in ast.walk(func):
-        if (isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
+        if not isinstance(node, ast.Call):
+            continue
+        target = ast.unparse(node.func)
+        if target.endswith("_signature"):
+            found.append((node.lineno, "signature"))
+        elif (isinstance(node.func, ast.Attribute)
                 and getattr(node.func.value, "id", "") == "db"
                 and node.func.attr != "db"):
-            names.append((node.lineno, node.func.attr))
-    return [name for _, name in sorted(names)]
+            found.append((node.lineno, node.func.attr))
+    return [kind for _, kind in sorted(found)]
 
 
 def test_every_loader_reads_its_signature_before_the_data_it_describes():
@@ -185,22 +203,34 @@ def test_every_loader_reads_its_signature_before_the_data_it_describes():
     between the rows and the signature would marry STALE rows to a FRESH
     signature — which the watcher then records as "what the page is showing",
     and the change is never rendered. Reading the signature first can only fail
-    the safe way: one rebuild nobody needed."""
+    the safe way: one rebuild nobody needed.
+
+    Over the whole UI package, not only its pages: the rail is a loader that
+    lives beside them and is rendered on every screen there is."""
     from jobdeck.ui.pages import jobs as jobs_page
 
-    pages = pathlib.Path(jobs_page.__file__).parent
+    ui_dir = pathlib.Path(jobs_page.__file__).parent.parent
     checked = []
-    for path in sorted(pages.glob("*.py")):
+    for path in sorted(ui_dir.rglob("*.py")):
         tree = ast.parse(path.read_text())
         for func in ast.walk(tree):
             if not isinstance(func, ast.FunctionDef | ast.AsyncFunctionDef):
                 continue
-            calls = _db_calls(func)
-            signatures = [c for c in calls if c.endswith("_signature")]
-            if not signatures or len(calls) == 1:
+            calls = _signature_or_data_calls(func)
+            if "signature" not in calls or len(calls) == 1:
                 continue
-            assert calls[0].endswith("_signature"), (
+            assert calls[0] == "signature", (
                 f"{path.name}:{func.name} reads {calls[0]} before its "
                 f"signature — a write landing between the two would be lost")
             checked.append(f"{path.name}:{func.name}")
-    assert len(checked) >= 4, f"the scan found almost nothing: {checked}"
+    assert len(checked) >= 5, f"the scan found almost nothing: {checked}"
+
+
+def test_reading_a_posting_changes_the_data_signature(con, data_dir):
+    """"Neu" is a count of what he has not opened, so another tab has to see
+    him open one — otherwise its rail keeps promising work already done."""
+    job_id = _job(con)
+    before = db.data_signature(con)
+    db.mark_job_opened(con, job_id)
+    con.commit()
+    assert db.data_signature(con) != before

@@ -366,3 +366,43 @@ def test_migrate_adds_the_source_fact_columns_to_pre_v7_jobs(tmp_path):
             == migrations.SCHEMA_VERSION)
     migrations.migrate(con)  # idempotent with the new columns present
     con.close()
+
+
+def test_migrate_adds_the_reading_columns_to_pre_v8_jobs(tmp_path):
+    """A pre-v8 jobs table gains `bookmarked_at` and `opened_at`, both empty,
+    without disturbing the rows already stored — nothing he has is marked or
+    read until he marks or reads it."""
+    path = tmp_path / "v7.db"
+    con = sqlite3.connect(path)
+    con.row_factory = sqlite3.Row
+    con.execute(
+        """
+        CREATE TABLE jobs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            source      TEXT NOT NULL,
+            external_id TEXT NOT NULL,
+            company     TEXT NOT NULL DEFAULT '',
+            fetched_at  TEXT NOT NULL,
+            status      TEXT NOT NULL DEFAULT 'new',
+            UNIQUE (source, external_id)
+        )
+        """
+    )
+    con.execute(
+        "INSERT INTO jobs (source, external_id, company, fetched_at) "
+        "VALUES (?, ?, ?, ?)",
+        ("arbeitsagentur", "10001-1-S", "Beispiel GmbH", "2026-08-01T10:00:00"),
+    )
+    con.execute("PRAGMA user_version = 7")
+    con.commit()
+
+    migrations.migrate(con)
+
+    row = con.execute("SELECT * FROM jobs").fetchone()
+    assert row["company"] == "Beispiel GmbH"
+    assert row["bookmarked_at"] == ""
+    assert row["opened_at"] == ""
+    assert (con.execute("PRAGMA user_version").fetchone()[0]
+            == migrations.SCHEMA_VERSION)
+    migrations.migrate(con)  # idempotent with the new columns present
+    con.close()

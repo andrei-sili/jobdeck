@@ -453,9 +453,29 @@ APPLIED_FIRM_SQL = """(
         SELECT jd_norm(b.email) FROM bewerbungen b WHERE jd_norm(b.email) <> '')))"""
 
 
+# A posting whose application is UNDER WAY. Two ways that happens and they are
+# one fact from his side: a draft is being written or waiting to be sent, or he
+# has opened the employer's form, which the app records by moving the posting to
+# `portal`. A screen that showed only the first would lose every form
+# application between opening the form and recording it — which is most of them.
+#
+# The draft statuses are listed rather than negated so a NEW one has to be
+# classified deliberately: silently counting an unknown draft state as work in
+# progress is how a screen starts lying.
+OPEN_DRAFT_STATUSES = ("generating", "ready", "failed", "approved", "sending")
+_IN_PROGRESS_SQL = (
+    "(jobs.status='portal' OR EXISTS ("
+    "SELECT 1 FROM drafts d WHERE d.job_id=jobs.id AND d.status IN ("
+    + ",".join("?" * len(OPEN_DRAFT_STATUSES)) + ")))"
+)
+
+
 def _job_filters(
     status: str | None, mismatches: str, gone: str, applied: str = "include",
     old: str = "include", stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
+    bookmarked: str = "include", opened: str = "include",
+    in_progress: str = "include", search: str = "",
+    keep_ids: tuple[int, ...] = (),
 ) -> tuple[list[str], list]:
     """WHERE fragments + bound values shared by the list and the count, so a
     page can never be filtered differently from the total printed beside it.
@@ -464,7 +484,9 @@ def _job_filters(
     falling through would SHOW a pile the caller asked to hide, and a hidden
     pile exists precisely because its rows should not be acted on."""
     for name, value in (("mismatches", mismatches), ("gone", gone),
-                        ("applied", applied), ("old", old)):
+                        ("applied", applied), ("old", old),
+                        ("bookmarked", bookmarked), ("opened", opened),
+                        ("in_progress", in_progress)):
         if value not in ("include", "exclude", "only"):
             raise ValueError(f"{name}={value!r}: expected include/exclude/only")
     where, params = [], []
@@ -492,6 +514,52 @@ def _job_filters(
     elif old == "only":
         where.append(freshness.OLD_SQL)
         params.append(stale_age_days)
+    # Set aside by hand. Unlike the four piles above this is not a fact about
+    # the posting but a decision of his, so it never hides anything by itself —
+    # 'only' is the whole point, 'exclude' exists just so the vocabulary is the
+    # same three words everywhere.
+    if bookmarked == "exclude":
+        where.append("bookmarked_at=''")
+    elif bookmarked == "only":
+        where.append("bookmarked_at<>''")
+    # 'only' here means "not yet opened" — the unread half of an inbox. Named
+    # after the column rather than after the view so the three words keep
+    # meaning the same thing: 'only' is always "just the rows the column is
+    # true of", and it is the caller that decides which half it wants.
+    if opened == "exclude":
+        # `keep_ids` is what makes an inbox usable: reading a posting in the
+        # "Neu" view would otherwise drop it out of the list under his cursor
+        # the moment the next tick ran, taking the reading pane with it. The
+        # rows he opened during this sitting stay where they are; they are gone
+        # the next time he opens the view, which is when he expects it.
+        if keep_ids:
+            places = ",".join("?" * len(keep_ids))
+            where.append(f"(opened_at='' OR jobs.id IN ({places}))")
+            params.extend(keep_ids)
+        else:
+            where.append("opened_at=''")
+    elif opened == "only":
+        where.append("opened_at<>''")
+    # A plain substring over the two fields a person searches by. SQLite's LIKE
+    # folds ASCII case only, which is what a search box needs; folding through
+    # jd_norm would call a Python callback once per row for a query he retypes
+    # on every keystroke.
+    term = str(search or "").strip()
+    if term:
+        # ESCAPE, because % and _ are wildcards and he types them: searching
+        # "100%" without this returns every posting containing "100", and a
+        # single "_" returns the whole corpus. The guard tests the STRIPPED
+        # value too — a query of spaces used to append "%%" and filter nothing.
+        pattern = "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        where.append("(jobs.title LIKE ? ESCAPE '\\' "
+                     "OR jobs.company LIKE ? ESCAPE '\\')")
+        params.extend((pattern, pattern))
+    if in_progress == "exclude":
+        where.append(f"NOT {_IN_PROGRESS_SQL}")
+        params.extend(OPEN_DRAFT_STATUSES)
+    elif in_progress == "only":
+        where.append(_IN_PROGRESS_SQL)
+        params.extend(OPEN_DRAFT_STATUSES)
     return where, params
 
 
@@ -548,6 +616,11 @@ def list_job_groups(
     applied: str = "include",
     old: str = "include",
     stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
+    bookmarked: str = "include",
+    opened: str = "include",
+    in_progress: str = "include",
+    search: str = "",
+    keep_ids: tuple[int, ...] = (),
     offset: int = 0,
 ) -> list[sqlite3.Row]:
     """One row per company: its best-ranked posting, plus `company_count`.
@@ -557,7 +630,9 @@ def list_job_groups(
     never silently reorders the page under the user. Only the ranking WITHIN a
     company is always by score, because something has to choose which posting
     represents it."""
-    where, params = _job_filters(status, mismatches, gone, applied, old, stale_age_days)
+    where, params = _job_filters(status, mismatches, gone, applied, old,
+                                 stale_age_days, bookmarked, opened,
+                                 in_progress, search, keep_ids)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     order = _JOB_ORDER_SQL if status else "id DESC"
     return con.execute(
@@ -576,9 +651,16 @@ def count_job_groups(
     applied: str = "include",
     old: str = "include",
     stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
+    bookmarked: str = "include",
+    opened: str = "include",
+    in_progress: str = "include",
+    search: str = "",
+    keep_ids: tuple[int, ...] = (),
 ) -> int:
     """How many companies the grouped view holds."""
-    where, params = _job_filters(status, mismatches, gone, applied, old, stale_age_days)
+    where, params = _job_filters(status, mismatches, gone, applied, old,
+                                 stale_age_days, bookmarked, opened,
+                                 in_progress, search, keep_ids)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     return con.execute(
         f"{_ranked_jobs_cte(where_sql)}"
@@ -599,6 +681,11 @@ def list_company_siblings(
     applied: str = "include",
     old: str = "include",
     stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
+    bookmarked: str = "include",
+    opened: str = "include",
+    in_progress: str = "include",
+    search: str = "",
+    keep_ids: tuple[int, ...] = (),
     per_company: int = SIBLINGS_PER_COMPANY,
 ) -> list[sqlite3.Row]:
     """The postings a grouped row stands in front of, best-ranked first.
@@ -609,7 +696,9 @@ def list_company_siblings(
     are."""
     if not company_keys:
         return []
-    where, params = _job_filters(status, mismatches, gone, applied, old, stale_age_days)
+    where, params = _job_filters(status, mismatches, gone, applied, old,
+                                 stale_age_days, bookmarked, opened,
+                                 in_progress, search, keep_ids)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     placeholders = ",".join("?" * len(company_keys))
     return con.execute(
@@ -630,10 +719,17 @@ def count_jobs(
     applied: str = "include",
     old: str = "include",
     stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
+    bookmarked: str = "include",
+    opened: str = "include",
+    in_progress: str = "include",
+    search: str = "",
+    keep_ids: tuple[int, ...] = (),
 ) -> int:
     """How many postings a `list_jobs` call with the same filters would have,
     ignoring its page limit — the total a paged view has to print."""
-    where, params = _job_filters(status, mismatches, gone, applied, old, stale_age_days)
+    where, params = _job_filters(status, mismatches, gone, applied, old,
+                                 stale_age_days, bookmarked, opened,
+                                 in_progress, search, keep_ids)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     return con.execute(
         f"SELECT COUNT(*) FROM jobs{where_sql}", params
@@ -649,6 +745,11 @@ def list_jobs(
     applied: str = "include",
     old: str = "include",
     stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
+    bookmarked: str = "include",
+    opened: str = "include",
+    in_progress: str = "include",
+    search: str = "",
+    keep_ids: tuple[int, ...] = (),
     offset: int = 0,
 ) -> list[sqlite3.Row]:
     """List postings. mismatches: 'include' (default), 'exclude' (hide the
@@ -656,7 +757,9 @@ def list_jobs(
     (just the hidden pile — keeps mismatches reachable regardless of how
     many better-scored rows fill the page limit). `gone` takes the same three
     values over postings whose ad the source says is no longer there."""
-    where, params = _job_filters(status, mismatches, gone, applied, old, stale_age_days)
+    where, params = _job_filters(status, mismatches, gone, applied, old,
+                                 stale_age_days, bookmarked, opened,
+                                 in_progress, search, keep_ids)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     # The age-adjusted score is SELECTED as well as ordered on, so the number
     # the UI prints is the very number that decided the row's position — two
@@ -700,6 +803,36 @@ def set_job_status(
             "UPDATE jobs SET status=?, bewerbung_id=? WHERE id=?",
             (status, bewerbung_id, job_id),
         )
+
+
+def set_bookmark(con: sqlite3.Connection, job_id: int, marked: bool) -> bool:
+    """Set a posting aside, or take the mark off again. Returns the new state.
+
+    Independent of `status`: setting one aside is not acting on it. The
+    timestamp is only rewritten when the mark is newly set, so re-marking an
+    already-marked posting cannot move it to the top of the pile it is already
+    in."""
+    if marked:
+        con.execute(
+            "UPDATE jobs SET bookmarked_at=? WHERE id=? AND bookmarked_at=''",
+            (_now(), job_id),
+        )
+    else:
+        con.execute("UPDATE jobs SET bookmarked_at='' WHERE id=?", (job_id,))
+    return marked
+
+
+def mark_job_opened(con: sqlite3.Connection, job_id: int) -> None:
+    """Record that he has now read this posting.
+
+    Written once and never rewritten: the question the list asks is "have I
+    looked at this yet", not "when did I last look", and re-stamping it on
+    every visit would turn a stable order into one that moves while he reads
+    down it."""
+    con.execute(
+        "UPDATE jobs SET opened_at=? WHERE id=? AND opened_at=''",
+        (_now(), job_id),
+    )
 
 
 def set_job_score(
@@ -1014,6 +1147,17 @@ def count_old_jobs(
     return con.execute(sql, params).fetchone()[0]
 
 
+def count_bookmarked_jobs(con: sqlite3.Connection) -> int:
+    """How many postings he has set aside, across every status.
+
+    Deliberately not narrowed to one status: the mark survives applying and
+    skipping, and a count that quietly dropped those would disagree with the
+    view it labels."""
+    return con.execute(
+        "SELECT COUNT(*) FROM jobs WHERE bookmarked_at<>''"
+    ).fetchone()[0]
+
+
 def jobs_needing_apply_channel(
     con: sqlite3.Connection, limit: int, min_score: int = 1
 ) -> list[sqlite3.Row]:
@@ -1107,6 +1251,60 @@ def count_jobs_by_status(con: sqlite3.Connection) -> dict[str, int]:
     return {row["status"]: row["n"] for row in rows}
 
 
+def count_active_profiles(con: sqlite3.Connection) -> int:
+    """How many search profiles are switched on.
+
+    Its own read because `profiles_signature` cannot see a profile being
+    deactivated — it carries COUNT, MAX(id), the poll stamps and the errors,
+    none of which move when `active` flips."""
+    return con.execute(
+        "SELECT COUNT(*) FROM search_profiles WHERE active=1"
+    ).fetchone()[0]
+
+
+def count_unscored_jobs(con: sqlite3.Connection) -> int:
+    """New postings still waiting for a match score — the scoring backlog."""
+    return con.execute(
+        "SELECT COUNT(*) FROM jobs WHERE status='new' AND match_score IS NULL"
+    ).fetchone()[0]
+
+
+def poll_progress(con: sqlite3.Connection) -> tuple[int, str, int]:
+    """(active profiles, when one was last polled, how many last failed).
+
+    What the rail says about discovery. The error COUNT rather than the text:
+    the rail has one line, and "2 Quellen melden einen Fehler" sends him to the
+    page that states them."""
+    row = con.execute(
+        "SELECT COUNT(*), MAX(COALESCE(last_polled_at,'')), "
+        "TOTAL(COALESCE(last_poll_error,'')<>'') "
+        "FROM search_profiles WHERE active=1"
+    ).fetchone()
+    return int(row[0]), str(row[1] or ""), int(row[2])
+
+
+def liveness_progress(
+    con: sqlite3.Connection, sources: tuple[str, ...], min_score: int = 1
+) -> tuple[str, int]:
+    """(when a posting was last probed, how many the pass has still to reach).
+
+    Counted over exactly what `jobs_needing_liveness_check` would select — the
+    askable sources, the statuses it looks at, AND the mismatch floor. Leaving
+    the floor out counted every score-0 posting as pending, which the pass will
+    never probe: a backlog that can never reach zero, pulsing on every screen
+    forever."""
+    if not sources:
+        return "", 0
+    row = con.execute(
+        "SELECT MAX(COALESCE(liveness_checked_at,'')), "
+        "TOTAL(COALESCE(liveness_checked_at,'')='') "
+        f"FROM jobs WHERE source IN ({','.join('?' * len(sources))}) "
+        f"AND status IN ({','.join('?' * len(LIVENESS_STATUSES))}) "
+        "AND (match_score IS NULL OR match_score>=?)",
+        (*sources, *LIVENESS_STATUSES, min_score),
+    ).fetchone()
+    return str(row[0] or ""), int(row[1])
+
 # --------------------------------------------------------------------------
 # Signatures — "has anything I display changed?" in one cheap query
 # --------------------------------------------------------------------------
@@ -1127,7 +1325,8 @@ SELECT COUNT(*), MAX(id), COUNT(match_score), TOTAL(match_score),
        MAX(liveness_checked_at), TOTAL(liveness=?),
        TOTAL(status='new'), TOTAL(status='portal'), TOTAL(status='applied'),
        TOTAL(status='skipped'), TOTAL(status='duplicate'),
-       TOTAL(contact_email<>''), TOTAL(COALESCE(apply_channel,'')<>'')
+       TOTAL(contact_email<>''), TOTAL(COALESCE(apply_channel,'')<>''),
+       TOTAL(bookmarked_at<>''), TOTAL(opened_at<>'')
   FROM jobs
 """
 
@@ -1478,3 +1677,8 @@ def record_llm_usage(
         "printf('%.6f', CAST(value AS REAL) + CAST(excluded.value AS REAL))",
         ("llm_cost_usd", float(cost_usd)),
     )
+    # WHEN, not just how much. The rail says whether the machine is working
+    # right now, and a backlog is not evidence of a worker — with AI spend
+    # switched off the queue never moves and nothing else records the
+    # difference between "scoring is running" and "scoring will never run".
+    set_setting(con, "llm_last_call_at", _now())

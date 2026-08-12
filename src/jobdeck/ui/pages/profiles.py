@@ -45,7 +45,7 @@ def _get_profile_row(profile_id):
 
 @ui.page("/profiles")
 async def profiles_page():
-    with frame("Search profiles"):
+    async with frame("Suchprofile", current="unterlagen"):
         header = ui.row().classes("w-full items-center gap-2")
         container = ui.column().classes("w-full gap-2")
         # Dialogs and messages live in a sibling of the list, never in the row

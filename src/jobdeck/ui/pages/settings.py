@@ -100,7 +100,7 @@ def _ai_enabled():
 
 @ui.page("/settings")
 async def settings_page():
-    with frame("Settings"):
+    async with frame("Einstellungen", current="einstellungen"):
         settings = await run.io_bound(_get_settings)
         prep = await run.io_bound(_prepare_filter)
         live_host = ui.row().classes("w-full items-center")

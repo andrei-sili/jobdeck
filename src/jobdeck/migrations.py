@@ -9,7 +9,7 @@ import sqlite3
 
 from jobdeck import dates
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # Legacy table, exactly as the previous tracker created it.
 BEWERBUNGEN_SQL = """
@@ -82,6 +82,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     salary_to           TEXT NOT NULL DEFAULT '',
     salary_period       TEXT NOT NULL DEFAULT '',
     temp_agency         INTEGER NOT NULL DEFAULT 0,
+    bookmarked_at       TEXT NOT NULL DEFAULT '',
+    opened_at           TEXT NOT NULL DEFAULT '',
     UNIQUE (source, external_id)
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
@@ -265,6 +267,31 @@ def _ensure_source_fact_columns(con: sqlite3.Connection) -> None:
             "ALTER TABLE jobs ADD COLUMN temp_agency INTEGER NOT NULL DEFAULT 0")
 
 
+def _ensure_reading_columns(con: sqlite3.Connection) -> None:
+    """What he has done with a posting BEFORE deciding anything (schema v8).
+
+    Both are timestamps rather than flags, and both are independent of
+    `status` — acting on a posting is a different question from having looked
+    at it or having put it on a shelf.
+
+    * `bookmarked_at`: set aside to come back to. The pile he builds by hand is
+      the one place where his own order matters, and "when did I mark this" is
+      the only thing that can order it; score decides everywhere else.
+    * `opened_at`: the first time he actually read it. Without this "new" can
+      only mean "recently discovered", which is a fact about the board rather
+      than about him — and the whole point of a list shaped like an inbox is
+      that it can tell him what he has not looked at yet.
+
+    Empty string means not-yet, so both read as booleans where that is all a
+    query needs.
+    """
+    existing = [row[1] for row in con.execute("PRAGMA table_info(jobs)")]
+    for col in ("bookmarked_at", "opened_at"):
+        if col not in existing:
+            con.execute(
+                f"ALTER TABLE jobs ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+
+
 def _ensure_draft_columns(con: sqlite3.Connection) -> None:
     """Send-tracking columns added in schema v4 (additive only).
 
@@ -288,6 +315,7 @@ def migrate(con: sqlite3.Connection) -> None:
     _ensure_apply_channel_columns(con)
     _ensure_freshness_columns(con)
     _ensure_source_fact_columns(con)
+    _ensure_reading_columns(con)
     _ensure_draft_columns(con)
     _backfill_published_on(con)
     if version < 2:

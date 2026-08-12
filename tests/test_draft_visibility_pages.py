@@ -21,7 +21,7 @@ pytest_plugins = ["nicegui.testing.user_plugin"]
 
 pytestmark = pytest.mark.nicegui_main_file("tests/nicegui_main.py")
 
-DRAFT_BUTTON = "Draft application"
+DRAFT_BUTTON = "Bewerbung per E-Mail erstellen"
 
 
 @pytest.fixture(autouse=True)
@@ -40,11 +40,10 @@ def _keep_the_package_importable():
     sys.modules.update(saved)
 
 
-async def _open_pile(user: User, pile: str | None = None):
-    """Switch the inbox to the 'already applied' pile through its real control."""
-    from jobdeck.ui.pages import jobs as jobs_page
-    toggle = next(iter(user.find(marker="pile-toggle").elements))
-    toggle.set_value(pile if pile is not None else jobs_page.PILE_APPLIED)
+async def _open_view(user: User, view_key: str = "firma_kontaktiert"):
+    """Switch the list to a named view through its real control."""
+    select = next(iter(user.find(marker="view-select").elements))
+    select.set_value(view_key)
     await asyncio.sleep(0.3)
 
 
@@ -54,11 +53,19 @@ def user_error_records(caplog):
 
 
 def _posting(con, company="Beispiel GmbH", **over):
+    """A posting the screen offers to write an e-mail application for.
+
+    The channel is set because the main button is polymorphic now: with none
+    resolved the one thing to do here is "Kanal ermitteln", which is right for
+    650 of his 803 postings and wrong for every test about drafting."""
+    emailable = over.pop("emailable", True)
     job_id = db.insert_job_if_new(con, {
         "source": "stub", "external_id": over.pop("ext", "e1"),
         "title": "Python Entwickler", "company": company,
         "url": "https://beispiel.example/1", **over,
     })
+    if emailable and job_id is not None:
+        db.set_apply_channel(con, job_id, "direct_email", "", "")
     con.commit()
     return job_id
 
@@ -78,7 +85,7 @@ def _claimed(con, job_id, minutes_ago: float):
 async def test_the_inbox_row_says_a_draft_is_being_written(user: User, con, data_dir):
     job_id = _posting(con)
     _claimed(con, job_id, minutes_ago=0.2)
-    await user.open("/jobs")
+    await user.open("/")
     await user.should_see("Beispiel GmbH")
     await user.should_see("wird gerade geschrieben")
 
@@ -90,7 +97,7 @@ async def test_the_draft_button_stands_down_only_while_the_claim_is_alive(
     a crash became a posting that could never be drafted again."""
     job_id = _posting(con)
     _claimed(con, job_id, minutes_ago=0.2)
-    await user.open("/jobs")
+    await user.open("/")
     await user.should_not_see(DRAFT_BUTTON)
 
     # …and the moment the claim is old enough for _claim to take it over, the
@@ -100,8 +107,8 @@ async def test_the_draft_button_stands_down_only_while_the_claim_is_alive(
          - datetime.timedelta(minutes=drafting.CLAIM_TIMEOUT_MIN + 1)
          ).isoformat(timespec="seconds"), job_id))
     con.commit()
-    await user.open("/jobs")
-    await user.should_see(DRAFT_BUTTON)
+    await user.open("/")
+    await user.should_see("Erneut schreiben")
     await user.should_see("abgebrochen")
     await user.should_not_see("etwa eine Minute")
 
@@ -116,7 +123,7 @@ async def test_the_inbox_row_states_every_other_draft_state(
     job_id = _posting(con)
     db.upsert_draft(con, job_id, {"status": status})
     con.commit()
-    await user.open("/jobs")
+    await user.open("/")
     await user.should_see(expected)
 
 
@@ -125,9 +132,9 @@ async def test_a_discarded_draft_leaves_the_row_as_it_found_it(
     job_id = _posting(con)
     db.upsert_draft(con, job_id, {"status": "discarded"})
     con.commit()
-    await user.open("/jobs")
+    await user.open("/")
     await user.should_see(DRAFT_BUTTON)
-    await user.should_not_see("Entwurf")
+    await user.should_not_see("Entwurf fertig")
 
 
 # --------------------------------------------------------------------------
@@ -208,7 +215,7 @@ async def test_an_abandoned_claim_tells_both_screens_the_same_thing(
     await user.open("/queue")
     await user.should_see("abgebrochen")
     await user.should_not_see("Die Zeile aktualisiert sich")
-    await user.open("/jobs")
+    await user.open("/")
     await user.should_see("abgebrochen")
 
 
@@ -228,7 +235,7 @@ async def test_the_pressed_button_says_what_it_is_doing_for_the_whole_wait(
 
     monkeypatch.setattr(jobs_page.drafting, "draft_for_job", slow_draft)
     _posting(con)
-    await user.open("/jobs")
+    await user.open("/")
     await user.should_see(DRAFT_BUTTON)
 
     user.find(DRAFT_BUTTON).click()
@@ -257,11 +264,13 @@ async def test_an_unexpected_failure_does_not_leave_the_button_dead(
 
     monkeypatch.setattr(jobs_page.drafting, "draft_for_job", exploding_draft)
     _posting(con)
-    await user.open("/jobs")
+    await user.open("/")
     user.find(DRAFT_BUTTON).click()
     await asyncio.sleep(0.3)
+    # the button is live again — the stub raised before drafting could mark
+    # the row failed, so the posting is exactly where it started
     await user.should_see(DRAFT_BUTTON)
-    await user.should_not_see("wird geschrieben…")
+    await user.should_not_see("wird geschrieben …")
     await user.should_see("unerwartet fehlgeschlagen")
 
     # The traceback must still reach the log — that is the only place the real
@@ -292,13 +301,13 @@ async def test_a_posting_at_a_firm_he_already_wrote_to_says_so(
 
     # it is OUT of the working list: it can never become an application, which
     # is a fact about the posting, exactly like a score-0 mismatch
-    await user.open("/jobs")
+    await user.open("/")
     await user.should_not_see("Beispiel GmbH")
-    await user.should_see("bei schon beworbenen Firmen hidden")
+    await user.should_see("bei schon beworbenen Firmen ausgeblendet")
 
     # …and one click away, saying why, with nothing inviting him to spend a
     # draft on an application that can never be sent
-    await _open_pile(user)
+    await _open_view(user)
     await user.should_see("Beispiel GmbH")
     await user.should_see("bereits beworben")
     await user.should_see("Absage")
@@ -313,8 +322,8 @@ async def test_the_decorated_spelling_is_covered_by_the_same_warning(
     db.add_bewerbung(con, {"gesendet_am": "2026-06-12", "firma": "Beispiel GmbH",
                            "email": "", "kanal": "E-Mail", "status": "Absage"})
     con.commit()
-    await user.open("/jobs")
-    await _open_pile(user)
+    await user.open("/")
+    await _open_view(user)
     await user.should_see("bereits beworben")
 
 
@@ -323,24 +332,30 @@ async def test_a_firm_he_never_wrote_to_is_left_alone(user: User, con, data_dir)
     db.add_bewerbung(con, {"gesendet_am": "2026-06-12", "firma": "Andere GmbH",
                            "email": "", "kanal": "E-Mail", "status": "Absage"})
     con.commit()
-    await user.open("/jobs")
+    await user.open("/")
     await user.should_not_see("bereits beworben")
     await user.should_see(DRAFT_BUTTON)
 
 
 async def test_opening_a_draft_twice_leaves_one_dialog_behind(
-        user: User, con, data_dir):
+        user: User, con, data_dir, monkeypatch):
     """`overlay.clear()` could be deleted with the suite green while every
     draft left its dialog parented to the host for the page's lifetime —
     contradicting the comment that says it keeps exactly one alive."""
     from nicegui import ui
 
-    job_id = _posting(con)
-    db.upsert_draft(con, job_id, {
-        "status": "ready", "betreff": "Bewerbung als Python Entwickler",
-        "recipient": "jobs@beispiel.example"})
-    con.commit()
-    await user.open("/jobs")
+    from jobdeck.ui.pages import jobs as jobs_page
+
+    async def finished_draft(job_id):
+        return {"ok": True, "error": "", "draft": {
+            "recipient": "jobs@beispiel.example",
+            "betreff": "Bewerbung als Python Entwickler",
+            "email_body": "Sehr geehrte Damen und Herren,",
+            "anschreiben_body": "…", "llm_model": "stub", "pdf_path": ""}}
+
+    monkeypatch.setattr(jobs_page.drafting, "draft_for_job", finished_draft)
+    _posting(con)
+    await user.open("/")
 
     def dialogs():
         return [e for e in user.client.elements.values()
@@ -348,5 +363,7 @@ async def test_opening_a_draft_twice_leaves_one_dialog_behind(
 
     for _ in range(3):
         user.find(DRAFT_BUTTON).click()
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.3)
         assert len(dialogs()) == 1, f"{len(dialogs())} dialogs are alive at once"
+        user.find("Schließen").click()
+        await asyncio.sleep(0.1)

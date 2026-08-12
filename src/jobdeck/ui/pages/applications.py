@@ -65,7 +65,7 @@ def _export_csv():
 
 @ui.page("/applications")
 async def applications_page():
-    with frame("Applications"):
+    async with frame("Bewerbungen", current="bewerbungen"):
         state = {"query": "", "status": "Alle", "rows": []}
 
         columns = [
