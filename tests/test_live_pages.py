@@ -1034,3 +1034,77 @@ async def test_an_application_landing_while_the_editor_is_open_reaches_the_confi
 
     await user.should_see("Send this application?")
     await user.should_see("bereits beworben")
+
+
+async def test_the_way_back_is_on_screen_the_second_after_the_form_opens(
+        user: User, con, data_dir, monkeypatch):
+    """Opening a form writes `portal`, and the posting leaves the view — so the
+    reader keeps the copy it was holding, which still said `new` and rendered
+    "kein Interesse" instead of the way back. The moment he wants the undo is
+    the second after the click."""
+    job_id = _posting(con)
+    db.set_apply_channel(con, job_id, "ats_form", "JOIN",
+                         "https://join.com/companies/x/1/apply")
+    con.commit()
+    await user.open("/")
+    # patched AFTER the page is open: the user fixture navigates too
+    monkeypatch.setattr(ui.navigate, "to", lambda url, **kw: None)
+
+    user.find("Formular öffnen", kind=ui.button).click()
+    await asyncio.sleep(0.4)
+
+    await user.should_see("zurück in die Arbeitsliste")
+    assert con.execute("SELECT status FROM jobs WHERE id=?",
+                       (job_id,)).fetchone()[0] == "portal"
+
+
+async def test_undoing_an_opened_form_asks_what_actually_happened(
+        user: User, con, data_dir, monkeypatch):
+    """`portal` is the app's ONLY record that an application at that company
+    may already be out, and an unrecorded form submission is invisible to every
+    gate. Pressing this after actually applying would erase the one hint."""
+    job_id = _posting(con)
+    db.set_apply_channel(con, job_id, "ats_form", "JOIN",
+                         "https://join.com/companies/x/1/apply")
+    con.commit()
+    await user.open("/")
+    monkeypatch.setattr(ui.navigate, "to", lambda url, **kw: None)
+    user.find("Formular öffnen", kind=ui.button).click()
+    await asyncio.sleep(0.4)
+
+    user.find("zurück in die Arbeitsliste", kind=ui.button).click()
+    await asyncio.sleep(0.3)
+    await user.should_see("hast du dich beworben?")
+
+    # "yes" hands it to the recording path, which asks its own question
+    user.find("Ja, eintragen", kind=ui.button).click()
+    await asyncio.sleep(0.3)
+    await user.should_see("Bewerbung eintragen?")
+    user.find("Eintragen", kind=ui.button).click()
+    await asyncio.sleep(0.4)
+
+    assert con.execute("SELECT status FROM jobs WHERE id=?",
+                       (job_id,)).fetchone()[0] == "applied"
+    assert con.execute("SELECT kanal FROM bewerbungen").fetchone()[0] \
+        == "Online-Portal"
+
+
+async def test_saying_no_puts_it_back_without_recording_anything(
+        user: User, con, data_dir, monkeypatch):
+    job_id = _posting(con)
+    db.set_apply_channel(con, job_id, "ats_form", "JOIN",
+                         "https://join.com/companies/x/1/apply")
+    con.commit()
+    await user.open("/")
+    monkeypatch.setattr(ui.navigate, "to", lambda url, **kw: None)
+    user.find("Formular öffnen", kind=ui.button).click()
+    await asyncio.sleep(0.4)
+
+    user.find("zurück in die Arbeitsliste", kind=ui.button).click()
+    await asyncio.sleep(0.3)
+    user.find("Nein, zurück in die Liste", kind=ui.button).click()
+    await asyncio.sleep(0.4)
+
+    assert con.execute("SELECT status FROM jobs WHERE id=?",
+                       (job_id,)).fetchone()[0] == "new"
+    assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 0

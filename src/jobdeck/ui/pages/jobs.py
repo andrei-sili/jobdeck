@@ -1245,6 +1245,12 @@ async def jobs_page():
                     type="warning")
                 return
             await run.io_bound(_set_status, job["id"], "portal")
+            # The posting leaves this view, so the reader keeps the copy it was
+            # holding — and that copy still said `new`, which renders "kein
+            # Interesse" instead of the way back. The second after the click is
+            # exactly when he wants the undo.
+            if job["id"] in shown:
+                shown[job["id"]]["status"] = "portal"
             await refresh(force=True)
             overlay.clear()
             with overlay:
@@ -1307,10 +1313,38 @@ async def jobs_page():
             await refresh(force=True)
 
         async def revive(job_id: int) -> None:
-            """Put a posting he had put away back into the working list."""
+            """Put a posting back into the working list.
+
+            From `portal` it asks first, and the question is not "are you
+            sure": `portal` is the app's ONLY record that an application at
+            that company may already be out, and an unrecorded form
+            submission is invisible to every gate there is. Pressing this
+            after actually applying would erase the one hint and let a second
+            application through."""
             job = shown.get(job_id)
             if job is None or job["status"] not in ("skipped", "portal"):
                 return
+            if job["status"] == "portal":
+                overlay.clear()
+                with overlay, ui.dialog() as ask, ui.card():
+                    ui.label("Du hattest das Formular geöffnet.") \
+                        .classes("font-bold")
+                    ui.label(f"{job['company']} — hast du dich beworben?") \
+                        .classes("text-sm")
+                    with ui.row().classes("justify-end gap-2 w-full"):
+                        ui.button("Nein, zurück in die Liste",
+                                  on_click=lambda: ask.submit("back")) \
+                            .props("flat no-caps")
+                        ui.button("Ja, eintragen",
+                                  on_click=lambda: ask.submit("record")) \
+                            .props("color=positive no-caps")
+                ask.open()
+                answer = await ask
+                if answer == "record":
+                    await confirm_applied(job)
+                    return
+                if answer != "back":
+                    return
             _hold_place(job_id)
             await run.io_bound(_set_status, job_id, "new")
             await refresh(force=True)
