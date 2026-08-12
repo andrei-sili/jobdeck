@@ -216,18 +216,23 @@ def primary_action(job: dict, already: dict | None = None) -> Action:
                   "Kein Bewerbungsweg gefunden — die Anzeige nennt keinen.")
 
 
-def _score_line(job: dict) -> str:
+def _score_line(job: dict, with_age: bool = True) -> str:
     """The score, and what its age did to it: ' · match 92 → 72 · 61 Tage alt'.
 
     Both numbers come from the row the query returned, so the one shown is the
     one that decided the position (see freshness.py). Showing the arrow only
-    when age actually cost something keeps a fresh posting's line quiet."""
+    when age actually cost something keeps a fresh posting's line quiet.
+
+    `with_age=False` where the age is already on the same line — the reader's
+    header would otherwise read "61 T · … · 61 Tage alt"."""
     score = job["match_score"]
     if score is None:
         return ""
     age = job["age_days"]
     effective = job["effective_score"]
-    if age is None:
+    if not with_age:
+        aged = ""
+    elif age is None:
         aged = " · Datum unbekannt"
     elif age <= 0:
         # today, or a date in the future: the boards state no timezone, so a
@@ -467,8 +472,8 @@ _DRAFT_LINES = {
 _CLAIM_LIVE = ("✍ Die Bewerbung wird gerade geschrieben — das dauert etwa "
                "eine Minute.", "text-sm text-blue-700")
 _CLAIM_ABANDONED = ("⚠ Der Entwurf wurde begonnen und nie fertig — der "
-                    "Vorgang ist abgebrochen. Erneut auf „Draft "
-                    "application“ drücken.", "text-sm text-amber-700")
+                    "Vorgang ist abgebrochen. „Erneut schreiben“ drücken.",
+                    "text-sm text-amber-700")
 
 
 def _draft_line(draft_status: object, draft_updated_at: object = None
@@ -563,8 +568,12 @@ def reader_facts(job: dict) -> list[tuple[str, str]]:
         ("Ort", str(job.get("location") or "").strip() or "—"),
         ("Gehalt", _salary_line(job).partition(": ")[2] or "—"),
         ("Kanal", _apply_line(job) or "noch nicht ermittelt"),
-        ("Gefunden", str(job.get("published_on") or job.get("fetched_at")
-                         or "")[:10] or "—"),
+        # Two different facts, and the row says which one it has: the board's
+        # publication date where it states one, and otherwise the day this app
+        # first saw the posting. Printing the second under "Gefunden" was fine;
+        # printing the FIRST under it was not.
+        (("Veröffentlicht" if job.get("published_on") else "Gefunden"),
+         str(job.get("published_on") or job.get("fetched_at") or "")[:10] or "—"),
     ]
 
 
@@ -680,20 +689,28 @@ async def jobs_page():
                 chip_host = ui.row().classes("items-center ml-auto gap-2")
                 with chip_host:
                     ui.label("j k bewegen · x kein Interesse · s merken · "
-                             "⏎ Hauptaktion").classes("jd-meta")
+                             "o Anzeige öffnen · ⏎ Hauptaktion") \
+                        .classes("jd-meta")
             with ui.element("div").classes("jd-panes"):
                 with ui.element("div").classes("jd-list"):
                     with ui.row().classes("items-center gap-2 p-2 border-b"):
+                        # `debounce` is Quasar's own: without it every
+                        # keystroke resets the page, drops the selection and
+                        # awaits a full reload — three windowed CTEs, four pile
+                        # counts, a fifty-row rebuild and a markdown re-render,
+                        # ten times over for "Entwickler".
                         search_box = ui.input(placeholder="suchen …") \
-                            .props("dense outlined clearable").classes("flex-1")
+                            .props("dense outlined clearable debounce=350") \
+                            .classes("flex-1")
                         search_box.on_value_change(
                             lambda e: set_search(e.value or ""))
                         ui.select(
                             {view.key: view.label for view in VIEWS},
                             value=DEFAULT_VIEW,
+                            label="Ansicht",
                             on_change=lambda e: set_view(e.value),
-                        ).mark("view-select").props("dense outlined borderless") \
-                            .classes("min-w-36")
+                        ).mark("view-select").props("dense outlined") \
+                            .classes("min-w-40")
                     rows_host = ui.column().classes("jd-rows w-full gap-0") \
                         .props('role=listbox aria-label="Anzeigen"')
                     pager = ui.row().classes("items-center gap-2 p-2 border-t")
@@ -886,7 +903,10 @@ async def jobs_page():
             with ui.column().classes("w-full gap-0 p-6"):
                 ui.label(job["company"] or "—").classes("text-xl jd-serif")
                 ui.label(clean_title(job["title"])).classes("text-base mt-1")
-                ui.label(row_meta(job) + _score_line(job)).classes("jd-meta mt-2")
+                # `row_meta` already states the age; `_score_line` would state
+                # it a second time in the same line ("61 T · … · 61 Tage alt").
+                ui.label(row_meta(job) + _score_line(job, with_age=False)) \
+                    .classes("jd-meta mt-2")
                 # Triage first: the three things he does WITHOUT reading, so
                 # they are reachable before the text and again from the
                 # keyboard. The one action that commits him waits below it.

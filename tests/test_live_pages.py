@@ -736,3 +736,140 @@ async def test_the_other_postings_of_a_company_are_listed_and_openable(
     await user.should_see("Andere Stelle")       # by title, in the reader
     await user.should_see("öffnen")              # with its own link
     await user.should_not_see("Top 10")
+
+
+# --------------------------------------------------------------------------
+# The rendered contract: what a mutation would have to break
+# --------------------------------------------------------------------------
+def _classed(user: User, css: str):
+    return [e for e in user.client.elements.values()
+            if css in getattr(e, "_classes", [])]
+
+
+async def test_the_rail_really_draws_its_bars_budget_and_pulse(
+        user: User, con, data_dir):
+    """Every one of these was deletable or hardcodable with the suite green:
+    the rail was unit-tested as pure functions and never rendered once."""
+    db.add_profile(con, {"name": "Python", "keywords": "python"})
+    _posting(con)
+    db.set_setting(con, "daily_send_cap", "5")
+    con.commit()
+    await user.open("/")
+
+    bars = _classed(user, "jd-track")
+    assert len(bars) == 5, "one proportional bar per rubric"
+    widths = [b.default_slot.children[0]._style.get("width") for b in bars]
+    assert any(w and w not in ("0%", None) for w in widths), "every bar is empty"
+
+    assert len(_classed(user, "jd-budget-box")) == 5, "today's budget"
+    assert len(_classed(user, "jd-pulse-dot")) == 3, "the engine's three beats"
+    await user.should_see("Heute gesendet")
+    await user.should_see("Puls")
+
+
+async def test_the_pulse_dot_shows_which_state_it_is_in(user: User, con,
+                                                        data_dir):
+    """Dropping `{beat.state}` from the class made run, ok and idle identical
+    — the rail's whole claim is that you can see the engine working."""
+    _posting(con)
+    con.commit()
+    await user.open("/")
+    states = {c for dot in _classed(user, "jd-pulse-dot")
+              for c in dot._classes if c in ("run", "ok", "idle")}
+    assert states, "no dot carries a state at all"
+
+
+async def test_a_rubric_really_navigates(user: User, con, data_dir):
+    """The rail is the app's ONLY navigation since the old drawer went. With
+    the click handler gone he is stranded on whatever page he loaded."""
+    await user.open("/")
+    rubrics = [e for e in user.client.elements.values()
+               if "jd-sec" in getattr(e, "_classes", [])]
+    assert len(rubrics) == 5
+    live_ones = [r for r in rubrics if r.props.get("data-enabled") == "true"]
+    assert len(live_ones) == 4, "only Antworten is meant to be a dead end"
+    for rubric in live_ones:
+        assert any(listener.type == "click"
+                   for listener in rubric._event_listeners.values()), \
+            "a rubric with no handler strands him on whatever page he loaded"
+
+
+async def test_the_pager_is_rendered_when_there_is_a_second_page(
+        user: User, con, data_dir, monkeypatch):
+    """Deleting `render_pager(view)` made 148 of his 198 working companies
+    unreachable with the suite green — the exact defect the honest-inbox slice
+    was written to fix."""
+    from jobdeck.ui.pages import jobs as jobs_page
+    monkeypatch.setattr(jobs_page, "PAGE_SIZE", 2)
+    for n in range(5):
+        job_id = _posting(con, external_id=f"e{n}", title=f"Stelle {n}",
+                          company=f"Firma {n}")
+        db.set_job_score(con, job_id, 90 - n, "passt")
+    con.commit()
+    await user.open("/")
+
+    await user.should_see("Seite 1/3")
+
+
+async def test_a_refused_action_renders_disabled_and_says_why(
+        user: User, con, data_dir):
+    """Both the disabled state and the reason beside the button could be
+    deleted with the suite green, and the only rendered string that could have
+    caught it is produced by reader_notes as well."""
+    _posting(con, company="Beispiel GmbH")
+    db.add_bewerbung(con, {"gesendet_am": "2026-06-12", "firma": "Beispiel GmbH",
+                           "email": "", "kanal": "E-Mail", "status": "Absage"})
+    con.commit()
+    await user.open("/")
+    select = next(iter(user.find(marker="view-select").elements))
+    select.set_value("firma_kontaktiert")
+    await asyncio.sleep(0.3)
+
+    await user.should_see("Bewerbung nicht möglich")
+    button = next(e for e in user.client.elements.values()
+                  if isinstance(e, ui.button) and e.text == "Bewerbung nicht möglich")
+    assert button.enabled is False, "the refusal is offered as a live button"
+    reasons = _classed(user, "jd-reason")
+    assert reasons and "bereits beworben" in reasons[0].text
+
+
+async def test_the_warnings_stand_above_the_advert_on_the_screen(
+        user: User, con, data_dir):
+    """Moving the notes below the markdown would bury "already applied",
+    "offline" and "Arbeitnehmerüberlassung" under a wall of prose, and the
+    ordering test only pinned the score block."""
+    job_id = _posting(con)
+    db.set_job_liveness(con, job_id, "gone")
+    con.execute("UPDATE jobs SET description=? WHERE id=?",
+                ("Wir suchen zum nächstmöglichen Zeitpunkt.", job_id))
+    con.commit()
+    await user.open("/")
+    select = next(iter(user.find(marker="view-select").elements))
+    select.set_value("offline")     # a dead ad leaves the working list
+    await asyncio.sleep(0.3)
+
+    await user.should_see("Anzeige offline")
+    warning = next(e for e in _classed(user, "jd-note")
+                   if "offline" in str(getattr(e, "text", "")))
+    advert = next(e for e in user.client.elements.values()
+                  if isinstance(e, ui.markdown))
+    assert warning.id < advert.id, "the warning is buried under the advert"
+
+
+async def test_the_search_box_really_filters_and_waits_for_him_to_finish(
+        user: User, con, data_dir):
+    """Nothing tested the arm at all — deleting it, making it prefix-only or
+    dropping the company half all kept the suite green."""
+    _posting(con, title="Django Entwickler", company="Alpha GmbH")
+    _posting(con, external_id="e2", title="Java Entwickler", company="Beta GmbH")
+    await user.open("/")
+    await user.should_see("Java Entwickler")
+
+    box = next(e for e in user.client.elements.values() if isinstance(e, ui.input))
+    assert "debounce" in box.props, "a reload per keystroke"
+    box.set_value("Django")
+    await asyncio.sleep(0.3)
+
+    await user.should_see("Django Entwickler")
+    await user.should_not_see("Java Entwickler")
+    await user.should_see("gefiltert nach „Django“")
