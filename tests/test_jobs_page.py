@@ -673,7 +673,7 @@ def test_changing_the_view_always_returns_to_the_first_page(con, data_dir):
     source = pathlib.Path(jobs.__file__).read_text()
     for handler in ("async def set_view", "async def set_search"):
         body = source[source.index(handler):]
-        body = body[:body.index("await refresh()")]
+        body = body[:body.index("await refresh(")]
         assert 'state["page"] = 0' in body, f"{handler} does not reset the page"
 
     # and the loader is what makes a stale offset harmless either way
@@ -768,7 +768,9 @@ def test_the_main_button_is_guarded_on_a_live_claim_not_on_a_status():
     source = pathlib.Path(jobs.__file__).read_text()
     handler = source[source.index("async def draft("):]
     handler = handler[:handler.index("async def resolve_channel")]
-    assert "await refresh()" in handler
+    assert "await refresh(force=True)" in handler, (
+        "a plain refresh() can be skipped when the data did not change — and "
+        "the pressed button stays relabelled 'wird geschrieben …' forever")
 
 
 @pytest.mark.parametrize("age, running", [

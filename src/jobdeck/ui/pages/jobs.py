@@ -93,11 +93,20 @@ def view_for(key: str) -> View:
     return _BY_KEY.get(key, _BY_KEY[DEFAULT_VIEW])
 
 
-def _hidden_line(view: View, counts: dict, stale_age_days: int) -> str:
+def _hidden_line(view: View, counts: dict, stale_age_days: int,
+                 search: str = "") -> str:
     """What this view is not showing, derived from the filters it actually used
     so the label cannot contradict the list. Independent statements, never a
-    total: a posting can be a mismatch AND offline AND old."""
+    total: a posting can be a mismatch AND offline AND old.
+
+    A search narrows the list without hiding a pile, so it is stated first and
+    in its own words — otherwise the pile counts read as if they explained a
+    three-row result."""
     parts = []
+    if search.strip():
+        parts.append(f"gefiltert nach „{search.strip()}“")
+    if view.filters.get("opened") == "exclude" and counts.get("read"):
+        parts.append(f"{counts['read']} schon gelesen ausgeblendet")
     for arm, count_key, hidden, only in (
         ("mismatches", "mismatches", "{n} passen nicht",
          "{n} verletzen eine harte Anforderung"),
@@ -304,6 +313,10 @@ def _load_jobs(view_key: str, page: int, search: str = "",
         filters = {**view.filters, "stale_age_days": stale_age_days,
                    "search": search, "keep_ids": keep_ids}
         total = db.count_job_groups(con, view.status, **filters)
+        read_total = None
+        if view.filters.get("opened") == "exclude":
+            read_total = db.count_job_groups(
+                con, view.status, **{**filters, "opened": "include"})
         pages = max(1, -(-total // PAGE_SIZE))
         page = min(max(page, 0), pages - 1)
         rows = [dict(r) for r in db.list_job_groups(
@@ -326,7 +339,12 @@ def _load_jobs(view_key: str, page: int, search: str = "",
                 "dead": db.count_gone_jobs(con, view.status),
                 "applied_firm": db.count_applied_firm_jobs(con, view.status),
                 "old": db.count_old_jobs(con, view.status, stale_age_days),
+                # What the landing view's own filter hides, counted in the same
+                # unit as the list it labels: the difference between this view
+                # and the same view with the read postings put back.
+                "read": (read_total - total) if read_total is not None else 0,
             },
+            "search": search,
             "stale_age_days": stale_age_days,
             "total": total,
             "page": page,
@@ -367,9 +385,17 @@ def _load_draft(job_id: int):
         return dict(row) if row is not None else None
 
 
-def _mark_opened(job_id: int):
+def _mark_opened(job_id: int) -> str:
+    """Record that he read it, and answer with the stamp that was written.
+
+    The page holds the row it is showing; giving it the real value keeps that
+    copy and the database saying the same thing without a second query — and a
+    German word standing in for a timestamp would be a lie the row's own
+    fingerprint would carry."""
     with db.db() as con:
         db.mark_job_opened(con, job_id)
+        row = db.get_job(con, job_id)
+        return "" if row is None else str(row["opened_at"] or "")
 
 
 def _set_bookmark(job_id: int, marked: bool):
@@ -522,6 +548,40 @@ def reader_facts(job: dict) -> list[tuple[str, str]]:
     ]
 
 
+def _verdict_heading(job: dict) -> str:
+    """'WARUM 92' — and 'WARUM 92 · durch das Alter noch 72' when age moved it.
+
+    The heading has to name the score the REASONING is about. The model was
+    asked about the posting, not about its age; heading its answer with the
+    aged number produced 'WARUM 72' over a paragraph arguing for a near-perfect
+    match and never mentioning how old the advert is."""
+    score = job.get("match_score")
+    if score is None:
+        return "WARUM"
+    effective = job.get("effective_score")
+    if effective is not None and effective != score:
+        return f"WARUM {score} · durch das Alter noch {effective}"
+    return f"WARUM {score}"
+
+
+def _row_fingerprint(job: dict) -> tuple:
+    """Everything a row and its reader actually draw.
+
+    The live signature is global by design — a score landing on a posting he
+    is not looking at moves it — so most ticks change nothing this page shows.
+    Redrawing anyway empties two scroll containers and loses his place in a
+    two-page advert."""
+    return tuple(job.get(key) for key in (
+        "id", "company", "title", "effective_score", "match_score", "age_days",
+        "match_reason", "status", "apply_channel", "ats_vendor", "apply_url",
+        "url", "contact_email", "draft_status", "draft_updated_at", "liveness",
+        "liveness_checked_at", "opened_at", "bookmarked_at", "temp_agency",
+        "salary_from", "salary_to", "salary_period", "description", "refnr",
+        "location", "published_on", "fetched_at", "source", "company_count",
+        "company_key",
+    ))
+
+
 def _openable_url(job: dict) -> str:
     """The URL a posting's buttons may hand to the browser, '' when none is
     safe. The resolved apply link wins over the raw feed URL."""
@@ -543,13 +603,17 @@ def legacy_jobs_page():
 async def jobs_page():
     async with frame("Stellen", current="stellen", padded=False):
         state = {"view": DEFAULT_VIEW, "page": 0, "search": "",
-                 "selected": None}
+                 "selected": None, "prefer_index": None}
+        # What is on screen right now, so a tick that changes nothing this page
+        # shows can draw nothing at all.
+        drawn: dict = {}
         # The rows currently on screen, by id — what the keyboard moves through
         # and what the reader is drawn from, so both always describe the very
         # page he is looking at rather than a query run again behind his back.
         shown: dict[int, dict] = {}
         order: list[int] = []
         row_elements: dict = {}
+        siblings: dict = {}
         # What he has opened during this sitting. The "Neu" view hides what he
         # has read, so without this the posting he is reading would drop out of
         # the list on the next tick and take the reading pane with it.
@@ -597,14 +661,21 @@ async def jobs_page():
                             on_change=lambda e: set_view(e.value),
                         ).mark("view-select").props("dense outlined borderless") \
                             .classes("min-w-36")
-                    rows_host = ui.column().classes("jd-rows w-full gap-0")
+                    rows_host = ui.column().classes("jd-rows w-full gap-0") \
+                        .props('role=listbox aria-label="Anzeigen"')
                     pager = ui.row().classes("items-center gap-2 p-2 border-t")
                 reader = ui.element("div").classes("jd-reader")
 
         # ------------------------------------------------------------------
         # loading and rendering
         # ------------------------------------------------------------------
-        async def refresh() -> None:
+        async def refresh(force: bool = False) -> None:
+            """Re-read and re-draw. `force` when HE did something.
+
+            The skip below exists for the watcher's ticks, which are mostly
+            about postings he is not looking at. It must never swallow his own
+            action: the pressed button relabels itself to "wird geschrieben …"
+            and only a re-render puts it back."""
             refresh_gen["n"] += 1
             gen = refresh_gen["n"]
             view = await run.io_bound(
@@ -614,25 +685,68 @@ async def jobs_page():
                 return  # superseded, or the page is going away
             state["page"] = view["page"]   # the loader clamped it to what exists
             live_view.mark(view["signature"])
+            fresh = {row["id"]: row for row in view["rows"]}
+            new_order = [row["id"] for row in view["rows"]]
+            selected, dropped = _next_selection(fresh, new_order)
+
+            # A rebuild empties both panes, and both are scroll containers: he
+            # loses his place in a two-page advert AND in the list. The
+            # signature is global — a score landing on a posting he is not
+            # looking at moves it — so most ticks change nothing this page
+            # shows. Compare what would be drawn and draw nothing when it is
+            # the same.
+            page_state = (new_order, [_row_fingerprint(r) for r in view["rows"]],
+                          selected, view["total"], view["page"],
+                          bool(dropped), sorted(applied) != sorted(view["applied"]))
+            unchanged = not force and page_state == drawn.get("state")
+            drawn["state"] = page_state
+
             applied.clear()
             applied.update(view["applied"])
+            siblings.clear()
+            siblings.update(view["siblings"])
             shown.clear()
+            shown.update(fresh)
             order.clear()
-            for row in view["rows"]:
-                shown[row["id"]] = row
-                order.append(row["id"])
+            order.extend(new_order)
+            state["selected"] = selected
+            state["prefer_index"] = None
+            if dropped is not None:
+                # It left the list while he was reading it — scored 0, marked
+                # gone, aged past the threshold. Keeping it in the pane and
+                # saying so beats swapping a different posting under his eyes.
+                shown[dropped["id"]] = dropped
+            if unchanged:
+                return
             range_label.set_text(_range_line(
                 view["page"], view["total"], len(view["rows"])))
             hidden_label.set_text(_hidden_line(
-                view["view"], view["counts"], view["stale_age_days"]))
-            # Keep his place across a rebuild: a posting that survived the
-            # reload stays open, and only a selection that no longer exists
-            # falls back to the top of the list.
-            if state["selected"] not in shown:
-                state["selected"] = order[0] if order else None
+                view["view"], view["counts"], view["stale_age_days"],
+                search=view["search"]))
             render_rows(view)
             render_pager(view)
-            render_reader()
+            render_reader(gone=dropped is not None)
+
+        def _next_selection(fresh: dict, new_order: list) -> tuple:
+            """(the id to show, the row that fell out from under him or None).
+
+            Three cases in the order they matter: the posting he is on is still
+            there; he has just acted on it, so the row that TOOK ITS PLACE is
+            next (jumping back to the top made triaging a page cost O(n²)
+            keystrokes); or it left the list without him asking, and then it
+            stays in the reading pane rather than being silently replaced."""
+            previous = state["selected"]
+            if previous in fresh:
+                return previous, None
+            index = state["prefer_index"]
+            if index is not None:
+                # He acted on it himself, so it is meant to be gone: the row
+                # that took its place is next, and an empty list is empty.
+                return (new_order[min(index, len(new_order) - 1)]
+                        if new_order else None), None
+            if previous is not None and previous in shown:
+                return previous, shown[previous]
+            return (new_order[0] if new_order else None), None
 
         def render_rows(view: dict) -> None:
             rows_host.clear()
@@ -644,7 +758,15 @@ async def jobs_page():
                     render_row(shown[job_id], view["siblings"])
 
         def render_row(job: dict, siblings: dict) -> None:
-            row = ui.element("button").classes("jd-row").props(
+            # A div, NOT a button, and the difference is the whole keyboard.
+            # `ui.keyboard`'s `ignore` is a CLIENT-side rule reading
+            # document.activeElement, and a browser focuses a <button> on
+            # mousedown — so with rows as buttons, clicking a posting to read
+            # it silently killed j/k/x/s/o/Enter until something else took the
+            # focus away. `role=option` inside the list's `role=listbox` is
+            # also what makes `aria-selected` mean anything.
+            row = ui.element("div").classes("jd-row").props(
+                f'role=option '
                 f'data-unread={"false" if job["opened_at"] else "true"} '
                 f'aria-selected={"true" if job["id"] == state["selected"] else "false"}'
             )
@@ -662,10 +784,8 @@ async def jobs_page():
                     ui.label(row_meta(job)).classes("jd-meta")
             others = job.get("company_count", 1) - 1
             if others > 0:
-                listed = len(siblings.get(job["company_key"], ()))
                 stellen = "weitere Stelle" if others == 1 else "weitere Stellen"
-                shown_note = "" if others <= listed else f" (Top {listed})"
-                ui.label(f"↳ +{others} {stellen} bei dieser Firma{shown_note}") \
+                ui.label(f"↳ +{others} {stellen} bei dieser Firma") \
                     .classes("jd-siblings w-full")
 
         def render_pager(view: dict) -> None:
@@ -681,13 +801,52 @@ async def jobs_page():
                     .props("flat dense") \
                     .set_enabled(view["page"] + 1 < view["pages"])
 
-        def render_reader() -> None:
+        def _render_siblings(job: dict) -> None:
+            """The other postings this company has, with their own links.
+
+            One row stands for a COMPANY because only one application per
+            company is possible — but that makes choosing WHICH posting to
+            apply with a real decision, and the row alone gives him nothing to
+            decide with. One employer holds 27 of his postings; without this
+            they are in the database and nowhere else."""
+            group = siblings.get(job.get("company_key"), [])
+            others = job.get("company_count", 1) - 1
+            if others <= 0:
+                return
+            listed = len(group)
+            more = "" if others <= listed else (
+                f" — die {listed} bestbewerteten von {others}")
+            stellen = "weitere Stelle" if others == 1 else "weitere Stellen"
+            with ui.column().classes("gap-1 mt-6 pl-3 border-l w-full"):
+                ui.label(f"{others} {stellen} bei {job['company']}{more} — eine "
+                         f"Bewerbung pro Firma, deshalb steht oben die "
+                         f"bestbewertete.").classes("jd-meta")
+                for other in group:
+                    with ui.row().classes("items-baseline gap-2 no-wrap"):
+                        score = other["effective_score"]
+                        ui.label("—" if score is None else str(score)) \
+                            .classes("jd-score")
+                        ui.label(clean_title(other["title"]) or other["title"]) \
+                            .classes("text-sm")
+                        other_url = _openable_url(other)
+                        if other_url:
+                            ui.button("öffnen",
+                                      on_click=lambda u=other_url:
+                                          ui.navigate.to(u, new_tab=True)) \
+                                .props("flat dense no-caps")
+
+        def render_reader(gone: bool = False) -> None:
             reader.clear()
             job = shown.get(state["selected"])
             with reader:
                 if job is None:
                     ui.label("Keine Anzeige ausgewählt.").classes("p-6 jd-meta")
                     return
+                if gone:
+                    ui.label("Diese Anzeige ist gerade aus dieser Ansicht "
+                             "gefallen — du liest sie weiter, sie steht aber "
+                             "jetzt in einer anderen Ansicht.") \
+                        .classes("jd-note warn m-6 mb-0")
                 _render_reader(job, applied.get(job["id"]))
 
         def _render_reader(job: dict, already: dict | None) -> None:
@@ -734,10 +893,10 @@ async def jobs_page():
                 # offered the one action that commits him.
                 if job["match_reason"]:
                     with ui.element("div").classes("jd-why"):
-                        ui.label(f"WARUM {job['effective_score']}") \
-                            .classes("jd-meta")
+                        ui.label(_verdict_heading(job)).classes("jd-meta")
                         ui.label(job["match_reason"]).classes("text-sm mt-1")
                 _render_primary(job, already)
+                _render_siblings(job)
 
         def _render_facts(job: dict) -> None:
             with ui.element("div").classes("jd-facts mt-4"):
@@ -766,10 +925,15 @@ async def jobs_page():
             state["selected"] = job_id
             read_here.add(job_id)
             if not shown[job_id]["opened_at"]:
-                await run.io_bound(_mark_opened, job_id)
                 # Recorded on the row we are holding too, so the mark and the
                 # database agree without asking it again.
-                shown[job_id]["opened_at"] = "gelesen"
+                shown[job_id]["opened_at"] = await run.io_bound(
+                    _mark_opened, job_id)
+                # …and the watcher is told, or his own click would look like
+                # somebody else's write on the next tick and rebuild the page
+                # under the advert he has just started reading. `opened_at` is
+                # part of the shared signature, so EVERY first open did this.
+                live_view.mark(await run.io_bound(_signature))
             restamp_rows()
             render_reader()
 
@@ -797,7 +961,7 @@ async def jobs_page():
         async def turn_page(step: int) -> None:
             state["page"] += step
             state["selected"] = None
-            await refresh()
+            await refresh(force=True)
 
         async def set_view(value: str) -> None:
             """Move to another named view.
@@ -809,13 +973,40 @@ async def jobs_page():
             state["page"] = 0  # a different list: page 3 of it means nothing
             state["selected"] = None
             read_here.clear()   # coming back to Neu is when it should have emptied
-            await refresh()
+            await refresh(force=True)
 
         async def set_search(value: str) -> None:
             state["search"] = value
             state["page"] = 0
             state["selected"] = None
-            await refresh()
+            await refresh(force=True)
+
+        async def ask_before_spending(action: Action, job: dict) -> bool:
+            """The keyboard asks before an action costs money.
+
+            ⏎ is the one control on this screen whose meaning changes with the
+            row under the cursor: he moves with j and presses it expecting
+            "open this", and on a direct-e-mail posting that is a Sonnet call
+            of about nine cents and forty seconds. A button he clicked carries
+            its own label and needs no second question."""
+            if action.key != ACTION_DRAFT:
+                return True
+            overlay.clear()
+            with overlay, ui.dialog() as confirm, ui.card():
+                ui.label("Bewerbung schreiben?").classes("font-bold")
+                ui.label(f"{job['company']} — {clean_title(job['title'])}") \
+                    .classes("text-sm")
+                ui.label("Das schreibt der KI-Dienst, kostet Geld und dauert "
+                         "etwa eine Minute.").classes("text-sm text-gray-600")
+                with ui.row().classes("justify-end gap-2 w-full"):
+                    ui.button("Abbrechen",
+                              on_click=lambda: confirm.submit(False)) \
+                        .props("flat no-caps")
+                    ui.button("Schreiben",
+                              on_click=lambda: confirm.submit(True)) \
+                        .props("no-caps")
+            confirm.open()
+            return bool(await confirm)
 
         async def run_action(action: Action, job: dict, button) -> None:
             if action.key == ACTION_RESOLVE:
@@ -836,9 +1027,19 @@ async def jobs_page():
                 await confirm_applied(job)
 
         async def on_key(event) -> None:
-            if not event.action.keydown:
+            if not event.action.keydown or event.action.repeat:
+                # Held keys repeat ~30 times a second. Without this, holding ⏎
+                # on an unresolved posting fires a burst of concurrent channel
+                # resolutions at one employer's host, and holding x walks a
+                # dozen postings out of the list.
                 return
             if event.modifiers.ctrl or event.modifiers.meta or event.modifiers.alt:
+                return
+            if live.dialog_open():
+                # A dialog sits OVER the list. Without this, reaching for the
+                # close button and hitting 'x' skipped the posting underneath
+                # it — and the refresh that followed rebuilt the list beneath
+                # the still-open dialog, so nothing on screen even flickered.
                 return
             key = str(event.key)
             job = shown.get(state["selected"])
@@ -859,22 +1060,29 @@ async def jobs_page():
                         ui.navigate.to(url, new_tab=True)
             elif key == "Enter":
                 action = primary_action(job, applied.get(job["id"]))
-                if action.enabled:
+                if action.enabled and await ask_before_spending(action, job):
                     await run_action(action, job, None)
+
+        def _hold_place(job_id: int) -> None:
+            """Remember where in the list he acted, so the row that takes that
+            posting's place is the one he lands on."""
+            state["prefer_index"] = order.index(job_id) if job_id in order else None
 
         async def toggle_bookmark(job_id: int) -> None:
             job = shown.get(job_id)
             if job is None:
                 return
+            _hold_place(job_id)
             await run.io_bound(_set_bookmark, job_id, not job["bookmarked_at"])
-            await refresh()
+            await refresh(force=True)
 
         async def not_interested(job_id: int) -> None:
             job = shown.get(job_id)
             if job is None or job["status"] != "new":
                 return
+            _hold_place(job_id)
             await run.io_bound(_set_status, job_id, "skipped")
-            await refresh()
+            await refresh(force=True)
 
         # ------------------------------------------------------------------
         # the slow actions, unchanged in substance from the old inbox
@@ -972,7 +1180,7 @@ async def jobs_page():
             # The reader carries the outcome from here on, whichever way it went
             # — and everything the user sees afterwards is built in `overlay`,
             # because this refresh has just deleted the button we came from.
-            await refresh()
+            await refresh(force=True)
             overlay.clear()
             with overlay:
                 if not result["ok"]:
@@ -985,7 +1193,7 @@ async def jobs_page():
             res = await apply_resolve.resolve_and_store(job["id"])
             label = _apply_line({**job, "apply_channel": res["channel"],
                                  "ats_vendor": res["vendor"]})
-            await refresh()
+            await refresh(force=True)
             say(label or "Kanal nicht ermittelbar",
                 type="positive" if label else "warning")
 
@@ -1014,7 +1222,7 @@ async def jobs_page():
                     await run.io_bound(_set_contact_email, job["id"], res["email"])
                     say(f"Übernommen: {res['email']}", type="positive")
                     dialog.close()
-                    await refresh()
+                    await refresh(force=True)
 
                 with ui.row().classes("w-full justify-end gap-2"):
                     if not res["generic"]:  # never adopt a generic info@ inbox
@@ -1027,7 +1235,7 @@ async def jobs_page():
         async def confirm_applied(job: dict):
             bewerbung_id = await run.io_bound(_confirm_applied, job["id"],
                                               "Online-Portal")
-            await refresh()
+            await refresh(force=True)
             if bewerbung_id is None:
                 say("Blockiert: bei dieser Firma liegt schon eine Bewerbung",
                     type="warning")
@@ -1047,4 +1255,4 @@ async def jobs_page():
         # 'x' landing on the page while he types a company name would throw the
         # posting away.
         ui.keyboard(on_key=on_key, ignore=["input", "select", "button", "textarea"])
-        await refresh()
+        await refresh(force=True)
