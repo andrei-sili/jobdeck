@@ -300,7 +300,9 @@ def test_the_working_count_leaves_out_what_the_piles_hide(con, data_dir):
 
 def test_a_key_is_reported_as_present_and_never_read(con, data_dir, monkeypatch):
     """A screen that says "connected" must not be holding the value to say it."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-not-a-real-key")
+    # deliberately NOT shaped like a real key: a public repo runs
+    # secret scanners, and a convincing placeholder is a false alarm
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "placeholder-for-this-test")
     names = dict(rail.connections())
     assert names["Anthropic"] is True
 
