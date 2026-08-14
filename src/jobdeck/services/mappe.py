@@ -44,6 +44,43 @@ PORTAL_CHANNELS = frozenset({
 })
 
 
+def letter_values(job, draft, applicant_name: str, applicant_ort: str) -> dict:
+    """The tokens the letter template is filled with, for THIS posting.
+
+    `draft` may be None: a specimen Mappe is built to show what an employer
+    receives before any application exists, and every field except the letter
+    body is already decided by the posting and the user's settings.
+
+    This is deliberately the ONLY place those values are derived. The preview
+    screen exists to say "this field will be empty" before the PDF is built,
+    and a preview computing the address block its own way would be reassuring
+    about a letter it had not actually described.
+    """
+    strasse, plz_ort = templates.letter_address(job)
+    betreff = draft["betreff"] if draft is not None else ""
+    return {
+        "firma": job["company"],
+        "ansprechpartner": job["ansprechpartner"],
+        "strasse": strasse,
+        "plz_ort": plz_ort,
+        "ort": applicant_ort,
+        "datum": heute_de(),
+        # Follows the (possibly user-corrected) e-mail subject, so the letter
+        # and the e-mail never cite a different Stellenbezeichnung or Refnr.
+        "betreff": (ai_drafting.letter_betreff(betreff, applicant_name)
+                    or ai_drafting.build_betreff(job["title"],
+                                                 resolve_refnr(job))),
+        # Derived from the same subject: a cover sheet naming a different
+        # Stelle than the letter is the classic copy-paste tell. The fallback
+        # cleans the title too — without a draft (the specimen) it is ALWAYS
+        # the fallback that runs, and the Betreff beside it is built from
+        # `build_betreff`, which cleans. Page one would carry the board's
+        # "Ab sofort:" while page two carried the tidy line.
+        "deckblatt_rolle": ai_drafting.deckblatt_rolle(betreff, applicant_name)
+                           or f"als {ai_drafting.clean_title(job['title'])}",
+    }
+
+
 def _error(message: str) -> dict:
     return {"ok": False, "error": message, "pdf_path": "", "warning": "",
             "pages": 0, "size_bytes": 0, "size_before_bytes": 0,
@@ -68,7 +105,44 @@ def target_mb_setting(raw: str, fallback: float) -> float:
     return value
 
 
-def _target_bytes(settings: dict, channel: str) -> int:
+# field -> (app_settings key, default, strip?). The single definition of what
+# a Mappe is built from: `build_settings` reads it and BUILD_SETTING_KEYS is
+# DERIVED from it. Two hand-kept lists drift, and the drift is invisible —
+# the next setting added would become a fact a screen states and no signature
+# can see, with every test still green.
+_BUILD_SETTINGS = (
+    ("applicant_name", "applicant_name", "", True),
+    ("applicant_ort", "applicant_ort", "", True),
+    ("template_path", "template_path", "", True),
+    ("anlagen_dir", "anlagen_dir", "", True),
+    ("compress", "mappe_compress", "1", False),
+    ("target_mb", "mappe_target_mb", "", False),
+    ("target_portal_mb", "mappe_target_portal_mb", "", False),
+)
+
+# A screen stating the budgets, the template or the Anlagen folder it will use
+# must rebuild when one of them changes on the Settings page — no table
+# signature can see an app_settings row.
+BUILD_SETTING_KEYS = tuple(key for _field, key, _default, _strip
+                           in _BUILD_SETTINGS)
+
+
+def build_settings(con) -> dict:
+    """Everything outside the posting that decides what the Mappe becomes.
+
+    One definition, because the specimen the user inspects and the Mappe an
+    employer receives have to be built from the same template, the same
+    Anlagen folder and the same size budgets — a screen describing documents
+    assembled under different settings is worse than no screen.
+    """
+    return {
+        field: (db.get_setting(con, key, default).strip() if strip
+                else db.get_setting(con, key, default))
+        for field, key, default, strip in _BUILD_SETTINGS
+    }
+
+
+def target_bytes(settings: dict, channel: str) -> int:
     """Size budget for the channel this Mappe will travel through.
 
     An unresolved channel gets the e-mail budget rather than the tighter
@@ -88,15 +162,7 @@ def _build_mappe(job_id: int) -> dict:
     with db.db() as con:
         draft = db.get_draft_by_job(con, job_id)
         job = db.get_job(con, job_id)
-        settings = {
-            "applicant_name": db.get_setting(con, "applicant_name", "").strip(),
-            "applicant_ort": db.get_setting(con, "applicant_ort", "").strip(),
-            "template_path": db.get_setting(con, "template_path", "").strip(),
-            "anlagen_dir": db.get_setting(con, "anlagen_dir", "").strip(),
-            "compress": db.get_setting(con, "mappe_compress", "1"),
-            "target_mb": db.get_setting(con, "mappe_target_mb", ""),
-            "target_portal_mb": db.get_setting(con, "mappe_target_portal_mb", ""),
-        }
+        settings = build_settings(con)
     if job is None:
         return _error("posting not found")
     if draft is None or draft["status"] not in EDITABLE_STATUS:
@@ -117,27 +183,9 @@ def _build_mappe(job_id: int) -> dict:
         return _error(f"letter template not found: {template_file}")
     draft_revision = draft["updated_at"]
 
-    strasse, plz_ort = templates.letter_address(job)
-    values = {
-        "firma": job["company"],
-        "ansprechpartner": job["ansprechpartner"],
-        "strasse": strasse,
-        "plz_ort": plz_ort,
-        "ort": settings["applicant_ort"],
-        "datum": heute_de(),
-        # Follows the (possibly user-corrected) e-mail subject, so the letter
-        # and the e-mail never cite a different Stellenbezeichnung or Refnr.
-        "betreff": (ai_drafting.letter_betreff(draft["betreff"],
-                                               settings["applicant_name"])
-                    or ai_drafting.build_betreff(job["title"],
-                                                 resolve_refnr(job))),
-        # Derived from the same subject: a cover sheet naming a different
-        # Stelle than the letter is the classic copy-paste tell.
-        "deckblatt_rolle": ai_drafting.deckblatt_rolle(
-            draft["betreff"], settings["applicant_name"]
-        ) or f"als {job['title']}",
-        "anschreiben_body": draft["anschreiben_body"],
-    }
+    values = letter_values(job, draft, settings["applicant_name"],
+                           settings["applicant_ort"])
+    values["anschreiben_body"] = draft["anschreiben_body"]
     try:
         template_html = template_file.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
@@ -153,7 +201,7 @@ def _build_mappe(job_id: int) -> dict:
         out_path = (pathlib.Path(config.OUTPUT_DIR) / f"job_{job_id}"
                     / f"{out_name}.pdf")
 
-        target_bytes = _target_bytes(settings, job["apply_channel"] or "")
+        budget = target_bytes(settings, job["apply_channel"] or "")
         with tempfile.TemporaryDirectory(prefix="jobdeck_mappe_") as tmp:
             letter_pdf = pathlib.Path(tmp) / "anschreiben.pdf"
             pdf.html_to_pdf(letter_html, letter_pdf)
@@ -163,14 +211,13 @@ def _build_mappe(job_id: int) -> dict:
             merged = pathlib.Path(tmp) / "mappe.pdf"
             pdf.merge_pdfs([letter_pdf, *anlagen], merged)
             if settings["compress"] == "1":
-                compression = pdf.compress_to_target(merged, out_path,
-                                                     target_bytes)
+                compression = pdf.compress_to_target(merged, out_path, budget)
             else:
                 pdf.install_pdf(merged, out_path)
                 merged_size = merged.stat().st_size
                 compression = pdf.Compression(
                     size_bytes=merged_size, original_bytes=merged_size,
-                    met_target=merged_size <= target_bytes,
+                    met_target=merged_size <= budget,
                 )
         size = out_path.stat().st_size
         pages = pdf.page_count(out_path)
@@ -193,7 +240,7 @@ def _build_mappe(job_id: int) -> dict:
                   if settings["compress"] == "1"
                   else "shrinking is switched off in Settings")
         warning = (f"Mappe is {size / 1024 / 1024:.1f} MB — over the "
-                   f"{target_bytes / 1024 / 1024:.1f} MB target for this "
+                   f"{budget / 1024 / 1024:.1f} MB target for this "
                    f"channel; {reason}")
         log.warning("mappe for job %s: %s", job_id, warning)
 

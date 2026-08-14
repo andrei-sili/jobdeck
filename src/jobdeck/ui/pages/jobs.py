@@ -1200,12 +1200,15 @@ async def jobs_page():
 
         async def build_mappe(job: dict, button) -> None:
             """The PDF he uploads to an employer's form."""
+            # Cleared BEFORE the wait, never after: the page stays live
+            # while this runs, and clearing afterwards destroys a dialog he
+            # opened meanwhile — one awaited on then never resolves at all.
+            overlay.clear()
             say("Bewerbungsmappe wird gebaut…")
             if button is not None:
                 button.disable()
             result = await mappe.create_mappe(job["id"])
             await refresh(force=True)
-            overlay.clear()
             with overlay:
                 if not result["ok"]:
                     say(result["error"], type="warning", multi_line=True)
@@ -1217,11 +1220,14 @@ async def jobs_page():
 
         async def open_draft_editor(job: dict) -> None:
             """The one editor — the same the review queue opens."""
+            # Cleared BEFORE the wait, never after: the page stays live
+            # while this runs, and clearing afterwards destroys a dialog he
+            # opened meanwhile — one awaited on then never resolves at all.
+            overlay.clear()
             row = await run.io_bound(draft_editor.load, job["id"])
             if row is None:
                 say("Kein Entwurf zu dieser Anzeige.", type="warning")
                 return
-            overlay.clear()
             with overlay:
                 draft_editor.open_editor(
                     row, overlay=overlay, say=say, on_change=forced_refresh)
@@ -1239,6 +1245,10 @@ async def jobs_page():
             The app never fills a form — that is settled — but opening one IS
             the start of an application, so the posting moves to `portal` and
             leaves the working list while he is at it."""
+            # Cleared BEFORE the wait, never after: the page stays live
+            # while this runs, and clearing afterwards destroys a dialog he
+            # opened meanwhile — one awaited on then never resolves at all.
+            overlay.clear()
             url = _openable_url(job)
             if not url:
                 say("Diese Anzeige nennt keine Adresse zum Öffnen.",
@@ -1252,7 +1262,6 @@ async def jobs_page():
             if job["id"] in shown:
                 shown[job["id"]]["status"] = "portal"
             await refresh(force=True)
-            overlay.clear()
             with overlay:
                 ui.navigate.to(url, new_tab=True)
                 say("Trag die Bewerbung ein, sobald du das Formular "
@@ -1424,12 +1433,15 @@ async def jobs_page():
             await draft(job, force=True)
 
         async def draft(job: dict, force: bool = False, button=None):
+            # Cleared BEFORE the wait, never after: the page stays live
+            # while this runs, and clearing afterwards destroys a dialog he
+            # opened meanwhile — one awaited on then never resolves at all.
+            overlay.clear()
             # a finished draft costs nothing to show again — regenerate only
             # on explicit request
             if not force:
                 existing = await run.io_bound(_load_draft, job["id"])
                 if existing is not None and existing["status"] == "ready":
-                    overlay.clear()
                     with overlay:
                         show_draft(existing, job)
                     return
@@ -1454,7 +1466,6 @@ async def jobs_page():
             # — and everything the user sees afterwards is built in `overlay`,
             # because this refresh has just deleted the button we came from.
             await refresh(force=True)
-            overlay.clear()
             with overlay:
                 if not result["ok"]:
                     say(result["error"], type="warning", multi_line=True)
@@ -1471,13 +1482,16 @@ async def jobs_page():
                 type="positive" if label else "warning")
 
         async def find_email(job: dict):
+            # Cleared BEFORE the wait, never after: the page stays live
+            # while this runs, and clearing afterwards destroys a dialog he
+            # opened meanwhile — one awaited on then never resolves at all.
+            overlay.clear()
             say("Kontakt-E-Mail wird gesucht…")
             res = await contact_lookup.lookup_and_propose(job["id"])
             if not res["email"]:
                 say("Keine verifizierte Bewerbungs-E-Mail gefunden",
                     type="warning")
                 return
-            overlay.clear()
             with overlay, ui.dialog() as dialog, \
                     ui.card().classes("w-[440px] max-w-full"):
                 ui.label("Gefundene Bewerbungs-E-Mail").classes("font-bold")

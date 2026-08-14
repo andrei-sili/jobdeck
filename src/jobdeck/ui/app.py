@@ -13,9 +13,9 @@ from jobdeck.ui.pages import (  # noqa: F401
     cockpit,
     dashboard,
     jobs,
-    profiles,
     queue,
     settings,
+    unterlagen,
 )
 
 log = logging.getLogger(__name__)

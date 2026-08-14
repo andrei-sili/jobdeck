@@ -129,6 +129,48 @@ body { background: var(--paper); color: var(--ink); font-family: var(--jd-sans);
 .jd-pulse-dot.run { animation: jd-pulse 1.4s ease-in-out infinite; }
 @keyframes jd-pulse { 0%,100%{opacity:1} 50%{opacity:.25} }
 @media (prefers-reduced-motion: reduce) { .jd-pulse-dot.run { animation: none; } }
+
+/* ---- Unterlagen: the Mappe as a stack you can weigh ------------------ */
+.jd-card { background: var(--surface); border:1px solid var(--rule); border-radius:10px;
+           padding:16px 18px; width:100%; }
+.jd-card-title { font:400 17px/1.3 var(--jd-serif); }
+.jd-card-sub { font:400 12px/1.5 var(--jd-sans); color: var(--ink-3); }
+
+/* Page range, what it is, how heavy — one grid so the columns line up and
+   the eye can run down the weights without reading the names. */
+.jd-stack { display:grid; grid-template-columns:auto 1fr auto auto; gap:0 14px;
+            width:100%; }
+.jd-stack > * { padding:6px 0; border-bottom:1px solid var(--rule); min-width:0; }
+.jd-stack > .last { border-bottom:0; }
+.jd-pageno { font:400 11.5px/1.6 var(--jd-mono); color: var(--ink-4);
+             font-variant-numeric: tabular-nums; white-space:nowrap; }
+.jd-partname { font:400 13px/1.6 var(--jd-sans); overflow:hidden;
+               text-overflow:ellipsis; white-space:nowrap; }
+.jd-partmeta { font:400 11.5px/1.6 var(--jd-mono); color: var(--ink-3);
+               font-variant-numeric: tabular-nums; white-space:nowrap;
+               text-align:right; }
+.jd-partmeta.warn { color: var(--warn); }
+.jd-total { font:500 13px/1.6 var(--jd-mono); font-variant-numeric: tabular-nums; }
+
+/* The letter head, drawn the way the page it describes is laid out. */
+.jd-letter { border:1px solid var(--rule); border-radius:8px; background: var(--surface-2);
+             padding:16px 18px; max-width:52ch; font:400 12.5px/1.7 var(--jd-sans); }
+.jd-letter .addr { white-space:pre-line; }
+.jd-letter .date { margin-top:14px; text-align:right; color: var(--ink-2); }
+.jd-letter .subj { margin-top:14px; font-weight:600; }
+.jd-letter .body { margin-top:10px; color: var(--ink-3); font-style:italic; }
+.jd-letter .gap { color: var(--warn); font-family: var(--jd-mono); }
+
+/* One row of the register: a permission, and how often a letter used it. */
+.jd-claim { display:grid; grid-template-columns:1fr auto auto; gap:0 12px;
+            align-items:center; width:100%; border-bottom:1px solid var(--rule); }
+.jd-claim:last-child { border-bottom:0; }
+.jd-claim-fact { font:400 13px/1.5 var(--jd-sans); padding:8px 0; min-width:0; }
+.jd-claim-bind { color: var(--ink-3); }
+.jd-claim-count { font:400 11.5px/1.5 var(--jd-mono); color: var(--ink-3);
+                  white-space:nowrap; }
+.jd-claim-count.never { color: var(--warn); }
+.jd-claim-count.unknown { color: var(--ink-4); }
 """
 
 

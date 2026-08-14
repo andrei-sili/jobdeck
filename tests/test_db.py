@@ -504,6 +504,48 @@ def test_the_cockpit_signature_of_a_vanished_posting_is_nothing(con):
     assert db.job_signature(con, 999999) is None
 
 
+def test_the_posting_signature_covers_the_contact_block_it_is_asked_about(con):
+    """Both the cockpit and the letter preview PRINT the Ansprechpartner and
+    the postal address, and contact resolution fills them in the background.
+    A signature blind to them leaves a screen reading "none named" beside a
+    name the app already holds."""
+    job_id = _add_job(con)
+    con.commit()
+    seen = db.job_signature(con, job_id)
+
+    for write in (
+        lambda: db.set_job_contacts(con, job_id, {"ansprechpartner": "Frau Weber"}),
+        lambda: db.set_job_contacts(con, job_id, {"contact_strasse": "Weg 1"}),
+        lambda: db.set_job_contacts(con, job_id, {"contact_plz_ort": "10115 Berlin"}),
+        lambda: db.set_job_contacts(con, job_id, {"refnr": "K-17"}),
+        lambda: con.execute("UPDATE jobs SET work_plz_ort='10115 Berlin' "
+                            "WHERE id=?", (job_id,)),
+        lambda: con.execute("UPDATE jobs SET temp_agency=1 WHERE id=?", (job_id,)),
+        lambda: con.execute("UPDATE jobs SET title='Anderer Titel' WHERE id=?",
+                            (job_id,)),
+    ):
+        write()
+        con.commit()
+        current = db.job_signature(con, job_id)
+        assert current != seen, "a screen stating this would not notice"
+        seen = current
+
+
+def test_two_unresolved_postings_never_sign_the_same(con):
+    """A caller may CHOOSE which posting to sign — the letter preview signs
+    whichever currently tops the working list. Two fresh postings with the
+    same scraped title have every other column empty and identical, so without
+    the id and the company the preview goes on naming a firm whose posting has
+    just been skipped, applied to or outranked."""
+    alpha = _add_job(con, external_id="A", company="Alpha GmbH",
+                     title="Softwareentwickler (m/w/d)")
+    beta = _add_job(con, external_id="B", company="Beta AG",
+                    title="Softwareentwickler (m/w/d)")
+    con.commit()
+
+    assert db.job_signature(con, alpha) != db.job_signature(con, beta)
+
+
 # ---------------------------------------------------------------------------
 # Vorgemerkt — a posting he sets aside by hand (schema v8)
 # ---------------------------------------------------------------------------

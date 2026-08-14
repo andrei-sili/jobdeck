@@ -26,7 +26,7 @@ from jobdeck.ui import live
 # in their own slices — Unterlagen already means "the Suchprofil and what gets
 # sent", and Bewerbungen already means the register. Pointing them at nothing
 # until then would take away the only way he has to send anything.
-UNTERLAGEN_PATH = "/profiles"
+UNTERLAGEN_PATH = "/unterlagen"
 STELLEN_PATH = "/"
 BEWERBUNGEN_PATH = "/applications"
 EINSTELLUNGEN_PATH = "/settings"
@@ -93,6 +93,16 @@ def _clock(iso: str, now: datetime.datetime) -> str:
     if parsed.date() == now.date():
         return parsed.strftime("%H:%M")
     return parsed.strftime("%d.%m.")
+
+
+def clock(iso: str) -> str:
+    """`_clock` for a screen that has no clock of its own to pass in.
+
+    Shared rather than reimplemented: the Suchprofil panel used to print the
+    raw ISO fragment ("zuletzt gesucht 2026-08-14T10:22") in the middle of
+    German prose, on a screen whose credibility rests on its German.
+    """
+    return _clock(iso, datetime.datetime.now())
 
 
 def _parse(iso: str) -> datetime.datetime | None:

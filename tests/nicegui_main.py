@@ -19,8 +19,8 @@ import sys
 from nicegui import ui
 
 PAGE_MODULES = (
-    "applications", "cockpit", "dashboard", "jobs", "profiles", "queue",
-    "settings",
+    "applications", "cockpit", "dashboard", "jobs", "queue", "settings",
+    "unterlagen",
 )
 
 for _name in PAGE_MODULES:

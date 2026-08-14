@@ -864,7 +864,7 @@ def _unhosted_ui_calls(path):
 # deliberately absent: its refresh assigns `table.rows` and deletes no element,
 # so no handler's slot can die under it.
 @pytest.mark.parametrize("page_module",
-                         ["jobs.py", "queue.py", "profiles.py", "cockpit.py",
+                         ["jobs.py", "queue.py", "unterlagen.py", "cockpit.py",
                           "../draft_editor.py"])
 def test_nothing_is_shown_on_a_slot_that_may_already_be_gone(page_module):
     """The defect CLASS, not the one place it was found. A handler runs in the
@@ -882,7 +882,7 @@ def test_nothing_is_shown_on_a_slot_that_may_already_be_gone(page_module):
 
 
 @pytest.mark.parametrize("page_module",
-                         ["jobs.py", "queue.py", "profiles.py", "cockpit.py",
+                         ["jobs.py", "queue.py", "unterlagen.py", "cockpit.py",
                           "../draft_editor.py"])
 def test_the_slot_rule_is_actually_binding(page_module):
     """A scan that finds no candidates would pass on any code at all."""
@@ -1505,3 +1505,63 @@ def test_a_letter_already_on_its_way_says_where_to_resolve_it():
                  draft_status="sending"))}
         assert steps[key].enabled is False
         assert "Review queue" in steps[key].reason, (channel, steps[key].reason)
+
+
+def _own_nodes(func):
+    """Every node belonging to THIS function, excluding nested definitions.
+
+    Without the exclusion an `await` inside a nested handler would be read as
+    an await of the outer function, and a perfectly ordered outer handler
+    would be reported as an offender."""
+    stack, own = list(func.body), []
+    while stack:
+        node = stack.pop()
+        own.append(node)
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.AsyncFunctionDef | ast.FunctionDef
+                          | ast.Lambda):
+                continue
+            stack.append(child)
+    return own
+
+
+@pytest.mark.parametrize("page_module",
+                         ["jobs.py", "queue.py", "unterlagen.py", "cockpit.py",
+                          "../draft_editor.py"])
+def test_no_handler_clears_the_overlay_after_an_await(page_module):
+    """`overlay.clear()` before an await is housekeeping; after one it is a
+    demolition. The page stays fully interactive while a handler waits on a
+    model call or a Chrome render, so a dialog opened in that window is
+    destroyed — and in NiceGUI clearing the slot drops the dialog's canary
+    element, whose finalizer calls `Dialog.delete()` without ever setting
+    `value`. A coroutine parked on `await confirm` is then never resumed at
+    all: the confirmation vanishes and its handler hangs for the life of the
+    page.
+
+    Found by review on `propose_claims`, which awaited a multi-second model
+    call and then cleared. Pinned as a class, not as one line.
+    """
+    path = pathlib.Path(jobs.__file__).parent / page_module
+    tree = ast.parse(path.read_text())
+
+    offenders, scanned = [], 0
+    for func in ast.walk(tree):
+        if not isinstance(func, ast.AsyncFunctionDef):
+            continue
+        own = _own_nodes(func)
+        first_await = min((n.lineno for n in own if isinstance(n, ast.Await)),
+                          default=None)
+        clears = [n.lineno for n in own if isinstance(n, ast.Call)
+                  and ast.unparse(n.func) == "overlay.clear"]
+        if clears:
+            scanned += 1
+        if first_await is None:
+            continue
+        offenders += [f"{path.name}:{func.name}:{line}"
+                      for line in clears if line > first_await]
+    assert offenders == [], (
+        "overlay.clear() runs after an await at " + ", ".join(offenders)
+        + " — a dialog opened while that await was pending is destroyed, and "
+          "anything parked on it never resolves")
+    if page_module in ("jobs.py", "unterlagen.py"):
+        assert scanned, "no handler clears the overlay at all — scan is broken"

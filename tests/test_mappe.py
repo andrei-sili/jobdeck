@@ -146,14 +146,14 @@ async def test_mappe_warns_when_the_quality_floor_blocks_the_target(
 
 async def test_portal_channels_get_the_tighter_budget(con, data_dir):
     settings = {"target_mb": "3", "target_portal_mb": "2"}
-    assert mappe._target_bytes(settings, "ats_form") == 2 * 1024 * 1024
-    assert mappe._target_bytes(settings, "board_apply") == 2 * 1024 * 1024
-    assert mappe._target_bytes(settings, "company_site") == 2 * 1024 * 1024
+    assert mappe.target_bytes(settings, "ats_form") == 2 * 1024 * 1024
+    assert mappe.target_bytes(settings, "board_apply") == 2 * 1024 * 1024
+    assert mappe.target_bytes(settings, "company_site") == 2 * 1024 * 1024
     # e-mail and an unresolved channel keep the roomier budget: degrading a
     # scan on a guess is silent, an oversized upload fails in front of the user
-    assert mappe._target_bytes(settings, "direct_email") == 3 * 1024 * 1024
-    assert mappe._target_bytes(settings, "unknown") == 3 * 1024 * 1024
-    assert mappe._target_bytes(settings, "") == 3 * 1024 * 1024
+    assert mappe.target_bytes(settings, "direct_email") == 3 * 1024 * 1024
+    assert mappe.target_bytes(settings, "unknown") == 3 * 1024 * 1024
+    assert mappe.target_bytes(settings, "") == 3 * 1024 * 1024
 
 
 async def test_unset_or_broken_size_budgets_fall_back_to_the_defaults(
@@ -164,10 +164,10 @@ async def test_unset_or_broken_size_budgets_fall_back_to_the_defaults(
     # would just die. app_settings is a file the user is invited to edit.
     for raw in ("", "   ", "abc", "0", "-4", None, "inf", "-inf", "1e400", "nan"):
         settings = {"target_mb": raw, "target_portal_mb": raw}
-        assert mappe._target_bytes(settings, "direct_email") == int(
+        assert mappe.target_bytes(settings, "direct_email") == int(
             mappe.DEFAULT_TARGET_MB * 1024 * 1024
         )
-        assert mappe._target_bytes(settings, "ats_form") == int(
+        assert mappe.target_bytes(settings, "ats_form") == int(
             mappe.DEFAULT_PORTAL_TARGET_MB * 1024 * 1024
         )
 
@@ -455,3 +455,56 @@ async def test_an_address_the_posting_states_still_wins_in_the_letter(
     captured = await _captured_letter_values(con, data_dir, monkeypatch, job_id)
 
     assert captured["strasse"] == "Weg 1"
+
+
+# --------------------------------------------------------------------------
+# One definition of what a Mappe is built from
+# --------------------------------------------------------------------------
+def test_the_signed_setting_keys_are_exactly_the_ones_read(con, data_dir):
+    """BUILD_SETTING_KEYS is what a screen watches so a budget or a template
+    change reaches it. It was a hand-copied second list beside the reader, and
+    six of its seven keys could be deleted with the whole suite green — the
+    next setting added would silently become a fact a screen states and no
+    signature can see."""
+    seen = []
+    real_get = db.get_setting
+
+    def spy(connection, key, default=""):
+        seen.append(key)
+        return real_get(connection, key, default)
+
+    original = mappe.db.get_setting
+    mappe.db.get_setting = spy
+    try:
+        settings = mappe.build_settings(con)
+    finally:
+        mappe.db.get_setting = original
+
+    assert set(seen) == set(mappe.BUILD_SETTING_KEYS)
+    assert len(mappe.BUILD_SETTING_KEYS) == len(set(mappe.BUILD_SETTING_KEYS))
+    # and every field the build uses really comes from one of them
+    assert set(settings) == {"applicant_name", "applicant_ort", "template_path",
+                             "anlagen_dir", "compress", "target_mb",
+                             "target_portal_mb"}
+
+
+def test_the_cover_sheet_and_the_subject_name_the_same_role(con, data_dir):
+    """Without a draft — always, for the specimen — the Deckblatt fell back to
+    the RAW scraped title while the Betreff two pages later printed the cleaned
+    one. He opens the specimen to see what an employer gets and finds board
+    noise on page one."""
+    job_id = db.insert_job_if_new(con, {
+        "source": "arbeitsagentur", "external_id": "REF-NOISE",
+        "title": "Ab sofort: Python Entwickler (m/w/d)Vollzeit",
+        "company": "Neue Firma GmbH",
+    })
+    con.commit()
+    job = db.get_job(con, job_id)
+
+    values = mappe.letter_values(job, None, "Erika Muster", "Musterstadt")
+
+    assert "Ab sofort" not in values["deckblatt_rolle"]
+    assert "Vollzeit" not in values["deckblatt_rolle"]
+    assert "Python Entwickler" in values["deckblatt_rolle"]
+    # the two lines of the same document agree
+    assert values["deckblatt_rolle"].removeprefix("als ") in values["betreff"]
