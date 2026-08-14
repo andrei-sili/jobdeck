@@ -18,6 +18,7 @@ from nicegui import app, run, ui
 
 from jobdeck import claims as claims_lib
 from jobdeck import db, freshness
+from jobdeck.services import claims as claims_service
 from jobdeck.services import polling
 from jobdeck.services import unterlagen as unterlagen_service
 from jobdeck.ui import live
@@ -333,6 +334,61 @@ async def unterlagen_page():
             await run.io_bound(_delete_claim, claim["id"])
             await refresh()
 
+        async def propose_claims():
+            """Read profile.md once and offer what the register does not hold.
+
+            Proposes only. The register is the list of things a letter may say
+            about him, and a model's reading of his own file is not authority
+            for that — every row is his to keep or drop before anything is
+            written.
+            """
+            say("profile.md wird gelesen…")
+            result = await claims_service.propose_from_profile()
+            if not result["ok"]:
+                say(result["error"], type="warning")
+                return
+            if not result["claims"]:
+                skipped = result.get("skipped", 0)
+                say("Nichts Neues gefunden"
+                    + (f" — {skipped} stehen schon im Register" if skipped
+                       else ""))
+                return
+            overlay.clear()
+            with overlay, ui.dialog() as dialog, ui.card().classes("w-[36rem]"):
+                ui.label("Vorschlag aus profile.md").classes("font-bold")
+                ui.label("Nichts davon ist gespeichert. Nimm nur, was ein Brief "
+                         "wirklich behaupten darf.").classes("text-sm")
+                boxes = []
+                for claim in result["claims"]:
+                    box = ui.checkbox(claim["headline"], value=True) \
+                        .classes("w-full")
+                    if claim["terms"]:
+                        ui.label(f"erkennbar an: {claim['terms']}") \
+                            .classes("text-xs text-gray-500 ml-8")
+                    boxes.append((box, claim))
+                if result.get("skipped"):
+                    ui.label(f"{result['skipped']} standen bereits im Register "
+                             "und sind nicht dabei.") \
+                        .classes("text-xs text-gray-500")
+                ui.label(f"Kosten dieses Aufrufs: "
+                         f"{result['cost_usd']:.4f} $").classes("text-xs "
+                                                                "text-gray-500")
+
+                async def keep():
+                    chosen = [{"fact": c["fact"], "binding": c["binding"],
+                               "terms": c["terms"]}
+                              for box, c in boxes if box.value]
+                    dialog.close()
+                    written = await claims_service.accept(chosen)
+                    say(f"{written} übernommen", type="positive")
+                    await refresh()
+
+                with ui.row().classes("w-full justify-end"):
+                    ui.button("Verwerfen", on_click=dialog.close).props("flat")
+                    ui.button("Übernehmen", on_click=keep) \
+                        .mark("accept-claims")
+            dialog.open()
+
         def draw_claims(register: list[dict], letters: int) -> None:
             with ui.column().classes("jd-card gap-3"):
                 ui.label("Was ein Brief behaupten darf — und wie oft er es tat") \
@@ -369,8 +425,15 @@ async def unterlagen_page():
                                 .props("flat round dense size=sm color=negative") \
                                 .mark("delete-claim")
 
-                ui.button("Erlaubnis hinzufügen", icon="add",
-                          on_click=lambda: claim_dialog(None)).props("flat")
+                with ui.row().classes("gap-2 items-center"):
+                    ui.button("Erlaubnis hinzufügen", icon="add",
+                              on_click=lambda: claim_dialog(None)).props("flat")
+                    ui.button("Aus profile.md lesen", icon="auto_awesome",
+                              on_click=propose_claims) \
+                        .props("flat").mark("propose-claims") \
+                        .tooltip("Ein KI-Aufruf über deine profile.md. "
+                                 "Nichts wird gespeichert, bevor du es "
+                                 "bestätigt hast.")
                 # The register counts; it does not yet constrain. Saying so is
                 # the difference between a screen and a promise — the drafting
                 # prompt still reads profile.md, and a line claiming otherwise

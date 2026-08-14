@@ -236,6 +236,21 @@ async def test_a_permission_added_through_the_dialog_is_stored(
         ("Java & Spring Boot", "Eigenprojekt", "Spring Boot")]
 
 
+async def test_reading_the_profile_is_refused_while_the_ai_switch_is_off(
+        user: User, con, data_dir):
+    """The button is wired to the real service, and the master switch's
+    promise reaches the screen rather than only the log. `ai_enabled` is off
+    by default, so this is also the state he will meet it in."""
+    _posting(con)
+
+    await user.open("/unterlagen")
+    user.find(marker="propose-claims").click()
+    await asyncio.sleep(0.3)
+
+    await user.should_see("ausgeschaltet")
+    assert db.list_claims(con) == []
+
+
 async def test_deleting_a_permission_asks_first(user: User, con, data_dir):
     _posting(con)
     claim_id = db.add_claim(con, {"fact": "Java", "binding": "Eigenprojekt"})
