@@ -359,6 +359,87 @@ def mark_profile_polled(
 
 
 # --------------------------------------------------------------------------
+# Claims — what a letter is allowed to claim (schema v9)
+# --------------------------------------------------------------------------
+def list_claims(con: sqlite3.Connection) -> list[sqlite3.Row]:
+    """The register in the order it is read. `id` breaks ties so two claims
+    given the same rank never swap places between two renders."""
+    return con.execute(
+        "SELECT * FROM claims ORDER BY sort_order, id").fetchall()
+
+
+def add_claim(con: sqlite3.Connection, values: dict) -> int:
+    """Append a permission. A new row sorts after every existing one unless
+    the caller places it, so adding never reorders what is already there."""
+    order = values.get("sort_order")
+    if order is None:
+        order = (con.execute(
+            "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM claims"
+        ).fetchone()[0])
+    stamp = _now()
+    cur = con.execute(
+        """
+        INSERT INTO claims (fact, binding, terms, sort_order, created_at,
+                            updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (values["fact"].strip(), values.get("binding", "").strip(),
+         values.get("terms", "").strip(), int(order), stamp, stamp),
+    )
+    return cur.lastrowid
+
+
+def update_claim(con: sqlite3.Connection, claim_id: int, values: dict) -> None:
+    con.execute(
+        "UPDATE claims SET fact=?, binding=?, terms=?, updated_at=? WHERE id=?",
+        (values["fact"].strip(), values.get("binding", "").strip(),
+         values.get("terms", "").strip(), _now(), claim_id),
+    )
+
+
+def delete_claim(con: sqlite3.Connection, claim_id: int) -> None:
+    con.execute("DELETE FROM claims WHERE id=?", (claim_id,))
+
+
+def letter_bodies(con: sqlite3.Connection) -> list[str]:
+    """Every Anschreiben this app has written, for the register's counters.
+
+    Every draft counts, not only the sent ones: a claim that keeps being
+    written and then discarded is exactly what the register should show, and
+    reading only sent letters would call it unused.
+    """
+    return [row[0] for row in con.execute(
+        "SELECT anschreiben_body FROM drafts WHERE TRIM(anschreiben_body) <> ''"
+    )]
+
+
+def claims_signature(con: sqlite3.Connection) -> tuple:
+    """What the register shows: its own rows, and the letters it counts.
+
+    The claims are compared VERBATIM rather than through their timestamps.
+    `updated_at` has second resolution, so correcting a claim's terms and
+    looking at the counter it changes — the whole loop this screen exists for
+    — happens well inside one tick and would leave the screen certain it was
+    already current. The register is a handful of short rows, so the cheap
+    aggregate is the one that would hide the edit.
+
+    The letters cannot be compared that way (thousands of characters each),
+    so their total length stands in for their content: a body is rewritten by
+    drafting or edited by hand, and either changes both the count of letters
+    and, in all but a same-length coincidence, this sum — which the timestamp
+    then catches on the next second.
+    """
+    return tuple(con.execute(
+        "SELECT (SELECT COUNT(*) FROM claims), "
+        "(SELECT GROUP_CONCAT(fact || '|' || binding || '|' || terms, '§') "
+        " FROM (SELECT * FROM claims ORDER BY sort_order, id)), "
+        "(SELECT COUNT(*) FROM drafts WHERE TRIM(anschreiben_body) <> ''), "
+        "(SELECT COALESCE(SUM(LENGTH(anschreiben_body)), 0) FROM drafts), "
+        "(SELECT MAX(COALESCE(updated_at,'')) FROM drafts)"
+    ).fetchone())
+
+
+# --------------------------------------------------------------------------
 # Jobs
 # --------------------------------------------------------------------------
 def insert_job_if_new(con: sqlite3.Connection, values: dict) -> int | None:

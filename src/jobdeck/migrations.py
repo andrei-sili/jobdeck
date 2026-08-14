@@ -9,7 +9,7 @@ import sqlite3
 
 from jobdeck import dates
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # Legacy table, exactly as the previous tracker created it.
 BEWERBUNGEN_SQL = """
@@ -148,6 +148,25 @@ CREATE INDEX IF NOT EXISTS idx_status_history_bewerbung ON status_history(bewerb
 CREATE TABLE IF NOT EXISTS app_settings (
     key   TEXT PRIMARY KEY,
     value TEXT
+);
+
+-- What a letter is allowed to claim (schema v9). One row is one permission:
+-- a competence or credential (`fact`) together with the ONE project or
+-- employer it belongs to (`binding`). The pair is the point — the drafting
+-- rule that keeps being broken is not inventing a skill, it is welding a
+-- real skill to the wrong project, and only the pair can state that.
+--
+-- `terms` are the words a letter would have to use to be claiming this, and
+-- exist so the register can COUNT its own use across written letters rather
+-- than merely assert itself.
+CREATE TABLE IF NOT EXISTS claims (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    fact       TEXT NOT NULL,
+    binding    TEXT NOT NULL DEFAULT '',
+    terms      TEXT NOT NULL DEFAULT '',
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 """
 
