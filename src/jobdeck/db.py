@@ -1460,10 +1460,19 @@ def job_signature(con: sqlite3.Connection, job_id: int) -> tuple | None:
     Per-posting rather than the whole pipeline: the apply cockpit sits open for
     many minutes while he types into an employer's form, and rebuilding it every
     time an unrelated posting is scored would move the buttons under his hand.
-    `None` when the posting is gone."""
+    `None` when the posting is gone.
+
+    The contact block is signed as well as the channel. Both the cockpit and
+    the letter preview PRINT the Ansprechpartner and the postal address, and
+    contact resolution fills exactly those fields in the background — a screen
+    that states a value has to be rebuilt when that value changes, or it is
+    quietly showing "none named" beside a name the app already has.
+    """
     row = con.execute(
         "SELECT status, liveness, liveness_checked_at, contact_email, "
-        f"apply_channel, ats_vendor, apply_url, {_DRAFT_STATUS_SQL}, "
+        "apply_channel, ats_vendor, apply_url, title, ansprechpartner, "
+        "contact_strasse, contact_plz_ort, work_strasse, work_plz_ort, "
+        f"temp_agency, refnr, {_DRAFT_STATUS_SQL}, "
         f"{_DRAFT_UPDATED_SQL} FROM jobs WHERE id=?",
         (job_id,),
     ).fetchone()
