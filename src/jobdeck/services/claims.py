@@ -19,6 +19,11 @@ from jobdeck.ai import llm, profile
 
 log = logging.getLogger(__name__)
 
+# Every other spending service in this app is single-flight, and this one is
+# reached by a button whose only feedback is a toast that fades while the call
+# runs — the shape that gets pressed three times and billed three times.
+_lock = asyncio.Lock()
+
 
 def _key(fact: str, binding: str) -> tuple[str, str]:
     """What makes two entries the same permission: the pair, folded.
@@ -58,6 +63,15 @@ def _propose() -> dict:
                                       "gibt es nichts zu lesen", "claims": []}
     try:
         proposed, usage = ai_claims.extract_claims(profile_text)
+    except llm.LLMNotConfigured:
+        # NOT a subclass of LLMError — a sibling — so catching LLMError alone
+        # let it escape to_thread, past the page's await, into NiceGUI's
+        # handler wrapper, which turns it into a log line. The button then did
+        # nothing and said nothing, however often it was pressed. Every other
+        # spending service names this case; this one has to as well.
+        return {"ok": False, "claims": [],
+                "error": "Kein Anthropic-Schlüssel geladen — in "
+                         "secrets.env eintragen"}
     except llm.LLMError as exc:
         # The call may have billed before failing; meter it either way.
         if exc.usage is not None:
@@ -83,9 +97,15 @@ async def propose_from_profile() -> dict:
     """Read profile.md and propose register entries the register lacks.
 
     Returns {"ok", "error", "claims", "skipped", "cost_usd"}. Writes nothing
-    but the spend meter.
+    but the spend meter. A second press while one reading is in flight is
+    refused rather than queued: the answer would be the same proposal, and
+    paying twice for it is the whole failure mode.
     """
-    return await asyncio.to_thread(_propose)
+    if _lock.locked():
+        return {"ok": False, "claims": [], "skipped": 0, "cost_usd": 0.0,
+                "error": "profile.md wird bereits gelesen"}
+    async with _lock:
+        return await asyncio.to_thread(_propose)
 
 
 def _store(chosen: list[dict]) -> int:

@@ -113,6 +113,51 @@ async def test_an_empty_profile_is_refused_before_any_call(con, data_dir, ai_on,
     assert "profile.md" in result["error"]
 
 
+async def test_a_missing_api_key_answers_instead_of_vanishing(
+        con, data_dir, ai_on, profile_file, monkeypatch):
+    """`LLMNotConfigured` is a SIBLING of `LLMError`, not a subclass, so
+    catching LLMError alone let it escape to_thread, past the page's await,
+    into NiceGUI's handler wrapper — which turns it into a log line. The
+    button then did nothing and said nothing, however often it was pressed.
+    He meets this every time he runs against a copied data dir, which is this
+    project's own verification recipe."""
+    def no_key(**kwargs):
+        raise llm.LLMNotConfigured("ANTHROPIC_API_KEY is not set")
+
+    monkeypatch.setattr(llm, "complete", no_key)
+    result = await claims_service.propose_from_profile()
+
+    assert result["ok"] is False
+    assert "Schlüssel" in result["error"]
+    assert result["claims"] == []
+
+
+async def test_a_second_press_while_one_reading_runs_is_refused(
+        con, data_dir, ai_on, profile_file, monkeypatch):
+    """The button's only feedback is a toast that fades while the call runs —
+    the shape that gets pressed three times and billed three times. Every
+    other spending service in this app is single-flight."""
+    import asyncio
+    import threading
+
+    release = threading.Event()
+
+    def slow(**kwargs):
+        release.wait(timeout=5)
+        return _result({"claims": []})
+
+    monkeypatch.setattr(llm, "complete", slow)
+    first = asyncio.create_task(claims_service.propose_from_profile())
+    await asyncio.sleep(0.05)
+
+    second = await claims_service.propose_from_profile()
+    assert second["ok"] is False
+    assert "bereits" in second["error"]
+
+    release.set()
+    await first
+
+
 # --------------------------------------------------------------------------
 # Proposing, and what it costs
 # --------------------------------------------------------------------------

@@ -195,13 +195,45 @@ def test_a_letter_edited_to_new_text_moves_the_signature(con):
     assert db.claims_signature(con) != before
 
 
-def test_the_register_survives_the_migration_of_an_older_database(con):
-    """v9 is additive: an existing database gains the table and keeps its
-    rows. The `con` fixture migrates from empty, so re-running must be a
-    no-op rather than a truncation."""
+def test_migrating_an_actual_v8_database_creates_the_register(con):
+    """His database is at v8 and carries 60+ applications, so the upgrade has
+    to be exercised as an upgrade. The earlier version of this test added a row
+    to the already-v9 fixture and re-ran migrate — an idempotency check wearing
+    a migration's name, which no `if version < N` step would ever reach."""
     from jobdeck import migrations
 
+    con.execute("DROP TABLE claims")
+    con.execute("PRAGMA user_version = 8")
+    con.commit()
+    assert con.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='claims'"
+    ).fetchone()[0] == 0
+
+    migrations.migrate(con)
+
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 9
+    claim_id = db.add_claim(con, {"fact": "IHK-Abschluss"})
+    assert [r["id"] for r in db.list_claims(con)] == [claim_id]
+
+
+def test_re_running_the_migration_never_truncates_the_register(con):
     db.add_claim(con, {"fact": "IHK-Abschluss"})
+    con.commit()
+    from jobdeck import migrations
     migrations.migrate(con)
     assert [r["fact"] for r in db.list_claims(con)] == ["IHK-Abschluss"]
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 9
+
+
+def test_a_letter_rewritten_to_the_same_length_still_moves_the_signature(con):
+    """The docstring leans on the timestamp for exactly this case, and the
+    term was deletable with the suite green: the length sum does not move when
+    a body is replaced by another of the same size."""
+    job = _letter(con, "AAAA", "REF-A")
+    before = db.claims_signature(con)
+    con.execute("UPDATE drafts SET anschreiben_body='BBBB', "
+                "updated_at='2099-01-01T00:00:00' WHERE job_id=?", (job,))
+    con.commit()
+
+    assert db.claims_signature(con) != before, (
+        "a same-length rewrite is invisible — the timestamp term is not "
+        "load-bearing")
