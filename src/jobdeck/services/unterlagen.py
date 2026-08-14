@@ -69,6 +69,11 @@ class Part:
     error: str = ""
 
     @property
+    def placed(self) -> bool:
+        """Whether this part's position in the stack is known at all."""
+        return self.first_page > 0
+
+    @property
     def last_page(self) -> int:
         return self.first_page + self.pages - 1
 
@@ -77,14 +82,38 @@ def specimen_path() -> pathlib.Path:
     return pathlib.Path(config.OUTPUT_DIR) / "muster" / SPECIMEN_NAME
 
 
+def _int_setting(raw: str) -> int:
+    """A byte count out of app_settings, 0 for anything that is not one.
+
+    The directory holding these is one the user is invited to edit, so the
+    value is screened rather than trusted to parse."""
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return 0
+    return max(0, value)
+
+
 def _numbered(parts: list[Part]) -> list[Part]:
-    """Walk the stack and give every part the page it starts on."""
-    placed = []
+    """Walk the stack and give every part the page it starts on.
+
+    A part whose length is unknown — the letter before the first build, or an
+    Anlage that cannot be read — leaves every part AFTER it at an unknown
+    offset, and those get `first_page` 0 rather than a number. Numbering
+    through the gap was the first thing the running app showed: before a
+    build, the Zeugnis was announced as pages 1–2 when the letter takes three
+    pages and it really lands on 4–5. A page number is either right or it is
+    the wrong kind of wrong for a document somebody prints.
+    """
+    numbered = []
     page = 1
     for part in parts:
-        placed.append(dataclasses.replace(part, first_page=page))
-        page += part.pages
-    return placed
+        numbered.append(dataclasses.replace(part, first_page=page))
+        if part.pages <= 0:
+            page = 0  # nothing after this can be placed any more
+        elif page:
+            page += part.pages
+    return numbered
 
 
 def anlagen_parts(anlagen_dir: str) -> tuple[list[Part], str]:
@@ -110,8 +139,13 @@ def anlagen_parts(anlagen_dir: str) -> tuple[list[Part], str]:
     return parts, ""
 
 
-# Written by a build, and read back beside the stack it describes.
-COMPRESSION_SETTING = "mappe_specimen_compression"
+# Written by a build, and read back beside the stack it describes. Numbers
+# rather than a sentence: `Compression.describe()` is written for the log and
+# is English, and this screen is German. Storing the figures lets the screen
+# say it in its own language without a second thing to keep in step.
+BEFORE_SETTING = "mappe_specimen_before_bytes"
+LOSSLESS_SETTING = "mappe_specimen_lossless"
+SPECIMEN_SETTINGS = (BEFORE_SETTING, LOSSLESS_SETTING)
 
 
 def _folder_fingerprint(anlagen_dir: str) -> tuple:
@@ -148,7 +182,7 @@ def signature(con, job_id: int | None) -> tuple:
         # Suchprofil panel summarises only the active ones.
         db.count_active_profiles(con),
         *(db.get_setting(con, key, "")
-          for key in (*mappe.BUILD_SETTING_KEYS, COMPRESSION_SETTING)),
+          for key in (*mappe.BUILD_SETTING_KEYS, *SPECIMEN_SETTINGS)),
         db.job_signature(con, job_id) if job_id is not None else None,
         _folder_fingerprint(db.get_setting(con, "anlagen_dir", "").strip()),
     )
@@ -221,7 +255,8 @@ def read(con, job_id: int | None) -> dict:
     the signature taken before any of it.
     """
     settings = mappe.build_settings(con)
-    compression = db.get_setting(con, COMPRESSION_SETTING, "")
+    shrunk_from = _int_setting(db.get_setting(con, BEFORE_SETTING, ""))
+    lossless = db.get_setting(con, LOSSLESS_SETTING, "") == "1"
     view = preview(con, job_id)
     parts, anlagen_error = anlagen_parts(settings["anlagen_dir"])
     facts = _specimen_facts(parts)
@@ -242,7 +277,8 @@ def read(con, job_id: int | None) -> dict:
         "target_portal_bytes": mappe.target_bytes(settings,
                                                   apply_channel.CHANNEL_ATS),
         "max_bytes": pdf.MAX_MAPPE_BYTES,
-        "compression": compression,
+        "shrunk_from_bytes": shrunk_from,
+        "lossless": lossless,
     }
 
 
@@ -311,7 +347,11 @@ def _build(job_id: int | None) -> dict:
         return {"ok": False, "error": str(exc)}
 
     with db.db() as con:
-        db.set_setting(con, COMPRESSION_SETTING, compression.describe())
+        db.set_setting(con, BEFORE_SETTING,
+                       str(compression.original_bytes if compression.applied
+                           else 0))
+        db.set_setting(con, LOSSLESS_SETTING,
+                       "1" if compression.lossless else "0")
     log.info("specimen Mappe built for job %s: %s pages, %s bytes %s", job_id,
              pdf.page_count(out_path), out_path.stat().st_size,
              compression.describe())

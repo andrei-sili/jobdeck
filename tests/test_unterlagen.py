@@ -106,6 +106,35 @@ def test_page_numbers_run_through_the_whole_stack(con, data_dir):
         unterlagen.Part(label="02_zertifikat", pages=1, size_bytes=0),
     ])
     assert [(p.first_page, p.last_page) for p in parts] == [(1, 3), (4, 5), (6, 6)]
+    assert all(p.placed for p in parts)
+
+
+def test_nothing_after_an_unmeasured_part_gets_a_page_number(con, data_dir):
+    """Found in the running app: before the first build the letter's length is
+    unknown, and the Zeugnis was announced as pages 1–2 when it really lands
+    on 4–5. Numbering through the gap is worse than not numbering — a page
+    number is checked against a printout."""
+    parts = unterlagen._numbered([
+        unterlagen.Part(label="Vorlage", pages=0, size_bytes=0),
+        unterlagen.Part(label="01_zeugnis", pages=2, size_bytes=0),
+        unterlagen.Part(label="02_zertifikat", pages=1, size_bytes=0),
+    ])
+    assert parts[0].first_page == 1, "the first part is still where it starts"
+    assert [p.placed for p in parts] == [True, False, False]
+    assert [p.first_page for p in parts[1:]] == [0, 0]
+
+
+def test_a_torn_anlage_also_unplaces_what_follows_it(con, data_dir):
+    """Same rule, other cause: the pages of a file that cannot be read are
+    not zero, they are unknown."""
+    parts = unterlagen._numbered([
+        unterlagen.Part(label="Vorlage", pages=3, size_bytes=0),
+        unterlagen.Part(label="01_kaputt", pages=0, size_bytes=0,
+                        error="nicht lesbar"),
+        unterlagen.Part(label="02_zertifikat", pages=1, size_bytes=0),
+    ])
+    assert [p.first_page for p in parts] == [1, 4, 0]
+    assert [p.placed for p in parts] == [True, True, False]
 
 
 # --------------------------------------------------------------------------

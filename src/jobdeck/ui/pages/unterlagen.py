@@ -178,10 +178,15 @@ async def unterlagen_page():
                 with ui.element("div").classes("jd-stack"):
                     for index, part in enumerate(parts):
                         last = " last" if index == len(parts) - 1 else ""
-                        span = (f"{part.first_page}–{part.last_page}"
+                        # A position is printed only when it is known. Before
+                        # the first build the letter's length is not, and
+                        # everything after it would be announced three pages
+                        # too early — which is the wrong kind of wrong for a
+                        # number somebody checks against a printout.
+                        span = ("—" if not (part.placed and part.pages)
+                                else f"{part.first_page}–{part.last_page}"
                                 if part.pages > 1 else str(part.first_page))
-                        ui.label(span if part.pages else "—") \
-                            .classes("jd-pageno" + last)
+                        ui.label(span).classes("jd-pageno" + last)
                         ui.label(part.label).classes("jd-partname" + last)
                         ui.label(_pages(part.pages) if part.pages else "") \
                             .classes("jd-partmeta" + last)
@@ -199,8 +204,11 @@ async def unterlagen_page():
                         ui.label(f"{_pages(specimen['pages'])} · "
                                  f"{_kb(specimen['size_bytes'])}") \
                             .classes("jd-total")
-                        if view["compression"]:
-                            ui.label(view["compression"]).classes("jd-card-sub")
+                        if view["shrunk_from_bytes"]:
+                            kind = ("verlustfrei von" if view["lossless"]
+                                    else "verkleinert von")
+                            ui.label(f"{kind} {_kb(view['shrunk_from_bytes'])}") \
+                                .classes("jd-card-sub")
                     for line in _budget_notes(view):
                         ui.label(line["text"]).classes(f"jd-note {line['tone']}")
                 else:

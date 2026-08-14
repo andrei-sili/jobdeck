@@ -85,6 +85,20 @@ async def test_the_stack_names_every_part_with_its_pages_and_weight(
     await user.should_see("Noch nicht gebaut")
 
 
+async def test_before_a_build_no_page_number_is_claimed(user: User, con,
+                                                        data_dir):
+    """The running app printed "1–2" beside the Zeugnis before anything was
+    built — three pages early, because the letter had not been measured yet."""
+    _posting(con)
+    _anlagen(con, data_dir)
+
+    await user.open("/unterlagen")
+
+    await user.should_see("Noch nicht gebaut")
+    await user.should_not_see("1–2")
+    await user.should_not_see("4–5")
+
+
 async def test_a_torn_anlage_is_named_on_the_screen(user: User, con, data_dir):
     """The alternative to finding it here is finding it at send time."""
     _posting(con)
