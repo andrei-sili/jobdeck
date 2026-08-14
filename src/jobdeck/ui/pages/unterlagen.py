@@ -21,7 +21,7 @@ from jobdeck import db, freshness
 from jobdeck.services import claims as claims_service
 from jobdeck.services import polling
 from jobdeck.services import unterlagen as unterlagen_service
-from jobdeck.ui import live
+from jobdeck.ui import live, rail
 from jobdeck.ui.helpers import open_in_system
 from jobdeck.ui.layout import frame
 from jobdeck.ui.rail import UNTERLAGEN_PATH
@@ -154,9 +154,10 @@ async def unterlagen_page():
             if not result["ok"]:
                 say(result["error"], type="warning")
             else:
-                note = f" · {result['compression']}" if result["compression"] else ""
+                # `Compression.describe()` is written for the log and is
+                # English; this toast lands between two German sentences.
                 say(f"{result['pages']} Seiten · "
-                    f"{_kb(result['size_bytes'])}{note}", type="positive")
+                    f"{_kb(result['size_bytes'])} — gebaut", type="positive")
             await refresh()
 
         def _current_preview_job() -> int | None:
@@ -199,7 +200,18 @@ async def unterlagen_page():
                             ui.label("aus der Vorlage") \
                                 .classes("jd-partmeta" + last)
 
-                if specimen["built"]:
+                if specimen["built"] and specimen["stale"]:
+                    # The page count is still right — the letter's length was
+                    # measured at build time and the Anlagen are counted fresh
+                    # — but the WEIGHT belongs to a Mappe that no longer
+                    # matches this stack, so it is withheld rather than
+                    # reprinted as though it still held.
+                    ui.label(f"{_pages(specimen['pages'])} · Gewicht unbekannt") \
+                        .classes("jd-total")
+                    ui.label("Die Anlagen haben sich seit dem letzten Bauen "
+                             "geändert — für Größe und Budget einmal „Neu "
+                             "bauen“.").classes("jd-note warn")
+                elif specimen["built"]:
                     with ui.row().classes("items-baseline gap-3 w-full"):
                         ui.label(f"{_pages(specimen['pages'])} · "
                                  f"{_kb(specimen['size_bytes'])}") \
@@ -242,17 +254,29 @@ async def unterlagen_page():
                               f"Über der deutschen 5-MB-Konvention "
                               f"({_kb(size)}) — eine Anlage entfernen oder "
                               f"vorher verkleinern."})
-            for label, budget in (("E-Mail", view["target_email_bytes"]),
-                                  ("Portal", view["target_portal_bytes"])):
+            for label, budget, harder in (
+                    # The specimen is ALREADY fitted to the e-mail budget, so
+                    # an over-budget e-mail line means the app has compressed
+                    # as hard as it ever will — promising more there was always
+                    # false. Only the portal rung is still to come, and only
+                    # when shrinking is switched on at all.
+                    ("E-Mail", view["target_email_bytes"], False),
+                    ("Portal", view["target_portal_bytes"], view["compress"])):
                 fits = size <= budget
-                notes.append({
-                    "tone": "" if fits else "warn",
-                    "text": (f"{label}: {_kb(size)} von {_kb(budget)} — passt"
-                             if fits else
-                             f"{label}: {_kb(size)} über dem Budget von "
-                             f"{_kb(budget)}; für diesen Weg wird stärker "
-                             f"komprimiert."),
-                })
+                if fits:
+                    text = f"{label}: {_kb(size)} von {_kb(budget)} — passt"
+                elif harder:
+                    text = (f"{label}: {_kb(size)} über dem Budget von "
+                            f"{_kb(budget)}; für diesen Weg wird stärker "
+                            f"komprimiert.")
+                else:
+                    text = (f"{label}: {_kb(size)} über dem Budget von "
+                            f"{_kb(budget)} — "
+                            + ("Verkleinern ist in den Einstellungen "
+                               "ausgeschaltet, es geht so raus."
+                               if not view["compress"] else
+                               "die Qualitätsgrenze lässt nicht mehr zu."))
+                notes.append({"tone": "" if fits else "warn", "text": text})
             return notes
 
         # ------------------------------------------------------------------
@@ -350,6 +374,27 @@ async def unterlagen_page():
             for that — every row is his to keep or drop before anything is
             written.
             """
+            # It costs money, so it asks first — the same rule the drafting
+            # keyboard follows. The figure is what a reading of his profile has
+            # cost so far; it is stated BEFORE the spend, not inside the
+            # proposal dialog afterwards.
+            overlay.clear()
+            with overlay, ui.dialog() as confirm, ui.card():
+                ui.label("profile.md von der KI lesen lassen?") \
+                    .classes("font-bold")
+                ui.label("Ein Aufruf über deine profile.md, ungefähr ein "
+                         "halber Cent. Vorgeschlagen wird nur — gespeichert "
+                         "wird, was du behältst.").classes("text-sm")
+                with ui.row().classes("justify-end gap-2 w-full"):
+                    ui.button("Abbrechen",
+                              on_click=lambda: confirm.submit(False)) \
+                        .props("flat")
+                    ui.button("Lesen", on_click=lambda: confirm.submit(True)) \
+                        .mark("confirm-propose")
+            confirm.open()
+            if not await confirm:
+                return
+
             say("profile.md wird gelesen…")
             result = await claims_service.propose_from_profile()
             if not result["ok"]:
@@ -361,7 +406,11 @@ async def unterlagen_page():
                     + (f" — {skipped} stehen schon im Register" if skipped
                        else ""))
                 return
-            overlay.clear()
+            # Deliberately NOT overlay.clear() here. This is the one point in
+            # the module that would clear it AFTER an await, and the page stays
+            # live for the seconds the model takes: a delete confirmation or a
+            # half-typed Erlaubnis opened in that window would be destroyed —
+            # and a dialog awaited on then never resolves at all.
             with overlay, ui.dialog() as dialog, ui.card().classes("w-[36rem]"):
                 ui.label("Vorschlag aus profile.md").classes("font-bold")
                 ui.label("Nichts davon ist gespeichert. Nimm nur, was ein Brief "
@@ -483,8 +532,9 @@ async def unterlagen_page():
                 auto_send = ui.switch(
                     "Freigegebene Entwürfe automatisch senden",
                     value=bool(data.get("auto_send", 0)),
-                ).tooltip("Nur Entwürfe, die du in der Prüfliste freigegeben "
-                          "hast — getaktet, in Geschäftszeiten, unter dem "
+                ).tooltip("Nur Entwürfe, die du selbst freigegeben hast — "
+                          "über „Prüfen und senden“ bei einer Stelle — "
+                          "getaktet, in Geschäftszeiten, unter dem "
                           "Tageslimit. Standard: aus.")
 
                 with ui.expansion("Kriterien (KI-Bewertung)").classes("w-full"):
@@ -604,7 +654,7 @@ async def unterlagen_page():
                                 .classes("jd-reason")
                         elif profile["last_polled_at"]:
                             ui.label(f"zuletzt gesucht "
-                                     f"{profile['last_polled_at'][:16]}") \
+                                     f"{rail.clock(profile['last_polled_at'])}") \
                                 .classes("jd-card-sub")
                         ui.button(icon="play_arrow",
                                   on_click=lambda p=profile: run_now(p["id"])) \

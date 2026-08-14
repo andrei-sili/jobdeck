@@ -95,6 +95,16 @@ def _clock(iso: str, now: datetime.datetime) -> str:
     return parsed.strftime("%d.%m.")
 
 
+def clock(iso: str) -> str:
+    """`_clock` for a screen that has no clock of its own to pass in.
+
+    Shared rather than reimplemented: the Suchprofil panel used to print the
+    raw ISO fragment ("zuletzt gesucht 2026-08-14T10:22") in the middle of
+    German prose, on a screen whose credibility rests on its German.
+    """
+    return _clock(iso, datetime.datetime.now())
+
+
 def _parse(iso: str) -> datetime.datetime | None:
     try:
         return datetime.datetime.fromisoformat(str(iso))

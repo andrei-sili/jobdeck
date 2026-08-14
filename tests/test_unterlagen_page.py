@@ -81,6 +81,9 @@ async def test_the_stack_names_every_part_with_its_pages_and_weight(
     await user.should_see("01_Zeugnis")
     await user.should_see("02_Zertifikat")
     await user.should_see("2 Seiten")
+    # the weight column is the point of "a measured stack" — it is what tells
+    # him which Anlage to shrink under the 5 MB ceiling
+    await user.should_see("KB")
     # nothing has been built yet, so the total is not claimed
     await user.should_see("Noch nicht gebaut")
 
@@ -150,6 +153,10 @@ async def test_the_preview_is_filled_with_a_real_posting(user: User, con,
     await user.should_see("Gefüllt mit: Beispiel GmbH")
     await user.should_see("Frau Weber")
     await user.should_see("10115 Berlin")
+    # the Betreff is the most rule-bound line in the German norm, and checking
+    # it before a PDF exists is half of why this panel is here
+    await user.should_see("Bewerbung als Python Entwickler")
+    await user.should_see("Musterstadt,")
     await user.should_see("Kein Feld bleibt leer")
 
 
@@ -221,7 +228,10 @@ async def test_the_register_says_it_does_not_yet_constrain_the_prompt(
     _posting(con)
     await user.open("/unterlagen")
 
-    await user.should_see("profile.md")
+    # NOT just "profile.md" — that string is also the button label two rows
+    # up, so the assertion passed with the whole paragraph deleted.
+    await user.should_see("Heute zählt dieses Register mit")
+    await user.should_see("Was die KI behaupten DARF")
 
 
 async def test_a_permission_added_through_the_dialog_is_stored(
@@ -259,7 +269,12 @@ async def test_reading_the_profile_is_refused_while_the_ai_switch_is_off(
 
     await user.open("/unterlagen")
     user.find(marker="propose-claims").click()
-    await asyncio.sleep(0.3)
+    await asyncio.sleep(0.2)
+
+    # it costs money, so it asks first — and says so before spending
+    await user.should_see("Ein Aufruf über deine profile.md")
+    user.find(marker="confirm-propose").click()
+    await asyncio.sleep(0.4)
 
     await user.should_see("ausgeschaltet")
     assert db.list_claims(con) == []
@@ -311,3 +326,189 @@ async def test_the_old_profiles_address_still_lands(user: User, con, data_dir):
     # would still have set the title
     await user.should_see("Die Mappe, Seite für Seite")
     await user.should_see("Suchprofil")
+
+
+# --------------------------------------------------------------------------
+# The half of the Mappe panel that only exists after a build
+# --------------------------------------------------------------------------
+def _built_specimen(con, data_dir, *, letter_pages=3, total=6, before=0,
+                    lossless=False):
+    """The artifact and the facts a real build leaves behind.
+
+    Every page test runs with a fresh OUTPUT_DIR and no specimen, so without
+    this the whole "built" branch — the total, the budget lines, the page
+    spans, the enabled "Ansehen" — is executed by nothing at all.
+    """
+    from jobdeck.services import unterlagen as service
+    path = service.specimen_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _blank_pdf(path, pages=total)
+    parts, _ = service.anlagen_parts(db.get_setting(con, "anlagen_dir", ""))
+    db.set_setting(con, service.LETTER_PAGES_SETTING, str(letter_pages))
+    db.set_setting(con, service.ANLAGEN_SETTING, service._anlagen_stamp(parts))
+    db.set_setting(con, service.BEFORE_SETTING, str(before))
+    db.set_setting(con, service.LOSSLESS_SETTING, "1" if lossless else "0")
+    con.commit()
+    return path
+
+
+async def test_a_built_stack_prints_the_page_each_part_starts_on(
+        user: User, con, data_dir):
+    _posting(con)
+    _anlagen(con, data_dir)
+    _built_specimen(con, data_dir, letter_pages=3, total=6)
+
+    await user.open("/unterlagen")
+
+    await user.should_see("1–3")   # the letter
+    await user.should_see("4–5")   # 01_Zeugnis, two pages
+    await user.should_see("6")     # 02_Zertifikat
+    await user.should_not_see("Noch nicht gebaut")
+
+
+async def test_a_built_stack_states_both_budgets(user: User, con, data_dir):
+    _posting(con)
+    _anlagen(con, data_dir)
+    _built_specimen(con, data_dir)
+    db.set_setting(con, "mappe_target_mb", "0.000001")  # ~1 byte: over budget
+    con.commit()
+
+    await user.open("/unterlagen")
+
+    await user.should_see("E-Mail:")
+    await user.should_see("Portal:")
+
+
+async def test_over_the_german_ceiling_is_said_in_those_words(
+        user: User, con, data_dir):
+    """If this line is missing or inverted he sends an oversized Mappe
+    believing the screen told him it fits."""
+    from jobdeck import pdf as pdf_module
+    _posting(con)
+    _anlagen(con, data_dir)
+    _built_specimen(con, data_dir)
+    saved = pdf_module.MAX_MAPPE_BYTES
+    pdf_module.MAX_MAPPE_BYTES = 10  # the specimen is larger than ten bytes
+    try:
+        await user.open("/unterlagen")
+        await user.should_see("5-MB-Konvention")
+    finally:
+        pdf_module.MAX_MAPPE_BYTES = saved
+
+
+async def test_a_budget_that_fits_says_passt_rather_than_warning(
+        user: User, con, data_dir):
+    _posting(con)
+    _anlagen(con, data_dir)
+    _built_specimen(con, data_dir)
+
+    await user.open("/unterlagen")
+
+    await user.should_see("passt")
+    await user.should_not_see("wird stärker komprimiert")
+
+
+async def test_with_shrinking_switched_off_nothing_promises_more_compression(
+        user: User, con, data_dir):
+    """The specimen is already fitted to the e-mail budget, and with
+    compression off nothing was fitted at all — "für diesen Weg wird stärker
+    komprimiert" was false in both cases. The same bytes are what goes out."""
+    _posting(con)
+    _anlagen(con, data_dir)
+    _built_specimen(con, data_dir)
+    db.set_setting(con, "mappe_compress", "0")
+    db.set_setting(con, "mappe_target_mb", "0.000001")
+    db.set_setting(con, "mappe_target_portal_mb", "0.000001")
+    con.commit()
+
+    await user.open("/unterlagen")
+
+    await user.should_see("über dem Budget")
+    await user.should_see("ausgeschaltet, es geht so raus")
+    await user.should_not_see("wird stärker komprimiert")
+
+
+async def test_the_weight_is_withheld_when_the_anlagen_moved_since_the_build(
+        user: User, con, data_dir):
+    """Page numbers stay right — the letter's length was measured — but the
+    size belongs to a Mappe that no longer matches this stack."""
+    _posting(con)
+    folder = _anlagen(con, data_dir)
+    _built_specimen(con, data_dir, letter_pages=3, total=6)
+    _blank_pdf(folder / "03_Neu.pdf", pages=2)
+
+    await user.open("/unterlagen")
+
+    await user.should_see("Gewicht unbekannt")
+    await user.should_see("seit dem letzten Bauen")
+    await user.should_see("4–5")  # the Zeugnis did not move
+
+
+async def test_a_shrunk_mappe_says_so_in_german(user: User, con, data_dir):
+    _posting(con)
+    _anlagen(con, data_dir)
+    _built_specimen(con, data_dir, before=3_850_000, lossless=True)
+
+    await user.open("/unterlagen")
+
+    await user.should_see("verlustfrei von 3,7 MB")
+
+
+# --------------------------------------------------------------------------
+# The consent boundary on the AI proposal
+# --------------------------------------------------------------------------
+async def test_only_the_ticked_proposals_are_written(user: User, con, data_dir):
+    """The checkbox IS the consent boundary of this feature: the register
+    exists to stop a real skill being bound to the wrong employer, and the
+    proposal is a model's guess at those bindings. Nothing drove this path."""
+    from jobdeck.services import claims as claims_service
+    _posting(con)
+
+    async def propose():
+        return {"ok": True, "error": "", "skipped": 0, "cost_usd": 0.004,
+                "claims": [
+                    {"fact": "FastAPI", "binding": "IHK-Projekt",
+                     "terms": "FastAPI", "headline": "FastAPI — IHK-Projekt"},
+                    {"fact": "Kotlin", "binding": "Praktikum",
+                     "terms": "Kotlin", "headline": "Kotlin — Praktikum"},
+                ]}
+
+    saved = claims_service.propose_from_profile
+    claims_service.propose_from_profile = propose
+    try:
+        await user.open("/unterlagen")
+        user.find(marker="propose-claims").click()
+        await asyncio.sleep(0.2)
+        user.find(marker="confirm-propose").click()
+        await asyncio.sleep(0.3)
+
+        await user.should_see("Vorschlag aus profile.md")
+        boxes = [e for e in user.client.elements.values()
+                 if isinstance(e, ui.checkbox)]
+        assert len(boxes) == 2, "the proposal did not render one row each"
+        wrong = next(b for b in boxes if "Kotlin" in (b.text or ""))
+        wrong.set_value(False)   # he unticks the one welded to the wrong project
+        await asyncio.sleep(0.1)
+
+        user.find(marker="accept-claims").click()
+        await asyncio.sleep(0.4)
+    finally:
+        claims_service.propose_from_profile = saved
+
+    assert [r["fact"] for r in db.list_claims(con)] == ["FastAPI"], \
+        "an unticked proposal was written into the register anyway"
+
+
+async def test_the_cost_is_stated_before_the_spend_not_after(user: User, con,
+                                                             data_dir):
+    """It used to be revealed inside the proposal dialog — after it had been
+    spent — while the button itself had no confirmation at all."""
+    _posting(con)
+
+    await user.open("/unterlagen")
+    user.find(marker="propose-claims").click()
+    await asyncio.sleep(0.2)
+
+    await user.should_see("profile.md von der KI lesen lassen?")
+    await user.should_see("halber Cent")
+    assert db.get_setting(con, "llm_calls", "0") == "0"
