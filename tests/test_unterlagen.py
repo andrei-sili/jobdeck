@@ -163,32 +163,32 @@ def test_the_signature_sees_a_new_anlage_appearing_on_disk(con, data_dir):
     """No table signature can see a file being added, and renaming files is
     how the order of the stack is set."""
     _setup(con, data_dir)
-    before = unterlagen._signature(con, None)
+    before = unterlagen.signature(con, None)
     _blank_pdf(pathlib.Path(db.get_setting(con, "anlagen_dir", "")) / "03_neu.pdf")
-    assert unterlagen._signature(con, None) != before
+    assert unterlagen.signature(con, None) != before
 
 
 def test_the_signature_sees_an_anlage_being_renamed(con, data_dir):
     _setup(con, data_dir)
     folder = pathlib.Path(db.get_setting(con, "anlagen_dir", ""))
-    before = unterlagen._signature(con, None)
+    before = unterlagen.signature(con, None)
     (folder / "01_zeugnis.pdf").rename(folder / "04_zeugnis.pdf")
-    assert unterlagen._signature(con, None) != before
+    assert unterlagen.signature(con, None) != before
 
 
 def test_the_signature_sees_the_template_being_repointed(con, data_dir):
     _setup(con, data_dir)
-    before = unterlagen._signature(con, None)
+    before = unterlagen.signature(con, None)
     db.set_setting(con, "template_path", str(data_dir / "andere.html"))
     con.commit()
-    assert unterlagen._signature(con, None) != before
+    assert unterlagen.signature(con, None) != before
 
 
 def test_the_signature_sees_the_register_change(con, data_dir):
     _setup(con, data_dir)
-    before = unterlagen._signature(con, None)
+    before = unterlagen.signature(con, None)
     db.add_claim(con, {"fact": "Java"})
-    assert unterlagen._signature(con, None) != before
+    assert unterlagen.signature(con, None) != before
 
 
 def test_the_signature_sees_the_previewed_posting_gain_a_contact(con, data_dir):
@@ -197,10 +197,10 @@ def test_the_signature_sees_the_previewed_posting_gain_a_contact(con, data_dir):
     job_id = _setup(con, data_dir)
     con.execute("UPDATE jobs SET ansprechpartner='' WHERE id=?", (job_id,))
     con.commit()
-    before = unterlagen._signature(con, job_id)
+    before = unterlagen.signature(con, job_id)
     db.set_job_contacts(con, job_id, {"ansprechpartner": "Herr Klein"})
     con.commit()
-    assert unterlagen._signature(con, job_id) != before
+    assert unterlagen.signature(con, job_id) != before
 
 
 # --------------------------------------------------------------------------

@@ -26,7 +26,7 @@ from jobdeck.ui import live
 # in their own slices — Unterlagen already means "the Suchprofil and what gets
 # sent", and Bewerbungen already means the register. Pointing them at nothing
 # until then would take away the only way he has to send anything.
-UNTERLAGEN_PATH = "/profiles"
+UNTERLAGEN_PATH = "/unterlagen"
 STELLEN_PATH = "/"
 BEWERBUNGEN_PATH = "/applications"
 EINSTELLUNGEN_PATH = "/settings"

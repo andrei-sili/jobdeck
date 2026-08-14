@@ -95,7 +95,7 @@ async def test_a_failed_draft_can_be_rewritten_from_the_queue(
 async def test_deleting_a_search_profile_asks_first(user: User, con, data_dir):
     profile_id = db.add_profile(con, {"name": "Python", "keywords": "python"})
     con.commit()
-    await user.open("/profiles")
+    await user.open("/unterlagen")
 
     user.find(marker="delete-profile").click()
     await asyncio.sleep(0.2)
@@ -108,7 +108,7 @@ async def test_deleting_a_search_profile_asks_first(user: User, con, data_dir):
 
     user.find(marker="delete-profile").click()
     await asyncio.sleep(0.2)
-    user.find("Löschen").click()
+    user.find(marker="confirm-delete-profile").click()
     await asyncio.sleep(0.3)
     assert db.get_profile(con, profile_id) is None
 

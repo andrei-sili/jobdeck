@@ -182,7 +182,7 @@ async def test_the_profile_list_shows_a_poll_that_just_happened(
         user: User, con, data_dir):
     profile_id = db.add_profile(con, {"name": "Python", "keywords": "python"})
     con.commit()
-    await user.open("/profiles")
+    await user.open("/unterlagen")
     await user.should_see("Python")
 
     db.mark_profile_polled(con, profile_id, error="jooble: 401 Unauthorized")

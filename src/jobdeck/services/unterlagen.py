@@ -139,8 +139,8 @@ def _folder_fingerprint(anlagen_dir: str) -> tuple:
     return tuple(fingerprint)
 
 
-def _signature(con, job_id: int | None) -> tuple:
-    """Everything this page states, compressed to one comparable tuple."""
+def signature(con, job_id: int | None) -> tuple:
+    """Everything the Unterlagen screen states, as one comparable tuple."""
     return (
         *db.claims_signature(con),
         *db.profiles_signature(con),
@@ -152,11 +152,6 @@ def _signature(con, job_id: int | None) -> tuple:
         db.job_signature(con, job_id) if job_id is not None else None,
         _folder_fingerprint(db.get_setting(con, "anlagen_dir", "").strip()),
     )
-
-
-def signature(job_id: int | None = None) -> tuple:
-    with db.db() as con:
-        return _signature(con, job_id)
 
 
 # What the letter head needs, and how to say it is missing. The reason
@@ -218,15 +213,16 @@ def _specimen_facts(parts: list[Part]) -> dict:
     }
 
 
-def _read(job_id: int | None) -> dict:
-    with db.db() as con:
-        # First, before anything it labels: sqlite3 gives every SELECT its own
-        # snapshot, so a write landing between them would marry stale rows to a
-        # fresh signature and the watcher would record that as what is showing.
-        current = _signature(con, job_id)
-        settings = mappe.build_settings(con)
-        compression = db.get_setting(con, COMPRESSION_SETTING, "")
-        view = preview(con, job_id)
+def read(con, job_id: int | None) -> dict:
+    """The stack, the budgets and the letter head, without rendering anything.
+
+    Takes a connection so the screen can read everything it states — this, the
+    register and the search profiles — under one short-lived connection, with
+    the signature taken before any of it.
+    """
+    settings = mappe.build_settings(con)
+    compression = db.get_setting(con, COMPRESSION_SETTING, "")
+    view = preview(con, job_id)
     parts, anlagen_error = anlagen_parts(settings["anlagen_dir"])
     facts = _specimen_facts(parts)
     template = pathlib.Path(settings["template_path"]).expanduser() \
@@ -236,7 +232,6 @@ def _read(job_id: int | None) -> dict:
                   error="" if template and template.is_file()
                         else "Vorlage fehlt — in den Einstellungen setzen")
     return {
-        "signature": current,
         "settings": settings,
         "parts": _numbered([letter, *parts]),
         "anlagen_error": anlagen_error,
@@ -251,9 +246,18 @@ def _read(job_id: int | None) -> dict:
     }
 
 
+def _inspect(job_id: int | None) -> dict:
+    with db.db() as con:
+        # First, before anything it labels: sqlite3 gives every SELECT its own
+        # snapshot, so a write landing between them would marry stale rows to a
+        # fresh signature and the watcher would record that as what is showing.
+        current = signature(con, job_id)
+        return {"signature": current, **read(con, job_id)}
+
+
 async def inspect(job_id: int | None = None) -> dict:
-    """The stack as it stands, without rendering anything."""
-    return await asyncio.to_thread(_read, job_id)
+    """The stack as it stands, on its own connection."""
+    return await asyncio.to_thread(_inspect, job_id)
 
 
 def _build(job_id: int | None) -> dict:

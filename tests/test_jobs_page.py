@@ -864,7 +864,7 @@ def _unhosted_ui_calls(path):
 # deliberately absent: its refresh assigns `table.rows` and deletes no element,
 # so no handler's slot can die under it.
 @pytest.mark.parametrize("page_module",
-                         ["jobs.py", "queue.py", "profiles.py", "cockpit.py",
+                         ["jobs.py", "queue.py", "unterlagen.py", "cockpit.py",
                           "../draft_editor.py"])
 def test_nothing_is_shown_on_a_slot_that_may_already_be_gone(page_module):
     """The defect CLASS, not the one place it was found. A handler runs in the
@@ -882,7 +882,7 @@ def test_nothing_is_shown_on_a_slot_that_may_already_be_gone(page_module):
 
 
 @pytest.mark.parametrize("page_module",
-                         ["jobs.py", "queue.py", "profiles.py", "cockpit.py",
+                         ["jobs.py", "queue.py", "unterlagen.py", "cockpit.py",
                           "../draft_editor.py"])
 def test_the_slot_rule_is_actually_binding(page_module):
     """A scan that finds no candidates would pass on any code at all."""
