@@ -531,6 +531,21 @@ def test_the_posting_signature_covers_the_contact_block_it_is_asked_about(con):
         seen = current
 
 
+def test_two_unresolved_postings_never_sign_the_same(con):
+    """A caller may CHOOSE which posting to sign — the letter preview signs
+    whichever currently tops the working list. Two fresh postings with the
+    same scraped title have every other column empty and identical, so without
+    the id and the company the preview goes on naming a firm whose posting has
+    just been skipped, applied to or outranked."""
+    alpha = _add_job(con, external_id="A", company="Alpha GmbH",
+                     title="Softwareentwickler (m/w/d)")
+    beta = _add_job(con, external_id="B", company="Beta AG",
+                    title="Softwareentwickler (m/w/d)")
+    con.commit()
+
+    assert db.job_signature(con, alpha) != db.job_signature(con, beta)
+
+
 # ---------------------------------------------------------------------------
 # Vorgemerkt — a posting he sets aside by hand (schema v8)
 # ---------------------------------------------------------------------------

@@ -177,25 +177,58 @@ def test_a_poll_error_changes_the_profiles_signature(con, data_dir):
 # --------------------------------------------------------------------------
 # The order inside a loader is load-bearing
 # --------------------------------------------------------------------------
-def _signature_or_data_calls(func) -> list[str]:
-    """Every read a loader makes, in source order, tagged by what it is.
+def _is_signature_call(node: ast.Call) -> bool:
+    """Whether this call reads a signature, however it is spelled.
 
-    A signature read is anything whose call ends in `_signature` — the rail's
-    own helper composes three of the shared ones and is the loader's first
-    statement, so a rule that only recognised `db.*_signature` would skip that
-    loader entirely rather than check it."""
+    The rule used to test `ast.unparse(node.func).endswith("_signature")`,
+    which matches `db.data_signature(...)` and `_signature(...)` — and misses
+    `unterlagen.signature(con, job_id)` by one character. The Unterlagen
+    loader was therefore skipped in silence: the rule reported success while
+    the newest screen was the one thing it did not check. Match the NAME being
+    called instead of the spelling of the path to it.
+    """
+    name = (node.func.attr if isinstance(node.func, ast.Attribute)
+            else getattr(node.func, "id", ""))
+    return name == "signature" or name.endswith("_signature")
+
+
+def _composes_a_signature(func) -> bool:
+    """Whether this function IS a signature rather than a loader that reads one.
+
+    A signature composer has no data to label — every read inside it is part
+    of the same one-moment snapshot, so their order carries nothing. Judging
+    it by the loader rule turns a correct signature into a failure and invites
+    reordering real code to satisfy a rule that does not apply to it.
+    """
+    return func.name == "signature" or func.name.endswith("_signature")
+
+
+def _signature_or_data_calls(func) -> list[str]:
+    """Every read a loader makes, in source order, tagged by what it is."""
     found = []
     for node in ast.walk(func):
         if not isinstance(node, ast.Call):
             continue
-        target = ast.unparse(node.func)
-        if target.endswith("_signature"):
+        if _is_signature_call(node):
             found.append((node.lineno, "signature"))
         elif (isinstance(node.func, ast.Attribute)
                 and getattr(node.func.value, "id", "") == "db"
                 and node.func.attr != "db"):
             found.append((node.lineno, node.func.attr))
     return [kind for _, kind in sorted(found)]
+
+
+def _loader_files() -> list[pathlib.Path]:
+    """Every file that can hold a loader: the whole UI package, and the
+    services that read a signature on a page's behalf.
+
+    `services/unterlagen.py` reads one for the Unterlagen screen and lives
+    outside `ui/`, so a scan bounded by the UI package never opened it.
+    """
+    from jobdeck.ui.pages import jobs as jobs_page
+    ui_dir = pathlib.Path(jobs_page.__file__).parent.parent
+    services_dir = ui_dir.parent / "services"
+    return sorted([*ui_dir.rglob("*.py"), *services_dir.rglob("*.py")])
 
 
 def test_every_loader_reads_its_signature_before_the_data_it_describes():
@@ -207,14 +240,13 @@ def test_every_loader_reads_its_signature_before_the_data_it_describes():
 
     Over the whole UI package, not only its pages: the rail is a loader that
     lives beside them and is rendered on every screen there is."""
-    from jobdeck.ui.pages import jobs as jobs_page
-
-    ui_dir = pathlib.Path(jobs_page.__file__).parent.parent
     checked = []
-    for path in sorted(ui_dir.rglob("*.py")):
+    for path in _loader_files():
         tree = ast.parse(path.read_text())
         for func in ast.walk(tree):
             if not isinstance(func, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            if _composes_a_signature(func):
                 continue
             calls = _signature_or_data_calls(func)
             if "signature" not in calls or len(calls) == 1:
@@ -224,6 +256,44 @@ def test_every_loader_reads_its_signature_before_the_data_it_describes():
                 f"signature — a write landing between the two would be lost")
             checked.append(f"{path.name}:{func.name}")
     assert len(checked) >= 5, f"the scan found almost nothing: {checked}"
+
+
+def test_the_signature_first_rule_actually_covers_the_newest_screen():
+    """The rule passed for weeks on a page it was silently skipping, because
+    its detector matched the SPELLING of the call rather than the name. A rule
+    that can quietly cover nothing has to say what it covered."""
+    covered = []
+    for path in _loader_files():
+        tree = ast.parse(path.read_text())
+        for func in ast.walk(tree):
+            if not isinstance(func, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            if _composes_a_signature(func):
+                continue
+            calls = _signature_or_data_calls(func)
+            if "signature" in calls and len(calls) > 1:
+                covered.append(f"{path.stem}:{func.name}")
+
+    assert "unterlagen:_load" in covered, (
+        f"the Unterlagen loader is not checked by the signature-first rule; "
+        f"covered: {sorted(covered)}")
+
+
+def test_the_rule_recognises_a_signature_read_however_it_is_spelled():
+    """The detector matched the SPELLING of the call path, so
+    `unterlagen.signature(con, job_id)` — one character away from
+    `*_signature` — was not recognised and its loader was skipped in silence
+    for the whole slice. Pin every spelling the codebase actually uses."""
+    for source in ("db.data_signature(con)", "_signature(con)",
+                   "unterlagen.signature(con, job_id)",
+                   "unterlagen_service.signature(con, job_id)"):
+        call = ast.parse(source, mode="eval").body
+        assert _is_signature_call(call), f"not recognised: {source}"
+
+    for source in ("db.list_claims(con)", "read(con, job_id)",
+                   "db.get_setting(con, 'x', '')"):
+        call = ast.parse(source, mode="eval").body
+        assert not _is_signature_call(call), f"wrongly recognised: {source}"
 
 
 def test_reading_a_posting_changes_the_data_signature(con, data_dir):

@@ -1467,12 +1467,18 @@ def job_signature(con: sqlite3.Connection, job_id: int) -> tuple | None:
     contact resolution fills exactly those fields in the background — a screen
     that states a value has to be rebuilt when that value changes, or it is
     quietly showing "none named" beside a name the app already has.
+
+    `id` and `company` lead it because a caller may CHOOSE which posting to
+    sign — the letter preview signs whichever posting currently tops the
+    working list. Without them, two unresolved postings sharing a scraped
+    title produce identical tuples, so the preview goes on naming a firm whose
+    posting has just been skipped, applied to or outranked.
     """
     row = con.execute(
-        "SELECT status, liveness, liveness_checked_at, contact_email, "
-        "apply_channel, ats_vendor, apply_url, title, ansprechpartner, "
-        "contact_strasse, contact_plz_ort, work_strasse, work_plz_ort, "
-        f"temp_agency, refnr, {_DRAFT_STATUS_SQL}, "
+        "SELECT id, company, status, liveness, liveness_checked_at, "
+        "contact_email, apply_channel, ats_vendor, apply_url, title, "
+        "ansprechpartner, contact_strasse, contact_plz_ort, work_strasse, "
+        f"work_plz_ort, temp_agency, refnr, {_DRAFT_STATUS_SQL}, "
         f"{_DRAFT_UPDATED_SQL} FROM jobs WHERE id=?",
         (job_id,),
     ).fetchone()
