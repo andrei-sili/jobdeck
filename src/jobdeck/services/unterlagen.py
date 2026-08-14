@@ -145,7 +145,12 @@ def anlagen_parts(anlagen_dir: str) -> tuple[list[Part], str]:
 # say it in its own language without a second thing to keep in step.
 BEFORE_SETTING = "mappe_specimen_before_bytes"
 LOSSLESS_SETTING = "mappe_specimen_lossless"
-SPECIMEN_SETTINGS = (BEFORE_SETTING, LOSSLESS_SETTING)
+# What the build MEASURED, so the screen never has to infer it back out of the
+# artifact: the letter's own length, and the Anlagen that were merged with it.
+LETTER_PAGES_SETTING = "mappe_specimen_letter_pages"
+ANLAGEN_SETTING = "mappe_specimen_anlagen"
+SPECIMEN_SETTINGS = (BEFORE_SETTING, LOSSLESS_SETTING, LETTER_PAGES_SETTING,
+                     ANLAGEN_SETTING)
 
 
 def _folder_fingerprint(anlagen_dir: str) -> tuple:
@@ -173,8 +178,33 @@ def _folder_fingerprint(anlagen_dir: str) -> tuple:
     return tuple(fingerprint)
 
 
+# app_settings this screen PRINTS beyond the ones the Mappe is built from.
+# `stale_age_days` is not decoration here: it is the age filter that decides
+# which posting the whole letter-head panel is built from.
+WATCHED_SETTINGS = ("global_hard_tags", "stale_age_days")
+
+
+def _file_fingerprint(path: pathlib.Path | None) -> tuple:
+    """One file as the screen sees it: whether it is there, and what it is.
+
+    Existence alone is not enough for either of the two files this covers. The
+    template decides the letter's page count, so editing it changes every page
+    span the stack prints; the specimen IS the screen's cache of the built
+    Mappe, so replacing or deleting it changes the total, the weight and
+    whether "Ansehen" leads anywhere.
+    """
+    if path is None:
+        return ()
+    try:
+        stat = path.stat()
+    except OSError:
+        return ("missing",)
+    return (stat.st_size, stat.st_mtime_ns)
+
+
 def signature(con, job_id: int | None) -> tuple:
     """Everything the Unterlagen screen states, as one comparable tuple."""
+    template = db.get_setting(con, "template_path", "").strip()
     return (
         *db.claims_signature(con),
         *db.profiles_signature(con),
@@ -182,9 +212,15 @@ def signature(con, job_id: int | None) -> tuple:
         # Suchprofil panel summarises only the active ones.
         db.count_active_profiles(con),
         *(db.get_setting(con, key, "")
-          for key in (*mappe.BUILD_SETTING_KEYS, *SPECIMEN_SETTINGS)),
+          for key in (*mappe.BUILD_SETTING_KEYS, *SPECIMEN_SETTINGS,
+                      *WATCHED_SETTINGS)),
         db.job_signature(con, job_id) if job_id is not None else None,
         _folder_fingerprint(db.get_setting(con, "anlagen_dir", "").strip()),
+        # The PATHS to these two are settings and already above; their
+        # CONTENTS are facts on disk that no table and no setting can see.
+        _file_fingerprint(pathlib.Path(template).expanduser()
+                          if template else None),
+        _file_fingerprint(specimen_path()),
     )
 
 
@@ -203,6 +239,18 @@ _PREVIEW_FIELDS = (
     ("betreff", "Betreff", ""),
 )
 
+# The address block has a THIRD outcome, and it is the only one the user can
+# do something about: under Arbeitnehmerüberlassung `templates.letter_address`
+# refuses the board's work address on purpose, because it belongs to a client
+# and not to the employer the letter is addressed to. Reporting that as "no
+# address anywhere" sends him to the ad, where he finds one, and concludes the
+# extraction is broken.
+_TEMP_AGENCY_REASON = (
+    "Arbeitnehmerüberlassung — das Board nennt zwar eine Adresse, aber das "
+    "ist der Einsatzort beim Kunden, nicht der Empfänger des Briefes"
+)
+_ADDRESS_KEYS = ("strasse", "plz_ort")
+
 
 def preview(con, job_id: int | None) -> dict:
     """The letter head for one posting, and what will be empty in it.
@@ -216,35 +264,66 @@ def preview(con, job_id: int | None) -> dict:
         return {"job": None, "values": {}, "missing": []}
     values = mappe.letter_values(job, None, settings["applicant_name"],
                                  settings["applicant_ort"])
+    temp_agency = bool(job["temp_agency"])
     missing = [
-        {"key": key, "label": label, "why": why}
+        {"key": key, "label": label,
+         "why": (_TEMP_AGENCY_REASON
+                 if temp_agency and key in _ADDRESS_KEYS else why)}
         for key, label, why in _PREVIEW_FIELDS
         if not str(values.get(key, "")).strip()
     ]
     return {"job": dict(job), "values": values, "missing": missing}
 
 
-def _specimen_facts(parts: list[Part]) -> dict:
-    """What the last build produced, read back from the file it produced.
+def _specimen_facts(con, parts: list[Part]) -> dict:
+    """What the last build produced — the letter's own length MEASURED, and
+    whether the Anlagen have moved under it since.
 
-    The letter's page count is the specimen's total minus the Anlagen, which
-    is exact: merging preserves both the order and the number of pages.
+    The letter's page count used to be the specimen's total minus the Anlagen
+    as they are on disk NOW. That is a subtraction between two different
+    moments, and every page number on the screen rode on it: dropping one new
+    certificate into the folder silently re-attributed its pages to the letter
+    and shifted every range below, while the total still read like a fresh
+    measurement. An unreadable folder attributed the WHOLE Mappe to the letter.
+
+    So the build writes down what it actually saw — the letter's pages, and a
+    fingerprint of the Anlagen it merged — and this reads those back. The page
+    numbers are then correct even after the folder changes, because only the
+    letter's length is remembered and the Anlagen are always counted fresh; the
+    total SIZE is the one figure that goes stale, and it is flagged rather than
+    reprinted as if it still held.
     """
     path = specimen_path()
     try:
-        total_pages = pdf.page_count(path)
         size = path.stat().st_size
+        total_pages = pdf.page_count(path)
     except Exception:
         return {"built": False, "pages": 0, "size_bytes": 0,
-                "letter_pages": 0, "built_at": ""}
-    anlagen_pages = sum(part.pages for part in parts)
+                "letter_pages": 0, "stale": False, "built_pages": 0}
+    letter_pages = _int_setting(db.get_setting(con, LETTER_PAGES_SETTING, ""))
+    built_with = db.get_setting(con, ANLAGEN_SETTING, "")
+    stale = built_with != _anlagen_stamp(parts)
     return {
         "built": True,
-        "pages": total_pages,
+        # What the stack really is now: the remembered letter plus the Anlagen
+        # as they stand. Reading the total off the old artifact is exactly the
+        # figure that was wrong.
+        "pages": letter_pages + sum(part.pages for part in parts),
+        "built_pages": total_pages,
         "size_bytes": size,
-        "letter_pages": max(0, total_pages - anlagen_pages),
-        "built_at": path.stat().st_mtime,
+        "letter_pages": letter_pages,
+        "stale": stale,
     }
+
+
+def _anlagen_stamp(parts: list[Part]) -> str:
+    """The Anlagen a build saw, in a form two builds can be compared by.
+
+    Names and page counts rather than mtimes: re-saving a certificate without
+    changing it should not tell the user his measurements have gone stale, and
+    what the stack STATES about an Anlage is its name and its length.
+    """
+    return "|".join(f"{part.label}:{part.pages}" for part in parts)
 
 
 def read(con, job_id: int | None) -> dict:
@@ -259,7 +338,7 @@ def read(con, job_id: int | None) -> dict:
     lossless = db.get_setting(con, LOSSLESS_SETTING, "") == "1"
     view = preview(con, job_id)
     parts, anlagen_error = anlagen_parts(settings["anlagen_dir"])
-    facts = _specimen_facts(parts)
+    facts = _specimen_facts(con, parts)
     template = pathlib.Path(settings["template_path"]).expanduser() \
         if settings["template_path"] else None
     letter = Part(label=TEMPLATE_LABEL, pages=facts["letter_pages"],
@@ -279,6 +358,9 @@ def read(con, job_id: int | None) -> dict:
         "max_bytes": pdf.MAX_MAPPE_BYTES,
         "shrunk_from_bytes": shrunk_from,
         "lossless": lossless,
+        # A budget line may only promise more compression when compression is
+        # actually switched on; with it off, what was merged is what is sent.
+        "compress": settings["compress"] == "1",
     }
 
 
@@ -300,18 +382,27 @@ def _build(job_id: int | None) -> dict:
     with db.db() as con:
         settings = mappe.build_settings(con)
         job = db.get_job(con, job_id) if job_id is not None else None
+    # German, like everything else the screen shows him. These refusals are
+    # the first thing a fresh install meets, and the toast that carries them
+    # sits between two German sentences.
     if not settings["applicant_name"]:
-        return {"ok": False, "error": "set your applicant name in Settings first"}
+        return {"ok": False, "error": "Trage zuerst deinen Namen in den "
+                                      "Einstellungen ein"}
     if not settings["applicant_ort"]:
-        return {"ok": False, "error": "set your city (Ort) in Settings first"}
+        return {"ok": False, "error": "Trage zuerst deinen Ort in den "
+                                      "Einstellungen ein — er trägt die "
+                                      "Datumszeile"}
     if not settings["template_path"]:
-        return {"ok": False, "error": "set the letter template path in Settings first"}
+        return {"ok": False, "error": "Trage zuerst den Pfad zur Briefvorlage "
+                                      "in den Einstellungen ein"}
     template_file = pathlib.Path(settings["template_path"]).expanduser()
     if not template_file.is_file():
-        return {"ok": False, "error": f"letter template not found: {template_file}"}
+        return {"ok": False, "error": f"Briefvorlage nicht gefunden: "
+                                      f"{template_file}"}
     if job is None:
-        return {"ok": False, "error": "no posting to build the specimen from — "
-                                      "the letter head needs a real one"}
+        return {"ok": False, "error": "Keine Anzeige, aus der gebaut werden "
+                                      "könnte — der Briefkopf braucht eine "
+                                      "echte"}
 
     values = mappe.letter_values(job, None, settings["applicant_name"],
                                  settings["applicant_ort"])
@@ -319,9 +410,10 @@ def _build(job_id: int | None) -> dict:
     try:
         template_html = template_file.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        return {"ok": False, "error": f"cannot read the letter template: {exc}"}
+        return {"ok": False, "error": f"Briefvorlage nicht lesbar: {exc}"}
 
     out_path = specimen_path()
+    letter_pages = 0
     try:
         letter_html = templates.render_letter(template_html, values)
         anlagen = pdf.collect_anlagen(settings["anlagen_dir"])
@@ -333,6 +425,11 @@ def _build(job_id: int | None) -> dict:
         with tempfile.TemporaryDirectory(prefix="jobdeck_muster_") as tmp:
             letter_pdf = pathlib.Path(tmp) / "anschreiben.pdf"
             pdf.html_to_pdf(letter_html, letter_pdf)
+            # Measured here, while the two documents are still apart. Deriving
+            # it later by subtracting the Anlagen from the merged total looks
+            # equivalent and is not: the Anlagen can change afterwards, and
+            # then the subtraction quietly re-attributes their pages.
+            letter_pages = pdf.page_count(letter_pdf)
             merged = pathlib.Path(tmp) / "mappe.pdf"
             pdf.merge_pdfs([letter_pdf, *anlagen], merged)
             if settings["compress"] == "1":
@@ -346,18 +443,28 @@ def _build(job_id: int | None) -> dict:
     except (templates.TemplateError, pdf.PdfError) as exc:
         return {"ok": False, "error": str(exc)}
 
+    total_pages = pdf.page_count(out_path)
+    size_bytes = out_path.stat().st_size
     with db.db() as con:
         db.set_setting(con, BEFORE_SETTING,
                        str(compression.original_bytes if compression.applied
                            else 0))
         db.set_setting(con, LOSSLESS_SETTING,
                        "1" if compression.lossless else "0")
-    log.info("specimen Mappe built for job %s: %s pages, %s bytes %s", job_id,
-             pdf.page_count(out_path), out_path.stat().st_size,
+        # What this build saw, so the screen never infers it back out of the
+        # artifact: the letter's own length, and the Anlagen it was merged
+        # with — which is how a later change to the folder becomes visible
+        # instead of silently rewriting every page number.
+        db.set_setting(con, LETTER_PAGES_SETTING, str(letter_pages))
+        db.set_setting(con, ANLAGEN_SETTING, _anlagen_stamp(
+            anlagen_parts(settings["anlagen_dir"])[0]))
+    log.info("specimen Mappe built for job %s: %s pages (%s letter), %s bytes %s",
+             job_id, total_pages, letter_pages, size_bytes,
              compression.describe())
     return {"ok": True, "error": "", "pdf_path": str(out_path),
-            "pages": pdf.page_count(out_path),
-            "size_bytes": out_path.stat().st_size,
+            "pages": total_pages,
+            "letter_pages": letter_pages,
+            "size_bytes": size_bytes,
             "compression": compression.describe(),
             "met_target": compression.met_target}
 

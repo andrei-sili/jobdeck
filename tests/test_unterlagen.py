@@ -299,14 +299,14 @@ async def test_a_build_without_a_posting_refuses_and_says_why(con, data_dir):
     _setup(con, data_dir)
     result = await unterlagen.build(None)
     assert result["ok"] is False
-    assert "no posting" in result["error"]
+    assert "Keine Anzeige" in result["error"]
 
 
 async def test_a_build_without_a_template_refuses_and_says_why(con, data_dir):
     job_id = _setup(con, data_dir, template_path="")
     result = await unterlagen.build(job_id)
     assert result["ok"] is False
-    assert "template path" in result["error"]
+    assert "Briefvorlage" in result["error"]
 
 
 async def test_a_build_with_a_template_that_is_gone_names_the_path(con, data_dir):
@@ -332,3 +332,239 @@ async def test_inspect_states_both_budgets_and_the_german_ceiling(con, data_dir)
         mappe.DEFAULT_PORTAL_TARGET_MB * 1024 * 1024)
     assert view["target_portal_bytes"] < view["target_email_bytes"]
     assert view["max_bytes"] == pdf.MAX_MAPPE_BYTES
+
+
+# --------------------------------------------------------------------------
+# What the build remembers, and what goes stale under it
+# --------------------------------------------------------------------------
+def _fake_specimen(data_dir, pages: int) -> pathlib.Path:
+    """A built specimen, without paying for a Chrome render."""
+    path = unterlagen.specimen_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return _blank_pdf(path, pages=pages)
+
+
+def _remember_build(con, letter_pages: int, parts) -> None:
+    db.set_setting(con, unterlagen.LETTER_PAGES_SETTING, str(letter_pages))
+    db.set_setting(con, unterlagen.ANLAGEN_SETTING,
+                   unterlagen._anlagen_stamp(parts))
+    con.commit()
+
+
+def test_a_new_anlage_does_not_silently_rewrite_the_letters_page_count(
+        con, data_dir):
+    """The panel's worst possible lie, and the reason the letter's length is
+    remembered instead of subtracted. With a 3-page letter and 3 pages of
+    Anlagen, dropping in a 2-page certificate used to re-attribute its pages
+    to the letter: the Zeugnis moved from 4–5 to 2–3 and the total still read
+    6 while the real Mappe would be 8."""
+    _setup(con, data_dir)
+    parts, _ = unterlagen.anlagen_parts(db.get_setting(con, "anlagen_dir", ""))
+    _fake_specimen(data_dir, pages=6)
+    _remember_build(con, 3, parts)
+
+    view = unterlagen.read(con, None)
+    assert view["specimen"]["letter_pages"] == 3
+    assert [(p.label, p.first_page) for p in view["parts"]] == [
+        (unterlagen.TEMPLATE_LABEL, 1), ("01_zeugnis", 4), ("02_zertifikat", 6)]
+    assert view["specimen"]["stale"] is False
+
+    _blank_pdf(pathlib.Path(db.get_setting(con, "anlagen_dir", "")) / "03_neu.pdf",
+               pages=2)
+    after = unterlagen.read(con, None)
+
+    assert after["specimen"]["letter_pages"] == 3, \
+        "the new Anlage's pages were attributed to the letter"
+    assert [(p.label, p.first_page) for p in after["parts"]] == [
+        (unterlagen.TEMPLATE_LABEL, 1), ("01_zeugnis", 4), ("02_zertifikat", 6),
+        ("03_neu", 7)]
+    assert after["specimen"]["pages"] == 8, "the total came off the stale file"
+    assert after["specimen"]["stale"] is True
+
+
+def test_a_deleted_anlage_does_not_inflate_the_letter_either(con, data_dir):
+    _setup(con, data_dir)
+    parts, _ = unterlagen.anlagen_parts(db.get_setting(con, "anlagen_dir", ""))
+    _fake_specimen(data_dir, pages=6)
+    _remember_build(con, 3, parts)
+
+    (pathlib.Path(db.get_setting(con, "anlagen_dir", "")) / "01_zeugnis.pdf").unlink()
+    view = unterlagen.read(con, None)
+
+    assert view["specimen"]["letter_pages"] == 3
+    assert view["specimen"]["pages"] == 4
+    assert view["specimen"]["stale"] is True
+
+
+def test_a_missing_anlagen_folder_does_not_attribute_the_whole_mappe_to_the_letter(
+        con, data_dir):
+    """The degenerate case: with no readable Anlagen the subtraction gave the
+    letter every page in the file, printed beside the warning saying the
+    folder does not exist."""
+    _setup(con, data_dir)
+    parts, _ = unterlagen.anlagen_parts(db.get_setting(con, "anlagen_dir", ""))
+    _fake_specimen(data_dir, pages=6)
+    _remember_build(con, 3, parts)
+
+    db.set_setting(con, "anlagen_dir", str(data_dir / "weg"))
+    con.commit()
+    view = unterlagen.read(con, None)
+
+    assert view["specimen"]["letter_pages"] == 3, \
+        "the Anlagen's pages were charged to the letter"
+    assert view["anlagen_error"]
+
+
+def test_a_torn_anlage_keeps_its_pages_out_of_the_letters_count(con, data_dir):
+    _setup(con, data_dir)
+    parts, _ = unterlagen.anlagen_parts(db.get_setting(con, "anlagen_dir", ""))
+    _fake_specimen(data_dir, pages=6)
+    _remember_build(con, 3, parts)
+
+    folder = pathlib.Path(db.get_setting(con, "anlagen_dir", ""))
+    (folder / "01_zeugnis.pdf").write_bytes(b"torn")
+    view = unterlagen.read(con, None)
+
+    assert view["specimen"]["letter_pages"] == 3
+    assert view["parts"][1].error.startswith("nicht lesbar")
+
+
+def test_the_stack_is_not_stale_when_only_an_anlage_is_re_saved(con, data_dir):
+    """Names and page counts, not mtimes: re-saving an unchanged certificate
+    must not tell him his measurements have expired."""
+    _setup(con, data_dir)
+    folder = pathlib.Path(db.get_setting(con, "anlagen_dir", ""))
+    parts, _ = unterlagen.anlagen_parts(str(folder))
+    _fake_specimen(data_dir, pages=6)
+    _remember_build(con, 3, parts)
+
+    _blank_pdf(folder / "01_zeugnis.pdf", pages=2)  # same name, same length
+    assert unterlagen.read(con, None)["specimen"]["stale"] is False
+
+
+@pytest.mark.skipif(pdf.find_chrome() is None, reason="headless Chrome missing")
+async def test_a_build_writes_down_what_it_measured(con, data_dir):
+    job_id = _setup(con, data_dir)
+    result = await unterlagen.build(job_id)
+
+    assert result["ok"], result["error"]
+    assert result["letter_pages"] >= 1
+    assert db.get_setting(con, unterlagen.LETTER_PAGES_SETTING, "") == \
+        str(result["letter_pages"])
+    assert db.get_setting(con, unterlagen.ANLAGEN_SETTING, "") == \
+        "01_zeugnis:2|02_zertifikat:1"
+    assert unterlagen.read(con, job_id)["specimen"]["stale"] is False
+
+
+@pytest.mark.skipif(pdf.find_chrome() is None, reason="headless Chrome missing")
+async def test_the_compression_facts_survive_into_the_screen(con, data_dir):
+    """The "verlustfrei von 3,7 MB" line is the only evidence the lossless
+    rung is doing its job on his real Anlagen."""
+    job_id = _setup(con, data_dir)
+    await unterlagen.build(job_id)
+
+    view = unterlagen.read(con, job_id)
+    assert view["shrunk_from_bytes"] == unterlagen._int_setting(
+        db.get_setting(con, unterlagen.BEFORE_SETTING, ""))
+    assert view["lossless"] is (
+        db.get_setting(con, unterlagen.LOSSLESS_SETTING, "") == "1")
+    assert db.get_setting(con, unterlagen.LOSSLESS_SETTING, "") in ("0", "1")
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("3670016", 3670016), ("", 0), ("nonsense", 0), ("-5", 0), (" 42 ", 42),
+])
+def test_a_stored_byte_count_is_screened_not_trusted(raw, expected):
+    """app_settings lives in a directory the user is invited to edit."""
+    assert unterlagen._int_setting(raw) == expected
+
+
+# --------------------------------------------------------------------------
+# More of what the signature has to see
+# --------------------------------------------------------------------------
+def test_the_signature_sees_the_search_rules_the_panel_prints(con, data_dir):
+    """`stale_age_days` is not decoration: it is also the age filter that
+    decides which posting the whole letter-head panel is built from."""
+    _setup(con, data_dir)
+    for key, value in (("global_hard_tags", "Keine Ausbildung"),
+                       ("stale_age_days", "5")):
+        before = unterlagen.signature(con, None)
+        db.set_setting(con, key, value)
+        con.commit()
+        assert unterlagen.signature(con, None) != before, f"{key} is unsigned"
+
+
+def test_the_signature_sees_a_profile_being_switched_off(con, data_dir):
+    """`profiles_signature` counts rows and poll stamps; it cannot see
+    `active`, and the panel prints "(inaktiv)"."""
+    _setup(con, data_dir)
+    profile_id = db.add_profile(con, {"name": "P", "keywords": "python"})
+    con.commit()
+    before = unterlagen.signature(con, None)
+    db.update_profile(con, profile_id, {"name": "P", "keywords": "python",
+                                        "active": 0})
+    con.commit()
+    assert unterlagen.signature(con, None) != before
+
+
+def test_the_signature_sees_the_specimen_itself_appear_and_vanish(con, data_dir):
+    """The specimen file IS the screen's cache of the built Mappe — the total,
+    the weight and whether "Ansehen" leads anywhere all come from it."""
+    _setup(con, data_dir)
+    before = unterlagen.signature(con, None)
+    _fake_specimen(data_dir, pages=6)
+    built = unterlagen.signature(con, None)
+    assert built != before
+
+    unterlagen.specimen_path().unlink()
+    assert unterlagen.signature(con, None) != built
+
+
+def test_the_signature_sees_the_template_file_itself(con, data_dir):
+    """Only the PATH was signed. Putting the template where the setting
+    already points left the screen saying "Vorlage fehlt" for the life of the
+    page; moving it away left it describing a Mappe that can no longer build."""
+    _setup(con, data_dir, template_path=str(data_dir / "spaeter.html"))
+    before = unterlagen.signature(con, None)
+    assert "Vorlage fehlt" in unterlagen.read(con, None)["parts"][0].error
+
+    (data_dir / "spaeter.html").write_text(TEMPLATE, encoding="utf-8")
+    after = unterlagen.signature(con, None)
+    assert after != before
+    assert unterlagen.read(con, None)["parts"][0].error == ""
+
+    (data_dir / "spaeter.html").write_text(TEMPLATE + "<p>x</p>", encoding="utf-8")
+    assert unterlagen.signature(con, None) != after, "an edit is invisible"
+
+
+# --------------------------------------------------------------------------
+# The reason a field is empty
+# --------------------------------------------------------------------------
+def test_arbeitnehmeruberlassung_is_named_as_the_reason_for_the_empty_address(
+        con, data_dir):
+    """The board DOES state an address here; it is refused on purpose, because
+    it is the client's site and not the recipient. Blaming "weder Anzeige noch
+    Board" sends him to the ad, where he finds one."""
+    job_id = _setup(con, data_dir)
+    con.execute("UPDATE jobs SET contact_strasse='', contact_plz_ort='', "
+                "work_strasse='Kundenweg 3', work_plz_ort='10115 Berlin', "
+                "temp_agency=1 WHERE id=?", (job_id,))
+    con.commit()
+
+    missing = unterlagen.preview(con, job_id)["missing"]
+    reasons = {m["key"]: m["why"] for m in missing}
+    assert "Arbeitnehmerüberlassung" in reasons["strasse"]
+    assert "Arbeitnehmerüberlassung" in reasons["plz_ort"]
+    assert "weder Anzeige noch Board" not in reasons["strasse"]
+
+
+def test_without_ueberlassung_the_ordinary_reason_still_stands(con, data_dir):
+    job_id = _setup(con, data_dir)
+    con.execute("UPDATE jobs SET contact_strasse='', contact_plz_ort='', "
+                "work_strasse='', work_plz_ort='', temp_agency=0 WHERE id=?",
+                (job_id,))
+    con.commit()
+
+    reasons = {m["key"]: m["why"]
+               for m in unterlagen.preview(con, job_id)["missing"]}
+    assert "weder Anzeige noch Board" in reasons["strasse"]

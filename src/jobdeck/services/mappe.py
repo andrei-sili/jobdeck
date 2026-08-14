@@ -71,9 +71,13 @@ def letter_values(job, draft, applicant_name: str, applicant_ort: str) -> dict:
                     or ai_drafting.build_betreff(job["title"],
                                                  resolve_refnr(job))),
         # Derived from the same subject: a cover sheet naming a different
-        # Stelle than the letter is the classic copy-paste tell.
+        # Stelle than the letter is the classic copy-paste tell. The fallback
+        # cleans the title too — without a draft (the specimen) it is ALWAYS
+        # the fallback that runs, and the Betreff beside it is built from
+        # `build_betreff`, which cleans. Page one would carry the board's
+        # "Ab sofort:" while page two carried the tidy line.
         "deckblatt_rolle": ai_drafting.deckblatt_rolle(betreff, applicant_name)
-                           or f"als {job['title']}",
+                           or f"als {ai_drafting.clean_title(job['title'])}",
     }
 
 
@@ -101,6 +105,28 @@ def target_mb_setting(raw: str, fallback: float) -> float:
     return value
 
 
+# field -> (app_settings key, default, strip?). The single definition of what
+# a Mappe is built from: `build_settings` reads it and BUILD_SETTING_KEYS is
+# DERIVED from it. Two hand-kept lists drift, and the drift is invisible —
+# the next setting added would become a fact a screen states and no signature
+# can see, with every test still green.
+_BUILD_SETTINGS = (
+    ("applicant_name", "applicant_name", "", True),
+    ("applicant_ort", "applicant_ort", "", True),
+    ("template_path", "template_path", "", True),
+    ("anlagen_dir", "anlagen_dir", "", True),
+    ("compress", "mappe_compress", "1", False),
+    ("target_mb", "mappe_target_mb", "", False),
+    ("target_portal_mb", "mappe_target_portal_mb", "", False),
+)
+
+# A screen stating the budgets, the template or the Anlagen folder it will use
+# must rebuild when one of them changes on the Settings page — no table
+# signature can see an app_settings row.
+BUILD_SETTING_KEYS = tuple(key for _field, key, _default, _strip
+                           in _BUILD_SETTINGS)
+
+
 def build_settings(con) -> dict:
     """Everything outside the posting that decides what the Mappe becomes.
 
@@ -110,22 +136,10 @@ def build_settings(con) -> dict:
     assembled under different settings is worse than no screen.
     """
     return {
-        "applicant_name": db.get_setting(con, "applicant_name", "").strip(),
-        "applicant_ort": db.get_setting(con, "applicant_ort", "").strip(),
-        "template_path": db.get_setting(con, "template_path", "").strip(),
-        "anlagen_dir": db.get_setting(con, "anlagen_dir", "").strip(),
-        "compress": db.get_setting(con, "mappe_compress", "1"),
-        "target_mb": db.get_setting(con, "mappe_target_mb", ""),
-        "target_portal_mb": db.get_setting(con, "mappe_target_portal_mb", ""),
+        field: (db.get_setting(con, key, default).strip() if strip
+                else db.get_setting(con, key, default))
+        for field, key, default, strip in _BUILD_SETTINGS
     }
-
-
-# The settings `build_settings` reads. A screen that states the budgets and
-# the template it will use must rebuild when one of them is changed on the
-# Settings page — no table signature can see an app_settings row.
-BUILD_SETTING_KEYS = ("applicant_name", "applicant_ort", "template_path",
-                      "anlagen_dir", "mappe_compress", "mappe_target_mb",
-                      "mappe_target_portal_mb")
 
 
 def target_bytes(settings: dict, channel: str) -> int:
