@@ -101,7 +101,34 @@ def target_mb_setting(raw: str, fallback: float) -> float:
     return value
 
 
-def _target_bytes(settings: dict, channel: str) -> int:
+def build_settings(con) -> dict:
+    """Everything outside the posting that decides what the Mappe becomes.
+
+    One definition, because the specimen the user inspects and the Mappe an
+    employer receives have to be built from the same template, the same
+    Anlagen folder and the same size budgets — a screen describing documents
+    assembled under different settings is worse than no screen.
+    """
+    return {
+        "applicant_name": db.get_setting(con, "applicant_name", "").strip(),
+        "applicant_ort": db.get_setting(con, "applicant_ort", "").strip(),
+        "template_path": db.get_setting(con, "template_path", "").strip(),
+        "anlagen_dir": db.get_setting(con, "anlagen_dir", "").strip(),
+        "compress": db.get_setting(con, "mappe_compress", "1"),
+        "target_mb": db.get_setting(con, "mappe_target_mb", ""),
+        "target_portal_mb": db.get_setting(con, "mappe_target_portal_mb", ""),
+    }
+
+
+# The settings `build_settings` reads. A screen that states the budgets and
+# the template it will use must rebuild when one of them is changed on the
+# Settings page — no table signature can see an app_settings row.
+BUILD_SETTING_KEYS = ("applicant_name", "applicant_ort", "template_path",
+                      "anlagen_dir", "mappe_compress", "mappe_target_mb",
+                      "mappe_target_portal_mb")
+
+
+def target_bytes(settings: dict, channel: str) -> int:
     """Size budget for the channel this Mappe will travel through.
 
     An unresolved channel gets the e-mail budget rather than the tighter
@@ -121,15 +148,7 @@ def _build_mappe(job_id: int) -> dict:
     with db.db() as con:
         draft = db.get_draft_by_job(con, job_id)
         job = db.get_job(con, job_id)
-        settings = {
-            "applicant_name": db.get_setting(con, "applicant_name", "").strip(),
-            "applicant_ort": db.get_setting(con, "applicant_ort", "").strip(),
-            "template_path": db.get_setting(con, "template_path", "").strip(),
-            "anlagen_dir": db.get_setting(con, "anlagen_dir", "").strip(),
-            "compress": db.get_setting(con, "mappe_compress", "1"),
-            "target_mb": db.get_setting(con, "mappe_target_mb", ""),
-            "target_portal_mb": db.get_setting(con, "mappe_target_portal_mb", ""),
-        }
+        settings = build_settings(con)
     if job is None:
         return _error("posting not found")
     if draft is None or draft["status"] not in EDITABLE_STATUS:
@@ -168,7 +187,7 @@ def _build_mappe(job_id: int) -> dict:
         out_path = (pathlib.Path(config.OUTPUT_DIR) / f"job_{job_id}"
                     / f"{out_name}.pdf")
 
-        target_bytes = _target_bytes(settings, job["apply_channel"] or "")
+        budget = target_bytes(settings, job["apply_channel"] or "")
         with tempfile.TemporaryDirectory(prefix="jobdeck_mappe_") as tmp:
             letter_pdf = pathlib.Path(tmp) / "anschreiben.pdf"
             pdf.html_to_pdf(letter_html, letter_pdf)
@@ -178,14 +197,13 @@ def _build_mappe(job_id: int) -> dict:
             merged = pathlib.Path(tmp) / "mappe.pdf"
             pdf.merge_pdfs([letter_pdf, *anlagen], merged)
             if settings["compress"] == "1":
-                compression = pdf.compress_to_target(merged, out_path,
-                                                     target_bytes)
+                compression = pdf.compress_to_target(merged, out_path, budget)
             else:
                 pdf.install_pdf(merged, out_path)
                 merged_size = merged.stat().st_size
                 compression = pdf.Compression(
                     size_bytes=merged_size, original_bytes=merged_size,
-                    met_target=merged_size <= target_bytes,
+                    met_target=merged_size <= budget,
                 )
         size = out_path.stat().st_size
         pages = pdf.page_count(out_path)
@@ -208,7 +226,7 @@ def _build_mappe(job_id: int) -> dict:
                   if settings["compress"] == "1"
                   else "shrinking is switched off in Settings")
         warning = (f"Mappe is {size / 1024 / 1024:.1f} MB — over the "
-                   f"{target_bytes / 1024 / 1024:.1f} MB target for this "
+                   f"{budget / 1024 / 1024:.1f} MB target for this "
                    f"channel; {reason}")
         log.warning("mappe for job %s: %s", job_id, warning)
 

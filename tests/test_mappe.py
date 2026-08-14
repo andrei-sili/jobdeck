@@ -146,14 +146,14 @@ async def test_mappe_warns_when_the_quality_floor_blocks_the_target(
 
 async def test_portal_channels_get_the_tighter_budget(con, data_dir):
     settings = {"target_mb": "3", "target_portal_mb": "2"}
-    assert mappe._target_bytes(settings, "ats_form") == 2 * 1024 * 1024
-    assert mappe._target_bytes(settings, "board_apply") == 2 * 1024 * 1024
-    assert mappe._target_bytes(settings, "company_site") == 2 * 1024 * 1024
+    assert mappe.target_bytes(settings, "ats_form") == 2 * 1024 * 1024
+    assert mappe.target_bytes(settings, "board_apply") == 2 * 1024 * 1024
+    assert mappe.target_bytes(settings, "company_site") == 2 * 1024 * 1024
     # e-mail and an unresolved channel keep the roomier budget: degrading a
     # scan on a guess is silent, an oversized upload fails in front of the user
-    assert mappe._target_bytes(settings, "direct_email") == 3 * 1024 * 1024
-    assert mappe._target_bytes(settings, "unknown") == 3 * 1024 * 1024
-    assert mappe._target_bytes(settings, "") == 3 * 1024 * 1024
+    assert mappe.target_bytes(settings, "direct_email") == 3 * 1024 * 1024
+    assert mappe.target_bytes(settings, "unknown") == 3 * 1024 * 1024
+    assert mappe.target_bytes(settings, "") == 3 * 1024 * 1024
 
 
 async def test_unset_or_broken_size_budgets_fall_back_to_the_defaults(
@@ -164,10 +164,10 @@ async def test_unset_or_broken_size_budgets_fall_back_to_the_defaults(
     # would just die. app_settings is a file the user is invited to edit.
     for raw in ("", "   ", "abc", "0", "-4", None, "inf", "-inf", "1e400", "nan"):
         settings = {"target_mb": raw, "target_portal_mb": raw}
-        assert mappe._target_bytes(settings, "direct_email") == int(
+        assert mappe.target_bytes(settings, "direct_email") == int(
             mappe.DEFAULT_TARGET_MB * 1024 * 1024
         )
-        assert mappe._target_bytes(settings, "ats_form") == int(
+        assert mappe.target_bytes(settings, "ats_form") == int(
             mappe.DEFAULT_PORTAL_TARGET_MB * 1024 * 1024
         )
 
