@@ -44,6 +44,39 @@ PORTAL_CHANNELS = frozenset({
 })
 
 
+def letter_values(job, draft, applicant_name: str, applicant_ort: str) -> dict:
+    """The tokens the letter template is filled with, for THIS posting.
+
+    `draft` may be None: a specimen Mappe is built to show what an employer
+    receives before any application exists, and every field except the letter
+    body is already decided by the posting and the user's settings.
+
+    This is deliberately the ONLY place those values are derived. The preview
+    screen exists to say "this field will be empty" before the PDF is built,
+    and a preview computing the address block its own way would be reassuring
+    about a letter it had not actually described.
+    """
+    strasse, plz_ort = templates.letter_address(job)
+    betreff = draft["betreff"] if draft is not None else ""
+    return {
+        "firma": job["company"],
+        "ansprechpartner": job["ansprechpartner"],
+        "strasse": strasse,
+        "plz_ort": plz_ort,
+        "ort": applicant_ort,
+        "datum": heute_de(),
+        # Follows the (possibly user-corrected) e-mail subject, so the letter
+        # and the e-mail never cite a different Stellenbezeichnung or Refnr.
+        "betreff": (ai_drafting.letter_betreff(betreff, applicant_name)
+                    or ai_drafting.build_betreff(job["title"],
+                                                 resolve_refnr(job))),
+        # Derived from the same subject: a cover sheet naming a different
+        # Stelle than the letter is the classic copy-paste tell.
+        "deckblatt_rolle": ai_drafting.deckblatt_rolle(betreff, applicant_name)
+                           or f"als {job['title']}",
+    }
+
+
 def _error(message: str) -> dict:
     return {"ok": False, "error": message, "pdf_path": "", "warning": "",
             "pages": 0, "size_bytes": 0, "size_before_bytes": 0,
@@ -117,27 +150,9 @@ def _build_mappe(job_id: int) -> dict:
         return _error(f"letter template not found: {template_file}")
     draft_revision = draft["updated_at"]
 
-    strasse, plz_ort = templates.letter_address(job)
-    values = {
-        "firma": job["company"],
-        "ansprechpartner": job["ansprechpartner"],
-        "strasse": strasse,
-        "plz_ort": plz_ort,
-        "ort": settings["applicant_ort"],
-        "datum": heute_de(),
-        # Follows the (possibly user-corrected) e-mail subject, so the letter
-        # and the e-mail never cite a different Stellenbezeichnung or Refnr.
-        "betreff": (ai_drafting.letter_betreff(draft["betreff"],
-                                               settings["applicant_name"])
-                    or ai_drafting.build_betreff(job["title"],
-                                                 resolve_refnr(job))),
-        # Derived from the same subject: a cover sheet naming a different
-        # Stelle than the letter is the classic copy-paste tell.
-        "deckblatt_rolle": ai_drafting.deckblatt_rolle(
-            draft["betreff"], settings["applicant_name"]
-        ) or f"als {job['title']}",
-        "anschreiben_body": draft["anschreiben_body"],
-    }
+    values = letter_values(job, draft, settings["applicant_name"],
+                           settings["applicant_ort"])
+    values["anschreiben_body"] = draft["anschreiben_body"]
     try:
         template_html = template_file.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
