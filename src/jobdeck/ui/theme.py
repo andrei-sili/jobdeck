@@ -111,6 +111,13 @@ body { background: var(--paper); color: var(--ink); font-family: var(--jd-sans);
             font:400 12px/1.6 var(--jd-mono); color: var(--ink-2); }
 .jd-facts .k { color: var(--ink-3); }
 .jd-reason { font-size:12px; color: var(--warn); }
+/* Applications under way, above the list and inside it: a sibling of the
+   scroll container rather than a floating bar, so it is present in every view,
+   on every page, under any search — and costs no grid change. */
+.jd-laeuft:not(:empty) { border-bottom:1px solid var(--accent);
+                         background: var(--surface-2); }
+.jd-laeuft-row { padding:7px 10px; border-bottom:1px solid var(--rule); }
+.jd-laeuft-row:last-child { border-bottom:0; }
 /* The ten seconds in which a recorded application can be taken back. Quiet,
    because it is a confirmation and not a warning — but it holds a control, so
    it sits on its own surface rather than reading as one more note. */

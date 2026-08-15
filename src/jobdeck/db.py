@@ -931,6 +931,44 @@ def mark_job_opened(con: sqlite3.Connection, job_id: int) -> None:
     )
 
 
+# A form application that is under way: he opened the employer's page and the
+# loop is not closed. 'applied' and 'duplicate' are excluded because BOTH are
+# written by `apply_job` — without the second the entry would vanish the
+# instant the duplicate gate refused, which is indistinguishable from the
+# eviction the strip exists to prevent. 'skipped' can only be reached by
+# putting the posting away deliberately, which is an answer too.
+_STARTED_FORM_SQL = (
+    "jobs.form_opened_at<>'' "
+    "AND jobs.status NOT IN ('applied','duplicate','skipped')"
+)
+
+
+def list_started_forms(con: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every form application under way, oldest first.
+
+    Oldest first because the list is a stack of unfinished business, not a
+    feed: the eleven that were open when this shipped surface top-down, and
+    the one he has been ignoring longest is the one worth asking about.
+
+    Nothing bounds this and nothing expires. An entry that aged out would take
+    with it the app's only record that an application may already be at that
+    company — and a company whose slot is spent silently is the one failure
+    this whole design refuses.
+    """
+    return con.execute(
+        f"SELECT jobs.*, {_DRAFT_STATUS_SQL} AS draft_status, "
+        f"{_DRAFT_PDF_SQL} AS pdf_path "
+        f"  FROM jobs WHERE {_STARTED_FORM_SQL} "
+        " ORDER BY form_opened_at ASC, id ASC"
+    ).fetchall()
+
+
+def count_started_forms(con: sqlite3.Connection) -> int:
+    return con.execute(
+        f"SELECT COUNT(*) FROM jobs WHERE {_STARTED_FORM_SQL}"
+    ).fetchone()[0]
+
+
 def mark_form_opened(con: sqlite3.Connection, job_id: int) -> None:
     """Record that he has opened this employer's form.
 

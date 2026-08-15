@@ -951,6 +951,78 @@ async def test_opening_the_form_records_that_the_application_started(
     await user.should_see("Beispiel GmbH")
 
 
+async def test_a_started_form_appears_on_the_strip_and_stays_there(
+        user: User, con, data_dir):
+    """He opened six forms in thirteen minutes and the list moved under him
+    every time. The strip is a sibling of the scroll container, so nothing the
+    list does — a search, a view, a page — can take it away."""
+    job_id = _posting(con)
+    await user.open("/")
+    await user.should_see("Beispiel GmbH")
+
+    # written the way another tab's press writes it
+    db.mark_form_opened(con, job_id)
+    con.commit()
+    await _tick(user)
+
+    await user.should_see("Formular bei Beispiel GmbH")
+    await user.should_see("Abgeschickt")
+    # …and it says the documents are not ready, because they are not
+    await user.should_see("Mappe NICHT fertig")
+
+
+async def test_the_strip_gets_older_without_redrawing_the_page(
+        user: User, con, data_dir):
+    """The relabel runs on every tick, including while he is reading — so it
+    must be `set_text` and never a rebuild. A rebuild here empties both scroll
+    containers and takes the advert away from him mid-sentence."""
+    job_id = _posting(con)
+    db.mark_form_opened(con, job_id)
+    con.execute("UPDATE jobs SET form_opened_at=? WHERE id=?",
+                ((__import__("datetime").datetime.now()
+                  - __import__("datetime").timedelta(minutes=11)).isoformat(),
+                 job_id))
+    con.commit()
+    await user.open("/")
+    await user.should_see("Formular bei Beispiel GmbH")
+    row = _rows(user)[0]
+    entry = next(e for e in user.client.elements.values()
+                 if isinstance(e, ui.label)
+                 and "Formular bei Beispiel GmbH" in str(e.text))
+
+    await _tick(user)
+
+    # the question is on screen …
+    await user.should_see("abgeschickt?")
+    # … carried by the SAME element, which is what "set_text, never a rebuild"
+    # means; a re-rendered strip would be a new element with the same words
+    assert entry.text.endswith("abgeschickt?")
+    assert entry.id in user.client.elements, "the strip element was replaced"
+    # … and the list was not touched either
+    assert _rows(user)[0] is row, "the strip rebuilt the page to change a label"
+
+
+async def test_recording_from_the_strip_closes_the_loop(
+        user: User, con, data_dir):
+    """The second of the two presses. The entry leaves because the application
+    is written, not because anything expired."""
+    job_id = _posting(con)
+    db.mark_form_opened(con, job_id)
+    con.commit()
+    await user.open("/")
+    await user.should_see("Formular bei Beispiel GmbH")
+
+    user.find("Abgeschickt", kind=ui.button).click()
+    await asyncio.sleep(0.5)
+
+    assert db.get_job(con, job_id)["status"] == "applied"
+    assert con.execute(
+        "SELECT kanal FROM bewerbungen").fetchone()[0] == "Online-Portal"
+    labels = [str(e.text) for e in user.client.elements.values()
+              if isinstance(e, ui.label)]
+    assert not any("Formular bei Beispiel GmbH" in t for t in labels)
+
+
 async def test_the_editor_the_queue_uses_opens_over_the_list_too(
         user: User, con, data_dir):
     """One editor, not two: it is the last screen before a message leaves."""

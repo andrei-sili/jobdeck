@@ -94,9 +94,11 @@ class LiveView:
         hot: Callable[[], bool] | None = None,
         idle_every: int = 1,
         label: str = NOTICE_LABEL,
+        beat: Callable[[], None] | None = None,
     ) -> None:
         self._signature = signature
         self._refresh = refresh
+        self._beat = beat
         self._busy = busy
         self._hot = hot
         self._idle_every = max(1, idle_every)
@@ -148,6 +150,19 @@ class LiveView:
         # the guard that does not depend on the order handlers run in.
         if not self.client.has_socket_connection:
             return
+        if self._beat is not None:
+            # Before everything else, and on EVERY tick: things that only get
+            # older. An entry on the "Läuft" strip has to stop saying "seit
+            # 3 Min." at some point, and nothing in the database moves when
+            # that happens — no signature can see the clock.
+            #
+            # It lives here rather than in the page because a page module may
+            # not own a repeating timer (the rule that keeps every recurring
+            # tick in this file, where the pause on socket drop lives) and this
+            # file may not own a second one. A beat that only calls `set_text`
+            # is free, and unlike a rebuild it cannot disturb what he is
+            # reading or close a dialog he has open.
+            self._beat()
         self._ticks += 1
         hot = bool(self._hot()) if self._hot is not None else False
         if not should_check(self._ticks, hot, self._idle_every):

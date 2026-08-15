@@ -1,5 +1,6 @@
 """Job inbox: discovered postings with per-job actions."""
 
+import datetime
 import logging
 import math
 import pathlib
@@ -8,7 +9,7 @@ from dataclasses import dataclass
 from fastapi.responses import RedirectResponse
 from nicegui import app, run, ui
 
-from jobdeck import apply_channel, db, freshness
+from jobdeck import apply_channel, config, db, freshness
 from jobdeck.ai import scoring
 from jobdeck.ai.drafting import clean_title
 from jobdeck.dedupe import duplicates_for_jobs
@@ -424,6 +425,11 @@ def _load_jobs(view_key: str, page: int, search: str = "",
             "applied": duplicates_for_jobs(con, on_screen),
             "rows": rows,
             "siblings": siblings,
+            # Read outside every filter on purpose: an application under way is
+            # not a search result. It has to be on screen whichever view he is
+            # in, on whatever page, however he has searched — the whole point
+            # is that the app cannot lose the posting he started.
+            "started": [dict(r) for r in db.list_started_forms(con)],
             "counts": {
                 "mismatches": db.count_mismatches(con, view.status),
                 "dead": db.count_gone_jobs(con, view.status),
@@ -440,6 +446,67 @@ def _load_jobs(view_key: str, page: int, search: str = "",
             "page": page,
             "pages": pages,
         }
+
+
+# After this long, an entry stops reporting its age and starts asking the
+# question. Not a dialog and not a dismissible prompt: he learns to close those,
+# and the app genuinely cannot see whether he pressed the employer's submit.
+ASK_AFTER_MIN = 10
+# And after this long it is worth noticing from across the screen.
+STALE_FORM_H = 24
+
+
+def _started_at(stamp: str) -> datetime.datetime | None:
+    """When a form was opened, or None when the app cannot know.
+
+    None is a real answer here, not a parse failure to paper over: eleven
+    postings were mid-application when this shipped and three left no evidence
+    of when, so they carry a named sentinel that must never become a date."""
+    try:
+        return datetime.datetime.fromisoformat(stamp)
+    except (TypeError, ValueError):
+        return None
+
+
+def started_line(job: dict, now: datetime.datetime | None = None) -> str:
+    """One running application, as the strip says it.
+
+    Under ten minutes it reports; past ten it asks. The question is the LABEL
+    rather than a prompt, so there is nothing to dismiss and therefore nothing
+    to learn to dismiss — and when replies are read it simply stops being
+    needed.
+
+    A form opened before the app could stamp it says so. Eleven of his
+    postings were in that state and three left no evidence of when; giving
+    those a computed age would sort them among applications begun this minute.
+    """
+    company = str(job.get("company") or "—")
+    stamp = str(job.get("form_opened_at") or "")
+    when = _started_at(stamp)
+    if when is None:
+        return f"Formular bei {company} — seit unbekannt"
+    now = now or datetime.datetime.now()
+    minutes = max(0, int((now - when).total_seconds() // 60))
+    if minutes >= ASK_AFTER_MIN:
+        return f"Formular bei {company} — abgeschickt?"
+    if minutes < 1:
+        return f"Formular bei {company} — gerade eben"
+    return f"Formular bei {company} — seit {minutes} Min."
+
+
+def mappe_line(job: dict) -> tuple[str, str]:
+    """What the strip says about the documents, and how loudly.
+
+    `mappe_kind` is written by the build, so "nothing is staged" is a fact
+    rather than a guess. It has to be said out loud: a Bewerbungsmappe is
+    always complete by his decision, so an incomplete one offered silently to
+    an upload button is the worst outcome this flow can produce.
+    """
+    if job.get("mappe_kind"):
+        return "Mappe bereit", ""
+    if str(job.get("draft_status") or "") == "generating":
+        return "Mappe wird gebaut …", ""
+    return "Mappe NICHT fertig — von Hand hochladen", "warn"
 
 
 def _range_line(page: int, total: int, shown: int) -> str:
@@ -768,6 +835,11 @@ async def jobs_page():
         # refreshed with them. Not `jobs.duplicate_of`: that is written once at
         # discovery, so every application he sends makes more rows stale.
         applied: dict[int, dict] = {}
+        # The strip's own rows and its age labels. Separate from `shown`: an
+        # application under way is not part of the list and survives every
+        # filter, page and search.
+        strip_rows: dict[int, dict] = {}
+        age_labels: dict[int, object] = {}
         refresh_gen = {"n": 0}   # rapid view flips: last request wins
 
         # Feedback has to outlive the row that asked for it. A handler runs in
@@ -815,6 +887,13 @@ async def jobs_page():
                             on_change=lambda e: set_view(e.value),
                         ).mark("view-select").props("dense outlined") \
                             .classes("min-w-40")
+                    # A sibling of the rows and ABOVE the scroll container, so
+                    # an application under way is on screen in every view, at
+                    # every page, under any search. `.jd-list` is a flex
+                    # column and `.jd-rows` carries the overflow, so this is
+                    # pinned structurally — no sticky positioning, no change
+                    # to the grid.
+                    laeuft_host = ui.column().classes("jd-laeuft w-full gap-0")
                     rows_host = ui.column().classes("jd-rows w-full gap-0") \
                         .props('role=listbox aria-label="Anzeigen"')
                     pager = ui.row().classes("items-center gap-2 p-2 border-t")
@@ -861,10 +940,20 @@ async def jobs_page():
             # hundreds of rows in a couple of minutes, and every one of those
             # ticks was rebuilding the advert he is reading along with the list
             # it belongs to.
+            # A THIRD comparison: the strip is not part of either pane, and
+            # it changes on writes neither of them cares about — a Mappe
+            # landing in the background is the whole reason it self-updates.
+            strip_state = [(r["id"], r["form_opened_at"], r["mappe_kind"],
+                            r["draft_status"], r["company"])
+                           for r in view["started"]]
             list_same = not force and list_state == drawn.get("list")
             reader_same = not force and reader_state == drawn.get("reader")
+            strip_same = not force and strip_state == drawn.get("strip")
             drawn["list"], drawn["reader"] = list_state, reader_state
+            drawn["strip"] = strip_state
 
+            strip_rows.clear()
+            strip_rows.update({r["id"]: r for r in view["started"]})
             applied.clear()
             applied.update(view["applied"])
             siblings.clear()
@@ -885,6 +974,8 @@ async def jobs_page():
             hidden_label.set_text(_hidden_line(
                 view["view"], view["counts"], view["stale_age_days"],
                 search=view["search"]))
+            if not strip_same:
+                render_strip(view)
             if not list_same:
                 render_rows(view)
                 render_pager(view)
@@ -921,6 +1012,61 @@ async def jobs_page():
             if previous is not None and previous in shown:
                 return previous, shown[previous]
             return (new_order[0] if new_order else None), None
+
+        def render_strip(view: dict) -> None:
+            """Every application under way, above the list, in every view.
+
+            Rebuilt whole, and `age_labels` is repopulated here — the beat
+            below holds element references, and a `set_text` on an element some
+            other redraw already deleted raises inside a timer callback, which
+            is one log line and a strip frozen at whatever it last said."""
+            laeuft_host.clear()
+            age_labels.clear()
+            started = view["started"]
+            if not started:
+                return
+            with laeuft_host:
+                for job in started:
+                    _render_started(job)
+
+        def _render_started(job: dict) -> None:
+            with ui.row().classes("jd-laeuft-row items-center gap-3 w-full"):
+                age_labels[job["id"]] = ui.label(started_line(job)) \
+                    .classes("text-sm")
+                text, kind = mappe_line(job)
+                ui.label(text).classes(f"jd-meta {kind}")
+                ui.space()
+                ui.button("Abgeschickt",
+                          on_click=lambda j=job: confirm_applied(j)) \
+                    .props("dense no-caps color=positive")
+                with ui.button(icon="more_horiz").props("flat dense"):
+                    with ui.menu():
+                        _started_menu(job)
+
+        def _started_menu(job: dict) -> None:
+            if job["upload_path"]:
+                ui.menu_item("Ordner öffnen",
+                             lambda: helpers.open_in_system(
+                                 str(config.UPLOAD_DIR)))
+            url = _openable_url(job)
+            if url:
+                ui.menu_item("Formular erneut öffnen",
+                             lambda u=url: ui.navigate.to(u, new_tab=True))
+            ui.menu_item("Doch nicht beworben",
+                         lambda j=job["id"]: revive(j))
+
+        def restamp_strip() -> None:
+            """Let the running applications get older, without redrawing.
+
+            `set_text` only, never a rebuild: this fires on every tick of the
+            page's watcher, including while he has a dialog open or is reading
+            an advert, and a rebuild then would take both away from him. It is
+            also why the ten-minute question is a LABEL — there is nothing to
+            dismiss, so there is nothing to learn to dismiss."""
+            for job_id, label in list(age_labels.items()):
+                job = strip_rows.get(job_id)
+                if job is not None:
+                    label.set_text(started_line(job))
 
         def render_rows(view: dict) -> None:
             rows_host.clear()
@@ -1640,7 +1786,8 @@ async def jobs_page():
         # is on screen: the reading pane survives a rebuild by itself, so unlike
         # the old expansions there is nothing here to yank out from under him.
         with chip_host:
-            live_view = live.watch(_signature, refresh, busy=live.dialog_open)
+            live_view = live.watch(_signature, refresh, busy=live.dialog_open,
+                                   beat=restamp_strip)
         # `ignore` is NiceGUI's own client-side rule and the only one that can
         # work: a keystroke typed into the search box must never reach here, and
         # only the browser knows where the caret is. Pinned by a test, because

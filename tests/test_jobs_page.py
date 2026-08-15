@@ -1592,3 +1592,68 @@ def test_no_handler_clears_the_overlay_after_an_await(page_module):
           "anything parked on it never resolves")
     if page_module in ("jobs.py", "unterlagen.py"):
         assert scanned, "no handler clears the overlay at all — scan is broken"
+
+
+# --------------------------------------------------------------------------
+# The "Läuft" strip: what is under way, above the list
+# --------------------------------------------------------------------------
+def test_the_strip_survives_a_search_and_a_view_that_hides_everything(
+        con, data_dir):
+    """An application under way is not a search result. Losing the posting he
+    had started is the complaint this whole slice answers, so it has to be on
+    screen whichever view he is in, on whatever page, however he searched."""
+    from jobdeck import db
+    job_id = _company_job(con, "p1", "Eine GmbH", 80)
+    db.mark_form_opened(con, job_id)
+    con.commit()
+
+    hidden = jobs._load_jobs("in_arbeit", 0, search="etwas-das-nicht-existiert")
+    assert hidden["rows"] == []
+    assert [r["id"] for r in hidden["started"]] == [job_id]
+
+    elsewhere = jobs._load_jobs("beworben", 0)
+    assert [r["id"] for r in elsewhere["started"]] == [job_id]
+
+
+@pytest.mark.parametrize("minutes, expected", [
+    (0, "Formular bei Eine GmbH — gerade eben"),
+    (3, "Formular bei Eine GmbH — seit 3 Min."),
+    (9, "Formular bei Eine GmbH — seit 9 Min."),
+    # past ten it stops reporting and starts asking — a LABEL, not a prompt,
+    # so there is nothing to dismiss and nothing to learn to dismiss
+    (10, "Formular bei Eine GmbH — abgeschickt?"),
+    (600, "Formular bei Eine GmbH — abgeschickt?"),
+])
+def test_a_running_application_reports_then_asks(minutes, expected):
+    import datetime
+    now = datetime.datetime(2026, 8, 15, 20, 0, 0)
+    started = now - datetime.timedelta(minutes=minutes)
+    assert jobs.started_line(
+        {"company": "Eine GmbH", "form_opened_at": started.isoformat()},
+        now=now) == expected
+
+
+def test_a_form_opened_before_the_app_could_stamp_it_says_so():
+    """Three of his eleven left no evidence of when. A computed age would sort
+    them among applications begun this minute, which is the one thing the
+    migration refused to do — the screen must not undo it."""
+    from jobdeck import constants
+    assert jobs.started_line({"company": "Eine GmbH",
+                              "form_opened_at": constants.FORM_OPENED_UNKNOWN}) \
+        == "Formular bei Eine GmbH — seit unbekannt"
+
+
+@pytest.mark.parametrize("job, expected, kind", [
+    ({"mappe_kind": "vollständig", "draft_status": "ready"},
+     "Mappe bereit", ""),
+    ({"mappe_kind": "", "draft_status": "generating"},
+     "Mappe wird gebaut …", ""),
+    # the one that matters: a Bewerbungsmappe is always complete, so an
+    # incomplete one has to be SAID rather than quietly offered for upload
+    ({"mappe_kind": "", "draft_status": "failed"},
+     "Mappe NICHT fertig — von Hand hochladen", "warn"),
+    ({"mappe_kind": "", "draft_status": None},
+     "Mappe NICHT fertig — von Hand hochladen", "warn"),
+])
+def test_the_strip_says_when_the_documents_are_not_complete(job, expected, kind):
+    assert jobs.mappe_line(job) == (expected, kind)

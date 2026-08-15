@@ -806,3 +806,45 @@ def test_another_posting_at_that_company_is_still_warned(con):
 
     rows = [dict(r) for r in db.list_jobs(con, "new")]
     assert list(duplicates_for_jobs(con, rows)) == [second]
+
+
+def test_the_running_forms_are_listed_oldest_first(con):
+    """The strip is a stack of unfinished business, not a feed: the eleven that
+    were open when this shipped surface top-down, and the one he has been
+    ignoring longest is the one worth asking about."""
+    late = _add_job(con, external_id="late")
+    early = _add_job(con, external_id="early")
+    con.execute("UPDATE jobs SET form_opened_at=? WHERE id=?",
+                ("2026-08-14T16:42:46", late))
+    con.execute("UPDATE jobs SET form_opened_at=? WHERE id=?",
+                ("2026-08-14T09:24:36", early))
+    con.commit()
+
+    assert [r["id"] for r in db.list_started_forms(con)] == [early, late]
+    assert db.count_started_forms(con) == 2
+
+
+def test_a_started_form_with_no_draft_is_still_on_the_strip(con):
+    """Six of his eleven open form applications had no draft at all. A strip
+    derived from drafts would have shown five of them."""
+    job_id = _add_job(con)
+    db.mark_form_opened(con, job_id)
+    con.commit()
+
+    assert db.get_draft_by_job(con, job_id) is None
+    assert [r["id"] for r in db.list_started_forms(con)] == [job_id]
+
+
+@pytest.mark.parametrize("status", ["applied", "duplicate", "skipped"])
+def test_a_closed_loop_leaves_the_strip(con, status):
+    """'duplicate' as well as 'applied', because BOTH are written by
+    `apply_job` — without the second the entry would vanish the instant the
+    duplicate gate refused, which looks exactly like the eviction the strip
+    exists to prevent."""
+    job_id = _add_job(con)
+    db.mark_form_opened(con, job_id)
+    db.set_job_status(con, job_id, status)
+    con.commit()
+
+    assert db.list_started_forms(con) == []
+    assert db.count_started_forms(con) == 0

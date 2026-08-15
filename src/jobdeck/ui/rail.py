@@ -143,6 +143,7 @@ def facts() -> dict:
             "unread": db.count_job_groups(con, "new", opened="exclude", **working),
             "bookmarked": db.count_bookmarked_jobs(con),
             "in_progress": db.count_waiting_drafts(con),
+            "started": db.count_started_forms(con),
             "apps": [dict(row) for row in db.list_bewerbungen(con)],
             "follow_up_days": _int_setting(
                 db.get_setting(con, "follow_up_days", ""), FOLLOW_UP_DEFAULT),
@@ -244,9 +245,16 @@ def rubrics(view: dict, current: str, now: datetime.datetime) -> list[Rubric]:
             # filtered out, when most of the difference is simply postings
             # collapsing into companies — and the bar was companies ÷ postings,
             # so it would have read about 25 % with every pile empty.
-            sub=f"{view['jobs_total']} Anzeigen · "
-                f"{view['working']} von {view['companies_total']} Firmen offen",
+            # A form he has begun and not closed is the one thing here worth
+            # seeing from Einstellungen: it is an application that may already
+            # be out, and it is the only state the app cannot resolve by
+            # itself. Absent entirely when there are none — a permanent "0
+            # laufen" is a line you stop reading.
+            sub=(f"{view['jobs_total']} Anzeigen · "
+                 f"{view['working']} von {view['companies_total']} Firmen offen"
+                 + (f" · {view['started']} laufen" if view["started"] else "")),
             fill=_share(view["working"], view["companies_total"]),
+            amber=bool(view["started"]),
         ),
         Rubric(
             key="bewerbungen",
