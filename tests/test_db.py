@@ -441,11 +441,11 @@ def test_bootstrap_reclassifies_the_stock_it_finds(con, data_dir):
 
 
 def test_a_posting_he_opened_as_a_form_still_converts(con):
-    """'portal' is where a posting sits while he fills a form — precisely the
-    row an address arriving later should rescue."""
+    """A posting with its form open is precisely the row an address arriving
+    later should rescue — it is the one he is still working on."""
     job_id = _add_job(con, contact_email="bewerbung@firma.de")
-    con.execute("UPDATE jobs SET apply_channel='', status='portal' WHERE id=?",
-                (job_id,))
+    con.execute("UPDATE jobs SET apply_channel='' WHERE id=?", (job_id,))
+    db.mark_form_opened(con, job_id)
 
     assert db.resolve_email_channels(con) == 1
     assert db.get_job(con, job_id)["apply_channel"] == "direct_email"

@@ -237,14 +237,14 @@ def apply_steps(job: dict, already: dict | None = None) -> list[Step]:
                                "In der Review queue auflösen." if letter_gone
                                else "Erst das Anschreiben schreiben."),
         ))
-        # Blocked too, and not only for tidiness: opening the form MOVES the
-        # posting to `portal`, which is the app's record that an application
-        # has started — at a company where one already exists, that is the one
+        # Blocked too, and not only for tidiness: opening the form STAMPS
+        # `form_opened_at`, which is the app's record that an application has
+        # started — at a company where one already exists, that is the one
         # thing that must not begin. Reading the advert is still a press away
         # in the triage row, and that one changes nothing.
         steps.append(Step(
             STEP_FORM, "Formular öffnen",
-            done=str(job.get("status") or "") == "portal",
+            done=bool(job.get("form_opened_at")),
             enabled=bool(_openable_url(job)) and not blocked,
             reason=blocked or ("" if _openable_url(job)
                                else "Diese Anzeige nennt keine Adresse zum "
@@ -481,6 +481,23 @@ def _mark_opened(job_id: int) -> str:
         return "" if row is None else str(row["opened_at"] or "")
 
 
+def _mark_form_opened(job_id: int) -> str:
+    """Record that he opened this employer's form; answer with the stamp.
+
+    Like `_mark_opened`: the page holds the row it is showing, and handing it
+    the value that was actually written keeps that copy and the database saying
+    the same thing without a second query."""
+    with db.db() as con:
+        db.mark_form_opened(con, job_id)
+        row = db.get_job(con, job_id)
+        return "" if row is None else str(row["form_opened_at"] or "")
+
+
+def _clear_form_opened(job_id: int):
+    with db.db() as con:
+        db.clear_form_opened(con, job_id)
+
+
 def _set_bookmark(job_id: int, marked: bool):
     with db.db() as con:
         db.set_bookmark(con, job_id, marked)
@@ -671,6 +688,10 @@ def _row_fingerprint(job: dict) -> tuple:
         "opened_at", "bookmarked_at", "temp_agency", "salary_from", "salary_to",
         "salary_period", "description", "refnr", "location", "published_on",
         "fetched_at", "source", "company_count", "company_key",
+        # Anything the reading pane STATES has to be in here or it is never
+        # redrawn: he presses the button, the write lands, and the pane goes on
+        # offering the press he already made until he clicks another row.
+        "form_opened_at", "upload_path", "mappe_kind",
     ))
     # The probe stamp is drawn only inside the offline warning, and the daily
     # liveness pass re-stamps hundreds of rows in a couple of minutes. Counting
@@ -694,6 +715,17 @@ def legacy_jobs_page():
     An HTTP redirect rather than a page that draws nothing and then navigates:
     the moved address should answer as moved, and a page whose only job is to
     jump renders an empty screen first."""
+    return RedirectResponse(STELLEN_PATH)
+
+
+@app.get("/cockpit/{job_id}")
+def legacy_cockpit_page(job_id: int):
+    """The apply cockpit's old address.
+
+    The cockpit was a second screen to stand beside an employer's form; the
+    posting itself is that place now, so the screen is gone and its answers
+    live on the running application. Same redirect as `/jobs` for the same
+    reason — an old tab or bookmark should land somewhere real."""
     return RedirectResponse(STELLEN_PATH)
 
 
@@ -991,11 +1023,11 @@ async def jobs_page():
                     ui.button("★ gemerkt" if marked else "☆ merken",
                               on_click=lambda j=job["id"]: toggle_bookmark(j)) \
                         .props("flat dense no-caps")
-                    if job["status"] in ("skipped", "portal"):
-                        # `portal` is written the moment a form is opened, and
-                        # nothing else brought a posting back from it: opening
-                        # a form he then decided against took the posting out
-                        # of the working list for good.
+                    if job["status"] == "skipped" or job["form_opened_at"]:
+                        # Two different ways back, one button: he put the
+                        # posting away, or he started a form here and decided
+                        # against it. The second is the one that needs asking —
+                        # `revive` does that.
                         ui.button("↩ zurück in die Arbeitsliste",
                                   on_click=lambda j=job["id"]: revive(j)) \
                             .props("flat dense no-caps")
@@ -1014,15 +1046,6 @@ async def jobs_page():
                     if job["status"] == "new" and not job["contact_email"]:
                         ui.button("Kontakt-E-Mail suchen",
                                   on_click=lambda j=job: find_email(j)) \
-                            .props("flat dense no-caps")
-                    if not _by_email(job) and not _blocking_reason(job, already):
-                        # The cockpit is not retired: it is the only screen
-                        # that holds the applicant fields ready to paste into
-                        # an employer's form, and deleting the last route into
-                        # it left Settings still promising it is a click away.
-                        ui.button("Formular-Daten",
-                                  on_click=lambda j=job["id"]:
-                                      open_cockpit(j)) \
                             .props("flat dense no-caps")
                 for text, kind in reader_notes(job, already):
                     ui.label(text).classes(f"jd-note {kind} mb-2")
@@ -1235,16 +1258,13 @@ async def jobs_page():
         async def forced_refresh() -> None:
             await refresh(force=True)
 
-        def open_cockpit(job_id: int) -> None:
-            """The clipboard beside an employer's form."""
-            ui.navigate.to(f"/cockpit/{job_id}")
-
         async def open_form(job: dict) -> None:
             """Open the employer's page and remember that he started applying.
 
             The app never fills a form — that is settled — but opening one IS
-            the start of an application, so the posting moves to `portal` and
-            leaves the working list while he is at it."""
+            the start of an application, so the moment is stamped. The posting
+            KEEPS its place in the list: losing the advert he had just started
+            working on is the complaint this replaced."""
             # Cleared BEFORE the wait, never after: the page stays live
             # while this runs, and clearing afterwards destroys a dialog he
             # opened meanwhile — one awaited on then never resolves at all.
@@ -1254,16 +1274,12 @@ async def jobs_page():
                 say("Diese Anzeige nennt keine Adresse zum Öffnen.",
                     type="warning")
                 return
-            await run.io_bound(_set_status, job["id"], "portal")
-            # The posting leaves this view, so the reader keeps the copy it was
-            # holding — and that copy still said `new`, which renders "kein
-            # Interesse" instead of the way back. The second after the click is
-            # exactly when he wants the undo.
-            if job["id"] in shown:
-                shown[job["id"]]["status"] = "portal"
+            # Issued before anything is awaited: a window.open pushed after
+            # seconds of server work is what a popup blocker refuses.
+            ui.navigate.to(url, new_tab=True)
+            await run.io_bound(_mark_form_opened, job["id"])
             await refresh(force=True)
             with overlay:
-                ui.navigate.to(url, new_tab=True)
                 say("Trag die Bewerbung ein, sobald du das Formular "
                     "abgeschickt hast.", type="positive", multi_line=True)
 
@@ -1324,16 +1340,17 @@ async def jobs_page():
         async def revive(job_id: int) -> None:
             """Put a posting back into the working list.
 
-            From `portal` it asks first, and the question is not "are you
-            sure": `portal` is the app's ONLY record that an application at
-            that company may already be out, and an unrecorded form
-            submission is invisible to every gate there is. Pressing this
+            From a started form it asks first, and the question is not "are you
+            sure": `form_opened_at` is the app's ONLY record that an
+            application at that company may already be out, and an unrecorded
+            form submission is invisible to every gate there is. Pressing this
             after actually applying would erase the one hint and let a second
             application through."""
             job = shown.get(job_id)
-            if job is None or job["status"] not in ("skipped", "portal"):
+            if job is None or not (job["status"] == "skipped"
+                                   or job["form_opened_at"]):
                 return
-            if job["status"] == "portal":
+            if job["form_opened_at"]:
                 overlay.clear()
                 with overlay, ui.dialog() as ask, ui.card():
                     ui.label("Du hattest das Formular geöffnet.") \
@@ -1354,6 +1371,12 @@ async def jobs_page():
                     return
                 if answer != "back":
                     return
+                _hold_place(job_id)
+                # He says no application went out: take back the start, and
+                # with it whatever was staged for the upload dialog.
+                await run.io_bound(_clear_form_opened, job_id)
+                await refresh(force=True)
+                return
             _hold_place(job_id)
             await run.io_bound(_set_status, job_id, "new")
             await refresh(force=True)

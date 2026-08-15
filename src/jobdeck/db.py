@@ -543,16 +543,22 @@ APPLIED_FIRM_SQL = """(
 
 # A posting whose application is UNDER WAY. Two ways that happens and they are
 # one fact from his side: a draft is being written or waiting to be sent, or he
-# has opened the employer's form, which the app records by moving the posting to
-# `portal`. A screen that showed only the first would lose every form
-# application between opening the form and recording it — which is most of them.
+# has opened the employer's form. A screen that showed only the first would lose
+# every form application between opening the form and recording it — which is
+# most of them.
+#
+# The form arm reads the MOMENT (`form_opened_at`) rather than the old `portal`
+# status, and that is strictly more coverage, not a rename: a form opened before
+# any letter was written had no draft to be found by the second arm and no
+# status of its own once `portal` was retired, so this view used to lose exactly
+# the applications it exists to show.
 #
 # The draft statuses are listed rather than negated so a NEW one has to be
 # classified deliberately: silently counting an unknown draft state as work in
 # progress is how a screen starts lying.
 OPEN_DRAFT_STATUSES = ("generating", "ready", "failed", "approved", "sending")
 _IN_PROGRESS_SQL = (
-    "(jobs.status='portal' OR EXISTS ("
+    "(jobs.form_opened_at<>'' OR EXISTS ("
     "SELECT 1 FROM drafts d WHERE d.job_id=jobs.id AND d.status IN ("
     + ",".join("?" * len(OPEN_DRAFT_STATUSES)) + ")))"
 )
@@ -925,6 +931,48 @@ def mark_job_opened(con: sqlite3.Connection, job_id: int) -> None:
     )
 
 
+def mark_form_opened(con: sqlite3.Connection, job_id: int) -> None:
+    """Record that he has opened this employer's form.
+
+    Written once and never rewritten, like `opened_at` and for a stronger
+    reason: this timestamp is how old a running application looks on the
+    "Läuft" strip, and re-stamping it on a second press would make an
+    application he began yesterday claim to have started just now."""
+    con.execute(
+        "UPDATE jobs SET form_opened_at=? WHERE id=? AND form_opened_at=''",
+        (_now(), job_id),
+    )
+
+
+def clear_form_opened(con: sqlite3.Connection, job_id: int) -> None:
+    """Take back "I started applying here" — he says no application went out.
+
+    Clears what was staged along with it: a file left in the upload folder for
+    an application that was abandoned is the next thing an employer's file
+    picker offers."""
+    con.execute(
+        "UPDATE jobs SET form_opened_at='', upload_path='', mappe_kind='' "
+        "WHERE id=?",
+        (job_id,),
+    )
+
+
+def set_upload(
+    con: sqlite3.Connection, job_id: int, path: str, kind: str
+) -> None:
+    """Record what the build staged for an employer's file picker.
+
+    `kind` is written BY the build and never inferred back out of the file
+    system — the Unterlagen lesson. Empty means nothing complete is staged,
+    which is a statement the screen has to make rather than a gap it fills in
+    optimistically: a Bewerbungsmappe is always complete, so a partial one
+    offered silently to an upload button is the worst outcome available."""
+    con.execute(
+        "UPDATE jobs SET upload_path=?, mappe_kind=? WHERE id=?",
+        (path, kind, job_id),
+    )
+
+
 def set_job_score(
     con: sqlite3.Connection, job_id: int, score: int, reason: str
 ) -> None:
@@ -1075,12 +1123,14 @@ def refresh_job_published_on(
     return cur.rowcount > 0
 
 
-# A posting is worth asking about while he might still act on it. 'portal' is
-# the OPPOSITE of ruled out — he opened its form and has not confirmed yet, so
-# that is precisely when "the ad is gone" is worth five minutes of his time, and
-# it is the status the review queue's pre-send warning depends on. 'skipped',
+# A posting is worth asking about while he might still act on it. 'skipped',
 # 'duplicate' and 'applied' are finished business.
-LIVENESS_STATUSES = ("new", "portal", "drafted")
+#
+# A posting whose form he has opened stays 'new' since v10, so it keeps being
+# probed through this list — which is the point, and it is the OPPOSITE of
+# ruled out: a half-finished form application is precisely when "the ad is
+# gone" is worth five minutes of his time.
+LIVENESS_STATUSES = ("new", "drafted")
 
 
 def jobs_needing_liveness_check(
@@ -1151,7 +1201,12 @@ def jobs_to_prepare(
     * a company he has ALREADY applied to is skipped, because
       `find_duplicate_bewerbung` would refuse the second application anyway —
       compared with `jd_norm`, the very function that gate uses;
-    * a posting that already has a draft in flight is skipped.
+    * a posting that already has a draft in flight is skipped;
+    * a posting whose form he has already opened is skipped. Before v10 that
+      one fell out of `status='new'` for free, because opening a form moved the
+      posting to `portal`; now that it stays in the working list it has to be
+      excluded here by name, or a started application would be handed back to
+      the batch and re-drafted at the price of a Sonnet call.
 
     An unknown publication date excludes a posting here, unlike in the inbox —
     and it falls out of the age bound rather than needing its own clause, since
@@ -1166,6 +1221,7 @@ def jobs_to_prepare(
                {freshness.effective_score_sql()} AS effective_score
           FROM jobs j
          WHERE j.status='new'
+           AND j.form_opened_at=''
            AND NOT ({GONE_SQL.replace('liveness', 'j.liveness')})
            AND j.duplicate_of IS NULL
            AND j.match_score >= ?
@@ -1301,7 +1357,9 @@ def set_contact_email(
 # Statuses whose channel is still worth deciding. A posting already applied to,
 # skipped or filed as a duplicate is finished business — rewriting how one
 # would have applied to it changes nothing and would only rewrite history.
-_CHANNEL_STATUSES = ("new", "portal")
+# A posting at an open form is 'new' since v10 and stays in scope: its channel
+# is what the strip's "open the form again" needs.
+_CHANNEL_STATUSES = ("new",)
 
 
 def resolve_email_channels(
@@ -1413,10 +1471,11 @@ def liveness_progress(
 _JOBS_SIGNATURE_SQL = """
 SELECT COUNT(*), MAX(id), COUNT(match_score), TOTAL(match_score),
        MAX(liveness_checked_at), TOTAL(liveness=?),
-       TOTAL(status='new'), TOTAL(status='portal'), TOTAL(status='applied'),
+       TOTAL(status='new'), TOTAL(status='applied'),
        TOTAL(status='skipped'), TOTAL(status='duplicate'),
        TOTAL(contact_email<>''), TOTAL(COALESCE(apply_channel,'')<>''),
-       TOTAL(bookmarked_at<>''), TOTAL(opened_at<>'')
+       TOTAL(bookmarked_at<>''), TOTAL(opened_at<>''),
+       TOTAL(form_opened_at<>''), TOTAL(upload_path<>''), TOTAL(mappe_kind<>'')
   FROM jobs
 """
 
@@ -1478,7 +1537,9 @@ def job_signature(con: sqlite3.Connection, job_id: int) -> tuple | None:
         "SELECT id, company, status, liveness, liveness_checked_at, "
         "contact_email, apply_channel, ats_vendor, apply_url, title, "
         "ansprechpartner, contact_strasse, contact_plz_ort, work_strasse, "
-        f"work_plz_ort, temp_agency, refnr, {_DRAFT_STATUS_SQL}, "
+        "work_plz_ort, temp_agency, refnr, "
+        "form_opened_at, upload_path, mappe_kind, "
+        f"{_DRAFT_STATUS_SQL}, "
         f"{_DRAFT_UPDATED_SQL} FROM jobs WHERE id=?",
         (job_id,),
     ).fetchone()

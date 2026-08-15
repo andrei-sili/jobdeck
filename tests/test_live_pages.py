@@ -192,45 +192,6 @@ async def test_the_profile_list_shows_a_poll_that_just_happened(
     await user.should_see("401 Unauthorized")
 
 
-async def test_the_cockpit_fills_its_rows_when_the_draft_finishes(
-        user: User, con, data_dir):
-    """Its own hint tells him to draft the application first, and the draft is
-    written on another screen — so the rows it leaves empty are exactly the
-    ones a finished draft fills, a minute later, on a page built to sit open."""
-    job_id = _posting(con)
-    await user.open(f"/cockpit/{job_id}")
-    await user.should_see("Fehlt noch")
-
-    db.upsert_draft(con, job_id, {
-        "status": "ready", "betreff": "Bewerbung als Python Entwickler",
-        "anschreiben_body": "Sehr geehrte Damen und Herren,"})
-    con.commit()
-    await _tick(user)
-
-    await user.should_see("Sehr geehrte Damen und Herren,")
-
-
-async def test_the_cockpit_ignores_a_change_to_another_posting(
-        user: User, con, data_dir):
-    """It watches ONE posting: rebuilding while he types into an employer's
-    form because an unrelated job was scored would move the buttons under his
-    hand."""
-    job_id = _posting(con)
-    await user.open(f"/cockpit/{job_id}")
-    await user.should_see("Beispiel GmbH")
-    before = [e for e in user.client.elements.values()
-              if isinstance(e, ui.button)]
-
-    _posting(con, external_id="e2", title="Django Entwickler",
-             company="Zweite GmbH")
-    await _tick(user)
-
-    after = [e for e in user.client.elements.values()
-             if isinstance(e, ui.button)]
-    assert [e.id for e in after] == [e.id for e in before], \
-        "the cockpit rebuilt for a posting it is not showing"
-
-
 async def test_the_settings_meter_follows_the_spend(user: User, con, data_dir):
     """Background scoring spends metered money every ten minutes and the page
     showed the number from whenever it was opened."""
@@ -968,8 +929,9 @@ async def test_recording_from_the_reader_makes_the_posting_leave_for_good(
 
 async def test_opening_the_form_records_that_the_application_started(
         user: User, con, data_dir, monkeypatch):
-    """Opening an employer's form is the moment an application begins; the
-    posting moves to `portal` and leaves the working list while he is at it."""
+    """Opening an employer's form is the moment an application begins, and the
+    app stamps it. The posting KEEPS its place in the list — losing the advert
+    he had just started working on is the complaint this replaced."""
     job_id = _posting(con)
     db.set_apply_channel(con, job_id, "ats_form", "JOIN",
                          "https://join.com/companies/x/1/apply")
@@ -984,9 +946,12 @@ async def test_opening_the_form_records_that_the_application_started(
     user.find("Formular öffnen").click()
     await asyncio.sleep(0.4)
 
-    assert con.execute("SELECT status FROM jobs WHERE id=?",
-                       (job_id,)).fetchone()[0] == "portal"
+    assert con.execute("SELECT form_opened_at FROM jobs WHERE id=?",
+                       (job_id,)).fetchone()[0] != ""
     assert opened == ["https://join.com/companies/x/1/apply"]
+    # and it is still in the working list, under his cursor
+    assert db.get_job(con, job_id)["status"] == "new"
+    await user.should_see("Beispiel GmbH")
 
 
 async def test_the_editor_the_queue_uses_opens_over_the_list_too(
@@ -1038,10 +1003,7 @@ async def test_an_application_landing_while_the_editor_is_open_reaches_the_confi
 
 async def test_the_way_back_is_on_screen_the_second_after_the_form_opens(
         user: User, con, data_dir, monkeypatch):
-    """Opening a form writes `portal`, and the posting leaves the view — so the
-    reader keeps the copy it was holding, which still said `new` and rendered
-    "kein Interesse" instead of the way back. The moment he wants the undo is
-    the second after the click."""
+    """The moment he wants the undo is the second after the click."""
     job_id = _posting(con)
     db.set_apply_channel(con, job_id, "ats_form", "JOIN",
                          "https://join.com/companies/x/1/apply")
@@ -1054,8 +1016,33 @@ async def test_the_way_back_is_on_screen_the_second_after_the_form_opens(
     await asyncio.sleep(0.4)
 
     await user.should_see("zurück in die Arbeitsliste")
-    assert con.execute("SELECT status FROM jobs WHERE id=?",
-                       (job_id,)).fetchone()[0] == "portal"
+    assert con.execute("SELECT form_opened_at FROM jobs WHERE id=?",
+                       (job_id,)).fetchone()[0] != ""
+
+
+async def test_the_reader_redraws_when_a_form_is_started_somewhere_else(
+        user: User, con, data_dir):
+    """The press itself refreshes by force, so it proves nothing about the
+    fingerprint. What does is a write this page did NOT make: a second tab, or
+    the background staging the Mappe seconds after he left for the employer.
+
+    `refresh` skips the redraw when the row's fingerprint is unchanged, so a
+    field the pane STATES and the fingerprint omits is never drawn again — the
+    pane goes on offering "kein Interesse" beside an application already under
+    way, and every functional test stays green."""
+    job_id = _posting(con)
+    db.set_apply_channel(con, job_id, "ats_form", "JOIN",
+                         "https://join.com/companies/x/1/apply")
+    con.commit()
+    await user.open("/")
+    await user.should_see("kein Interesse")
+
+    # exactly what another tab's press writes — nothing on THIS page ran
+    db.mark_form_opened(con, job_id)
+    con.commit()
+    await _tick(user)
+
+    await user.should_see("zurück in die Arbeitsliste")
 
 
 async def test_undoing_an_opened_form_asks_what_actually_happened(

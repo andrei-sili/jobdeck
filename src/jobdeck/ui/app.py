@@ -10,7 +10,6 @@ from jobdeck.scheduler import create_scheduler, shutdown_scheduler
 # Importing the page modules registers their @ui.page routes.
 from jobdeck.ui.pages import (  # noqa: F401
     applications,
-    cockpit,
     dashboard,
     jobs,
     queue,

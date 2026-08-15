@@ -78,6 +78,45 @@ def test_a_liveness_verdict_changes_the_data_signature(con, data_dir):
     assert db.data_signature(con) != before
 
 
+def test_opening_a_form_changes_the_data_signature(con, data_dir):
+    """A form he opened is drawn on two screens — the reading pane's button
+    state and the "Läuft" strip — and the status no longer moves at all when it
+    happens. Without a term of its own the strip simply never appears until he
+    reloads, and every functional test stays green: this is the class that
+    twice demolished the posting he was reading (an unsigned `opened_at`)."""
+    job_id = _job(con)
+    before = db.data_signature(con)
+    db.mark_form_opened(con, job_id)
+    con.commit()
+    assert db.data_signature(con) != before
+
+
+def test_staging_a_mappe_changes_the_data_signature(con, data_dir):
+    """The strip says whether the documents are ready, and the build that makes
+    them ready runs in the background — so nothing but this term can tell the
+    open page that "Mappe wird gebaut …" has become "Mappe fertig"."""
+    job_id = _job(con)
+    db.mark_form_opened(con, job_id)
+    con.commit()
+    before = db.data_signature(con)
+    db.set_upload(con, job_id, "/tmp/Bewerbung.pdf", "vollständig")
+    con.commit()
+    assert db.data_signature(con) != before
+
+
+def test_taking_back_an_opened_form_changes_the_data_signature(con, data_dir):
+    """And the way back out again: the entry has to leave the strip by itself
+    on the screen he pressed it from, and on any other tab that is open."""
+    job_id = _job(con)
+    db.mark_form_opened(con, job_id)
+    db.set_upload(con, job_id, "/tmp/Bewerbung.pdf", "vollständig")
+    con.commit()
+    before = db.data_signature(con)
+    db.clear_form_opened(con, job_id)
+    con.commit()
+    assert db.data_signature(con) != before
+
+
 def test_a_status_change_changes_the_data_signature(con, data_dir):
     """The row count does not move when a posting is skipped — the per-status
     counts are what makes it visible."""

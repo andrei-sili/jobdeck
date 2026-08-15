@@ -326,12 +326,13 @@ def test_the_hidden_line_can_never_contradict_the_list(view_key, counts, expecte
 
 
 def test_a_posting_he_has_acted_on_is_never_hidden_from_its_own_view(con, data_dir):
-    """The row of a posting in `portal` carries the button that finishes the job
-    ("I applied — record it"). Hiding it for being offline would hide that."""
+    """The row of a posting whose form he opened carries the button that
+    finishes the job ("I applied — record it"). Hiding it for being offline
+    would hide that."""
     from jobdeck import db
     job_id = _company_job(con, "p1", "Firma", 90)
-    con.execute("UPDATE jobs SET status='portal', liveness='gone' WHERE id=?",
-                (job_id,))
+    con.execute("UPDATE jobs SET liveness='gone' WHERE id=?", (job_id,))
+    db.mark_form_opened(con, job_id)
     con.commit()
     portal = jobs._load_jobs("in_arbeit", 0)
     assert [r["id"] for r in portal["rows"]] == [job_id]
@@ -864,7 +865,7 @@ def _unhosted_ui_calls(path):
 # deliberately absent: its refresh assigns `table.rows` and deletes no element,
 # so no handler's slot can die under it.
 @pytest.mark.parametrize("page_module",
-                         ["jobs.py", "queue.py", "unterlagen.py", "cockpit.py",
+                         ["jobs.py", "queue.py", "unterlagen.py",
                           "../draft_editor.py"])
 def test_nothing_is_shown_on_a_slot_that_may_already_be_gone(page_module):
     """The defect CLASS, not the one place it was found. A handler runs in the
@@ -882,7 +883,7 @@ def test_nothing_is_shown_on_a_slot_that_may_already_be_gone(page_module):
 
 
 @pytest.mark.parametrize("page_module",
-                         ["jobs.py", "queue.py", "unterlagen.py", "cockpit.py",
+                         ["jobs.py", "queue.py", "unterlagen.py",
                           "../draft_editor.py"])
 def test_the_slot_rule_is_actually_binding(page_module):
     """A scan that finds no candidates would pass on any code at all."""
@@ -1193,16 +1194,39 @@ def test_reading_a_posting_takes_it_out_of_neu_but_not_out_of_the_list(
 
 
 def test_an_opened_form_counts_as_work_in_progress(con, data_dir):
-    """Opening the employer's form moves the posting to `portal`, and that is
-    the whole record of a form application until he records it. A view that
-    listed only drafts would lose most of his applications at exactly the point
-    where he still has to finish them."""
+    """Opening the employer's form is the whole record of a form application
+    until he records it — and there need not be a draft anywhere.
+
+    This is the case that used to be lost: of eleven form applications open on
+    his real data, six had no draft at all, so a view that listed only drafts
+    would have shown five of the eleven and called that "in Arbeit"."""
     from jobdeck import db
     job_id = _company_job(con, "p1", "Eine GmbH", 80)
-    db.set_job_status(con, job_id, "portal")
+    db.mark_form_opened(con, job_id)
     con.commit()
+    assert db.get_draft_by_job(con, job_id) is None
 
     assert [r["id"] for r in jobs._load_jobs("in_arbeit", 0)["rows"]] == [job_id]
+
+
+def test_an_opened_form_is_not_handed_back_to_the_prepare_batch(con, data_dir):
+    """A started application must never be re-drafted by the batch.
+
+    Before v10 that was free: opening a form moved the posting out of `new`.
+    Now it stays in the working list, so the exclusion is by name — and every
+    posting the batch takes costs a Sonnet call."""
+    from jobdeck import db
+    job_id = _company_job(con, "p1", "Eine GmbH", 80)
+    con.execute("UPDATE jobs SET published_on=date('now') WHERE id=?", (job_id,))
+    con.commit()
+    assert [r["id"] for r in db.jobs_to_prepare(
+        con, limit=10, max_age_days=45, min_score=50)] == [job_id]
+
+    db.mark_form_opened(con, job_id)
+    con.commit()
+
+    assert db.jobs_to_prepare(
+        con, limit=10, max_age_days=45, min_score=50) == []
 
 
 def test_a_draft_being_written_counts_as_work_in_progress(con, data_dir):
@@ -1219,12 +1243,15 @@ def test_nothing_in_the_corpus_is_unreachable_from_the_named_views(con, data_dir
     least one view, whatever he did with it."""
     from jobdeck import db
     ids = {}
-    for key, status in (("plain", "new"), ("portal", "portal"),
-                        ("applied", "applied"), ("skipped", "skipped"),
-                        ("duplicate", "duplicate")):
+    for key, status in (("plain", "new"), ("applied", "applied"),
+                        ("skipped", "skipped"), ("duplicate", "duplicate")):
         job_id = _company_job(con, key, f"Firma {key}", 80)
         db.set_job_status(con, job_id, status)
         ids[key] = job_id
+    # a form he has opened and not yet recorded — since v10 that posting keeps
+    # its place in the working list, so it must be reachable AS one
+    ids["form"] = _company_job(con, "form", "Firma form", 80)
+    db.mark_form_opened(con, ids["form"])
     mismatch = _company_job(con, "mis", "Firma mis", 0)
     con.commit()
 
@@ -1526,7 +1553,7 @@ def _own_nodes(func):
 
 
 @pytest.mark.parametrize("page_module",
-                         ["jobs.py", "queue.py", "unterlagen.py", "cockpit.py",
+                         ["jobs.py", "queue.py", "unterlagen.py",
                           "../draft_editor.py"])
 def test_no_handler_clears_the_overlay_after_an_await(page_module):
     """`overlay.clear()` before an await is housekeeping; after one it is a
