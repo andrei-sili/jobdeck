@@ -898,12 +898,9 @@ async def test_recording_from_the_reader_makes_the_posting_leave_for_good(
     await user.should_see("Beispiel GmbH")
 
     user.find("Beworben eintragen", kind=ui.button).click()
-    await asyncio.sleep(0.3)
-    # a one-way door: it asks, and names the company
-    await user.should_see("Bewerbung eintragen?")
-    await user.should_see("Beispiel GmbH")
-    user.find("Eintragen", kind=ui.button).click()
     await asyncio.sleep(0.4)
+    # it records at once and names what it did, with the way back beside it
+    await user.should_see("Rückgängig")
 
     row = con.execute("SELECT status, bewerbung_id FROM jobs WHERE id=?",
                       (job_id,)).fetchone()
@@ -1063,17 +1060,72 @@ async def test_undoing_an_opened_form_asks_what_actually_happened(
     await asyncio.sleep(0.3)
     await user.should_see("hast du dich beworben?")
 
-    # "yes" hands it to the recording path, which asks its own question
+    # "yes" hands it to the one recorder
     user.find("Ja, eintragen", kind=ui.button).click()
-    await asyncio.sleep(0.3)
-    await user.should_see("Bewerbung eintragen?")
-    user.find("Eintragen", kind=ui.button).click()
-    await asyncio.sleep(0.4)
+    await asyncio.sleep(0.5)
 
     assert con.execute("SELECT status FROM jobs WHERE id=?",
                        (job_id,)).fetchone()[0] == "applied"
     assert con.execute("SELECT kanal FROM bewerbungen").fetchone()[0] \
         == "Online-Portal"
+
+
+async def test_a_recorded_application_can_be_taken_straight_back(
+        user: User, con, data_dir):
+    """The confirmation dialog is gone — he makes this press eight times an
+    evening and a dialog on it is one he learns to click through. The undo is
+    what pays for that, so it has to be REAL: a half-undo leaves the company
+    marked as applied-to and permanently spends its only application slot.
+
+    Asserted on the database, not on the button text: a label saying
+    "Rückgängig gemacht" beside a row that is still there proves nothing."""
+    job_id = _posting(con)
+    con.commit()
+    history_before = con.execute(
+        "SELECT COUNT(*) FROM status_history").fetchone()[0]
+    await user.open("/")
+    await user.should_see("Beispiel GmbH")
+
+    user.find("Beworben eintragen", kind=ui.button).click()
+    await asyncio.sleep(0.4)
+    assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 1
+
+    user.find("Rückgängig", kind=ui.button).click()
+    await asyncio.sleep(0.5)
+
+    assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 0
+    assert con.execute(
+        "SELECT COUNT(*) FROM status_history").fetchone()[0] == history_before
+    row = con.execute("SELECT status, bewerbung_id FROM jobs WHERE id=?",
+                      (job_id,)).fetchone()
+    assert row[0] == "new" and row[1] is None
+    # and it is back on screen, where he can act on it again
+    await user.should_see("Beispiel GmbH")
+
+
+async def test_a_refused_application_offers_no_undo_at_all(
+        user: User, con, data_dir):
+    """The duplicate gate marks the posting a duplicate and points it at the
+    blocking application BEFORE refusing, so there is no earlier state an undo
+    could restore — offering one would restore a state that never existed."""
+    job_id = _posting(con)
+    con.commit()
+    await user.open("/")
+    await user.should_see("Beispiel GmbH")
+    # the blocking application lands AFTER the row is on screen — a send from
+    # another tab, which is exactly when he would press this by mistake
+    db.add_bewerbung(con, {"gesendet_am": "2026-06-12", "firma": "Beispiel GmbH",
+                           "kanal": "E-Mail", "status": "Absage"})
+    con.commit()
+
+    user.find("Beworben eintragen", kind=ui.button).click()
+    await asyncio.sleep(0.4)
+
+    await user.should_see("bereits beworben")
+    assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 1
+    assert db.get_job(con, job_id)["status"] == "duplicate"
+    with pytest.raises(AssertionError):
+        user.find("Rückgängig", kind=ui.button)
 
 
 async def test_saying_no_puts_it_back_without_recording_anything(

@@ -511,3 +511,49 @@ def test_migrate_leaves_a_fresh_database_with_the_form_flow_columns(tmp_path):
     assert "upload_path" in cols
     assert "mappe_kind" in cols
     con.close()
+
+
+def test_migrate_points_an_application_at_the_mappe_that_was_built_for_it(tmp_path,
+                                                                          monkeypatch):
+    """Two writers recorded a form application and only one passed `dokument`,
+    so 13 of his 35 Online-Portal ledger rows say no document exists while the
+    PDF sits under output/job_<id>/. One recorder makes that impossible going
+    forward; this fills in what the disagreement already cost.
+
+    The file has to still be there: an entry naming a path that is gone is
+    worse than one that admits it has nothing, because he would click it."""
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    con = sqlite3.connect(tmp_path / "fresh.db")
+    con.row_factory = sqlite3.Row
+    migrations.migrate(con)
+
+    real = tmp_path / "output" / "job_1" / "Bewerbung.pdf"
+    real.parent.mkdir(parents=True)
+    real.write_bytes(b"%PDF-1.4")
+    gone = tmp_path / "output" / "job_2" / "Weg.pdf"
+
+    ids = {}
+    for key, path in (("has_file", real), ("no_file", gone)):
+        bewerbung_id = db.add_bewerbung(con, {
+            "firma": f"Firma {key}", "kanal": "Online-Portal",
+            "status": "Gesendet", "dokument": ""})
+        job_id = db.insert_job_if_new(con, {
+            "source": "stub", "external_id": key, "company": f"Firma {key}",
+            "title": "Entwickler", "url": "https://x.example/1"})
+        db.set_job_status(con, job_id, "applied", bewerbung_id=bewerbung_id)
+        db.upsert_draft(con, job_id, {"status": "sent", "pdf_path": str(path)})
+        ids[key] = bewerbung_id
+    con.commit()
+
+    migrations.migrate(con)
+
+    assert db.get_bewerbung(con, ids["has_file"])["dokument"] == str(real)
+    assert db.get_bewerbung(con, ids["no_file"])["dokument"] == ""
+    # and it never overwrites a pointer the app already has: this fills
+    # blanks, it does not decide what a sent application was sent with
+    con.execute("UPDATE bewerbungen SET dokument='/hand/gewaehlt.pdf' WHERE id=?",
+                (ids["has_file"],))
+    con.commit()
+    migrations.migrate(con)
+    assert db.get_bewerbung(con, ids["has_file"])["dokument"] == "/hand/gewaehlt.pdf"
+    con.close()

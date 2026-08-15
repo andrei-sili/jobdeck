@@ -12,7 +12,14 @@ from jobdeck import apply_channel, db, freshness
 from jobdeck.ai import scoring
 from jobdeck.ai.drafting import clean_title
 from jobdeck.dedupe import duplicates_for_jobs
-from jobdeck.services import apply_resolve, contact_lookup, drafting, liveness, mappe
+from jobdeck.services import (
+    apply_record,
+    apply_resolve,
+    contact_lookup,
+    drafting,
+    liveness,
+    mappe,
+)
 from jobdeck.ui import draft_editor, helpers, live
 from jobdeck.ui.helpers import (
     open_in_system,
@@ -457,9 +464,18 @@ def _set_status(job_id: int, status: str):
         db.set_job_status(con, job_id, status)
 
 
-def _confirm_applied(job_id: int, kanal: str, dokument: str = ""):
-    with db.db() as con:
-        return db.apply_job(con, job_id, kanal=kanal, dokument=dokument)
+def _record_application(job_id: int, kanal: str) -> dict:
+    """Write the application through the one recorder both this screen and the
+    reply reader use. A module-level def rather than the service function
+    passed straight to `run.io_bound`: the arity rule that catches a call with
+    the wrong number of arguments only inspects targets defined in this file,
+    and a TypeError raised in a worker thread is one log line and a button that
+    looks alive."""
+    return apply_record.record_application(job_id, kanal)
+
+
+def _undo_application(job_id: int, bewerbung_id: int, previous_status: str):
+    apply_record.undo(job_id, bewerbung_id, previous_status)
 
 
 def _load_draft(job_id: int):
@@ -1543,46 +1559,80 @@ async def jobs_page():
             dialog.open()
 
         async def confirm_applied(job: dict):
-            # A one-way door on a row of adjacent buttons. `apply_job` writes
-            # into the very table the duplicate gate reads, so a mis-click
-            # burns that company's single application slot and takes the
-            # posting out of the pipeline — and nothing in the app puts a
-            # status back from 'applied'.
+            """Record the application, and let him take it straight back.
+
+            This used to ask first, because it is a one-way door: `apply_job`
+            writes into the very table the duplicate gate reads, so a mis-click
+            burns that company's single application slot. The question is gone
+            and an undo took its place — a dialog on the press he makes eight
+            times an evening is a dialog he learns to click through, which
+            guards nothing. The undo is real work (`db.unrecord_application`
+            takes back every write, in one transaction), and that is the only
+            reason the trade is honest."""
+            # Cleared BEFORE the wait, never after: clearing afterwards
+            # destroys a dialog he opened meanwhile, and one awaited on then
+            # never resolves at all.
             overlay.clear()
-            with overlay, ui.dialog() as confirm, ui.card():
-                ui.label("Bewerbung eintragen?").classes("font-bold")
-                ui.label(f"{job['company']} — {clean_title(job['title'])}") \
-                    .classes("text-sm")
-                ui.label("Das trägt eine gesendete Bewerbung ein und nimmt die "
-                         "Anzeige aus der Arbeitsliste. Eine Bewerbung pro "
-                         "Firma — danach ist diese Firma vergeben.") \
-                    .classes("text-sm text-gray-600")
-                with ui.row().classes("justify-end gap-2 w-full"):
-                    ui.button("Abbrechen",
-                              on_click=lambda: confirm.submit(False)) \
-                        .props("flat no-caps")
-                    ui.button("Eintragen",
-                              on_click=lambda: confirm.submit(True)) \
-                        .props("color=positive no-caps")
-            confirm.open()
-            if not await confirm:
-                return
-            # FINDING 6: what the ledger records is the way it actually went,
-            # and the Mappe that went with it — the duplicate gate reads this
-            # table, so its rows have to be true.
-            kanal = ("E-Mail" if _by_email(job) else "Online-Portal")
+            # What the ledger records is the way it actually went — the
+            # duplicate gate reads this table, so its rows have to be true.
+            kanal = (apply_record.KANAL_EMAIL if _by_email(job)
+                     else apply_record.KANAL_FORM)
             # He asked for it to go, so it goes: without this the posting would
             # be treated as one that fell out of the view by itself and stay in
             # the reading pane behind a note.
             _hold_place(job["id"])
-            bewerbung_id = await run.io_bound(
-                _confirm_applied, job["id"], kanal, str(job.get("pdf_path") or ""))
+            result = await run.io_bound(_record_application, job["id"], kanal)
             await refresh(force=True)
-            if bewerbung_id is None:
-                say("Blockiert: bei dieser Firma liegt schon eine Bewerbung",
-                    type="warning")
-            else:
-                say("Bewerbung eingetragen ✓", type="positive")
+            if not result["ok"]:
+                blocking = result["duplicate"]
+                say(helpers.applied_line(blocking) if blocking else
+                    "Diese Anzeige gibt es nicht mehr.",
+                    type="warning", multi_line=True)
+                return
+            with overlay:
+                _undo_bar(result, job)
+
+        def _undo_bar(result: dict, job: dict) -> None:
+            """Ten seconds in which the press can be taken back.
+
+            Built as real elements rather than a Quasar notify action: nothing
+            in this codebase uses those, an unwired handler renders an
+            identical button, and a test that called the service directly would
+            pass while the button did nothing."""
+            bar = ui.row().classes("jd-undo items-center gap-3")
+            gone = {"yes": False}
+
+            async def dismiss() -> None:
+                """Idempotent, because two things end this bar and either can
+                come first: the ten seconds running out, and him pressing.
+                Deleting an already-deleted element raises, and inside a timer
+                callback that is one log line — the failure would be invisible
+                and the next press would find a page carrying a dead timer."""
+                if gone["yes"]:
+                    return
+                gone["yes"] = True
+                bar.delete()
+
+            with bar:
+                ui.label(f"Bewerbung bei {result['company']} eingetragen ✓") \
+                    .classes("text-sm")
+
+                async def take_back() -> None:
+                    await dismiss()
+                    await run.io_bound(_undo_application, job["id"],
+                                       result["bewerbung_id"],
+                                       result["previous_status"])
+                    _hold_place(job["id"])
+                    await refresh(force=True)
+                    say(f"Rückgängig gemacht — {result['company']} ist wieder "
+                        f"frei.", type="positive")
+
+                ui.button("Rückgängig", on_click=take_back) \
+                    .props("flat dense no-caps")
+            # once=True: a repeating timer in a page module is refused by the
+            # rule that keeps every recurring tick in ui/live.py, where the
+            # pause-on-disconnect lives.
+            ui.timer(10.0, dismiss, once=True)
 
         # Postings arrive hourly, scores land every ten minutes and the liveness
         # pass runs 90 s after every start — all of it invisible until this. It

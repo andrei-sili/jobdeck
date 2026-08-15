@@ -111,6 +111,12 @@ body { background: var(--paper); color: var(--ink); font-family: var(--jd-sans);
             font:400 12px/1.6 var(--jd-mono); color: var(--ink-2); }
 .jd-facts .k { color: var(--ink-3); }
 .jd-reason { font-size:12px; color: var(--warn); }
+/* The ten seconds in which a recorded application can be taken back. Quiet,
+   because it is a confirmation and not a warning — but it holds a control, so
+   it sits on its own surface rather than reading as one more note. */
+.jd-undo { border:1px solid var(--accent); border-radius:8px;
+           background: var(--surface-2); padding:6px 8px 6px 12px;
+           margin-top:12px; }
 @media (max-width: 1080px) {
   .jd-panes { grid-template-columns: 1fr; }
   .jd-screen { height: auto; }

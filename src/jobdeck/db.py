@@ -1834,6 +1834,42 @@ def apply_job(
     return bewerbung_id
 
 
+def unrecord_application(
+    con: sqlite3.Connection,
+    job_id: int,
+    bewerbung_id: int,
+    previous_status: str,
+) -> None:
+    """Undo `apply_job` completely — every write it made, in one transaction.
+
+    This exists so a form application can be recorded with a press and taken
+    back with a press, instead of being guarded by a confirmation dialog he
+    would learn to click through. That trade is only honest if the undo is
+    REAL: a half-undo leaves a company marked as applied-to and permanently
+    spends its only application slot, silently.
+
+    Four writes, because `apply_job` made four: `add_bewerbung` writes a
+    `status_history` row of its own, and `set_job_status` sets both the status
+    and the link. `previous_status` is what the posting was BEFORE — restoring
+    a hardcoded 'new' would quietly revive a posting he had skipped.
+    """
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        # The posting first: `jobs.bewerbung_id` is a foreign key into the row
+        # about to be deleted, so deleting it while the link stands raises.
+        con.execute(
+            "UPDATE jobs SET status=?, bewerbung_id=NULL WHERE id=?",
+            (previous_status, job_id),
+        )
+        con.execute("DELETE FROM status_history WHERE bewerbung_id=?",
+                    (bewerbung_id,))
+        con.execute("DELETE FROM bewerbungen WHERE id=?", (bewerbung_id,))
+    except Exception:
+        con.rollback()
+        raise
+    con.commit()
+
+
 # --------------------------------------------------------------------------
 # Settings
 # --------------------------------------------------------------------------

@@ -5,6 +5,7 @@ legacy `bewerbungen` table keeps its exact shape so the historical data
 (and any legacy tooling still reading it) continues to work unchanged.
 """
 
+import pathlib
 import sqlite3
 
 from jobdeck import constants, dates
@@ -316,6 +317,40 @@ def _backfill_published_on(con: sqlite3.Connection) -> None:
             )
 
 
+def _backfill_application_documents(con: sqlite3.Connection) -> None:
+    """Point an application at the Mappe that was actually built for it.
+
+    Two writers used to record a form application and only one of them passed
+    `dokument`, so 13 of his 35 Online-Portal ledger rows say no document
+    exists while the PDF sits under output/job_<id>/. One recorder makes that
+    impossible going forward; this fills in what the disagreement already cost.
+
+    Repeated on every start rather than gated on a version, in the shape of
+    `_backfill_published_on`: it only ever fills a BLANK from a path the app
+    itself stored, so it is idempotent and self-healing — a row whose PDF is
+    rebuilt later gets its pointer on the next start.
+
+    The file must still exist. A ledger entry naming a path that is not there
+    is worse than one that admits it has nothing: he would click it.
+    """
+    job_cols = [row[1] for row in con.execute("PRAGMA table_info(jobs)")]
+    draft_cols = [row[1] for row in con.execute("PRAGMA table_info(drafts)")]
+    if "bewerbung_id" not in job_cols or "pdf_path" not in draft_cols:
+        # a database old enough to predate either column — nothing to derive
+        # from, and a migration must never raise on a shape it can simply skip
+        return
+    rows = con.execute(
+        "SELECT b.id, d.pdf_path FROM bewerbungen b "
+        "  JOIN jobs j ON j.bewerbung_id = b.id "
+        "  JOIN drafts d ON d.job_id = j.id "
+        " WHERE COALESCE(b.dokument,'')='' AND COALESCE(d.pdf_path,'')<>''"
+    ).fetchall()
+    for bewerbung_id, pdf_path in rows:
+        if pathlib.Path(pdf_path).is_file():
+            con.execute("UPDATE bewerbungen SET dokument=? WHERE id=?",
+                        (pdf_path, bewerbung_id))
+
+
 def _ensure_source_fact_columns(con: sqlite3.Connection) -> None:
     """Facts the boards state and the app used to throw away (schema v7).
 
@@ -395,6 +430,7 @@ def migrate(con: sqlite3.Connection) -> None:
     _ensure_form_flow_columns(con)
     _ensure_draft_columns(con)
     _backfill_published_on(con)
+    _backfill_application_documents(con)
     if version < 10:
         _restate_portal_as_a_moment(con)
     if version < 2:
