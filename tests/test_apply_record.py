@@ -206,3 +206,24 @@ def test_the_undo_gives_the_documents_back_too(con, data_dir):
     assert pathlib.Path(job["upload_path"]).exists()
     assert pathlib.Path(job["upload_path"]).read_bytes() == archive.read_bytes()
     assert jobs_page.mappe_line(dict(job)) == ("Mappe bereit", "")
+
+
+def test_the_undo_survives_a_posting_that_was_refused_because_of_it(con, data_dir):
+    """`jobs.duplicate_of` is a SECOND foreign key into the row being deleted,
+    written by the very gate this application armed. Leaving it made the DELETE
+    raise — inside a worker thread, so one log line, a bar that vanishes and a
+    user who believes the undo happened — and those postings are not
+    duplicates of an application that never existed."""
+    first = _job(con)
+    _with_mappe(con, data_dir, first)
+    result = apply_record.record_form_application(first)
+    twin = _job(con, external_id="e2")
+    assert apply_record.record_form_application(twin)["ok"] is False
+    assert db.get_job(con, twin)["duplicate_of"] == result["bewerbung_id"]
+
+    apply_record.undo(first, result["bewerbung_id"], result["previous_status"])
+
+    assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 0
+    twin_row = db.get_job(con, twin)
+    assert twin_row["duplicate_of"] is None
+    assert twin_row["status"] == "new", "left as a duplicate of nothing"

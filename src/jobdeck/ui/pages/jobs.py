@@ -557,10 +557,20 @@ def _range_line(page: int, total: int, shown: int) -> str:
     return f"{first}–{first + shown - 1} von {total} Firmen"
 
 
+# What this screen states that lives in app_settings rather than in a table.
+# `db.data_signature` reads tables only, by design — so a screen that also
+# states a SETTING has to sign it here, the way the Unterlagen screen does.
+# Without this the button keeps saying "Tageslimit aufgebraucht" after he has
+# raised the limit in Einstellungen, and after midnight, until he reloads.
+_WATCHED_SETTINGS = ("daily_draft_cap", "drafts_written_count",
+                     "drafts_written_date")
+
+
 def _signature() -> tuple:
     """One cheap read of everything this page's rows can say (see ui/live.py)."""
     with db.db() as con:
-        return db.data_signature(con)
+        return (*db.data_signature(con),
+                *(db.get_setting(con, key, "") for key in _WATCHED_SETTINGS))
 
 
 def _set_status(job_id: int, status: str):
@@ -1618,6 +1628,11 @@ async def jobs_page():
                     return
                 say(helpers.mappe_summary(built, with_anlagen=True),
                     type="positive", multi_line=True)
+                if built["warning"]:
+                    # The portal budget is 2 MB and his real Mappe measures
+                    # about 2.1: the step this press replaced said so, and an
+                    # oversized upload fails in front of the employer.
+                    say(built["warning"], type="warning", multi_line=True)
             await run.io_bound(_open_upload_folder)
 
         async def on_key(event) -> None:

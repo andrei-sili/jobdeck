@@ -1146,7 +1146,8 @@ async def test_the_whole_press_runs_and_records_nothing(
     opened = []
     monkeypatch.setattr(drafting, "draft_for_job", letter)
     monkeypatch.setattr(mappe, "create_mappe", built)
-    monkeypatch.setattr("jobdeck.ui.helpers.open_in_system",
+    from jobdeck.ui import helpers
+    monkeypatch.setattr(helpers, "open_in_system",
                         lambda path: opened.append(str(path)))
 
     user.find("Bewerbung starten", kind=ui.button).click()
@@ -1421,3 +1422,64 @@ async def test_the_cockpits_old_address_lands_on_the_postings(user: User,
     await user.open(f"/cockpit/{job_id}")
     await user.should_see("Stellen")
     await user.should_see("Beispiel GmbH")
+
+
+async def test_raising_the_daily_limit_frees_the_button_by_itself(
+        user: User, con, data_dir):
+    """`db.data_signature` reads tables only, by design — so a screen that also
+    states a SETTING has to sign it, or the button keeps saying the limit is
+    used up after he has raised it in Einstellungen, and after midnight, until
+    he reloads. Adding it to the row fingerprint cannot help: the fingerprint
+    is only recomputed when a refresh runs, and a refresh only runs when the
+    signature moved."""
+    job_id = _posting(con)
+    db.set_apply_channel(con, job_id, "ats_form", "JOIN", "https://join.com/x/apply")
+    db.set_setting(con, "daily_draft_cap", "0")
+    con.commit()
+    await user.open("/")
+    await user.should_see("Tageslimit")
+
+    db.set_setting(con, "daily_draft_cap", "10")   # raised in another tab
+    con.commit()
+    await _tick(user)
+
+    await user.should_see("Bewerbung starten")
+    button = next(e for e in user.client.elements.values()
+                  if isinstance(e, ui.button) and "Bewerbung starten" in str(e.text))
+    assert button.enabled, "the button is still refusing a limit he has raised"
+
+
+async def test_an_oversized_mappe_still_says_so_on_the_new_path(
+        user: User, con, data_dir, monkeypatch):
+    """The portal budget is 2 MB and his real Mappe measures about 2.1. The
+    step this press replaced warned about it, and an oversized upload fails in
+    front of the employer rather than quietly."""
+    from jobdeck.services import drafting, mappe
+    job_id = _posting(con)
+    db.set_apply_channel(con, job_id, "ats_form", "JOIN", "https://join.com/x/apply")
+    con.commit()
+    await user.open("/")
+    monkeypatch.setattr(ui.navigate, "to", lambda url, **kw: None)
+
+    async def letter(jid):
+        with db.db() as c:
+            db.upsert_draft(c, jid, {"status": "ready", "anschreiben_body": "X"})
+            c.commit()
+        return {"ok": True, "error": "", "draft": {"id": 1}}
+
+    async def built(jid):
+        return {"ok": True, "error": "", "pdf_path": "/tmp/m.pdf",
+                "warning": "Mappe is 2.1 MB — over the 2.0 MB target for this "
+                           "channel; the quality floor stops further compression",
+                "pages": 10, "size_bytes": 2_100_000,
+                "size_before_bytes": 3_700_000, "compression": "", "anlagen": []}
+
+    monkeypatch.setattr(drafting, "draft_for_job", letter)
+    monkeypatch.setattr(mappe, "create_mappe", built)
+    from jobdeck.ui import helpers
+    monkeypatch.setattr(helpers, "open_in_system", lambda path: None)
+
+    user.find("Bewerbung starten", kind=ui.button).click()
+    await asyncio.sleep(0.8)
+
+    await user.should_see("over the 2.0 MB target")

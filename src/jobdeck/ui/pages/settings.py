@@ -588,6 +588,14 @@ async def settings_page():
                 async def resolve_channels_now():
                     ui.notify("Resolving where to apply…")
                     r = await apply_resolve.resolve_pending()
+                    if r.get("skipped"):
+                        # The scheduler runs the same pass every half hour, so
+                        # this is a normal answer now — and it looks exactly
+                        # like "nothing left to do" in the counters.
+                        ui.notify(f"Ein Durchlauf läuft gerade — "
+                                  f"{r['remaining']} noch offen.",
+                                  type="warning")
+                        return
                     if not r["resolved"] and not r["failed"]:
                         ui.notify("Every scored posting already knows its "
                                   "channel ✓", type="positive")

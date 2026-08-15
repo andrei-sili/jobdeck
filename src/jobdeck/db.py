@@ -1954,6 +1954,17 @@ def unrecord_application(
             "UPDATE jobs SET status=?, bewerbung_id=NULL WHERE id=?",
             (previous_status, job_id),
         )
+        # `jobs.duplicate_of` is a SECOND foreign key into the row being
+        # deleted, and it is written by the very gate this application armed:
+        # every posting refused because of it points here. Leaving them would
+        # make the DELETE raise — inside a worker thread, so one log line, a
+        # bar that vanishes and a user who believes the undo happened — and
+        # they are not duplicates of an application that never existed.
+        con.execute(
+            "UPDATE jobs SET status='new', duplicate_of=NULL "
+            " WHERE duplicate_of=? AND bewerbung_id IS NULL",
+            (bewerbung_id,),
+        )
         con.execute("DELETE FROM status_history WHERE bewerbung_id=?",
                     (bewerbung_id,))
         con.execute("DELETE FROM bewerbungen WHERE id=?", (bewerbung_id,))

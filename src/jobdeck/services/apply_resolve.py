@@ -213,7 +213,12 @@ async def resolve_pending(limit: int = BATCH_LIMIT,
     """
     if _lock.locked():
         log.info("apply-resolve: a pass is already running, skipping this one")
-        return {"resolved": 0, "failed": 0,
+        # `skipped` is what tells a caller apart from a pass that found
+        # nothing: both answer "0 resolved, 0 failed", and the Settings button
+        # reported the second as "every posting already knows its channel ✓".
+        # Since the scheduler runs this every half hour, that positive is now
+        # reachable with hundreds still pending.
+        return {"resolved": 0, "failed": 0, "skipped": True,
                 "remaining": await asyncio.to_thread(_pending_count),
                 "channels": {}}
     async with _lock:
@@ -226,7 +231,8 @@ async def _resolve_pending(limit: int,
     counts: dict[str, int] = {}
     resolved = failed = 0
     if not jobs:
-        return {"resolved": 0, "failed": 0, "remaining": 0, "channels": counts}
+        return {"resolved": 0, "failed": 0, "skipped": False,
+                "remaining": 0, "channels": counts}
     owned = client is None
     if owned:
         client = httpx.AsyncClient(
@@ -252,8 +258,8 @@ async def _resolve_pending(limit: int,
     remaining = await asyncio.to_thread(_pending_count)
     log.info("apply-resolve batch: %s resolved, %s failed, %s still pending",
              resolved, failed, remaining)
-    return {"resolved": resolved, "failed": failed, "remaining": remaining,
-            "channels": counts}
+    return {"resolved": resolved, "failed": failed, "skipped": False,
+            "remaining": remaining, "channels": counts}
 
 
 async def resolve_and_store(job_id: int) -> dict:

@@ -658,3 +658,28 @@ async def test_a_second_pass_never_walks_the_backlog_alongside_the_first(
     assert db.get_job(con, job_id)["apply_channel"] == ""
     # and the lock is free again afterwards, so the next tick really runs
     assert not apply_resolve._lock.locked()
+
+
+async def test_a_skipped_pass_is_told_apart_from_an_empty_one(con, data_dir):
+    """Both answer "0 resolved, 0 failed". The Settings button reported the
+    second as "every posting already knows its channel ✓" — and since the
+    scheduler runs the same pass every half hour, that positive became
+    reachable with hundreds still pending."""
+    from jobdeck import db
+    job_id = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "e1", "title": "Entwickler",
+        "company": "Firma", "url": "https://firma.de/x"})
+    db.set_job_score(con, job_id, 80, "passt")
+    con.commit()
+
+    async with apply_resolve._lock:
+        skipped = await apply_resolve.resolve_pending()
+    assert skipped["skipped"] is True
+    assert skipped["remaining"] == 1, "it says how much is really left"
+
+    def handler(request):
+        return httpx.Response(200, text="<html></html>")
+
+    async with _client(handler) as client:
+        done = await apply_resolve.resolve_pending(client=client)
+    assert done["skipped"] is False
