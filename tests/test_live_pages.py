@@ -789,7 +789,8 @@ async def test_a_refused_action_renders_disabled_and_says_why(
     steps = [e for e in user.client.elements.values()
              if isinstance(e, ui.button)
              and any(word in e.text for word in
-                     ("schreiben", "Mappe", "Formular", "eintragen", "senden"))]
+                     ("schreiben", "Bewerbung starten", "Abgeschickt",
+                      "eintragen", "senden"))]
     assert steps, "no apply step is rendered at all"
     assert all(not b.enabled for b in steps), \
         "an application that cannot happen is offered as a live button"
@@ -878,10 +879,11 @@ async def test_a_form_posting_carries_its_whole_toolkit_in_the_reader(
     con.commit()
     await user.open("/")
 
-    await user.should_see("Anschreiben schreiben")
-    await user.should_see("Mappe erstellen")
-    await user.should_see("Formular öffnen")
-    await user.should_see("Beworben eintragen")
+    # two controls, not four — and the price is on the one that spends
+    await user.should_see("Bewerbung starten · ~0,09 $")
+    await user.should_see("Abgeschickt")
+    await user.should_not_see("Mappe erstellen")
+    await user.should_not_see("Kanal ermitteln")
 
 
 async def test_recording_from_the_reader_makes_the_posting_leave_for_good(
@@ -897,7 +899,7 @@ async def test_recording_from_the_reader_makes_the_posting_leave_for_good(
     await user.open("/")
     await user.should_see("Beispiel GmbH")
 
-    user.find("Beworben eintragen", kind=ui.button).click()
+    user.find("Abgeschickt", kind=ui.button).click()
     await asyncio.sleep(0.4)
     # it records at once and names what it did, with the way back beside it
     await user.should_see("Rückgängig")
@@ -940,7 +942,7 @@ async def test_opening_the_form_records_that_the_application_started(
     opened = []
     monkeypatch.setattr(ui.navigate, "to",
                         lambda url, **kw: opened.append(url))
-    user.find("Formular öffnen").click()
+    user.find("Bewerbung starten").click()
     await asyncio.sleep(0.4)
 
     assert con.execute("SELECT form_opened_at FROM jobs WHERE id=?",
@@ -1023,6 +1025,63 @@ async def test_recording_from_the_strip_closes_the_loop(
     assert not any("Formular bei Beispiel GmbH" in t for t in labels)
 
 
+async def test_a_failed_letter_says_the_mappe_is_not_complete(
+        user: User, con, data_dir, monkeypatch):
+    """A Bewerbungsmappe is always complete — his decision, 2026-08-14. So the
+    one outcome that must never be silent is a Mappe that is not: staging a
+    partial one in front of an upload button is worse than staging nothing.
+
+    The employer's tab still opens either way. The app's document machinery
+    never stands between him and someone's form."""
+    from jobdeck.services import drafting, mappe
+    job_id = _posting(con)
+    db.set_apply_channel(con, job_id, "ats_form", "JOIN",
+                         "https://join.com/companies/x/1/apply")
+    con.commit()
+    await user.open("/")
+    opened = []
+    monkeypatch.setattr(ui.navigate, "to", lambda url, **kw: opened.append(url))
+
+    async def no_letter(_job_id):
+        return {"ok": False, "error": "ANTHROPIC_API_KEY is not set",
+                "draft": None}
+
+    async def never(_job_id):
+        raise AssertionError("the Mappe was built without a letter")
+
+    monkeypatch.setattr(drafting, "draft_for_job", no_letter)
+    monkeypatch.setattr(mappe, "create_mappe", never)
+
+    user.find("Bewerbung starten", kind=ui.button).click()
+    await asyncio.sleep(0.6)
+
+    assert opened == ["https://join.com/companies/x/1/apply"]
+    await user.should_see("NICHT vollständig")
+    job = db.get_job(con, job_id)
+    assert job["form_opened_at"] != "", "the application still started"
+    assert job["mappe_kind"] == "", "nothing complete is staged, and it says so"
+    await user.should_see("Mappe NICHT fertig")     # the strip says it too
+
+
+async def test_the_daily_letter_limit_is_enforced_where_the_money_is_spent(
+        user: User, con, data_dir):
+    """A screen that only greys out a button is a screen the keyboard, the
+    batch and a second tab all walk past. The refusal lives in the same
+    transaction that commits the spend."""
+    from jobdeck.services import drafting
+    job_id = _posting(con)
+    db.set_setting(con, "daily_draft_cap", "0")
+    con.commit()
+
+    refusal = await asyncio.to_thread(drafting._claim, job_id)
+
+    assert "limit" in refusal and "Einstellungen" in refusal
+    assert db.get_draft_by_job(con, job_id) is None, "a claim was taken anyway"
+
+    await user.open("/")
+    await user.should_see("Tageslimit")
+
+
 async def test_the_editor_the_queue_uses_opens_over_the_list_too(
         user: User, con, data_dir):
     """One editor, not two: it is the last screen before a message leaves."""
@@ -1081,7 +1140,7 @@ async def test_the_way_back_is_on_screen_the_second_after_the_form_opens(
     # patched AFTER the page is open: the user fixture navigates too
     monkeypatch.setattr(ui.navigate, "to", lambda url, **kw: None)
 
-    user.find("Formular öffnen", kind=ui.button).click()
+    user.find("Bewerbung starten", kind=ui.button).click()
     await asyncio.sleep(0.4)
 
     await user.should_see("zurück in die Arbeitsliste")
@@ -1125,7 +1184,7 @@ async def test_undoing_an_opened_form_asks_what_actually_happened(
     con.commit()
     await user.open("/")
     monkeypatch.setattr(ui.navigate, "to", lambda url, **kw: None)
-    user.find("Formular öffnen", kind=ui.button).click()
+    user.find("Bewerbung starten", kind=ui.button).click()
     await asyncio.sleep(0.4)
 
     user.find("zurück in die Arbeitsliste", kind=ui.button).click()
@@ -1158,7 +1217,7 @@ async def test_a_recorded_application_can_be_taken_straight_back(
     await user.open("/")
     await user.should_see("Beispiel GmbH")
 
-    user.find("Beworben eintragen", kind=ui.button).click()
+    user.find("Abgeschickt", kind=ui.button).click()
     await asyncio.sleep(0.4)
     assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 1
 
@@ -1190,7 +1249,7 @@ async def test_a_refused_application_offers_no_undo_at_all(
                            "kanal": "E-Mail", "status": "Absage"})
     con.commit()
 
-    user.find("Beworben eintragen", kind=ui.button).click()
+    user.find("Abgeschickt", kind=ui.button).click()
     await asyncio.sleep(0.4)
 
     await user.should_see("bereits beworben")
@@ -1208,7 +1267,7 @@ async def test_saying_no_puts_it_back_without_recording_anything(
     con.commit()
     await user.open("/")
     monkeypatch.setattr(ui.navigate, "to", lambda url, **kw: None)
-    user.find("Formular öffnen", kind=ui.button).click()
+    user.find("Bewerbung starten", kind=ui.button).click()
     await asyncio.sleep(0.4)
 
     user.find("zurück in die Arbeitsliste", kind=ui.button).click()

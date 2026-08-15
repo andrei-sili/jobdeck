@@ -15,6 +15,7 @@ from pathlib import Path
 from jobdeck import apply_channel, backup, config, dates, freshness, migrations
 from jobdeck.constants import (
     DEFAULT_DAILY_CAP,
+    DEFAULT_DAILY_DRAFT_CAP,
     EMAIL_OUTBOUND,
     EMAIL_OUTBOUND_TEST,
     LIVENESS_GONE,
@@ -1789,6 +1790,52 @@ def count_outbound_today(con: sqlite3.Connection) -> int:
         "SELECT COUNT(*) FROM email_log WHERE direction LIKE ? AND created_at LIKE ?",
         (f"{EMAIL_OUTBOUND}%", f"{today}%"),
     ).fetchone()[0]
+
+
+_DRAFT_DAY_KEY = "drafts_written_date"
+_DRAFT_COUNT_KEY = "drafts_written_count"
+
+
+def note_draft_written(con: sqlite3.Connection) -> None:
+    """Count one paid letter against today's quota.
+
+    Called where the money is committed — the claim — rather than where a
+    letter comes back, because a drafting call that fails has still spent the
+    tokens. The send cap counts test sends for the same reason.
+
+    A counter of its own rather than a query over `drafts`: `updated_at` moves
+    when the Mappe is written too, so counting rows would charge him for
+    building a PDF.
+    """
+    today = datetime.date.today().isoformat()
+    if get_setting(con, _DRAFT_DAY_KEY, "") != today:
+        set_setting(con, _DRAFT_DAY_KEY, today)
+        set_setting(con, _DRAFT_COUNT_KEY, "0")
+    _bump_int_setting(con, _DRAFT_COUNT_KEY, 1)
+
+
+def count_drafts_today(con: sqlite3.Connection) -> int:
+    """Letters written since local midnight. Zero on a new day without any
+    write having happened — the stored count belongs to the stored date."""
+    if get_setting(con, _DRAFT_DAY_KEY, "") != datetime.date.today().isoformat():
+        return 0
+    try:
+        return max(0, int(get_setting(con, _DRAFT_COUNT_KEY, "0") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def daily_draft_cap(con: sqlite3.Connection) -> int:
+    """How many letters may be written in a day. His decision, 2026-08-15: a
+    HARD cap, raised deliberately in Einstellungen rather than by a one-press
+    override, because an override always one press away is not a limit."""
+    raw = (get_setting(con, "daily_draft_cap", "") or "").strip()
+    try:
+        return max(0, int(float(raw)))
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError as well: float("1e999") is inf and int(inf) raises —
+        # app_settings is a file he is invited to edit
+        return int(DEFAULT_DAILY_DRAFT_CAP)
 
 
 def next_approved_autosend_job(

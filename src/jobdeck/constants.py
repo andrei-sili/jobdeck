@@ -74,6 +74,13 @@ DRAFT_STATUS = ["generating", "ready", "failed", "approved", "sending", "sent", 
 # second copy would let a bar promise a send the gate below it refuses.
 DEFAULT_DAILY_CAP = "15"
 
+# How many tailored letters may be written in a day when he has never said.
+# Since v10 a form application writes one by itself, so the form path spends
+# money per press for the first time — his decision (2026-08-15) was a HARD
+# cap, raised deliberately in Einstellungen, because an override always one
+# press away is a speed bump rather than a limit.
+DEFAULT_DAILY_DRAFT_CAP = "10"
+
 # email_log.direction values. Test sends (real sending OFF) get their own
 # direction: they must never look like a real application in the audit log,
 # but still count toward the daily cap — the account's reputation does not

@@ -213,3 +213,34 @@ def test_the_cockpits_old_address_still_lands_somewhere_real():
     for path in pathlib.Path(jobs_page.__file__).parent.glob("*.py"):
         text = path.read_text()
         assert 'navigate.to(f"/cockpit' not in text, f"{path.name} still links in"
+
+
+def test_the_form_answers_never_offer_a_letter_he_threw_away():
+    """`posting_fields` does NOT apply `usable()` — only `fields()` does — so
+    a caller that reaches for it directly would hand a discarded or failed
+    draft to an employer's form. The strip's Formulardaten sheet is such a
+    caller, and it applies `usable()` itself."""
+    source = pathlib.Path(jobs_page.__file__).read_text()
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "posting_fields"):
+            second = node.args[1] if len(node.args) > 1 else None
+            assert (isinstance(second, ast.Call)
+                    and isinstance(second.func, ast.Attribute)
+                    and second.func.attr == "usable"), (
+                f"jobs.py:{node.lineno} offers a draft that was never screened "
+                f"by apply_form.usable()")
+
+
+def test_a_shortened_label_never_shortens_what_is_copied():
+    """A truncated Referenznummer in someone's form is worse than none at all:
+    an id is either exact or wrong."""
+    long_value = "10001-1003387672-S-und-noch-viel-mehr-text-" + "x" * 80
+    assert jobs_page._short(long_value).endswith("…")
+    assert len(jobs_page._short(long_value)) <= 60
+    # the value itself is untouched — only the label is shortened
+    source = pathlib.Path(jobs_page.__file__).read_text()
+    assert "ui.clipboard.write(v)" in source
+    assert "ui.clipboard.write(_short" not in source

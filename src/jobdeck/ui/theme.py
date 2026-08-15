@@ -118,6 +118,11 @@ body { background: var(--paper); color: var(--ink); font-family: var(--jd-sans);
                          background: var(--surface-2); }
 .jd-laeuft-row { padding:7px 10px; border-bottom:1px solid var(--rule); }
 .jd-laeuft-row:last-child { border-bottom:0; }
+/* One personal answer, ready to copy. Chips because they are the same on every
+   German form — a row each would be eleven rows of furniture. */
+.jd-chip { border:1px solid var(--rule-2); border-radius:20px;
+           font:400 11.5px/1 var(--jd-mono); color: var(--ink-2);
+           background: var(--surface); }
 /* The ten seconds in which a recorded application can be taken back. Quiet,
    because it is a confirmation and not a warning — but it holds a control, so
    it sits on its own surface rather than reading as one more note. */
