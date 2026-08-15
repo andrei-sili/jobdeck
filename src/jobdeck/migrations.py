@@ -5,11 +5,12 @@ legacy `bewerbungen` table keeps its exact shape so the historical data
 (and any legacy tooling still reading it) continues to work unchanged.
 """
 
+import pathlib
 import sqlite3
 
-from jobdeck import dates
+from jobdeck import constants, dates
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # Legacy table, exactly as the previous tracker created it.
 BEWERBUNGEN_SQL = """
@@ -84,6 +85,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     temp_agency         INTEGER NOT NULL DEFAULT 0,
     bookmarked_at       TEXT NOT NULL DEFAULT '',
     opened_at           TEXT NOT NULL DEFAULT '',
+    form_opened_at      TEXT NOT NULL DEFAULT '',
+    upload_path         TEXT NOT NULL DEFAULT '',
+    mappe_kind          TEXT NOT NULL DEFAULT '',
     UNIQUE (source, external_id)
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
@@ -234,6 +238,60 @@ def _ensure_freshness_columns(con: sqlite3.Connection) -> None:
             con.execute(f"ALTER TABLE jobs ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
 
 
+def _ensure_form_flow_columns(con: sqlite3.Connection) -> None:
+    """Where a form application stands, as facts rather than as a status
+    (schema v10).
+
+    * `form_opened_at`: the moment he opened an employer's form. This replaces
+      the status `portal`, and the replacement is the point: `portal` is a
+      status, so every view that pins a concrete one hid the posting he had
+      just started working on — which is exactly the complaint. A timestamp
+      hides nothing, and it is independent of `status` for the same reason
+      `opened_at` is: starting an application is a different question from what
+      became of the posting.
+    * `upload_path`: the copy staged in `config.UPLOAD_DIR` for an employer's
+      file picker. Deliberately NOT called mappe_path — the Mappe itself lives
+      on `drafts.pdf_path` and is archived under `output/job_<id>/`; this is a
+      second, transient artifact with a different lifetime, and giving it the
+      Mappe's name is how two columns start disagreeing about one file.
+    * `mappe_kind`: what the build actually produced, written BY the build and
+      never inferred back out. Empty means no complete Mappe is staged, which
+      the strip must say out loud: a Bewerbungsmappe is always complete
+      (Deckblatt, Anschreiben, Lebenslauf, Zeugnisse) by the owner's decision,
+      so a partial one put silently in front of an upload button is the worst
+      outcome available.
+    """
+    existing = [row[1] for row in con.execute("PRAGMA table_info(jobs)")]
+    for col in ("form_opened_at", "upload_path", "mappe_kind"):
+        if col not in existing:
+            con.execute(
+                f"ALTER TABLE jobs ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+
+
+def _restate_portal_as_a_moment(con: sqlite3.Connection) -> None:
+    """Re-represent the postings whose form was already open (v10, once).
+
+    Not a status move, so not `set_job_status`: the fact does not change, only
+    where it is written. Each such posting goes back to `new` — it never left
+    the working list in any sense he chose — and gains the timestamp the rest
+    of the app now reads.
+
+    The age is taken from evidence and never from the clock: the newest draft's
+    `updated_at`, else `opened_at`. A posting with neither gets the literal
+    sentinel and reads "seit unbekannt". Stamping `now` here would be inventing
+    an age for eleven real rows, which is precisely the thing that must not
+    happen — the strip would then sort them as if they had just been started.
+    """
+    con.execute(
+        "UPDATE jobs SET status='new', form_opened_at=COALESCE("
+        "  (SELECT MAX(d.updated_at) FROM drafts d"
+        "    WHERE d.job_id=jobs.id AND d.updated_at<>''),"
+        "  NULLIF(opened_at, ''), ?) "
+        "WHERE status='portal'",
+        (constants.FORM_OPENED_UNKNOWN,),
+    )
+
+
 def _backfill_published_on(con: sqlite3.Connection) -> None:
     """Derive `published_on` for every posting that still lacks one.
 
@@ -257,6 +315,40 @@ def _backfill_published_on(con: sqlite3.Connection) -> None:
             con.execute(
                 "UPDATE jobs SET published_on=? WHERE id=?", (iso, job_id)
             )
+
+
+def _backfill_application_documents(con: sqlite3.Connection) -> None:
+    """Point an application at the Mappe that was actually built for it.
+
+    Two writers used to record a form application and only one of them passed
+    `dokument`, so 13 of his 35 Online-Portal ledger rows say no document
+    exists while the PDF sits under output/job_<id>/. One recorder makes that
+    impossible going forward; this fills in what the disagreement already cost.
+
+    Repeated on every start rather than gated on a version, in the shape of
+    `_backfill_published_on`: it only ever fills a BLANK from a path the app
+    itself stored, so it is idempotent and self-healing — a row whose PDF is
+    rebuilt later gets its pointer on the next start.
+
+    The file must still exist. A ledger entry naming a path that is not there
+    is worse than one that admits it has nothing: he would click it.
+    """
+    job_cols = [row[1] for row in con.execute("PRAGMA table_info(jobs)")]
+    draft_cols = [row[1] for row in con.execute("PRAGMA table_info(drafts)")]
+    if "bewerbung_id" not in job_cols or "pdf_path" not in draft_cols:
+        # a database old enough to predate either column — nothing to derive
+        # from, and a migration must never raise on a shape it can simply skip
+        return
+    rows = con.execute(
+        "SELECT b.id, d.pdf_path FROM bewerbungen b "
+        "  JOIN jobs j ON j.bewerbung_id = b.id "
+        "  JOIN drafts d ON d.job_id = j.id "
+        " WHERE COALESCE(b.dokument,'')='' AND COALESCE(d.pdf_path,'')<>''"
+    ).fetchall()
+    for bewerbung_id, pdf_path in rows:
+        if pathlib.Path(pdf_path).is_file():
+            con.execute("UPDATE bewerbungen SET dokument=? WHERE id=?",
+                        (pdf_path, bewerbung_id))
 
 
 def _ensure_source_fact_columns(con: sqlite3.Connection) -> None:
@@ -335,8 +427,12 @@ def migrate(con: sqlite3.Connection) -> None:
     _ensure_freshness_columns(con)
     _ensure_source_fact_columns(con)
     _ensure_reading_columns(con)
+    _ensure_form_flow_columns(con)
     _ensure_draft_columns(con)
     _backfill_published_on(con)
+    _backfill_application_documents(con)
+    if version < 10:
+        _restate_portal_as_a_moment(con)
     if version < 2:
         # v2 reserves match_score 0 for hard-criteria violations and hides
         # such rows by default. Under v1 semantics 0 just meant "very bad

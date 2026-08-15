@@ -453,22 +453,32 @@ async def test_only_an_arbeitnow_job_url_is_ever_fetched_for_an_arbeitnow_row():
 
 
 def test_a_posting_he_has_committed_to_is_still_asked_about(con, data_dir):
-    """'portal' means he opened the form and has not confirmed yet — the exact
-    moment "the ad is gone" is worth five minutes of his time, and the status the
-    review queue's pre-send warning depends on. 'skipped'/'applied'/'duplicate'
-    are finished business."""
-    _seed(con, [
+    """A posting whose form he opened and has not confirmed yet is the exact
+    moment "the ad is gone" is worth five minutes of his time, and it is what
+    the review queue's pre-send warning depends on. 'skipped'/'applied'/
+    'duplicate' are finished business.
+
+    The started posting is deliberately seeded the way v10 writes it — status
+    'new' plus the timestamp — and the assertion below names it, so this test
+    keeps covering what it claims to rather than passing through the 'new' arm
+    by accident."""
+    ids = _seed(con, [
         {"source": "arbeitnow", "ext": "working", "url": _AN_JOB["url"], "score": 80},
         {"source": "arbeitnow", "ext": "at-the-form", "url": _AN_JOB["url"] + "2",
-         "score": 90, "status": "portal"},
+         "score": 90},
         {"source": "arbeitnow", "ext": "given-up", "url": _AN_JOB["url"] + "3",
          "score": 95, "status": "skipped"},
         {"source": "arbeitnow", "ext": "sent", "url": _AN_JOB["url"] + "4",
          "score": 99, "status": "applied"},
     ])
+    db.mark_form_opened(con, ids["at-the-form"])
+    con.commit()
+
     queued = [r["external_id"] for r in db.jobs_needing_liveness_check(
         con, limit=10, sources=("arbeitnow",), recheck_after_h=20)]
     assert queued == ["at-the-form", "working"]   # best-scored first among these
+    # and it is still marked as started — being probed did not undo his work
+    assert db.get_job(con, ids["at-the-form"])["form_opened_at"] != ""
 
 
 async def test_the_pre_send_warning_survives_pressing_apply_via_portal(
@@ -477,13 +487,14 @@ async def test_the_pre_send_warning_survives_pressing_apply_via_portal(
     """The queue warning added for the job-18 incident must not be switched off
     by the very button the branch encourages him to press."""
     monkeypatch.setattr(liveness, "BATCH_PAUSE_S", 0)
-    ids = _seed(con, [{"source": "arbeitnow", "ext": "j", "url": _AN_JOB["url"],
-                       "status": "portal"}])
+    ids = _seed(con, [{"source": "arbeitnow", "ext": "j", "url": _AN_JOB["url"]}])
+    db.mark_form_opened(con, ids["j"])
     db.upsert_draft(con, ids["j"], {"status": "ready", "recipient": "hr@firma.de",
                                     "betreff": "B", "email_body": "e",
                                     "anschreiben_body": "a",
                                     "pdf_path": "/tmp/m.pdf"})
     con.commit()
+    started_at = db.get_job(con, ids["j"])["form_opened_at"]
 
     async with _client(_status(410)) as client:
         res = await liveness.check_pending(limit=10, client=client)
@@ -491,7 +502,9 @@ async def test_the_pre_send_warning_survives_pressing_apply_via_portal(
     assert res["gone"] == 1
     row = db.list_drafts_with_jobs(con, ["ready"])[0]
     assert row["job_liveness"] == "gone"      # the warning can still fire
-    assert row["job_status"] == "portal"      # and nothing about his work moved
+    # and nothing about his work moved — including WHEN he started it, which is
+    # what the strip renders as the application's age
+    assert db.get_job(con, ids["j"])["form_opened_at"] == started_at
 
 
 async def test_every_bound_on_the_outbound_volume_is_load_bearing(con, data_dir,

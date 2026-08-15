@@ -25,6 +25,8 @@ def _get_settings():
             "stale_age_days": freshness.stale_age_setting(
                 db.get_setting(con, "stale_age_days", "")),
             "daily_send_cap": db.get_setting(con, "daily_send_cap", "15"),
+            "daily_draft_cap": db.daily_draft_cap(con),
+            "drafts_today": db.count_drafts_today(con),
             "ai_enabled": db.ai_enabled(con),
             "web_contact_search": db.get_setting(con, "web_contact_search", "0"),
             "applicant_name": db.get_setting(con, "applicant_name", ""),
@@ -175,6 +177,17 @@ async def settings_page():
             cap = ui.number("Daily send cap (all sends count, test included)",
                             value=int(settings["daily_send_cap"]),
                             min=1, max=100).classes("w-64")
+            draft_cap = ui.number(
+                "Tageslimit für Anschreiben (jede Formular-Bewerbung schreibt "
+                "eines)",
+                value=settings["daily_draft_cap"], min=0, max=100) \
+                .classes("w-64")
+            ui.label(
+                f"Heute geschrieben: {settings['drafts_today']} von "
+                f"{settings['daily_draft_cap']}. Ein Anschreiben kostet etwa "
+                f"0,09 $. Das Limit gilt hart — die Bewerbung wird abgelehnt, "
+                f"bis du es hier anhebst."
+            ).classes("text-xs text-gray-500")
             stale_age = ui.number(
                 "Anzeigen gelten als alt nach (Tagen)",
                 value=settings["stale_age_days"], min=1, max=365).classes("w-64")
@@ -188,6 +201,10 @@ async def settings_page():
                                    str(int(follow_up.value or 14)))
                 await run.io_bound(_set_setting, "daily_send_cap",
                                    str(int(cap.value or 15)))
+                await run.io_bound(
+                    _set_setting, "daily_draft_cap",
+                    str(max(0, int(draft_cap.value
+                                   if draft_cap.value is not None else 10))))
                 await run.io_bound(
                     _set_setting, "stale_age_days",
                     str(freshness.stale_age_setting(stale_age.value)))
@@ -571,6 +588,14 @@ async def settings_page():
                 async def resolve_channels_now():
                     ui.notify("Resolving where to apply…")
                     r = await apply_resolve.resolve_pending()
+                    if r.get("skipped"):
+                        # The scheduler runs the same pass every half hour, so
+                        # this is a normal answer now — and it looks exactly
+                        # like "nothing left to do" in the counters.
+                        ui.notify(f"Ein Durchlauf läuft gerade — "
+                                  f"{r['remaining']} noch offen.",
+                                  type="warning")
+                        return
                     if not r["resolved"] and not r["failed"]:
                         ui.notify("Every scored posting already knows its "
                                   "channel ✓", type="positive")

@@ -15,8 +15,10 @@ from pathlib import Path
 from jobdeck import apply_channel, backup, config, dates, freshness, migrations
 from jobdeck.constants import (
     DEFAULT_DAILY_CAP,
+    DEFAULT_DAILY_DRAFT_CAP,
     EMAIL_OUTBOUND,
     EMAIL_OUTBOUND_TEST,
+    FORM_OPENED_UNKNOWN,
     LIVENESS_GONE,
     STATUS_RANK,
 )
@@ -543,16 +545,22 @@ APPLIED_FIRM_SQL = """(
 
 # A posting whose application is UNDER WAY. Two ways that happens and they are
 # one fact from his side: a draft is being written or waiting to be sent, or he
-# has opened the employer's form, which the app records by moving the posting to
-# `portal`. A screen that showed only the first would lose every form
-# application between opening the form and recording it — which is most of them.
+# has opened the employer's form. A screen that showed only the first would lose
+# every form application between opening the form and recording it — which is
+# most of them.
+#
+# The form arm reads the MOMENT (`form_opened_at`) rather than the old `portal`
+# status, and that is strictly more coverage, not a rename: a form opened before
+# any letter was written had no draft to be found by the second arm and no
+# status of its own once `portal` was retired, so this view used to lose exactly
+# the applications it exists to show.
 #
 # The draft statuses are listed rather than negated so a NEW one has to be
 # classified deliberately: silently counting an unknown draft state as work in
 # progress is how a screen starts lying.
 OPEN_DRAFT_STATUSES = ("generating", "ready", "failed", "approved", "sending")
 _IN_PROGRESS_SQL = (
-    "(jobs.status='portal' OR EXISTS ("
+    "(jobs.form_opened_at<>'' OR EXISTS ("
     "SELECT 1 FROM drafts d WHERE d.job_id=jobs.id AND d.status IN ("
     + ",".join("?" * len(OPEN_DRAFT_STATUSES)) + ")))"
 )
@@ -925,6 +933,93 @@ def mark_job_opened(con: sqlite3.Connection, job_id: int) -> None:
     )
 
 
+# A form application that is under way: he opened the employer's page and the
+# loop is not closed. 'applied' and 'duplicate' are excluded because BOTH are
+# written by `apply_job` — without the second the entry would vanish the
+# instant the duplicate gate refused, which is indistinguishable from the
+# eviction the strip exists to prevent. 'skipped' can only be reached by
+# putting the posting away deliberately, which is an answer too.
+_STARTED_FORM_SQL = (
+    "jobs.form_opened_at<>'' "
+    "AND jobs.status NOT IN ('applied','duplicate','skipped')"
+)
+
+
+def list_started_forms(con: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every form application under way, oldest first.
+
+    Oldest first because the list is a stack of unfinished business, not a
+    feed: the eleven that were open when this shipped surface top-down, and
+    the one he has been ignoring longest is the one worth asking about.
+
+    Nothing bounds this and nothing expires. An entry that aged out would take
+    with it the app's only record that an application may already be at that
+    company — and a company whose slot is spent silently is the one failure
+    this whole design refuses.
+    """
+    return con.execute(
+        f"SELECT jobs.*, {_DRAFT_STATUS_SQL} AS draft_status, "
+        f"{_DRAFT_PDF_SQL} AS pdf_path "
+        f"  FROM jobs WHERE {_STARTED_FORM_SQL} "
+        # The sentinel first, not last. It sorts above every ISO timestamp only
+        # by accident of collation, so it is ordered explicitly: a form opened
+        # before the app could stamp it is the OLDEST thing here by
+        # construction — it predates the release — and the strip is read
+        # top-down.
+        f" ORDER BY (form_opened_at <> ?) ASC, form_opened_at ASC, id ASC",
+        (FORM_OPENED_UNKNOWN,),
+    ).fetchall()
+
+
+def count_started_forms(con: sqlite3.Connection) -> int:
+    return con.execute(
+        f"SELECT COUNT(*) FROM jobs WHERE {_STARTED_FORM_SQL}"
+    ).fetchone()[0]
+
+
+def mark_form_opened(con: sqlite3.Connection, job_id: int) -> None:
+    """Record that he has opened this employer's form.
+
+    Written once and never rewritten, like `opened_at` and for a stronger
+    reason: this timestamp is how old a running application looks on the
+    "Läuft" strip, and re-stamping it on a second press would make an
+    application he began yesterday claim to have started just now."""
+    con.execute(
+        "UPDATE jobs SET form_opened_at=? WHERE id=? AND form_opened_at=''",
+        (_now(), job_id),
+    )
+
+
+def clear_form_opened(con: sqlite3.Connection, job_id: int) -> None:
+    """Take back "I started applying here" — he says no application went out.
+
+    Blanks the staging columns too, but it cannot remove the FILE: this layer
+    has no business touching the filesystem. `services.apply_record.
+    abandon_form` is the way in, and it unlinks first — afterwards the pointer
+    is gone and nothing could find that file again."""
+    con.execute(
+        "UPDATE jobs SET form_opened_at='', upload_path='', mappe_kind='' "
+        "WHERE id=?",
+        (job_id,),
+    )
+
+
+def set_upload(
+    con: sqlite3.Connection, job_id: int, path: str, kind: str
+) -> None:
+    """Record what the build staged for an employer's file picker.
+
+    `kind` is written BY the build and never inferred back out of the file
+    system — the Unterlagen lesson. Empty means nothing complete is staged,
+    which is a statement the screen has to make rather than a gap it fills in
+    optimistically: a Bewerbungsmappe is always complete, so a partial one
+    offered silently to an upload button is the worst outcome available."""
+    con.execute(
+        "UPDATE jobs SET upload_path=?, mappe_kind=? WHERE id=?",
+        (path, kind, job_id),
+    )
+
+
 def set_job_score(
     con: sqlite3.Connection, job_id: int, score: int, reason: str
 ) -> None:
@@ -1075,12 +1170,14 @@ def refresh_job_published_on(
     return cur.rowcount > 0
 
 
-# A posting is worth asking about while he might still act on it. 'portal' is
-# the OPPOSITE of ruled out — he opened its form and has not confirmed yet, so
-# that is precisely when "the ad is gone" is worth five minutes of his time, and
-# it is the status the review queue's pre-send warning depends on. 'skipped',
+# A posting is worth asking about while he might still act on it. 'skipped',
 # 'duplicate' and 'applied' are finished business.
-LIVENESS_STATUSES = ("new", "portal", "drafted")
+#
+# A posting whose form he has opened stays 'new' since v10, so it keeps being
+# probed through this list — which is the point, and it is the OPPOSITE of
+# ruled out: a half-finished form application is precisely when "the ad is
+# gone" is worth five minutes of his time.
+LIVENESS_STATUSES = ("new", "drafted")
 
 
 def jobs_needing_liveness_check(
@@ -1151,7 +1248,12 @@ def jobs_to_prepare(
     * a company he has ALREADY applied to is skipped, because
       `find_duplicate_bewerbung` would refuse the second application anyway —
       compared with `jd_norm`, the very function that gate uses;
-    * a posting that already has a draft in flight is skipped.
+    * a posting that already has a draft in flight is skipped;
+    * a posting whose form he has already opened is skipped. Before v10 that
+      one fell out of `status='new'` for free, because opening a form moved the
+      posting to `portal`; now that it stays in the working list it has to be
+      excluded here by name, or a started application would be handed back to
+      the batch and re-drafted at the price of a Sonnet call.
 
     An unknown publication date excludes a posting here, unlike in the inbox —
     and it falls out of the age bound rather than needing its own clause, since
@@ -1166,6 +1268,7 @@ def jobs_to_prepare(
                {freshness.effective_score_sql()} AS effective_score
           FROM jobs j
          WHERE j.status='new'
+           AND j.form_opened_at=''
            AND NOT ({GONE_SQL.replace('liveness', 'j.liveness')})
            AND j.duplicate_of IS NULL
            AND j.match_score >= ?
@@ -1301,7 +1404,9 @@ def set_contact_email(
 # Statuses whose channel is still worth deciding. A posting already applied to,
 # skipped or filed as a duplicate is finished business — rewriting how one
 # would have applied to it changes nothing and would only rewrite history.
-_CHANNEL_STATUSES = ("new", "portal")
+# A posting at an open form is 'new' since v10 and stays in scope: its channel
+# is what the strip's "open the form again" needs.
+_CHANNEL_STATUSES = ("new",)
 
 
 def resolve_email_channels(
@@ -1413,10 +1518,11 @@ def liveness_progress(
 _JOBS_SIGNATURE_SQL = """
 SELECT COUNT(*), MAX(id), COUNT(match_score), TOTAL(match_score),
        MAX(liveness_checked_at), TOTAL(liveness=?),
-       TOTAL(status='new'), TOTAL(status='portal'), TOTAL(status='applied'),
+       TOTAL(status='new'), TOTAL(status='applied'),
        TOTAL(status='skipped'), TOTAL(status='duplicate'),
        TOTAL(contact_email<>''), TOTAL(COALESCE(apply_channel,'')<>''),
-       TOTAL(bookmarked_at<>''), TOTAL(opened_at<>'')
+       TOTAL(bookmarked_at<>''), TOTAL(opened_at<>''),
+       TOTAL(form_opened_at<>''), TOTAL(upload_path<>''), TOTAL(mappe_kind<>'')
   FROM jobs
 """
 
@@ -1478,7 +1584,9 @@ def job_signature(con: sqlite3.Connection, job_id: int) -> tuple | None:
         "SELECT id, company, status, liveness, liveness_checked_at, "
         "contact_email, apply_channel, ats_vendor, apply_url, title, "
         "ansprechpartner, contact_strasse, contact_plz_ort, work_strasse, "
-        f"work_plz_ort, temp_agency, refnr, {_DRAFT_STATUS_SQL}, "
+        "work_plz_ort, temp_agency, refnr, "
+        "form_opened_at, upload_path, mappe_kind, "
+        f"{_DRAFT_STATUS_SQL}, "
         f"{_DRAFT_UPDATED_SQL} FROM jobs WHERE id=?",
         (job_id,),
     ).fetchone()
@@ -1692,6 +1800,52 @@ def count_outbound_today(con: sqlite3.Connection) -> int:
     ).fetchone()[0]
 
 
+_DRAFT_DAY_KEY = "drafts_written_date"
+_DRAFT_COUNT_KEY = "drafts_written_count"
+
+
+def note_draft_written(con: sqlite3.Connection) -> None:
+    """Count one paid letter against today's quota.
+
+    Called where the money is committed — the claim — rather than where a
+    letter comes back, because a drafting call that fails has still spent the
+    tokens. The send cap counts test sends for the same reason.
+
+    A counter of its own rather than a query over `drafts`: `updated_at` moves
+    when the Mappe is written too, so counting rows would charge him for
+    building a PDF.
+    """
+    today = datetime.date.today().isoformat()
+    if get_setting(con, _DRAFT_DAY_KEY, "") != today:
+        set_setting(con, _DRAFT_DAY_KEY, today)
+        set_setting(con, _DRAFT_COUNT_KEY, "0")
+    _bump_int_setting(con, _DRAFT_COUNT_KEY, 1)
+
+
+def count_drafts_today(con: sqlite3.Connection) -> int:
+    """Letters written since local midnight. Zero on a new day without any
+    write having happened — the stored count belongs to the stored date."""
+    if get_setting(con, _DRAFT_DAY_KEY, "") != datetime.date.today().isoformat():
+        return 0
+    try:
+        return max(0, int(get_setting(con, _DRAFT_COUNT_KEY, "0") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def daily_draft_cap(con: sqlite3.Connection) -> int:
+    """How many letters may be written in a day. His decision, 2026-08-15: a
+    HARD cap, raised deliberately in Einstellungen rather than by a one-press
+    override, because an override always one press away is not a limit."""
+    raw = (get_setting(con, "daily_draft_cap", "") or "").strip()
+    try:
+        return max(0, int(float(raw)))
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError as well: float("1e999") is inf and int(inf) raises —
+        # app_settings is a file he is invited to edit
+        return int(DEFAULT_DAILY_DRAFT_CAP)
+
+
 def next_approved_autosend_job(
     con: sqlite3.Connection, exclude_test_sent: bool = False
 ) -> int | None:
@@ -1771,6 +1925,53 @@ def apply_job(
     )
     set_job_status(con, job_id, "applied", bewerbung_id=bewerbung_id)
     return bewerbung_id
+
+
+def unrecord_application(
+    con: sqlite3.Connection,
+    job_id: int,
+    bewerbung_id: int,
+    previous_status: str,
+) -> None:
+    """Undo `apply_job` completely — every write it made, in one transaction.
+
+    This exists so a form application can be recorded with a press and taken
+    back with a press, instead of being guarded by a confirmation dialog he
+    would learn to click through. That trade is only honest if the undo is
+    REAL: a half-undo leaves a company marked as applied-to and permanently
+    spends its only application slot, silently.
+
+    Four writes, because `apply_job` made four: `add_bewerbung` writes a
+    `status_history` row of its own, and `set_job_status` sets both the status
+    and the link. `previous_status` is what the posting was BEFORE — restoring
+    a hardcoded 'new' would quietly revive a posting he had skipped.
+    """
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        # The posting first: `jobs.bewerbung_id` is a foreign key into the row
+        # about to be deleted, so deleting it while the link stands raises.
+        con.execute(
+            "UPDATE jobs SET status=?, bewerbung_id=NULL WHERE id=?",
+            (previous_status, job_id),
+        )
+        # `jobs.duplicate_of` is a SECOND foreign key into the row being
+        # deleted, and it is written by the very gate this application armed:
+        # every posting refused because of it points here. Leaving them would
+        # make the DELETE raise — inside a worker thread, so one log line, a
+        # bar that vanishes and a user who believes the undo happened — and
+        # they are not duplicates of an application that never existed.
+        con.execute(
+            "UPDATE jobs SET status='new', duplicate_of=NULL "
+            " WHERE duplicate_of=? AND bewerbung_id IS NULL",
+            (bewerbung_id,),
+        )
+        con.execute("DELETE FROM status_history WHERE bewerbung_id=?",
+                    (bewerbung_id,))
+        con.execute("DELETE FROM bewerbungen WHERE id=?", (bewerbung_id,))
+    except Exception:
+        con.rollback()
+        raise
+    con.commit()
 
 
 # --------------------------------------------------------------------------

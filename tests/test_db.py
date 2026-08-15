@@ -441,11 +441,11 @@ def test_bootstrap_reclassifies_the_stock_it_finds(con, data_dir):
 
 
 def test_a_posting_he_opened_as_a_form_still_converts(con):
-    """'portal' is where a posting sits while he fills a form — precisely the
-    row an address arriving later should rescue."""
+    """A posting with its form open is precisely the row an address arriving
+    later should rescue — it is the one he is still working on."""
     job_id = _add_job(con, contact_email="bewerbung@firma.de")
-    con.execute("UPDATE jobs SET apply_channel='', status='portal' WHERE id=?",
-                (job_id,))
+    con.execute("UPDATE jobs SET apply_channel='' WHERE id=?", (job_id,))
+    db.mark_form_opened(con, job_id)
 
     assert db.resolve_email_channels(con) == 1
     assert db.get_job(con, job_id)["apply_channel"] == "direct_email"
@@ -806,3 +806,91 @@ def test_another_posting_at_that_company_is_still_warned(con):
 
     rows = [dict(r) for r in db.list_jobs(con, "new")]
     assert list(duplicates_for_jobs(con, rows)) == [second]
+
+
+def test_the_running_forms_are_listed_oldest_first(con):
+    """The strip is a stack of unfinished business, not a feed: the eleven that
+    were open when this shipped surface top-down, and the one he has been
+    ignoring longest is the one worth asking about."""
+    late = _add_job(con, external_id="late")
+    early = _add_job(con, external_id="early")
+    con.execute("UPDATE jobs SET form_opened_at=? WHERE id=?",
+                ("2026-08-14T16:42:46", late))
+    con.execute("UPDATE jobs SET form_opened_at=? WHERE id=?",
+                ("2026-08-14T09:24:36", early))
+    con.commit()
+
+    assert [r["id"] for r in db.list_started_forms(con)] == [early, late]
+    assert db.count_started_forms(con) == 2
+
+
+def test_a_started_form_with_no_draft_is_still_on_the_strip(con):
+    """Six of his eleven open form applications had no draft at all. A strip
+    derived from drafts would have shown five of them."""
+    job_id = _add_job(con)
+    db.mark_form_opened(con, job_id)
+    con.commit()
+
+    assert db.get_draft_by_job(con, job_id) is None
+    assert [r["id"] for r in db.list_started_forms(con)] == [job_id]
+
+
+@pytest.mark.parametrize("status", ["applied", "duplicate", "skipped"])
+def test_a_closed_loop_leaves_the_strip(con, status):
+    """'duplicate' as well as 'applied', because BOTH are written by
+    `apply_job` — without the second the entry would vanish the instant the
+    duplicate gate refused, which looks exactly like the eviction the strip
+    exists to prevent."""
+    job_id = _add_job(con)
+    db.mark_form_opened(con, job_id)
+    db.set_job_status(con, job_id, status)
+    con.commit()
+
+    assert db.list_started_forms(con) == []
+    assert db.count_started_forms(con) == 0
+
+
+# --------------------------------------------------------------------------
+# The daily letter quota — its own counter, because drafts.updated_at moves
+# when the Mappe is written and counting rows would charge him for a PDF
+# --------------------------------------------------------------------------
+def test_the_letter_counter_counts(con):
+    assert db.count_drafts_today(con) == 0
+    db.note_draft_written(con)
+    db.note_draft_written(con)
+    assert db.count_drafts_today(con) == 2
+
+
+def test_yesterdays_letters_do_not_count_against_today(con):
+    """The stored count belongs to the stored DATE. Without that, the first
+    write after midnight would find yesterday's total and refuse."""
+    import datetime
+    db.note_draft_written(con)
+    yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+    con.execute("UPDATE app_settings SET value=? WHERE key='drafts_written_date'",
+                (yesterday,))
+
+    assert db.count_drafts_today(con) == 0
+    db.note_draft_written(con)
+    assert db.count_drafts_today(con) == 1, "the new day started from yesterday's total"
+
+
+@pytest.mark.parametrize("stored, expected", [
+    ("", 10), ("3", 3), ("0", 0), ("  7 ", 7),
+    ("abc", 10),        # app_settings is a file he is invited to edit
+    ("-4", 0),          # a negative cap is a refusal, not a licence
+    ("1e999", 10),      # float('inf'); int(inf) raises past a ValueError guard
+    ("2.7", 2),
+])
+def test_the_cap_survives_whatever_is_in_the_setting(con, stored, expected):
+    db.set_setting(con, "daily_draft_cap", stored)
+    assert db.daily_draft_cap(con) == expected
+
+
+def test_a_garbled_counter_reads_as_none_written(con):
+    """Never as "the cap is spent": that would lock him out of writing any
+    letter at all until he found the settings row."""
+    import datetime
+    db.set_setting(con, "drafts_written_date", datetime.date.today().isoformat())
+    db.set_setting(con, "drafts_written_count", "nonsense")
+    assert db.count_drafts_today(con) == 0

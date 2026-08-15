@@ -1,5 +1,6 @@
 """Job inbox: discovered postings with per-job actions."""
 
+import datetime
 import logging
 import math
 import pathlib
@@ -8,11 +9,19 @@ from dataclasses import dataclass
 from fastapi.responses import RedirectResponse
 from nicegui import app, run, ui
 
-from jobdeck import apply_channel, db, freshness
+from jobdeck import apply_channel, apply_form, config, db, freshness
 from jobdeck.ai import scoring
 from jobdeck.ai.drafting import clean_title
 from jobdeck.dedupe import duplicates_for_jobs
-from jobdeck.services import apply_resolve, contact_lookup, drafting, liveness, mappe
+from jobdeck.services import (
+    apply_record,
+    apply_resolve,
+    contact_lookup,
+    drafting,
+    liveness,
+    mappe,
+    preparing,
+)
 from jobdeck.ui import draft_editor, helpers, live
 from jobdeck.ui.helpers import (
     open_in_system,
@@ -157,7 +166,7 @@ STEP_RESOLVE = "resolve"
 STEP_DRAFT = "draft"
 STEP_MAPPE = "mappe"
 STEP_SEND = "send"
-STEP_FORM = "form"
+STEP_START = "start"
 STEP_RECORD = "record"
 
 
@@ -192,12 +201,17 @@ def apply_steps(job: dict, already: dict | None = None) -> list[Step]:
     """The acts this posting needs, in the order they happen.
 
     By E-MAIL: write the letter, then check and send it — the editor builds the
-    Mappe on the way. By FORM: write the letter, build the Mappe to upload,
-    open the employer's page, and record it yourself when you have filled it
-    in. Nothing here fills a form; that is a settled decision."""
+    Mappe on the way. By FORM: ONE press that opens the employer's page and
+    prepares everything behind it, then one press to say it went out. Nothing
+    here fills a form; that is a settled decision.
+
+    "Kanal ermitteln" is not a step any more. The scheduler resolves the whole
+    backlog by itself every half hour, and a button whose entire content is
+    "ask the question you already asked me to answer" rendered on four rows out
+    of five.
+    """
     blocked = _blocking_reason(job, already)
     draft_status = str(job.get("draft_status") or "")
-    channel = str(job.get("apply_channel") or "")
     by_email = _by_email(job)
     # What may still be checked and sent from HERE. A draft that is sending or
     # sent is the record of what went out; resolving one belongs to the review
@@ -208,20 +222,16 @@ def apply_steps(job: dict, already: dict | None = None) -> list[Step]:
                and not drafting.claim_is_stale(job.get("draft_updated_at")))
     steps: list[Step] = []
 
-    if not channel:
-        steps.append(Step(STEP_RESOLVE, "Kanal ermitteln", enabled=not blocked,
-                          reason=blocked or "Noch unbekannt, wie man sich hier "
-                                            "bewirbt."))
-    steps.append(Step(
-        STEP_DRAFT,
-        "Anschreiben neu schreiben" if has_letter else
-        ("E-Mail-Bewerbung schreiben" if by_email else "Anschreiben schreiben"),
-        done=has_letter or letter_gone,
-        enabled=not blocked and not writing and not letter_gone,
-        reason=blocked or ("Wird gerade geschrieben — etwa eine Minute."
-                           if writing else ""),
-    ))
     if by_email:
+        steps.append(Step(
+            STEP_DRAFT,
+            "Anschreiben neu schreiben" if has_letter
+            else "E-Mail-Bewerbung schreiben",
+            done=has_letter or letter_gone,
+            enabled=not blocked and not writing and not letter_gone,
+            reason=blocked or ("Wird gerade geschrieben — etwa eine Minute."
+                               if writing else ""),
+        ))
         steps.append(Step(
             STEP_SEND, "Prüfen und senden", done=draft_status == "sent",
             enabled=has_letter and not blocked,
@@ -230,33 +240,60 @@ def apply_steps(job: dict, already: dict | None = None) -> list[Step]:
                                else "Erst das Anschreiben schreiben."),
         ))
     else:
+        # ONE press, not four. It opens the employer's page and then does every
+        # free step by itself — the letter, the complete Mappe, the file put
+        # where their upload dialog will look for it. The old row was
+        # Anschreiben → Mappe → Formular → eintragen, and he skipped straight
+        # to the form: six of his eleven open applications had no letter,
+        # which was the flow's doing rather than his preference.
+        #
+        # Blocked as before, and not for tidiness: the press STAMPS
+        # `form_opened_at`, the app's record that an application has started —
+        # at a company where one already exists, that is the one thing that
+        # must not begin. Reading the advert stays a press away in the triage
+        # row, and that one changes nothing.
+        started = bool(job.get("form_opened_at"))
+        no_url = not _openable_url(job)
+        room = job.get("draft_room")
         steps.append(Step(
-            STEP_MAPPE, "Mappe erstellen", done=bool(job.get("pdf_path")),
-            enabled=has_letter and not blocked,
-            reason=blocked or ("" if has_letter else
-                               "In der Review queue auflösen." if letter_gone
-                               else "Erst das Anschreiben schreiben."),
+            STEP_START,
+            f"Bewerbung starten · ~{_usd(preparing.COST_PER_DRAFT_USD)}",
+            done=started,
+            enabled=not blocked and not started and not no_url
+                    and room is not False,
+            reason=blocked or (
+                "Diese Anzeige nennt keine Adresse zum Öffnen." if no_url
+                else "" if started
+                else "Das Tageslimit für Anschreiben ist aufgebraucht — "
+                     "in den Einstellungen anheben." if room is False
+                else ""),
         ))
-        # Blocked too, and not only for tidiness: opening the form MOVES the
-        # posting to `portal`, which is the app's record that an application
-        # has started — at a company where one already exists, that is the one
-        # thing that must not begin. Reading the advert is still a press away
-        # in the triage row, and that one changes nothing.
-        steps.append(Step(
-            STEP_FORM, "Formular öffnen",
-            done=str(job.get("status") or "") == "portal",
-            enabled=bool(_openable_url(job)) and not blocked,
-            reason=blocked or ("" if _openable_url(job)
-                               else "Diese Anzeige nennt keine Adresse zum "
-                                    "Öffnen."),
-        ))
+    # Only once something was actually started. Without this the step is the
+    # first ENABLED one whenever "Bewerbung starten" is refused — the daily
+    # letter cap used up, or a posting with no openable address — so
+    # "Abgeschickt" became the SOLID recommended button, and ⏎ under a cursor
+    # moving down the list wrote a ledger row for a form that was never opened.
+    # That row permanently spends the company's only application slot.
+    started = bool(job.get("form_opened_at")) or by_email
     steps.append(Step(
-        STEP_RECORD, "Beworben eintragen",
+        STEP_RECORD,
+        "Abgeschickt" if not by_email else "Beworben eintragen",
         done=str(job.get("status") or "") == "applied",
-        enabled=not blocked,
-        reason=blocked or "Drück das erst, wenn die Bewerbung wirklich raus ist.",
+        enabled=not blocked and started,
+        reason=blocked or ("Drück das erst, wenn die Bewerbung wirklich raus ist."
+                           if started else
+                           "Erst die Bewerbung starten — oder von Hand "
+                           "bewerben und dann hier eintragen."),
     ))
     return steps
+
+
+def _usd(amount: float) -> str:
+    """A price the way he reads one — the label IS the disclosure.
+
+    A button he pressed carries its own figure; only ⏎ gets a dialog, which is
+    the rule `ask_before_spending` already holds."""
+    return f"{amount:.2f} $".replace(".", ",")
 
 
 def _by_email(job: dict) -> bool:
@@ -393,6 +430,11 @@ def _load_jobs(view_key: str, page: int, search: str = "",
         signature = db.data_signature(con)
         stale_age_days = freshness.stale_age_setting(
             db.get_setting(con, "stale_age_days", ""))
+        # Whether a letter may still be written today. Read once and carried on
+        # every row, so the button and the gate inside `drafting._claim` state
+        # the same thing — a screen that offers what the gate below it refuses
+        # is the defect this project keeps pinning.
+        draft_room = db.count_drafts_today(con) < db.daily_draft_cap(con)
         filters = {**view.filters, "stale_age_days": stale_age_days,
                    "search": search, "keep_ids": keep_ids}
         total = db.count_job_groups(con, view.status, **filters)
@@ -402,12 +444,15 @@ def _load_jobs(view_key: str, page: int, search: str = "",
                 con, view.status, **{**filters, "opened": "include"})
         pages = max(1, -(-total // PAGE_SIZE))
         page = min(max(page, 0), pages - 1)
-        rows = [dict(r) for r in db.list_job_groups(
-            con, view.status, limit=PAGE_SIZE, offset=page * PAGE_SIZE, **filters)]
+        rows = [{**dict(r), "draft_room": draft_room}
+                for r in db.list_job_groups(
+                    con, view.status, limit=PAGE_SIZE,
+                    offset=page * PAGE_SIZE, **filters)]
         keys = [r["company_key"] for r in rows if r["company_count"] > 1]
         siblings: dict[str, list[dict]] = {}
         for row in db.list_company_siblings(con, keys, view.status, **filters):
-            siblings.setdefault(row["company_key"], []).append(dict(row))
+            siblings.setdefault(row["company_key"], []).append(
+                {**dict(row), "draft_room": draft_room})
         # Asked of the duplicate gate itself, for the rows on screen — see
         # dedupe.duplicates_for_jobs for why the stored flag cannot answer it.
         on_screen = rows + [r for group in siblings.values() for r in group]
@@ -417,6 +462,11 @@ def _load_jobs(view_key: str, page: int, search: str = "",
             "applied": duplicates_for_jobs(con, on_screen),
             "rows": rows,
             "siblings": siblings,
+            # Read outside every filter on purpose: an application under way is
+            # not a search result. It has to be on screen whichever view he is
+            # in, on whatever page, however he has searched — the whole point
+            # is that the app cannot lose the posting he started.
+            "started": [dict(r) for r in db.list_started_forms(con)],
             "counts": {
                 "mismatches": db.count_mismatches(con, view.status),
                 "dead": db.count_gone_jobs(con, view.status),
@@ -435,6 +485,67 @@ def _load_jobs(view_key: str, page: int, search: str = "",
         }
 
 
+# After this long, an entry stops reporting its age and starts asking the
+# question. Not a dialog and not a dismissible prompt: he learns to close those,
+# and the app genuinely cannot see whether he pressed the employer's submit.
+ASK_AFTER_MIN = 10
+# And after this long it is worth noticing from across the screen.
+STALE_FORM_H = 24
+
+
+def _started_at(stamp: str) -> datetime.datetime | None:
+    """When a form was opened, or None when the app cannot know.
+
+    None is a real answer here, not a parse failure to paper over: eleven
+    postings were mid-application when this shipped and three left no evidence
+    of when, so they carry a named sentinel that must never become a date."""
+    try:
+        return datetime.datetime.fromisoformat(stamp)
+    except (TypeError, ValueError):
+        return None
+
+
+def started_line(job: dict, now: datetime.datetime | None = None) -> str:
+    """One running application, as the strip says it.
+
+    Under ten minutes it reports; past ten it asks. The question is the LABEL
+    rather than a prompt, so there is nothing to dismiss and therefore nothing
+    to learn to dismiss — and when replies are read it simply stops being
+    needed.
+
+    A form opened before the app could stamp it says so. Eleven of his
+    postings were in that state and three left no evidence of when; giving
+    those a computed age would sort them among applications begun this minute.
+    """
+    company = str(job.get("company") or "—")
+    stamp = str(job.get("form_opened_at") or "")
+    when = _started_at(stamp)
+    if when is None:
+        return f"Formular bei {company} — seit unbekannt"
+    now = now or datetime.datetime.now()
+    minutes = max(0, int((now - when).total_seconds() // 60))
+    if minutes >= ASK_AFTER_MIN:
+        return f"Formular bei {company} — abgeschickt?"
+    if minutes < 1:
+        return f"Formular bei {company} — gerade eben"
+    return f"Formular bei {company} — seit {minutes} Min."
+
+
+def mappe_line(job: dict) -> tuple[str, str]:
+    """What the strip says about the documents, and how loudly.
+
+    `mappe_kind` is written by the build, so "nothing is staged" is a fact
+    rather than a guess. It has to be said out loud: a Bewerbungsmappe is
+    always complete by his decision, so an incomplete one offered silently to
+    an upload button is the worst outcome this flow can produce.
+    """
+    if job.get("mappe_kind"):
+        return "Mappe bereit", ""
+    if str(job.get("draft_status") or "") == "generating":
+        return "Mappe wird gebaut …", ""
+    return "Mappe NICHT fertig — von Hand hochladen", "warn"
+
+
 def _range_line(page: int, total: int, shown: int) -> str:
     """'51–100 von 266 Firmen' — where in the pipeline this page sits.
 
@@ -446,10 +557,20 @@ def _range_line(page: int, total: int, shown: int) -> str:
     return f"{first}–{first + shown - 1} von {total} Firmen"
 
 
+# What this screen states that lives in app_settings rather than in a table.
+# `db.data_signature` reads tables only, by design — so a screen that also
+# states a SETTING has to sign it here, the way the Unterlagen screen does.
+# Without this the button keeps saying "Tageslimit aufgebraucht" after he has
+# raised the limit in Einstellungen, and after midnight, until he reloads.
+_WATCHED_SETTINGS = ("daily_draft_cap", "drafts_written_count",
+                     "drafts_written_date")
+
+
 def _signature() -> tuple:
     """One cheap read of everything this page's rows can say (see ui/live.py)."""
     with db.db() as con:
-        return db.data_signature(con)
+        return (*db.data_signature(con),
+                *(db.get_setting(con, key, "") for key in _WATCHED_SETTINGS))
 
 
 def _set_status(job_id: int, status: str):
@@ -457,9 +578,18 @@ def _set_status(job_id: int, status: str):
         db.set_job_status(con, job_id, status)
 
 
-def _confirm_applied(job_id: int, kanal: str, dokument: str = ""):
-    with db.db() as con:
-        return db.apply_job(con, job_id, kanal=kanal, dokument=dokument)
+def _record_application(job_id: int, kanal: str) -> dict:
+    """Write the application through the one recorder both this screen and the
+    reply reader use. A module-level def rather than the service function
+    passed straight to `run.io_bound`: the arity rule that catches a call with
+    the wrong number of arguments only inspects targets defined in this file,
+    and a TypeError raised in a worker thread is one log line and a button that
+    looks alive."""
+    return apply_record.record_application(job_id, kanal)
+
+
+def _undo_application(job_id: int, bewerbung_id: int, previous_status: str):
+    apply_record.undo(job_id, bewerbung_id, previous_status)
 
 
 def _load_draft(job_id: int):
@@ -479,6 +609,61 @@ def _mark_opened(job_id: int) -> str:
         db.mark_job_opened(con, job_id)
         row = db.get_job(con, job_id)
         return "" if row is None else str(row["opened_at"] or "")
+
+
+def _mark_form_opened(job_id: int) -> str:
+    """Record that he opened this employer's form; answer with the stamp.
+
+    Like `_mark_opened`: the page holds the row it is showing, and handing it
+    the value that was actually written keeps that copy and the database saying
+    the same thing without a second query."""
+    with db.db() as con:
+        db.mark_form_opened(con, job_id)
+        row = db.get_job(con, job_id)
+        return "" if row is None else str(row["form_opened_at"] or "")
+
+
+def _short(value: str, limit: int = 60) -> str:
+    """A label that fits. Only the LABEL is shortened — what reaches the
+    clipboard is always the whole value, or a truncated Referenznummer would
+    go into someone's form."""
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _form_data(job_id: int) -> dict | None:
+    """The form answers for one posting, read in one go."""
+    with db.db() as con:
+        job = db.get_job(con, job_id)
+        if job is None:
+            return None
+        draft = db.get_draft_by_job(con, job_id)
+        settings = {key: db.get_setting(con, key, "")
+                    for key in apply_form.APPLICANT_SETTINGS}
+    return {
+        "company": str(job["company"] or "—"),
+        "personal": apply_form.personal_fields(settings),
+        # `usable()` explicitly: `posting_fields` does NOT apply it, so a
+        # discarded or failed letter would be offered as a form answer — words
+        # he threw away, in someone's application.
+        "posting": apply_form.posting_fields(
+            dict(job), apply_form.usable(dict(draft) if draft else None)),
+    }
+
+
+def _open_upload_folder() -> None:
+    """Open the one folder an employer's file picker will land in.
+
+    The folder, not the file: what has to change is where the DIALOG opens,
+    and a file manager pointed at a directory is what teaches it."""
+    helpers.open_in_system(str(config.UPLOAD_DIR))
+
+
+def _clear_form_opened(job_id: int):
+    """Through the service, so the staged file goes with the stamp — the
+    database layer cannot unlink, and blanking the pointer first would leave
+    the Mappe in the upload folder with nothing able to find it."""
+    apply_record.abandon_form(job_id)
 
 
 def _set_bookmark(job_id: int, marked: bool):
@@ -671,6 +856,10 @@ def _row_fingerprint(job: dict) -> tuple:
         "opened_at", "bookmarked_at", "temp_agency", "salary_from", "salary_to",
         "salary_period", "description", "refnr", "location", "published_on",
         "fetched_at", "source", "company_count", "company_key",
+        # Anything the reading pane STATES has to be in here or it is never
+        # redrawn: he presses the button, the write lands, and the pane goes on
+        # offering the press he already made until he clicks another row.
+        "form_opened_at", "upload_path", "mappe_kind", "draft_room",
     ))
     # The probe stamp is drawn only inside the offline warning, and the daily
     # liveness pass re-stamps hundreds of rows in a couple of minutes. Counting
@@ -697,6 +886,17 @@ def legacy_jobs_page():
     return RedirectResponse(STELLEN_PATH)
 
 
+@app.get("/cockpit/{job_id}")
+def legacy_cockpit_page(job_id: int):
+    """The apply cockpit's old address.
+
+    The cockpit was a second screen to stand beside an employer's form; the
+    posting itself is that place now, so the screen is gone and its answers
+    live on the running application. Same redirect as `/jobs` for the same
+    reason — an old tab or bookmark should land somewhere real."""
+    return RedirectResponse(STELLEN_PATH)
+
+
 @ui.page(STELLEN_PATH)
 async def jobs_page():
     async with frame("Stellen", current="stellen", padded=False):
@@ -720,6 +920,11 @@ async def jobs_page():
         # refreshed with them. Not `jobs.duplicate_of`: that is written once at
         # discovery, so every application he sends makes more rows stale.
         applied: dict[int, dict] = {}
+        # The strip's own rows and its age labels. Separate from `shown`: an
+        # application under way is not part of the list and survives every
+        # filter, page and search.
+        strip_rows: dict[int, dict] = {}
+        age_labels: dict[int, object] = {}
         refresh_gen = {"n": 0}   # rapid view flips: last request wins
 
         # Feedback has to outlive the row that asked for it. A handler runs in
@@ -728,6 +933,13 @@ async def jobs_page():
         # raises instead of appearing, silently swallowing the very error it was
         # meant to report. This host is a sibling of both panes.
         overlay = ui.column().classes("contents")
+        # A slot NOTHING clears, for one-shot timers. `overlay` is emptied at
+        # the top of every handler, and NiceGUI reads a timer's parent slot
+        # BEFORE its own stop check — so a one-shot parked in `overlay` whose
+        # slot is cleared before it fires writes an ERROR traceback into his
+        # log instead of quietly stopping. Observed live, twice in one session,
+        # and the same class as the queue timer that logged on every leave.
+        timers = ui.column().classes("contents")
 
         def say(message: str, **kwargs) -> None:
             """Tell the user something, from a slot no refresh can delete."""
@@ -767,6 +979,13 @@ async def jobs_page():
                             on_change=lambda e: set_view(e.value),
                         ).mark("view-select").props("dense outlined") \
                             .classes("min-w-40")
+                    # A sibling of the rows and ABOVE the scroll container, so
+                    # an application under way is on screen in every view, at
+                    # every page, under any search. `.jd-list` is a flex
+                    # column and `.jd-rows` carries the overflow, so this is
+                    # pinned structurally — no sticky positioning, no change
+                    # to the grid.
+                    laeuft_host = ui.column().classes("jd-laeuft w-full gap-0")
                     rows_host = ui.column().classes("jd-rows w-full gap-0") \
                         .props('role=listbox aria-label="Anzeigen"')
                     pager = ui.row().classes("items-center gap-2 p-2 border-t")
@@ -813,10 +1032,20 @@ async def jobs_page():
             # hundreds of rows in a couple of minutes, and every one of those
             # ticks was rebuilding the advert he is reading along with the list
             # it belongs to.
+            # A THIRD comparison: the strip is not part of either pane, and
+            # it changes on writes neither of them cares about — a Mappe
+            # landing in the background is the whole reason it self-updates.
+            strip_state = [(r["id"], r["form_opened_at"], r["mappe_kind"],
+                            r["draft_status"], r["company"])
+                           for r in view["started"]]
             list_same = not force and list_state == drawn.get("list")
             reader_same = not force and reader_state == drawn.get("reader")
+            strip_same = not force and strip_state == drawn.get("strip")
             drawn["list"], drawn["reader"] = list_state, reader_state
+            drawn["strip"] = strip_state
 
+            strip_rows.clear()
+            strip_rows.update({r["id"]: r for r in view["started"]})
             applied.clear()
             applied.update(view["applied"])
             siblings.clear()
@@ -837,6 +1066,8 @@ async def jobs_page():
             hidden_label.set_text(_hidden_line(
                 view["view"], view["counts"], view["stale_age_days"],
                 search=view["search"]))
+            if not strip_same:
+                render_strip(view)
             if not list_same:
                 render_rows(view)
                 render_pager(view)
@@ -873,6 +1104,106 @@ async def jobs_page():
             if previous is not None and previous in shown:
                 return previous, shown[previous]
             return (new_order[0] if new_order else None), None
+
+        def render_strip(view: dict) -> None:
+            """Every application under way, above the list, in every view.
+
+            Rebuilt whole, and `age_labels` is repopulated here — the beat
+            below holds element references, and a `set_text` on an element some
+            other redraw already deleted raises inside a timer callback, which
+            is one log line and a strip frozen at whatever it last said."""
+            laeuft_host.clear()
+            age_labels.clear()
+            started = view["started"]
+            if not started:
+                return
+            with laeuft_host:
+                for job in started:
+                    _render_started(job)
+
+        def _render_started(job: dict) -> None:
+            with ui.row().classes("jd-laeuft-row items-center gap-3 w-full"):
+                age_labels[job["id"]] = ui.label(started_line(job)) \
+                    .classes("text-sm")
+                text, kind = mappe_line(job)
+                ui.label(text).classes(f"jd-meta {kind}")
+                ui.space()
+                ui.button("Abgeschickt",
+                          on_click=lambda j=job: confirm_applied(j)) \
+                    .props("dense no-caps color=positive")
+                with ui.button(icon="more_horiz").props("flat dense"):
+                    with ui.menu():
+                        _started_menu(job)
+
+        def _started_menu(job: dict) -> None:
+            if job["upload_path"]:
+                ui.menu_item("Ordner öffnen",
+                             lambda: helpers.open_in_system(
+                                 str(config.UPLOAD_DIR)))
+            url = _openable_url(job)
+            if url:
+                ui.menu_item("Formular erneut öffnen",
+                             lambda u=url: ui.navigate.to(u, new_tab=True))
+            ui.menu_item("Formulardaten",
+                         lambda j=job: show_form_data(j))
+            ui.menu_item("Doch nicht beworben",
+                         lambda j=job["id"]: revive(j))
+
+        async def show_form_data(job: dict) -> None:
+            """What a German form asks for, ready to copy.
+
+            This is what is left of the cockpit, and it is deliberately less:
+            the eleven personal values are chips because they are the same on
+            every form, while the six the browser cannot know keep rows of
+            their own. The trade is one alt-tab back to JobDeck against a whole
+            second screen to keep in sync.
+            """
+            overlay.clear()
+            view = await run.io_bound(_form_data, job["id"])
+            if view is None:
+                say("Diese Anzeige gibt es nicht mehr.", type="warning")
+                return
+            with overlay, ui.dialog() as sheet, \
+                    ui.card().classes("w-[640px] max-w-full"):
+                ui.label(f"Formulardaten — {view['company']}") \
+                    .classes("font-bold")
+                with ui.row().classes("gap-1 flex-wrap my-2"):
+                    for field in view["personal"]:
+                        _copy_chip(field)
+                with ui.element("div").classes("jd-facts w-full"):
+                    for field in view["posting"]:
+                        ui.label(field.label).classes("k")
+                        _copy_value(field)
+                with ui.row().classes("justify-end w-full"):
+                    ui.button("Schließen", on_click=sheet.close) \
+                        .props("flat no-caps")
+            sheet.open()
+
+        def _copy_chip(field) -> None:
+            ui.button(f"{field.label}: {_short(field.value)}",
+                      on_click=lambda v=field.value: ui.clipboard.write(v)) \
+                .props("flat dense no-caps").classes("jd-chip")
+
+        def _copy_value(field) -> None:
+            if not field.ready:
+                ui.label(field.hint or "—").classes("jd-note warn")
+                return
+            ui.button(_short(field.value),
+                      on_click=lambda v=field.value: ui.clipboard.write(v)) \
+                .props("flat dense no-caps align=left")
+
+        def restamp_strip() -> None:
+            """Let the running applications get older, without redrawing.
+
+            `set_text` only, never a rebuild: this fires on every tick of the
+            page's watcher, including while he has a dialog open or is reading
+            an advert, and a rebuild then would take both away from him. It is
+            also why the ten-minute question is a LABEL — there is nothing to
+            dismiss, so there is nothing to learn to dismiss."""
+            for job_id, label in list(age_labels.items()):
+                job = strip_rows.get(job_id)
+                if job is not None:
+                    label.set_text(started_line(job))
 
         def render_rows(view: dict) -> None:
             rows_host.clear()
@@ -991,11 +1322,11 @@ async def jobs_page():
                     ui.button("★ gemerkt" if marked else "☆ merken",
                               on_click=lambda j=job["id"]: toggle_bookmark(j)) \
                         .props("flat dense no-caps")
-                    if job["status"] in ("skipped", "portal"):
-                        # `portal` is written the moment a form is opened, and
-                        # nothing else brought a posting back from it: opening
-                        # a form he then decided against took the posting out
-                        # of the working list for good.
+                    if job["status"] == "skipped" or job["form_opened_at"]:
+                        # Two different ways back, one button: he put the
+                        # posting away, or he started a form here and decided
+                        # against it. The second is the one that needs asking —
+                        # `revive` does that.
                         ui.button("↩ zurück in die Arbeitsliste",
                                   on_click=lambda j=job["id"]: revive(j)) \
                             .props("flat dense no-caps")
@@ -1014,15 +1345,6 @@ async def jobs_page():
                     if job["status"] == "new" and not job["contact_email"]:
                         ui.button("Kontakt-E-Mail suchen",
                                   on_click=lambda j=job: find_email(j)) \
-                            .props("flat dense no-caps")
-                    if not _by_email(job) and not _blocking_reason(job, already):
-                        # The cockpit is not retired: it is the only screen
-                        # that holds the applicant fields ready to paste into
-                        # an employer's form, and deleting the last route into
-                        # it left Settings still promising it is a click away.
-                        ui.button("Formular-Daten",
-                                  on_click=lambda j=job["id"]:
-                                      open_cockpit(j)) \
                             .props("flat dense no-caps")
                 for text, kind in reader_notes(job, already):
                     ui.label(text).classes(f"jd-note {kind} mb-2")
@@ -1156,45 +1478,63 @@ async def jobs_page():
             state["selected"] = None
             await refresh(force=True)
 
-        async def ask_before_spending(step: Step, job: dict) -> bool:
-            """The keyboard asks before an action costs money.
+        async def ask_before_committing(step: Step, job: dict) -> bool:
+            """The keyboard asks before an action he cannot take back cheaply.
 
             ⏎ is the one control on this screen whose meaning changes with the
             row under the cursor: he moves with j and presses it expecting
-            "open this", and on a direct-e-mail posting that is a Sonnet call
-            of about nine cents and forty seconds. A button he clicked carries
-            its own label and needs no second question."""
-            if step.key != STEP_DRAFT:
+            "open this". A button he CLICKED carries its own label — that is
+            why "Bewerbung starten · ~0,09 $" needs no second question — but ⏎
+            carries nothing, so it asks.
+
+            Two kinds of press qualify, and the second is the one this screen
+            got wrong. Money: a Sonnet call of about nine cents and a minute.
+            And the LEDGER: once a form is started, the next step under ⏎ is
+            "Abgeschickt", which writes into the very table the duplicate gate
+            reads — one keystroke spending that company's only application
+            slot. The button has ten seconds of "Rückgängig" beside it; a
+            keystroke he did not mean to make has nobody watching for it.
+
+            One dialog, built once: the branches are exclusive but the rule
+            that keeps `overlay.clear()` ahead of every await cannot know that,
+            and it is right not to guess.
+            """
+            if step.key == STEP_RECORD:
+                heading = "Bewerbung eintragen?"
+                detail = ("Eine Bewerbung pro Firma — danach ist diese Firma "
+                          "vergeben.")
+                go = "Eintragen"
+            elif step.key in (STEP_DRAFT, STEP_START):
+                heading = (f"Bewerbung schreiben? "
+                           f"~{_usd(preparing.COST_PER_DRAFT_USD)}")
+                detail = ("Das schreibt der KI-Dienst, kostet Geld und dauert "
+                          "etwa eine Minute.")
+                go = "Schreiben"
+            else:
                 return True
             overlay.clear()
             with overlay, ui.dialog() as confirm, ui.card():
-                ui.label("Bewerbung schreiben?").classes("font-bold")
+                ui.label(heading).classes("font-bold")
                 ui.label(f"{job['company']} — {clean_title(job['title'])}") \
                     .classes("text-sm")
-                ui.label("Das schreibt der KI-Dienst, kostet Geld und dauert "
-                         "etwa eine Minute.").classes("text-sm text-gray-600")
+                ui.label(detail).classes("text-sm text-gray-600")
                 with ui.row().classes("justify-end gap-2 w-full"):
                     ui.button("Abbrechen",
                               on_click=lambda: confirm.submit(False)) \
                         .props("flat no-caps")
-                    ui.button("Schreiben",
-                              on_click=lambda: confirm.submit(True)) \
+                    ui.button(go, on_click=lambda: confirm.submit(True)) \
                         .props("no-caps")
             confirm.open()
             return bool(await confirm)
 
         async def run_step(key: str, job: dict, button) -> None:
             """Do one act of applying, from the screen he read the posting on."""
-            if key == STEP_RESOLVE:
-                await resolve_channel(job)
-            elif key == STEP_DRAFT:
+            if key == STEP_DRAFT:
                 await draft(job, force=True, button=button)
-            elif key == STEP_MAPPE:
-                await build_mappe(job, button)
             elif key == STEP_SEND:
                 await open_draft_editor(job)
-            elif key == STEP_FORM:
-                await open_form(job)
+            elif key == STEP_START:
+                await start_application(job, button)
             elif key == STEP_RECORD:
                 await confirm_applied(job)
 
@@ -1235,37 +1575,72 @@ async def jobs_page():
         async def forced_refresh() -> None:
             await refresh(force=True)
 
-        def open_cockpit(job_id: int) -> None:
-            """The clipboard beside an employer's form."""
-            ui.navigate.to(f"/cockpit/{job_id}")
+        async def start_application(job: dict, button=None) -> None:
+            """One press: his tab opens, and everything behind it is prepared.
 
-        async def open_form(job: dict) -> None:
-            """Open the employer's page and remember that he started applying.
+            The ORDER is the feature, and the first two steps are forced by the
+            browser rather than chosen:
 
-            The app never fills a form — that is settled — but opening one IS
-            the start of an application, so the posting moves to `portal` and
-            leaves the working list while he is at it."""
-            # Cleared BEFORE the wait, never after: the page stays live
-            # while this runs, and clearing afterwards destroys a dialog he
-            # opened meanwhile — one awaited on then never resolves at all.
+            1. the overlay is cleared before anything is awaited — clearing it
+               afterwards destroys a dialog he opened meanwhile, and one
+               awaited on then never resolves at all;
+            2. the employer's page is opened BEFORE the first await. A
+               window.open pushed after a minute of server work is what a popup
+               blocker refuses, and the letter takes about a minute.
+
+            Then, while he reads their form: the moment is stamped, the channel
+            is resolved if the scheduler has not got to it yet, the letter is
+            written, the COMPLETE Mappe is built and staged where their upload
+            dialog opens, and that folder is opened for him.
+
+            If the letter fails the Mappe is not built and the strip says the
+            documents are NOT complete. A Bewerbungsmappe is always complete by
+            his decision, so a partial one put silently in front of an upload
+            button is the worst outcome available here.
+            """
             overlay.clear()
             url = _openable_url(job)
             if not url:
                 say("Diese Anzeige nennt keine Adresse zum Öffnen.",
                     type="warning")
                 return
-            await run.io_bound(_set_status, job["id"], "portal")
-            # The posting leaves this view, so the reader keeps the copy it was
-            # holding — and that copy still said `new`, which renders "kein
-            # Interesse" instead of the way back. The second after the click is
-            # exactly when he wants the undo.
-            if job["id"] in shown:
-                shown[job["id"]]["status"] = "portal"
+            ui.navigate.to(url, new_tab=True)
+            if button is not None:
+                button.disable()
+            await run.io_bound(_mark_form_opened, job["id"])
+            await refresh(force=True)
+            # Resolved after the tab is open rather than before it: the two
+            # cannot both come first, and a tab that opens on the board's own
+            # page is what he would have clicked through anyway. The strip's
+            # "Formular erneut öffnen" carries the resolved link.
+            if not job.get("apply_channel"):
+                try:
+                    await apply_resolve.resolve_and_store(job["id"])
+                except Exception as exc:      # noqa: BLE001 — never block the press
+                    log.warning("channel resolution failed for job %s: %s",
+                                job["id"], exc)
+            result = await drafting.draft_for_job(job["id"])
+            if not result["ok"]:
+                await refresh(force=True)
+                with overlay:
+                    say(f"Kein Anschreiben — die Mappe ist NICHT vollständig: "
+                        f"{result['error']}", type="warning", multi_line=True)
+                return
+            built = await mappe.create_mappe(job["id"])
             await refresh(force=True)
             with overlay:
-                ui.navigate.to(url, new_tab=True)
-                say("Trag die Bewerbung ein, sobald du das Formular "
-                    "abgeschickt hast.", type="positive", multi_line=True)
+                if not built["ok"]:
+                    say(f"Die Mappe ist NICHT vollständig: {built['error']}",
+                        type="warning", multi_line=True)
+                    return
+                say(helpers.mappe_summary(built, with_anlagen=True),
+                    type="positive", multi_line=True)
+                if built["warning"]:
+                    # The portal budget is 2 MB and his real Mappe measures
+                    # about 2.1: the step this press replaced said so, and an
+                    # oversized upload fails in front of the employer.
+                    say(built["warning"], type="warning", multi_line=True)
+            await run.io_bound(_open_upload_folder)
 
         async def on_key(event) -> None:
             if not event.action.keydown or event.action.repeat:
@@ -1291,7 +1666,16 @@ async def jobs_page():
             elif job is None:
                 return
             elif key == "x":
-                await not_interested(job["id"])
+                if job["form_opened_at"]:
+                    # `x` used to be a no-op here, for free: a started form had
+                    # left status 'new'. Now it has not, so one keystroke would
+                    # move it to 'skipped' — off the strip, and the strip is
+                    # the app's ONLY record that an application may already be
+                    # out at that company. It asks instead, exactly as the
+                    # row's own "zurück in die Arbeitsliste" does.
+                    await revive(job["id"])
+                else:
+                    await not_interested(job["id"])
             elif key == "s":
                 await toggle_bookmark(job["id"])
             elif key == "o":
@@ -1305,7 +1689,7 @@ async def jobs_page():
                 # can reach a send.
                 steps = apply_steps(job, applied.get(job["id"]))
                 index = _next_step(steps)
-                if index >= 0 and await ask_before_spending(steps[index], job):
+                if index >= 0 and await ask_before_committing(steps[index], job):
                     await run_step(steps[index].key, job, None)
 
         def _hold_place(job_id: int) -> None:
@@ -1324,16 +1708,17 @@ async def jobs_page():
         async def revive(job_id: int) -> None:
             """Put a posting back into the working list.
 
-            From `portal` it asks first, and the question is not "are you
-            sure": `portal` is the app's ONLY record that an application at
-            that company may already be out, and an unrecorded form
-            submission is invisible to every gate there is. Pressing this
+            From a started form it asks first, and the question is not "are you
+            sure": `form_opened_at` is the app's ONLY record that an
+            application at that company may already be out, and an unrecorded
+            form submission is invisible to every gate there is. Pressing this
             after actually applying would erase the one hint and let a second
             application through."""
             job = shown.get(job_id)
-            if job is None or job["status"] not in ("skipped", "portal"):
+            if job is None or not (job["status"] == "skipped"
+                                   or job["form_opened_at"]):
                 return
-            if job["status"] == "portal":
+            if job["form_opened_at"]:
                 overlay.clear()
                 with overlay, ui.dialog() as ask, ui.card():
                     ui.label("Du hattest das Formular geöffnet.") \
@@ -1354,6 +1739,12 @@ async def jobs_page():
                     return
                 if answer != "back":
                     return
+                _hold_place(job_id)
+                # He says no application went out: take back the start, and
+                # with it whatever was staged for the upload dialog.
+                await run.io_bound(_clear_form_opened, job_id)
+                await refresh(force=True)
+                return
             _hold_place(job_id)
             await run.io_bound(_set_status, job_id, "new")
             await refresh(force=True)
@@ -1361,6 +1752,12 @@ async def jobs_page():
         async def not_interested(job_id: int) -> None:
             job = shown.get(job_id)
             if job is None or job["status"] != "new":
+                return
+            if job["form_opened_at"]:
+                # Defence in depth: `revive` is the way out of a started
+                # application because it ASKS whether one went out. Reaching
+                # this instead would silently delete the only hint there is.
+                await revive(job_id)
                 return
             _hold_place(job_id)
             await run.io_bound(_set_status, job_id, "skipped")
@@ -1520,46 +1917,83 @@ async def jobs_page():
             dialog.open()
 
         async def confirm_applied(job: dict):
-            # A one-way door on a row of adjacent buttons. `apply_job` writes
-            # into the very table the duplicate gate reads, so a mis-click
-            # burns that company's single application slot and takes the
-            # posting out of the pipeline — and nothing in the app puts a
-            # status back from 'applied'.
+            """Record the application, and let him take it straight back.
+
+            This used to ask first, because it is a one-way door: `apply_job`
+            writes into the very table the duplicate gate reads, so a mis-click
+            burns that company's single application slot. The question is gone
+            and an undo took its place — a dialog on the press he makes eight
+            times an evening is a dialog he learns to click through, which
+            guards nothing. The undo is real work (`db.unrecord_application`
+            takes back every write, in one transaction), and that is the only
+            reason the trade is honest."""
+            # Cleared BEFORE the wait, never after: clearing afterwards
+            # destroys a dialog he opened meanwhile, and one awaited on then
+            # never resolves at all.
             overlay.clear()
-            with overlay, ui.dialog() as confirm, ui.card():
-                ui.label("Bewerbung eintragen?").classes("font-bold")
-                ui.label(f"{job['company']} — {clean_title(job['title'])}") \
-                    .classes("text-sm")
-                ui.label("Das trägt eine gesendete Bewerbung ein und nimmt die "
-                         "Anzeige aus der Arbeitsliste. Eine Bewerbung pro "
-                         "Firma — danach ist diese Firma vergeben.") \
-                    .classes("text-sm text-gray-600")
-                with ui.row().classes("justify-end gap-2 w-full"):
-                    ui.button("Abbrechen",
-                              on_click=lambda: confirm.submit(False)) \
-                        .props("flat no-caps")
-                    ui.button("Eintragen",
-                              on_click=lambda: confirm.submit(True)) \
-                        .props("color=positive no-caps")
-            confirm.open()
-            if not await confirm:
-                return
-            # FINDING 6: what the ledger records is the way it actually went,
-            # and the Mappe that went with it — the duplicate gate reads this
-            # table, so its rows have to be true.
-            kanal = ("E-Mail" if _by_email(job) else "Online-Portal")
+            # What the ledger records is the way it actually went — the
+            # duplicate gate reads this table, so its rows have to be true.
+            kanal = (apply_record.KANAL_EMAIL if _by_email(job)
+                     else apply_record.KANAL_FORM)
             # He asked for it to go, so it goes: without this the posting would
             # be treated as one that fell out of the view by itself and stay in
             # the reading pane behind a note.
             _hold_place(job["id"])
-            bewerbung_id = await run.io_bound(
-                _confirm_applied, job["id"], kanal, str(job.get("pdf_path") or ""))
+            result = await run.io_bound(_record_application, job["id"], kanal)
             await refresh(force=True)
-            if bewerbung_id is None:
-                say("Blockiert: bei dieser Firma liegt schon eine Bewerbung",
-                    type="warning")
-            else:
-                say("Bewerbung eingetragen ✓", type="positive")
+            if not result["ok"]:
+                blocking = result["duplicate"]
+                say(helpers.applied_line(blocking) if blocking else
+                    "Diese Anzeige gibt es nicht mehr.",
+                    type="warning", multi_line=True)
+                return
+            with overlay:
+                _undo_bar(result, job)
+
+        def _undo_bar(result: dict, job: dict) -> None:
+            """Ten seconds in which the press can be taken back.
+
+            Built as real elements rather than a Quasar notify action: nothing
+            in this codebase uses those, an unwired handler renders an
+            identical button, and a test that called the service directly would
+            pass while the button did nothing."""
+            bar = ui.row().classes("jd-undo items-center gap-3")
+            gone = {"yes": False}
+
+            async def dismiss() -> None:
+                """Idempotent, because two things end this bar and either can
+                come first: the ten seconds running out, and him pressing.
+                Deleting an already-deleted element raises, and inside a timer
+                callback that is one log line — the failure would be invisible
+                and the next press would find a page carrying a dead timer."""
+                if gone["yes"] or bar.is_deleted:
+                    gone["yes"] = True
+                    return
+                gone["yes"] = True
+                bar.delete()
+
+            with bar:
+                ui.label(f"Bewerbung bei {result['company']} eingetragen ✓") \
+                    .classes("text-sm")
+
+                async def take_back() -> None:
+                    await dismiss()
+                    await run.io_bound(_undo_application, job["id"],
+                                       result["bewerbung_id"],
+                                       result["previous_status"])
+                    _hold_place(job["id"])
+                    await refresh(force=True)
+                    say(f"Rückgängig gemacht — {result['company']} ist wieder "
+                        f"frei.", type="positive")
+
+                ui.button("Rückgängig", on_click=take_back) \
+                    .props("flat dense no-caps")
+            # once=True: a repeating timer in a page module is refused by the
+            # rule that keeps every recurring tick in ui/live.py, where the
+            # pause-on-disconnect lives. Parented outside `overlay`, which the
+            # next handler clears — see `timers` above.
+            with timers:
+                ui.timer(10.0, dismiss, once=True)
 
         # Postings arrive hourly, scores land every ten minutes and the liveness
         # pass runs 90 s after every start — all of it invisible until this. It
@@ -1567,7 +2001,8 @@ async def jobs_page():
         # is on screen: the reading pane survives a rebuild by itself, so unlike
         # the old expansions there is nothing here to yank out from under him.
         with chip_host:
-            live_view = live.watch(_signature, refresh, busy=live.dialog_open)
+            live_view = live.watch(_signature, refresh, busy=live.dialog_open,
+                                   beat=restamp_strip)
         # `ignore` is NiceGUI's own client-side rule and the only one that can
         # work: a keystroke typed into the search box must never reach here, and
         # only the browser knows where the caret is. Pinned by a test, because

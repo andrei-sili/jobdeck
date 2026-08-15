@@ -173,6 +173,10 @@ def _store(job_id: int, ch: apply_channel.ApplyChannel, apply_url: str) -> None:
 
 
 BATCH_LIMIT = 60           # one pass; a second click continues the backlog
+
+# One pass at a time across the whole process — the scheduler's and the
+# button's.
+_lock = asyncio.Lock()
 BATCH_PAUSE_S = 0.4        # between postings — this walks other people's sites
 
 
@@ -200,12 +204,35 @@ async def resolve_pending(limit: int = BATCH_LIMIT,
     Returns counters plus a channel breakdown. Never raises: one bad posting
     must not end the pass. `client` is injectable so a test can drive the whole
     pass through a MockTransport rather than the network.
+
+    Single-flight, and it RETURNS rather than queueing: the pass runs on a
+    schedule now, and Settings can still start one by hand at the same moment.
+    `max_instances=1` guards only the scheduled path, so without this the two
+    would walk the same backlog at once and double the requests other people's
+    servers see — the opposite of the politeness this batch exists to keep.
     """
+    if _lock.locked():
+        log.info("apply-resolve: a pass is already running, skipping this one")
+        # `skipped` is what tells a caller apart from a pass that found
+        # nothing: both answer "0 resolved, 0 failed", and the Settings button
+        # reported the second as "every posting already knows its channel ✓".
+        # Since the scheduler runs this every half hour, that positive is now
+        # reachable with hundreds still pending.
+        return {"resolved": 0, "failed": 0, "skipped": True,
+                "remaining": await asyncio.to_thread(_pending_count),
+                "channels": {}}
+    async with _lock:
+        return await _resolve_pending(limit, client)
+
+
+async def _resolve_pending(limit: int,
+                           client: httpx.AsyncClient | None) -> dict:
     jobs = await asyncio.to_thread(_pending, limit)
     counts: dict[str, int] = {}
     resolved = failed = 0
     if not jobs:
-        return {"resolved": 0, "failed": 0, "remaining": 0, "channels": counts}
+        return {"resolved": 0, "failed": 0, "skipped": False,
+                "remaining": 0, "channels": counts}
     owned = client is None
     if owned:
         client = httpx.AsyncClient(
@@ -231,8 +258,8 @@ async def resolve_pending(limit: int = BATCH_LIMIT,
     remaining = await asyncio.to_thread(_pending_count)
     log.info("apply-resolve batch: %s resolved, %s failed, %s still pending",
              resolved, failed, remaining)
-    return {"resolved": resolved, "failed": failed, "remaining": remaining,
-            "channels": counts}
+    return {"resolved": resolved, "failed": failed, "skipped": False,
+            "remaining": remaining, "channels": counts}
 
 
 async def resolve_and_store(job_id: int) -> dict:

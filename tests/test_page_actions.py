@@ -42,17 +42,19 @@ def _posting(con, **over):
 # ---------------------------------------------------------------------------
 async def test_the_inbox_offers_one_way_into_a_form_application(
         user: User, con, data_dir):
-    """"Apply via portal" opened the raw posting and marked it 'portal' from
-    the row; the cockpit does both and is where the form work happens. Two
-    controls for one act is what "too many buttons" meant."""
+    """"Apply via portal" opened the raw posting and marked it from the row
+    while a second control did the form work. Two controls for one act is what
+    "too many buttons" meant — it is one control now, and it carries its
+    price."""
     job_id = _posting(con)
     db.set_apply_channel(con, job_id, "ats_form", "JOIN", "https://join.com/x")
     con.commit()
     await user.open("/")
     await user.should_see("Python Entwickler")
 
-    await user.should_see("Formular öffnen")
+    await user.should_see("Bewerbung starten · ~0,09 $")
     await user.should_not_see("Apply via portal")
+    await user.should_not_see("Formular öffnen")
 
 
 # ---------------------------------------------------------------------------

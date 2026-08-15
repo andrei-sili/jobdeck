@@ -297,6 +297,81 @@ async def test_mappe_discards_result_when_draft_changed_mid_render(
     assert not any(out_dir.glob("*.pdf"))
 
 
+async def test_a_finished_mappe_is_staged_where_the_file_picker_opens(
+    con, data_dir
+):
+    """The complaint was "the form opens the previous application's folder".
+    The archive is a new directory per application, and every file chooser
+    reopens wherever it was last used — so it was one application behind by
+    construction. One permanent folder ends that."""
+    job_id = _setup(con, data_dir, with_anlagen=False)
+    db.mark_form_opened(con, job_id)      # only a form application is staged
+    con.commit()
+
+    result = await mappe.create_mappe(job_id)
+
+    assert result["ok"]
+    job = db.get_job(con, job_id)
+    staged = pathlib.Path(job["upload_path"])
+    assert staged.parent == pathlib.Path(config.UPLOAD_DIR)
+    assert staged.exists()
+    assert staged.read_bytes() == pathlib.Path(result["pdf_path"]).read_bytes()
+    # the build says what it produced; no screen has to guess from the disk
+    assert job["mappe_kind"] == mappe.MAPPE_COMPLETE
+    # and the archive is untouched — it is what bewerbungen.dokument points at
+    assert pathlib.Path(result["pdf_path"]).exists()
+
+
+async def test_a_rebuilt_mappe_stages_the_new_bytes_not_the_old_inode(
+    con, data_dir
+):
+    """`compress_to_target` writes the output up to four times in one call and
+    both installers end in `replace()`, which gives it a NEW inode. A link made
+    at any earlier moment survives, opens fine, looks complete — and is the
+    previous letter."""
+    job_id = _setup(con, data_dir, with_anlagen=False)
+    db.mark_form_opened(con, job_id)
+    con.commit()
+    assert (await mappe.create_mappe(job_id))["ok"]
+
+    db.upsert_draft(con, job_id, {"anschreiben_body": "Anrede,\n\nGANZ NEUER TEXT."})
+    con.commit()
+    result = await mappe.create_mappe(job_id)
+
+    assert result["ok"]
+    staged = pathlib.Path(db.get_job(con, job_id)["upload_path"])
+    assert staged.read_bytes() == pathlib.Path(result["pdf_path"]).read_bytes()
+
+
+async def test_a_mappe_discarded_mid_render_is_never_left_in_the_upload_folder(
+    con, data_dir, monkeypatch
+):
+    """The worst outcome reachable in this slice. The TOCTOU branch unlinks a
+    finished PDF when the draft moved while Chrome rendered — but a hardlink
+    keeps the inode ALIVE. Staged too early, the upload folder would hold a
+    complete, plausible Mappe carrying the OLD letter while the app reported
+    the build failed, and that is the file the employer's picker offers."""
+    job_id = _setup(con, data_dir, with_anlagen=False)
+    db.mark_form_opened(con, job_id)
+    con.commit()
+    real_render = pdf.html_to_pdf
+
+    def render_and_redraft(html_text, out_pdf):
+        real_render(html_text, out_pdf)
+        with db.db() as c:
+            db.upsert_draft(c, job_id, {"anschreiben_body": "NEUER TEXT"})
+
+    monkeypatch.setattr(pdf, "html_to_pdf", render_and_redraft)
+    result = await mappe.create_mappe(job_id)
+
+    assert not result["ok"]
+    assert not any(pathlib.Path(config.UPLOAD_DIR).glob("*.pdf")), \
+        "a Mappe the app says failed is sitting in the upload folder"
+    job = db.get_job(con, job_id)
+    assert job["upload_path"] == ""
+    assert job["mappe_kind"] == "", "nothing complete is staged, and it says so"
+
+
 async def test_letter_values_use_nameless_betreff_and_german_date(
     con, data_dir, monkeypatch
 ):
@@ -508,3 +583,20 @@ def test_the_cover_sheet_and_the_subject_name_the_same_role(con, data_dir):
     assert "Python Entwickler" in values["deckblatt_rolle"]
     # the two lines of the same document agree
     assert values["deckblatt_rolle"].removeprefix("als ") in values["betreff"]
+
+
+async def test_an_email_application_is_never_staged_for_an_upload(con, data_dir):
+    """Every channel builds a Mappe — the review-and-send editor and the
+    prepare batch both come through here — and only the form recorder ever
+    takes a file back out. Staging unconditionally would fill the folder with
+    documents nobody is uploading, and the next form's picker would offer
+    one of them."""
+    job_id = _setup(con, data_dir, with_anlagen=False)
+    db.set_apply_channel(con, job_id, "direct_email", "", "")
+    con.commit()
+
+    assert (await mappe.create_mappe(job_id))["ok"]
+
+    assert not any(pathlib.Path(config.UPLOAD_DIR).glob("*.pdf"))
+    job = db.get_job(con, job_id)
+    assert job["upload_path"] == "" and job["mappe_kind"] == ""

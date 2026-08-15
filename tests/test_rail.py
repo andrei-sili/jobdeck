@@ -31,6 +31,7 @@ def _view(**over) -> dict:
         "unread": 41,
         "bookmarked": 7,
         "in_progress": 1,
+        "started": 0,
         "apps": [],
         "follow_up_days": 14,
         "sent_today": 2,
@@ -311,3 +312,32 @@ def test_a_key_is_reported_as_present_and_never_read(con, data_dir, monkeypatch)
              if isinstance(node, ast.Call)]
     assert all(not call.startswith("ui.label(config.") for call in calls), (
         "a key is being rendered rather than merely counted")
+
+
+def test_a_running_form_application_is_visible_from_every_screen():
+    """It is an application that may already be out, and the only state the
+    app cannot resolve by itself — so it is worth seeing from Einstellungen."""
+    rubric = _rubric(_view(started=3), "stellen")
+    assert "3 laufen" in rubric.sub
+    assert rubric.amber is True
+
+
+def test_nothing_running_says_nothing():
+    """A permanent "0 laufen" is a line you stop reading, and then it is not
+    there when it matters."""
+    rubric = _rubric(_view(started=0), "stellen")
+    assert "laufen" not in rubric.sub
+    assert rubric.amber is False
+
+
+def test_the_rail_counts_the_running_forms_from_the_database(con, data_dir):
+    """`facts()["started"]` could be hardcoded to 0 with the suite green: the
+    rubric tests all feed a hand-written view."""
+    from jobdeck import db
+    job_id = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "e1", "title": "Entwickler",
+        "company": "Firma", "url": "https://firma.de/x"})
+    db.mark_form_opened(con, job_id)
+    con.commit()
+
+    assert rail.facts()["started"] == 1

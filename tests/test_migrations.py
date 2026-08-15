@@ -1,6 +1,6 @@
 import sqlite3
 
-from jobdeck import config, db, migrations
+from jobdeck import config, constants, db, migrations
 
 
 def make_legacy_db(path, rows):
@@ -405,4 +405,155 @@ def test_migrate_adds_the_reading_columns_to_pre_v8_jobs(tmp_path):
     assert (con.execute("PRAGMA user_version").fetchone()[0]
             == migrations.SCHEMA_VERSION)
     migrations.migrate(con)  # idempotent with the new columns present
+    con.close()
+
+
+def _pre_v10_db(path):
+    """A jobs+drafts pair shaped like the schema just before v10."""
+    con = sqlite3.connect(path)
+    con.row_factory = sqlite3.Row
+    con.execute(
+        """
+        CREATE TABLE jobs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            source      TEXT NOT NULL,
+            external_id TEXT NOT NULL,
+            company     TEXT NOT NULL DEFAULT '',
+            fetched_at  TEXT NOT NULL,
+            status      TEXT NOT NULL DEFAULT 'new',
+            opened_at   TEXT NOT NULL DEFAULT '',
+            UNIQUE (source, external_id)
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE drafts (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id     INTEGER NOT NULL,
+            status     TEXT NOT NULL DEFAULT 'ready',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    return con
+
+
+def _add_job(con, external_id, status, opened_at=""):
+    cur = con.execute(
+        "INSERT INTO jobs (source, external_id, company, fetched_at, status, "
+        "opened_at) VALUES (?, ?, ?, ?, ?, ?)",
+        ("arbeitsagentur", external_id, "Beispiel GmbH", "2026-08-01T10:00:00",
+         status, opened_at),
+    )
+    return cur.lastrowid
+
+
+def test_migrate_restates_an_open_form_as_a_moment(tmp_path):
+    """The postings whose form was already open keep their place in the working
+    list and gain the timestamp the app now reads.
+
+    Their age comes from evidence — the newest draft, else when he opened the
+    posting — and a posting that left neither says so rather than being handed
+    an invented age, which would sort it among applications started this
+    minute."""
+    con = _pre_v10_db(tmp_path / "v9.db")
+    from_draft = _add_job(con, "10001-1-S", "portal", "2026-08-14T09:00:00")
+    con.execute(
+        "INSERT INTO drafts (job_id, status, created_at, updated_at) "
+        "VALUES (?, 'ready', ?, ?)",
+        (from_draft, "2026-08-14T15:00:00", "2026-08-14T16:42:46"),
+    )
+    from_opened = _add_job(con, "10002-1-S", "portal", "2026-08-14T10:58:26")
+    no_evidence = _add_job(con, "10003-1-S", "portal")
+    untouched = _add_job(con, "10004-1-S", "new", "2026-08-14T11:00:00")
+    con.execute("PRAGMA user_version = 9")
+    con.commit()
+
+    migrations.migrate(con)
+
+    rows = {r["id"]: r for r in con.execute("SELECT * FROM jobs")}
+    # the newest draft is the best evidence of when the form was opened
+    assert rows[from_draft]["form_opened_at"] == "2026-08-14T16:42:46"
+    # no draft — when he opened the posting is the next best thing
+    assert rows[from_opened]["form_opened_at"] == "2026-08-14T10:58:26"
+    # neither: named as unknown, never a clock value
+    assert rows[no_evidence]["form_opened_at"] == constants.FORM_OPENED_UNKNOWN
+    # every one of them is back in the working list
+    assert [rows[i]["status"] for i in (from_draft, from_opened, no_evidence)] \
+        == ["new", "new", "new"]
+    # a posting that was never at a form is left completely alone
+    assert rows[untouched]["form_opened_at"] == ""
+    assert rows[untouched]["status"] == "new"
+    # the new columns start empty: nothing is staged until a build stages it
+    assert rows[from_draft]["upload_path"] == ""
+    assert rows[from_draft]["mappe_kind"] == ""
+    assert (con.execute("PRAGMA user_version").fetchone()[0]
+            == migrations.SCHEMA_VERSION)
+
+    migrations.migrate(con)
+    after = {r["id"]: r for r in con.execute("SELECT * FROM jobs")}
+    # a second run must not re-stamp: the moments are evidence, not defaults
+    assert all(after[i]["form_opened_at"] == rows[i]["form_opened_at"]
+               for i in rows)
+    con.close()
+
+
+def test_migrate_leaves_a_fresh_database_with_the_form_flow_columns(tmp_path):
+    """A database created from scratch has them from the canonical CREATE
+    TABLE, not from an ALTER — the two definitions must not drift."""
+    con = sqlite3.connect(tmp_path / "fresh.db")
+    con.row_factory = sqlite3.Row
+    migrations.migrate(con)
+    cols = [row[1] for row in con.execute("PRAGMA table_info(jobs)")]
+    assert "form_opened_at" in cols
+    assert "upload_path" in cols
+    assert "mappe_kind" in cols
+    con.close()
+
+
+def test_migrate_points_an_application_at_the_mappe_that_was_built_for_it(tmp_path,
+                                                                          monkeypatch):
+    """Two writers recorded a form application and only one passed `dokument`,
+    so 13 of his 35 Online-Portal ledger rows say no document exists while the
+    PDF sits under output/job_<id>/. One recorder makes that impossible going
+    forward; this fills in what the disagreement already cost.
+
+    The file has to still be there: an entry naming a path that is gone is
+    worse than one that admits it has nothing, because he would click it."""
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    con = sqlite3.connect(tmp_path / "fresh.db")
+    con.row_factory = sqlite3.Row
+    migrations.migrate(con)
+
+    real = tmp_path / "output" / "job_1" / "Bewerbung.pdf"
+    real.parent.mkdir(parents=True)
+    real.write_bytes(b"%PDF-1.4")
+    gone = tmp_path / "output" / "job_2" / "Weg.pdf"
+
+    ids = {}
+    for key, path in (("has_file", real), ("no_file", gone)):
+        bewerbung_id = db.add_bewerbung(con, {
+            "firma": f"Firma {key}", "kanal": "Online-Portal",
+            "status": "Gesendet", "dokument": ""})
+        job_id = db.insert_job_if_new(con, {
+            "source": "stub", "external_id": key, "company": f"Firma {key}",
+            "title": "Entwickler", "url": "https://x.example/1"})
+        db.set_job_status(con, job_id, "applied", bewerbung_id=bewerbung_id)
+        db.upsert_draft(con, job_id, {"status": "sent", "pdf_path": str(path)})
+        ids[key] = bewerbung_id
+    con.commit()
+
+    migrations.migrate(con)
+
+    assert db.get_bewerbung(con, ids["has_file"])["dokument"] == str(real)
+    assert db.get_bewerbung(con, ids["no_file"])["dokument"] == ""
+    # and it never overwrites a pointer the app already has: this fills
+    # blanks, it does not decide what a sent application was sent with
+    con.execute("UPDATE bewerbungen SET dokument='/hand/gewaehlt.pdf' WHERE id=?",
+                (ids["has_file"],))
+    con.commit()
+    migrations.migrate(con)
+    assert db.get_bewerbung(con, ids["has_file"])["dokument"] == "/hand/gewaehlt.pdf"
     con.close()

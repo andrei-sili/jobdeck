@@ -47,8 +47,17 @@ STATUS_RANK = {
     "Zurückgezogen": 4,
 }
 
-# Lifecycle of a discovered job posting
-JOB_STATUS = ["new", "duplicate", "skipped", "portal", "drafted", "applied"]
+# Lifecycle of a discovered job posting. `portal` was removed in v10: having
+# opened an employer's form is a moment (`jobs.form_opened_at`), not a state of
+# the posting, and writing it as a status hid the very posting he had just
+# started — every view here pins a concrete status.
+JOB_STATUS = ["new", "duplicate", "skipped", "drafted", "applied"]
+
+# What `form_opened_at` holds for a form that was already open before v10 and
+# left no evidence of when. A literal rather than a date, so nothing can format
+# it into a plausible age: eleven real rows carried no clue, and inventing one
+# would sort them among applications started this minute.
+FORM_OPENED_UNKNOWN = "unbekannt"
 
 # What the last liveness probe observed about a posting's ad ('' = never asked).
 # Here rather than in services/liveness.py because db.py builds SQL from these
@@ -64,6 +73,13 @@ DRAFT_STATUS = ["generating", "ready", "failed", "approved", "sending", "sent", 
 # the layer both the send gate and the screens that draw the budget can see: a
 # second copy would let a bar promise a send the gate below it refuses.
 DEFAULT_DAILY_CAP = "15"
+
+# How many tailored letters may be written in a day when he has never said.
+# Since v10 a form application writes one by itself, so the form path spends
+# money per press for the first time — his decision (2026-08-15) was a HARD
+# cap, raised deliberately in Einstellungen, because an override always one
+# press away is a speed bump rather than a limit.
+DEFAULT_DAILY_DRAFT_CAP = "10"
 
 # email_log.direction values. Test sends (real sending OFF) get their own
 # direction: they must never look like a real application in the audit log,

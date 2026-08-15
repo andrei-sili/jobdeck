@@ -111,6 +111,29 @@ body { background: var(--paper); color: var(--ink); font-family: var(--jd-sans);
             font:400 12px/1.6 var(--jd-mono); color: var(--ink-2); }
 .jd-facts .k { color: var(--ink-3); }
 .jd-reason { font-size:12px; color: var(--warn); }
+/* Applications under way, above the list and inside it: a sibling of the
+   scroll container rather than a floating bar, so it is present in every view,
+   on every page, under any search — and costs no grid change. */
+.jd-laeuft:not(:empty) { border-bottom:1px solid var(--accent);
+                         background: var(--surface-2); }
+.jd-laeuft-row { padding:7px 10px; border-bottom:1px solid var(--rule); }
+.jd-laeuft-row:last-child { border-bottom:0; }
+/* One personal answer, ready to copy. Chips because they are the same on every
+   German form — a row each would be eleven rows of furniture. */
+.jd-chip { border:1px solid var(--rule-2); border-radius:20px;
+           font:400 11.5px/1 var(--jd-mono); color: var(--ink-2);
+           background: var(--surface); }
+/* The ten seconds in which a recorded application can be taken back. Quiet,
+   because it is a confirmation and not a warning — but it holds a control, so
+   it sits on its own surface rather than reading as one more note. */
+/* Pinned to the bottom of the viewport, because `overlay` renders as a
+   sibling PRECEDING the 100vh screen: laid out in flow it sat above the fold,
+   and this is the control that replaced a confirmation dialog — one he cannot
+   see is one he cannot use. */
+.jd-undo { position:fixed; bottom:18px; left:50%; transform:translateX(-50%);
+           z-index:2500; border:1px solid var(--accent); border-radius:8px;
+           background: var(--surface); box-shadow:0 3px 14px rgba(0,0,0,.16);
+           padding:6px 8px 6px 12px; }
 @media (max-width: 1080px) {
   .jd-panes { grid-template-columns: 1fr; }
   .jd-screen { height: auto; }

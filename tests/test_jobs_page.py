@@ -326,12 +326,13 @@ def test_the_hidden_line_can_never_contradict_the_list(view_key, counts, expecte
 
 
 def test_a_posting_he_has_acted_on_is_never_hidden_from_its_own_view(con, data_dir):
-    """The row of a posting in `portal` carries the button that finishes the job
-    ("I applied — record it"). Hiding it for being offline would hide that."""
+    """The row of a posting whose form he opened carries the button that
+    finishes the job ("I applied — record it"). Hiding it for being offline
+    would hide that."""
     from jobdeck import db
     job_id = _company_job(con, "p1", "Firma", 90)
-    con.execute("UPDATE jobs SET status='portal', liveness='gone' WHERE id=?",
-                (job_id,))
+    con.execute("UPDATE jobs SET liveness='gone' WHERE id=?", (job_id,))
+    db.mark_form_opened(con, job_id)
     con.commit()
     portal = jobs._load_jobs("in_arbeit", 0)
     assert [r["id"] for r in portal["rows"]] == [job_id]
@@ -787,7 +788,8 @@ def test_only_a_claim_the_reclaim_would_refuse_blocks_the_button(age, running):
     stamp = (datetime.datetime.now()
              - datetime.timedelta(minutes=age)).isoformat(timespec="seconds")
     steps = {s.key: s for s in jobs.apply_steps(
-        _row(draft_status="generating", draft_updated_at=stamp))}
+        _row(draft_status="generating", draft_updated_at=stamp,
+             apply_channel="direct_email", contact_email="hr@x.de"))}
     assert steps[jobs.STEP_DRAFT].enabled is not running
     assert ("abgebrochen" in jobs._draft_line("generating", stamp)[0]) is not running
 
@@ -797,7 +799,8 @@ def test_an_unreadable_claim_timestamp_reads_as_running():
     treating it as dead would let a second claim start while the first is
     still spending money."""
     steps = {s.key: s for s in jobs.apply_steps(
-        _row(draft_status="generating", draft_updated_at="not a timestamp"))}
+        _row(draft_status="generating", draft_updated_at="not a timestamp",
+             apply_channel="direct_email", contact_email="hr@x.de"))}
     assert steps[jobs.STEP_DRAFT].enabled is False
 
 
@@ -864,7 +867,7 @@ def _unhosted_ui_calls(path):
 # deliberately absent: its refresh assigns `table.rows` and deletes no element,
 # so no handler's slot can die under it.
 @pytest.mark.parametrize("page_module",
-                         ["jobs.py", "queue.py", "unterlagen.py", "cockpit.py",
+                         ["jobs.py", "queue.py", "unterlagen.py",
                           "../draft_editor.py"])
 def test_nothing_is_shown_on_a_slot_that_may_already_be_gone(page_module):
     """The defect CLASS, not the one place it was found. A handler runs in the
@@ -882,7 +885,7 @@ def test_nothing_is_shown_on_a_slot_that_may_already_be_gone(page_module):
 
 
 @pytest.mark.parametrize("page_module",
-                         ["jobs.py", "queue.py", "unterlagen.py", "cockpit.py",
+                         ["jobs.py", "queue.py", "unterlagen.py",
                           "../draft_editor.py"])
 def test_the_slot_rule_is_actually_binding(page_module):
     """A scan that finds no candidates would pass on any code at all."""
@@ -1193,16 +1196,39 @@ def test_reading_a_posting_takes_it_out_of_neu_but_not_out_of_the_list(
 
 
 def test_an_opened_form_counts_as_work_in_progress(con, data_dir):
-    """Opening the employer's form moves the posting to `portal`, and that is
-    the whole record of a form application until he records it. A view that
-    listed only drafts would lose most of his applications at exactly the point
-    where he still has to finish them."""
+    """Opening the employer's form is the whole record of a form application
+    until he records it — and there need not be a draft anywhere.
+
+    This is the case that used to be lost: of eleven form applications open on
+    his real data, six had no draft at all, so a view that listed only drafts
+    would have shown five of the eleven and called that "in Arbeit"."""
     from jobdeck import db
     job_id = _company_job(con, "p1", "Eine GmbH", 80)
-    db.set_job_status(con, job_id, "portal")
+    db.mark_form_opened(con, job_id)
     con.commit()
+    assert db.get_draft_by_job(con, job_id) is None
 
     assert [r["id"] for r in jobs._load_jobs("in_arbeit", 0)["rows"]] == [job_id]
+
+
+def test_an_opened_form_is_not_handed_back_to_the_prepare_batch(con, data_dir):
+    """A started application must never be re-drafted by the batch.
+
+    Before v10 that was free: opening a form moved the posting out of `new`.
+    Now it stays in the working list, so the exclusion is by name — and every
+    posting the batch takes costs a Sonnet call."""
+    from jobdeck import db
+    job_id = _company_job(con, "p1", "Eine GmbH", 80)
+    con.execute("UPDATE jobs SET published_on=date('now') WHERE id=?", (job_id,))
+    con.commit()
+    assert [r["id"] for r in db.jobs_to_prepare(
+        con, limit=10, max_age_days=45, min_score=50)] == [job_id]
+
+    db.mark_form_opened(con, job_id)
+    con.commit()
+
+    assert db.jobs_to_prepare(
+        con, limit=10, max_age_days=45, min_score=50) == []
 
 
 def test_a_draft_being_written_counts_as_work_in_progress(con, data_dir):
@@ -1219,12 +1245,15 @@ def test_nothing_in_the_corpus_is_unreachable_from_the_named_views(con, data_dir
     least one view, whatever he did with it."""
     from jobdeck import db
     ids = {}
-    for key, status in (("plain", "new"), ("portal", "portal"),
-                        ("applied", "applied"), ("skipped", "skipped"),
-                        ("duplicate", "duplicate")):
+    for key, status in (("plain", "new"), ("applied", "applied"),
+                        ("skipped", "skipped"), ("duplicate", "duplicate")):
         job_id = _company_job(con, key, f"Firma {key}", 80)
         db.set_job_status(con, job_id, status)
         ids[key] = job_id
+    # a form he has opened and not yet recorded — since v10 that posting keeps
+    # its place in the working list, so it must be reachable AS one
+    ids["form"] = _company_job(con, "form", "Firma form", 80)
+    db.mark_form_opened(con, ids["form"])
     mismatch = _company_job(con, "mis", "Firma mis", 0)
     con.commit()
 
@@ -1240,7 +1269,8 @@ def test_nothing_in_the_corpus_is_unreachable_from_the_named_views(con, data_dir
 def _row(**over) -> dict:
     row = {"id": 1, "status": "new", "draft_status": None,
            "draft_updated_at": None, "apply_channel": "", "company": "Eine GmbH",
-           "contact_email": "", "pdf_path": "", "url": "", "apply_url": ""}
+           "contact_email": "", "pdf_path": "", "url": "https://firma.de/x",
+           "apply_url": "", "form_opened_at": "", "draft_room": True}
     row.update(over)
     return row
 
@@ -1339,12 +1369,14 @@ def test_a_posting_he_put_away_offers_nothing_until_it_comes_back():
 
 
 def test_a_form_posting_can_still_be_given_a_letter():
-    """The cockpit parks beside the employer's form and cannot write an
-    Anschreiben; the German market is form-first. Without this step the only
-    route left was a batch button on the Settings page."""
+    """The German market is form-first, and the letter is not optional: his
+    decision is that a Bewerbungsmappe is always complete. So the one press
+    writes it — there is no separate "Anschreiben" step to skip, which is what
+    left six of his eleven open applications without one."""
     for channel in ("ats_form", "board_apply", "company_site", "unknown"):
         steps = {s.key: s for s in jobs.apply_steps(_row(apply_channel=channel))}
-        assert steps[jobs.STEP_DRAFT].enabled, channel
+        assert steps[jobs.STEP_START].enabled, channel
+        assert "0,09 $" in steps[jobs.STEP_START].label, channel
     # …and never where an application cannot happen
     assert not any(s.enabled for s in jobs.apply_steps(_row(status="applied")))
     assert not any(s.enabled for s in jobs.apply_steps(
@@ -1414,31 +1446,86 @@ def test_an_email_posting_offers_writing_and_sending_and_nothing_else():
     assert "Anschreiben" in steps[jobs.STEP_SEND].reason
 
 
-def test_a_form_posting_offers_the_letter_the_mappe_and_the_link():
-    """The German market is form-first. He needs the PDF to upload and the
-    page to upload it on — and then to record it himself, because this app
-    never fills a form."""
+def test_a_form_posting_is_two_presses():
+    """It was four — Anschreiben, Mappe, Formular, eintragen — and he pressed
+    the third and skipped the rest. One press opens their page and prepares
+    everything behind it; one says it went out."""
     steps = _steps(_row(apply_channel="ats_form", url="https://firma.de/stelle"))
-    assert list(steps) == [jobs.STEP_DRAFT, jobs.STEP_MAPPE, jobs.STEP_FORM,
-                           jobs.STEP_RECORD]
-    assert steps[jobs.STEP_MAPPE].enabled is False, "the Mappe needs the letter"
-    assert steps[jobs.STEP_FORM].enabled is True
+    assert list(steps) == [jobs.STEP_START, jobs.STEP_RECORD]
+    assert steps[jobs.STEP_START].enabled is True
+    assert steps[jobs.STEP_RECORD].label == "Abgeschickt"
+    # the price is ON the button: that is the disclosure, not a dialog
+    assert steps[jobs.STEP_START].label == "Bewerbung starten · ~0,09 $"
 
 
-def test_an_unresolved_posting_is_asked_about_first():
-    steps = _steps(_row())
-    assert list(steps)[0] == jobs.STEP_RESOLVE
-    # …and once it is known, that step is gone rather than sitting there done
-    assert jobs.STEP_RESOLVE not in _steps(_row(apply_channel="ats_form"))
+def test_a_started_form_stops_offering_to_start_again():
+    """A second press would re-claim the draft and clear the Mappe pointer
+    while the staged file still holds the old letter — the two would disagree
+    with no error anywhere."""
+    steps = _steps(_row(apply_channel="ats_form", url="https://firma.de/x",
+                        form_opened_at="2026-08-15T20:00:00"))
+    assert steps[jobs.STEP_START].done is True
+    assert steps[jobs.STEP_START].enabled is False
+    assert jobs._next_step(list(steps.values())) == 1   # "Abgeschickt" is next
 
 
-def test_recording_is_offered_whatever_else_is_true():
-    """The detour that started this: a form filled in outside the app could
-    only be recorded by going through the cockpit."""
+def test_the_daily_letter_limit_refuses_the_press_and_says_where_to_raise_it():
+    """His decision (2026-08-15): a HARD cap. Every form application now writes
+    a letter, so the form path spends money per press — and the screen must
+    refuse exactly what `drafting._claim` refuses, or it promises a letter the
+    gate below it will not write."""
+    steps = _steps(_row(apply_channel="ats_form", url="https://firma.de/x",
+                        draft_room=False))
+    assert steps[jobs.STEP_START].enabled is False
+    assert "Tageslimit" in steps[jobs.STEP_START].reason
+    assert "Einstellungen" in steps[jobs.STEP_START].reason
+    # …and with room it is live again
+    assert _steps(_row(apply_channel="ats_form", url="https://firma.de/x",
+                       draft_room=True))[jobs.STEP_START].enabled is True
+
+
+def test_a_posting_with_no_openable_address_cannot_be_started():
+    steps = _steps(_row(apply_channel="ats_form", url="", apply_url=""))
+    assert steps[jobs.STEP_START].enabled is False
+    assert "Adresse" in steps[jobs.STEP_START].reason
+
+
+def test_an_unresolved_posting_is_never_asked_about():
+    """"Kanal ermitteln" is not a step any more. The scheduler resolves the
+    whole backlog every half hour, and the press resolves inline when it has
+    not got there yet — a button whose entire content is "ask the question you
+    already asked me to answer" rendered on four rows out of five."""
+    assert jobs.STEP_RESOLVE not in _steps(_row())
+    assert list(_steps(_row())) == [jobs.STEP_START, jobs.STEP_RECORD]
+
+
+def test_recording_is_offered_once_something_was_actually_started():
+    """A form application can only be recorded after one was begun, and that
+    is a guard rather than tidiness.
+
+    On the form path the step list is two entries long, so whenever
+    "Bewerbung starten" is refused — the daily letter cap used up, or a
+    posting with no openable address — an ungated "Abgeschickt" became the
+    first ENABLED step: drawn as the SOLID recommended button, and run by ⏎
+    under a cursor moving down the list. That writes a ledger row for a form
+    that was never opened, permanently spending the company's only slot.
+
+    The e-mail path keeps it open: he may have written and sent one by hand."""
     for job in (_row(), _row(apply_channel="ats_form"),
-                _row(apply_channel="direct_email", contact_email="hr@x.de"),
-                _row(status="portal")):
+                _row(apply_channel="ats_form", draft_room=False),
+                _row(apply_channel="ats_form", url="", apply_url="")):
+        step = _steps(job)[jobs.STEP_RECORD]
+        assert step.enabled is False
+        assert "Erst die Bewerbung starten" in step.reason
+
+    for job in (_row(apply_channel="direct_email", contact_email="hr@x.de"),
+                _row(apply_channel="ats_form",
+                     form_opened_at="2026-08-15T20:00:00")):
         assert _steps(job)[jobs.STEP_RECORD].enabled is True
+
+    # and nothing is ever the solid button when nothing may be pressed
+    refused = jobs.apply_steps(_row(apply_channel="ats_form", draft_room=False))
+    assert jobs._next_step(refused) == -1
 
 
 def test_a_written_letter_marks_its_step_done_and_opens_the_next():
@@ -1449,10 +1536,16 @@ def test_a_written_letter_marks_its_step_done_and_opens_the_next():
     assert steps[jobs.STEP_SEND].enabled is True
 
 
-def test_a_built_mappe_marks_its_step_done():
-    steps = _steps(_row(apply_channel="ats_form", draft_status="ready",
-                        pdf_path="/tmp/mappe.pdf"))
-    assert steps[jobs.STEP_MAPPE].done is True
+def test_the_press_is_marked_done_by_the_stamp_not_by_the_documents():
+    """A built Mappe is not evidence that he opened anyone's form — the
+    specimen Mappe on the Unterlagen screen is built from the same code path.
+    `form_opened_at` is the only thing that means an application started."""
+    with_pdf = _steps(_row(apply_channel="ats_form", draft_status="ready",
+                           pdf_path="/tmp/mappe.pdf"))
+    assert with_pdf[jobs.STEP_START].done is False
+    started = _steps(_row(apply_channel="ats_form",
+                          form_opened_at="2026-08-15T20:00:00"))
+    assert started[jobs.STEP_START].done is True
 
 
 @pytest.mark.parametrize("job, already", [
@@ -1476,35 +1569,32 @@ def test_the_step_to_press_is_the_first_that_is_neither_done_nor_refused():
     steps = jobs.apply_steps(_row(apply_channel="ats_form",
                                   draft_status="ready",
                                   url="https://firma.de/x"))
-    assert steps[jobs._next_step(steps)].key == jobs.STEP_MAPPE
+    assert steps[jobs._next_step(steps)].key == jobs.STEP_START
     assert jobs._next_step([jobs.Step("a", "A", done=True),
                             jobs.Step("b", "B", enabled=False)]) == -1
 
 
 def test_a_posting_whose_form_he_opened_can_come_back():
-    """`portal` is written the moment a form is opened, and nothing else brought
-    a posting back from it — opening a form he then decided against took the
-    posting out of the working list for good. It is not a REFUSAL, though: he
-    may still finish that application, so every step stays live."""
-    steps = jobs.apply_steps(_row(status="portal", apply_channel="ats_form",
+    """Opening a form he then decided against used to take the posting out of
+    the working list for good. It is not a REFUSAL either: he may still finish
+    that application, so recording it stays live."""
+    steps = jobs.apply_steps(_row(form_opened_at="2026-08-15T20:00:00",
+                                  apply_channel="ats_form",
                                   url="https://firma.de/x"))
     assert steps[-1].key == jobs.STEP_RECORD
     assert steps[-1].enabled is True
-    assert jobs._blocking_reason(_row(status="portal"), None) == ""
+    assert jobs._blocking_reason(
+        _row(form_opened_at="2026-08-15T20:00:00"), None) == ""
 
 
 def test_a_letter_already_on_its_way_says_where_to_resolve_it():
-    """Both branches, not only the e-mail one: an `ats_form` posting whose
-    draft is `sending` used to render a disabled "Mappe erstellen" telling him
-    to write the letter that was at that moment being sent."""
-    for channel, key in (("direct_email", jobs.STEP_SEND),
-                         ("ats_form", jobs.STEP_MAPPE)):
-        steps = {s.key: s for s in jobs.apply_steps(
-            _row(apply_channel=channel,
-                 contact_email="hr@x.de" if channel == "direct_email" else "",
-                 draft_status="sending"))}
-        assert steps[key].enabled is False
-        assert "Review queue" in steps[key].reason, (channel, steps[key].reason)
+    """A draft that is `sending` or `sent` is the record of what went out, and
+    only the review queue can tell those two apart."""
+    steps = {s.key: s for s in jobs.apply_steps(
+        _row(apply_channel="direct_email", contact_email="hr@x.de",
+             draft_status="sending"))}
+    assert steps[jobs.STEP_SEND].enabled is False
+    assert "Review queue" in steps[jobs.STEP_SEND].reason
 
 
 def _own_nodes(func):
@@ -1526,7 +1616,7 @@ def _own_nodes(func):
 
 
 @pytest.mark.parametrize("page_module",
-                         ["jobs.py", "queue.py", "unterlagen.py", "cockpit.py",
+                         ["jobs.py", "queue.py", "unterlagen.py",
                           "../draft_editor.py"])
 def test_no_handler_clears_the_overlay_after_an_await(page_module):
     """`overlay.clear()` before an await is housekeeping; after one it is a
@@ -1565,3 +1655,120 @@ def test_no_handler_clears_the_overlay_after_an_await(page_module):
           "anything parked on it never resolves")
     if page_module in ("jobs.py", "unterlagen.py"):
         assert scanned, "no handler clears the overlay at all — scan is broken"
+
+
+# --------------------------------------------------------------------------
+# The "Läuft" strip: what is under way, above the list
+# --------------------------------------------------------------------------
+def test_the_strip_survives_a_search_and_a_view_that_hides_everything(
+        con, data_dir):
+    """An application under way is not a search result. Losing the posting he
+    had started is the complaint this whole slice answers, so it has to be on
+    screen whichever view he is in, on whatever page, however he searched."""
+    from jobdeck import db
+    job_id = _company_job(con, "p1", "Eine GmbH", 80)
+    db.mark_form_opened(con, job_id)
+    con.commit()
+
+    hidden = jobs._load_jobs("in_arbeit", 0, search="etwas-das-nicht-existiert")
+    assert hidden["rows"] == []
+    assert [r["id"] for r in hidden["started"]] == [job_id]
+
+    elsewhere = jobs._load_jobs("beworben", 0)
+    assert [r["id"] for r in elsewhere["started"]] == [job_id]
+
+
+@pytest.mark.parametrize("minutes, expected", [
+    (0, "Formular bei Eine GmbH — gerade eben"),
+    (3, "Formular bei Eine GmbH — seit 3 Min."),
+    (9, "Formular bei Eine GmbH — seit 9 Min."),
+    # past ten it stops reporting and starts asking — a LABEL, not a prompt,
+    # so there is nothing to dismiss and nothing to learn to dismiss
+    (10, "Formular bei Eine GmbH — abgeschickt?"),
+    (600, "Formular bei Eine GmbH — abgeschickt?"),
+])
+def test_a_running_application_reports_then_asks(minutes, expected):
+    import datetime
+    now = datetime.datetime(2026, 8, 15, 20, 0, 0)
+    started = now - datetime.timedelta(minutes=minutes)
+    assert jobs.started_line(
+        {"company": "Eine GmbH", "form_opened_at": started.isoformat()},
+        now=now) == expected
+
+
+def test_a_form_opened_before_the_app_could_stamp_it_says_so():
+    """Three of his eleven left no evidence of when. A computed age would sort
+    them among applications begun this minute, which is the one thing the
+    migration refused to do — the screen must not undo it."""
+    from jobdeck import constants
+    assert jobs.started_line({"company": "Eine GmbH",
+                              "form_opened_at": constants.FORM_OPENED_UNKNOWN}) \
+        == "Formular bei Eine GmbH — seit unbekannt"
+
+
+@pytest.mark.parametrize("job, expected, kind", [
+    ({"mappe_kind": "vollständig", "draft_status": "ready"},
+     "Mappe bereit", ""),
+    ({"mappe_kind": "", "draft_status": "generating"},
+     "Mappe wird gebaut …", ""),
+    # the one that matters: a Bewerbungsmappe is always complete, so an
+    # incomplete one has to be SAID rather than quietly offered for upload
+    ({"mappe_kind": "", "draft_status": "failed"},
+     "Mappe NICHT fertig — von Hand hochladen", "warn"),
+    ({"mappe_kind": "", "draft_status": None},
+     "Mappe NICHT fertig — von Hand hochladen", "warn"),
+])
+def test_the_strip_says_when_the_documents_are_not_complete(job, expected, kind):
+    assert jobs.mappe_line(job) == (expected, kind)
+
+
+def test_the_employers_tab_opens_before_anything_is_awaited():
+    """The ONE mechanical statement of the press's order.
+
+    A `window.open` pushed after a minute of server work is what a popup
+    blocker refuses, and the letter takes about a minute. Server-side there is
+    no synchronous gesture path in this framework, so "before the first await"
+    is both the closest achievable rule and the only one a test can hold.
+
+    Written as an AST rule because the failure is silent: the tab simply never
+    appears, the letter is written anyway, and nothing raises."""
+    source = pathlib.Path(jobs.__file__).read_text()
+    func = next(
+        node for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "start_application")
+    navigations = [n.lineno for n in ast.walk(func)
+                   if isinstance(n, ast.Call)
+                   and isinstance(n.func, ast.Attribute) and n.func.attr == "to"]
+    awaits = [n.lineno for n in ast.walk(func) if isinstance(n, ast.Await)]
+    assert navigations, "the press never opens the employer's page"
+    assert awaits, "the press does no work at all"
+    assert min(navigations) < min(awaits), (
+        "the employer's tab is opened after an await — a popup blocker "
+        "refuses a window.open pushed that late")
+
+
+def test_the_press_never_records_an_application_by_itself():
+    """The app cannot see whether he pressed the employer's submit, and a
+    false ledger row permanently spends that company's only slot, silently.
+
+    So the one press writes the moment, the letter and the documents — and
+    never the application. Only `confirm_applied` may do that."""
+    source = pathlib.Path(jobs.__file__).read_text()
+    func = next(
+        node for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "start_application")
+    # Every NAME the function mentions, not only the ones in callee position.
+    # This codebase's idiom for exactly this work is
+    # `await run.io_bound(_record_application, job_id, kanal)`, where the
+    # recorder is an ARGUMENT — a rule that collected callees alone could not
+    # see the one shape it exists to forbid.
+    mentioned = {n.attr for n in ast.walk(func) if isinstance(n, ast.Attribute)}
+    mentioned |= {n.id for n in ast.walk(func) if isinstance(n, ast.Name)}
+    for forbidden in ("_record_application", "record_application",
+                      "record_form_application", "apply_job",
+                      "confirm_applied", "_undo_bar", "add_bewerbung"):
+        assert forbidden not in mentioned, (
+            f"start_application names {forbidden} — nothing may write an "
+            f"application on a timer or a guess")

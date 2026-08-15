@@ -101,6 +101,15 @@ def _claim(job_id: int) -> str:
                 if not claim_is_stale(existing["updated_at"]):
                     return "a draft for this posting is already being generated"
                 log.warning("reclaiming abandoned draft for job %s", job_id)
+        # The daily quota is enforced HERE, inside the same transaction that
+        # commits the spend — a screen that only greys out a button is a screen
+        # the keyboard, the batch and a second tab all walk past.
+        cap = db.daily_draft_cap(con)
+        written = db.count_drafts_today(con)
+        if written >= cap:
+            return (f"today's letter limit is used up ({written}/{cap}) — "
+                    f"raise it in Einstellungen")
+        db.note_draft_written(con)
         # A regenerated draft invalidates any previously built Mappe — the
         # PDF on disk still holds the OLD Anschreiben.
         db.upsert_draft(con, job_id, {"status": "generating", "pdf_path": ""})

@@ -21,6 +21,7 @@ import tempfile
 from jobdeck import apply_channel, config, db, pdf, templates
 from jobdeck.ai import drafting as ai_drafting
 from jobdeck.dates import heute_de
+from jobdeck.services import upload
 from jobdeck.services.drafting import resolve_refnr
 
 log = logging.getLogger(__name__)
@@ -31,6 +32,13 @@ _lock = asyncio.Lock()  # double-clicks must not race Chrome on one output file
 # approved draft included: editing its letter clears the PDF, and it must
 # be possible to get one back without un-approving first.
 EDITABLE_STATUS = ("ready", "approved")
+
+# What `jobs.mappe_kind` says when a build finished. One value, because a
+# Bewerbungsmappe is always complete — Deckblatt, Anschreiben, Lebenslauf,
+# Zeugnisse (his decision, 2026-08-14). The column distinguishes "complete" from
+# "nothing staged", not two kinds of Mappe, and it is written BY the build so no
+# screen ever has to guess from the file system.
+MAPPE_COMPLETE = "vollständig"
 
 # Size budgets, in MB. E-mail: 2-3 MB is the deliverability sweet spot and
 # corporate gateways start rejecting well below the 5 MB convention.
@@ -255,9 +263,29 @@ def _build_mappe(job_id: int) -> dict:
             # The draft was regenerated while Chrome rendered — this PDF
             # holds the OLD text and must not be linked to the new draft.
             out_path.unlink(missing_ok=True)
+            upload.clear(job["upload_path"])
+            db.set_upload(con, job_id, "", "")
             return _error("the draft changed while the Mappe was rendering "
                           "— create the PDF again for the new text")
         db.upsert_draft(con, job_id, {"pdf_path": str(out_path)})
+        # Staged only for an application that is actually being uploaded to a
+        # form. Every channel builds a Mappe — the review-and-send editor and
+        # the prepare batch both come through here — and only the form
+        # recorder ever takes a file back out, so staging unconditionally
+        # would fill the folder with documents nobody is uploading and nothing
+        # would ever remove them.
+        #
+        # Staged HERE and nowhere earlier, for two reasons that both end with
+        # the employer opening the wrong file. `compress_to_target` writes
+        # `out` up to four times in one call and both installers end in
+        # `replace()`, so a link made mid-build points at bytes that are no
+        # longer the Mappe. And a link made before the revision check above
+        # would keep the unlinked inode ALIVE: the upload folder would hold a
+        # complete, plausible Mappe carrying the OLD letter while the app
+        # reported the build failed — and that is the file the picker offers.
+        if job["form_opened_at"]:
+            staged = upload.stage(out_path, job["upload_path"])
+            db.set_upload(con, job_id, str(staged), MAPPE_COMPLETE)
     return {"ok": True, "error": "", "pdf_path": str(out_path),
             "warning": warning, "pages": pages, "size_bytes": size,
             "size_before_bytes": compression.original_bytes,
