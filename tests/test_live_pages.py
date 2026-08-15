@@ -1278,3 +1278,52 @@ async def test_saying_no_puts_it_back_without_recording_anything(
     assert con.execute("SELECT status FROM jobs WHERE id=?",
                        (job_id,)).fetchone()[0] == "new"
     assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 0
+
+
+async def test_enter_on_a_started_form_never_records_on_one_keystroke(
+        user: User, con, data_dir):
+    """The press this slice created and the guard it removed, together.
+
+    Once a form is started, the next step under ⏎ is "Abgeschickt" — which
+    writes into the very table the duplicate gate reads. The button has ten
+    seconds of "Rückgängig" beside it; a keystroke he did not mean to make has
+    nobody watching for it, and he moves through this list with j and ⏎."""
+    job_id = _posting(con)
+    db.set_apply_channel(con, job_id, "ats_form", "JOIN", "https://join.com/x/apply")
+    db.mark_form_opened(con, job_id)
+    con.commit()
+    await user.open("/")
+    await user.should_see("Beispiel GmbH")
+
+    await _press(user, "Enter")
+
+    assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 0, \
+        "one keystroke spent that company's only application slot"
+    await user.should_see("Bewerbung eintragen?")
+
+    # and it really records once he says so
+    user.find("Eintragen", kind=ui.button).click()
+    await asyncio.sleep(0.5)
+    assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 1
+    assert db.get_job(con, job_id)["status"] == "applied"
+
+
+async def test_x_on_a_started_form_asks_instead_of_erasing_the_record(
+        user: User, con, data_dir):
+    """`x` used to be a no-op here for free: a started form had left status
+    'new'. Since v10 it has not, so one keystroke would move it to 'skipped' —
+    off the strip, and the strip is the app's ONLY record that an application
+    may already be out at that company."""
+    job_id = _posting(con)
+    db.set_apply_channel(con, job_id, "ats_form", "JOIN", "https://join.com/x/apply")
+    db.mark_form_opened(con, job_id)
+    con.commit()
+    await user.open("/")
+    await user.should_see("Formular bei Beispiel GmbH")
+
+    await _press(user, "x")
+
+    assert db.get_job(con, job_id)["status"] == "new", \
+        "x threw away the only hint that an application may be out"
+    assert db.count_started_forms(con) == 1
+    await user.should_see("hast du dich beworben?")

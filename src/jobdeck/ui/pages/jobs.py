@@ -1449,32 +1449,51 @@ async def jobs_page():
             state["selected"] = None
             await refresh(force=True)
 
-        async def ask_before_spending(step: Step, job: dict) -> bool:
-            """The keyboard asks before an action costs money.
+        async def ask_before_committing(step: Step, job: dict) -> bool:
+            """The keyboard asks before an action he cannot take back cheaply.
 
             ⏎ is the one control on this screen whose meaning changes with the
             row under the cursor: he moves with j and presses it expecting
-            "open this", and on a direct-e-mail posting that is a Sonnet call
-            of about nine cents and forty seconds. A button he clicked carries
-            its own label — "Bewerbung starten · ~0,09 $" IS the disclosure —
-            and needs no second question."""
-            if step.key not in (STEP_DRAFT, STEP_START):
+            "open this". A button he CLICKED carries its own label — that is
+            why "Bewerbung starten · ~0,09 $" needs no second question — but ⏎
+            carries nothing, so it asks.
+
+            Two kinds of press qualify, and the second is the one this screen
+            got wrong. Money: a Sonnet call of about nine cents and a minute.
+            And the LEDGER: once a form is started, the next step under ⏎ is
+            "Abgeschickt", which writes into the very table the duplicate gate
+            reads — one keystroke spending that company's only application
+            slot. The button has ten seconds of "Rückgängig" beside it; a
+            keystroke he did not mean to make has nobody watching for it.
+
+            One dialog, built once: the branches are exclusive but the rule
+            that keeps `overlay.clear()` ahead of every await cannot know that,
+            and it is right not to guess.
+            """
+            if step.key == STEP_RECORD:
+                heading = "Bewerbung eintragen?"
+                detail = ("Eine Bewerbung pro Firma — danach ist diese Firma "
+                          "vergeben.")
+                go = "Eintragen"
+            elif step.key in (STEP_DRAFT, STEP_START):
+                heading = (f"Bewerbung schreiben? "
+                           f"~{_usd(preparing.COST_PER_DRAFT_USD)}")
+                detail = ("Das schreibt der KI-Dienst, kostet Geld und dauert "
+                          "etwa eine Minute.")
+                go = "Schreiben"
+            else:
                 return True
             overlay.clear()
             with overlay, ui.dialog() as confirm, ui.card():
-                ui.label(f"Bewerbung schreiben? "
-                         f"~{_usd(preparing.COST_PER_DRAFT_USD)}") \
-                    .classes("font-bold")
+                ui.label(heading).classes("font-bold")
                 ui.label(f"{job['company']} — {clean_title(job['title'])}") \
                     .classes("text-sm")
-                ui.label("Das schreibt der KI-Dienst, kostet Geld und dauert "
-                         "etwa eine Minute.").classes("text-sm text-gray-600")
+                ui.label(detail).classes("text-sm text-gray-600")
                 with ui.row().classes("justify-end gap-2 w-full"):
                     ui.button("Abbrechen",
                               on_click=lambda: confirm.submit(False)) \
                         .props("flat no-caps")
-                    ui.button("Schreiben",
-                              on_click=lambda: confirm.submit(True)) \
+                    ui.button(go, on_click=lambda: confirm.submit(True)) \
                         .props("no-caps")
             confirm.open()
             return bool(await confirm)
@@ -1613,7 +1632,16 @@ async def jobs_page():
             elif job is None:
                 return
             elif key == "x":
-                await not_interested(job["id"])
+                if job["form_opened_at"]:
+                    # `x` used to be a no-op here, for free: a started form had
+                    # left status 'new'. Now it has not, so one keystroke would
+                    # move it to 'skipped' — off the strip, and the strip is
+                    # the app's ONLY record that an application may already be
+                    # out at that company. It asks instead, exactly as the
+                    # row's own "zurück in die Arbeitsliste" does.
+                    await revive(job["id"])
+                else:
+                    await not_interested(job["id"])
             elif key == "s":
                 await toggle_bookmark(job["id"])
             elif key == "o":
@@ -1627,7 +1655,7 @@ async def jobs_page():
                 # can reach a send.
                 steps = apply_steps(job, applied.get(job["id"]))
                 index = _next_step(steps)
-                if index >= 0 and await ask_before_spending(steps[index], job):
+                if index >= 0 and await ask_before_committing(steps[index], job):
                     await run_step(steps[index].key, job, None)
 
         def _hold_place(job_id: int) -> None:
@@ -1690,6 +1718,12 @@ async def jobs_page():
         async def not_interested(job_id: int) -> None:
             job = shown.get(job_id)
             if job is None or job["status"] != "new":
+                return
+            if job["form_opened_at"]:
+                # Defence in depth: `revive` is the way out of a started
+                # application because it ASKS whether one went out. Reaching
+                # this instead would silently delete the only hint there is.
+                await revive(job_id)
                 return
             _hold_place(job_id)
             await run.io_bound(_set_status, job_id, "skipped")
