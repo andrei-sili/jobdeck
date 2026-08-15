@@ -10,7 +10,7 @@ import zoneinfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from jobdeck.services import autosend, liveness, polling, scoring
+from jobdeck.services import apply_resolve, autosend, liveness, polling, scoring
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +56,23 @@ def create_scheduler() -> AsyncIOScheduler:
         next_run_time=(datetime.datetime.now(TIMEZONE)
                        + datetime.timedelta(seconds=90)),
         id="check_liveness",
+        coalesce=True,
+        max_instances=1,
+    )
+    scheduler.add_job(
+        apply_resolve.resolve_pending,
+        "interval",
+        # 60 postings a pass, so half-hourly drains a backlog of ~740 in about
+        # six hours of uptime; six-hourly would need seventy-odd. This is what
+        # deletes "Kanal ermitteln" as a button: the answer is simply there by
+        # the time he reads the posting, on four rows out of five.
+        minutes=30,
+        # Same reason as the liveness pass: an interval job first fires one
+        # interval in, and the first pass has to happen inside a session. 120 s
+        # so it does not land on top of that pass at 90 s.
+        next_run_time=(datetime.datetime.now(TIMEZONE)
+                       + datetime.timedelta(seconds=120)),
+        id="resolve_channels",
         coalesce=True,
         max_instances=1,
     )

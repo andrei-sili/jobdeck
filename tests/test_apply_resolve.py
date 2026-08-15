@@ -4,10 +4,21 @@ Nothing fetches a Jooble link any more — robots.txt Disallows every shape a
 feed result uses — so the SSRF coverage lives on the paths that DO fetch: the
 company-site page inspection and the Arbeitnow job page."""
 
+import asyncio
+
 import httpx
+import pytest
 
 from jobdeck import apply_channel as ac
 from jobdeck.services import apply_resolve
+
+
+@pytest.fixture(autouse=True)
+def _fresh_lock(monkeypatch):
+    """A module-level asyncio.Lock binds to the first event loop that awaits
+    it, and every async test gets its own — so the lock has to be replaced per
+    test or the second one to use it raises."""
+    monkeypatch.setattr(apply_resolve, "_lock", asyncio.Lock())
 
 
 def _job(url, email=""):
@@ -611,3 +622,39 @@ async def test_remaining_is_the_true_backlog_not_one_page_of_it(con, data_dir):
     res = await apply_resolve.resolve_pending(limit=2)
     assert res["resolved"] == 2
     assert res["remaining"] == 5      # not min(remaining, limit+1) == 3
+
+
+async def test_a_second_pass_never_walks_the_backlog_alongside_the_first(
+        con, data_dir):
+    """The pass runs on a schedule now, and Settings can still start one by
+    hand at the same moment. `max_instances=1` guards only the scheduled path,
+    so without a lock of its own the two would walk the same backlog together
+    and double the requests other people's servers see.
+
+    It returns rather than queueing: a click during the scheduled pass should
+    answer immediately, not commit him to a second walk of the whole backlog."""
+    from jobdeck import db
+    job_id = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "e1", "title": "Python Entwickler",
+        "company": "Beispiel GmbH", "url": "https://beispiel.example/1"})
+    db.set_job_score(con, job_id, 80, "fits")
+    con.commit()
+    # the posting really is one this pass would pick up — otherwise the
+    # assertions below would hold for a batch that simply had nothing to do
+    assert [r["id"] for r in db.jobs_needing_apply_channel(con, 10)] == [job_id]
+
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx.Response(200, text="<html></html>")
+
+    async with apply_resolve._lock:          # a pass is under way
+        async with _client(handler) as client:
+            result = await apply_resolve.resolve_pending(client=client)
+
+    assert result["resolved"] == 0
+    assert seen == [], "the second pass made requests anyway"
+    assert db.get_job(con, job_id)["apply_channel"] == ""
+    # and the lock is free again afterwards, so the next tick really runs
+    assert not apply_resolve._lock.locked()
