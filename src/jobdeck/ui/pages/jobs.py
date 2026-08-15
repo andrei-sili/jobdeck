@@ -933,6 +933,13 @@ async def jobs_page():
         # raises instead of appearing, silently swallowing the very error it was
         # meant to report. This host is a sibling of both panes.
         overlay = ui.column().classes("contents")
+        # A slot NOTHING clears, for one-shot timers. `overlay` is emptied at
+        # the top of every handler, and NiceGUI reads a timer's parent slot
+        # BEFORE its own stop check — so a one-shot parked in `overlay` whose
+        # slot is cleared before it fires writes an ERROR traceback into his
+        # log instead of quietly stopping. Observed live, twice in one session,
+        # and the same class as the queue timer that logged on every leave.
+        timers = ui.column().classes("contents")
 
         def say(message: str, **kwargs) -> None:
             """Tell the user something, from a slot no refresh can delete."""
@@ -1959,7 +1966,8 @@ async def jobs_page():
                 Deleting an already-deleted element raises, and inside a timer
                 callback that is one log line — the failure would be invisible
                 and the next press would find a page carrying a dead timer."""
-                if gone["yes"]:
+                if gone["yes"] or bar.is_deleted:
+                    gone["yes"] = True
                     return
                 gone["yes"] = True
                 bar.delete()
@@ -1982,8 +1990,10 @@ async def jobs_page():
                     .props("flat dense no-caps")
             # once=True: a repeating timer in a page module is refused by the
             # rule that keeps every recurring tick in ui/live.py, where the
-            # pause-on-disconnect lives.
-            ui.timer(10.0, dismiss, once=True)
+            # pause-on-disconnect lives. Parented outside `overlay`, which the
+            # next handler clears — see `timers` above.
+            with timers:
+                ui.timer(10.0, dismiss, once=True)
 
         # Postings arrive hourly, scores land every ten minutes and the liveness
         # pass runs 90 s after every start — all of it invisible until this. It

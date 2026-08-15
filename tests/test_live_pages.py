@@ -1483,3 +1483,36 @@ async def test_an_oversized_mappe_still_says_so_on_the_new_path(
     await asyncio.sleep(0.8)
 
     await user.should_see("over the 2.0 MB target")
+
+
+async def test_the_undo_timer_survives_the_next_press(user: User, con, data_dir,
+                                                      monkeypatch):
+    """NiceGUI reads a timer's parent slot BEFORE its own stop check, so a
+    one-shot parked in `overlay` — which every handler clears at its top —
+    writes an ERROR traceback into his log instead of quietly stopping.
+
+    Reachable in ten seconds by the most ordinary sequence there is: record
+    one application, start the next. Observed twice in one live session, and
+    the same class as the queue timer that logged on every leave."""
+    done = _posting(con)
+    db.mark_form_opened(con, done)
+    nxt = _posting(con, external_id="e2", title="Django Entwickler",
+                   company="Zweite GmbH")
+    db.set_apply_channel(con, nxt, "ats_form", "JOIN", "https://join.com/x/apply")
+    con.commit()
+    await user.open("/")
+    monkeypatch.setattr(ui.navigate, "to", lambda url, **kw: None)
+
+    user.find("Abgeschickt", kind=ui.button).click()
+    await asyncio.sleep(0.4)
+    timers = [e for e in user.client.elements.values()
+              if isinstance(e, ui.timer) and getattr(e.callback, "__name__", "") == "dismiss"]
+    assert len(timers) == 1, "the undo bar has no auto-expiry"
+
+    # the next press. `start_application` clears the overlay before anything.
+    user.find("Bewerbung starten", kind=ui.button).click()
+    await asyncio.sleep(0.6)
+
+    assert not timers[0].is_deleted, "the one-shot was parked in a cleared slot"
+    with user.client:
+        await timers[0].callback()      # must not raise
