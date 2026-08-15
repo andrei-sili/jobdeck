@@ -19,6 +19,12 @@ DATA_DIR = Path(os.environ.get("JOBDECK_DATA_DIR", _xdg_data_home() / "jobdeck")
 DB_PATH = DATA_DIR / "jobdeck.db"
 BACKUP_DIR = DATA_DIR / "backups"
 OUTPUT_DIR = DATA_DIR / "output"
+# ONE folder an employer's file picker ever opens in. Every file chooser on the
+# platform reopens wherever it was last used, and the Mappe is archived under
+# output/job_<id>/ — a new folder per application, so the picker was
+# structurally guaranteed to offer the PREVIOUS employer's documents. German
+# name because he reads it in the dialog's breadcrumb.
+UPLOAD_DIR = DATA_DIR / "Bewerbung-hochladen"
 ENV_PATH = DATA_DIR / ".env"
 SECRETS_PATH = DATA_DIR / "secrets.env"  # user-managed; takes precedence over .env
 TOKEN_PATH = DATA_DIR / "token.json"
@@ -28,7 +34,7 @@ PROFILE_PATH = DATA_DIR / "profile.md"
 
 def ensure_data_dirs() -> None:
     """Create the data directory tree on first run."""
-    for path in (DATA_DIR, BACKUP_DIR, OUTPUT_DIR):
+    for path in (DATA_DIR, BACKUP_DIR, OUTPUT_DIR, UPLOAD_DIR):
         path.mkdir(parents=True, exist_ok=True)
 
 
