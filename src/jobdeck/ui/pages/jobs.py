@@ -651,6 +651,14 @@ def _form_data(job_id: int) -> dict | None:
     }
 
 
+def _staged_name(job_id: int) -> str:
+    """The file name an employer's dialog will show, '' when none is staged."""
+    with db.db() as con:
+        job = db.get_job(con, job_id)
+    path = str((job["upload_path"] if job is not None else "") or "")
+    return pathlib.Path(path).name if path else ""
+
+
 def _open_upload_folder() -> None:
     """Open the one folder an employer's file picker will land in.
 
@@ -1127,6 +1135,13 @@ async def jobs_page():
                     .classes("text-sm")
                 text, kind = mappe_line(job)
                 ui.label(text).classes(f"jd-meta {kind}")
+                if job["upload_path"]:
+                    # The one thing an upload dialog actually asks for, on
+                    # screen. "Mappe bereit" is true and useless at the moment
+                    # the form says "Datei auswählen": the file manager we open
+                    # lands BEHIND the employer's tab, and the path was
+                    # reachable only through a menu he had no reason to open.
+                    _mappe_path_control(job["upload_path"])
                 ui.space()
                 ui.button("Abgeschickt",
                           on_click=lambda j=job: confirm_applied(j)) \
@@ -1134,6 +1149,21 @@ async def jobs_page():
                 with ui.button(icon="more_horiz").props("flat dense"):
                     with ui.menu():
                         _started_menu(job)
+
+        def _mappe_path_control(path: str) -> None:
+            """The file name, and one press that puts the full path on the
+            clipboard — Ctrl+L, Ctrl+V is the way into any file dialog.
+
+            A button rather than an automatic copy: the Mappe lands about a
+            minute after his press, and a browser refuses a clipboard write
+            that far from a user gesture."""
+            name = pathlib.Path(path).name
+            ui.button(f"⧉ {name}",
+                      on_click=lambda p=path: (
+                          ui.clipboard.write(p),
+                          say("Pfad kopiert — im Datei-Dialog Strg+L, Strg+V.",
+                              type="positive"))) \
+                .props("flat dense no-caps").classes("jd-chip")
 
         def _started_menu(job: dict) -> None:
             if job["upload_path"]:
@@ -1635,6 +1665,14 @@ async def jobs_page():
                     return
                 say(helpers.mappe_summary(built, with_anlagen=True),
                     type="positive", multi_line=True)
+                staged = await run.io_bound(_staged_name, job["id"])
+                if staged:
+                    # Where it IS, not merely that it exists. The folder we
+                    # open for him appears behind the employer's tab, so the
+                    # notification has to carry the answer too.
+                    say(f"Zum Hochladen bereit: {staged}\n"
+                        f"Ordner: {config.UPLOAD_DIR}",
+                        type="positive", multi_line=True)
                 if built["warning"]:
                     # The portal budget is 2 MB and his real Mappe measures
                     # about 2.1: the step this press replaced said so, and an

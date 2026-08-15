@@ -1516,3 +1516,42 @@ async def test_the_undo_timer_survives_the_next_press(user: User, con, data_dir,
     assert not timers[0].is_deleted, "the one-shot was parked in a cleared slot"
     with user.client:
         await timers[0].callback()      # must not raise
+
+
+async def test_the_strip_names_the_file_the_upload_dialog_will_ask_for(
+        user: User, con, data_dir):
+    """"Mappe bereit" is true and useless at the moment the form says "Datei
+    auswählen". The file manager the app opens lands BEHIND the employer's tab,
+    and the path was reachable only through a menu he had no reason to open —
+    so he filled in a form and could not find his own Bewerbungsmappe.
+
+    The name is on the strip now, and one press puts the full path on the
+    clipboard: Ctrl+L, Ctrl+V is the way into any file dialog."""
+    from jobdeck import config
+    job_id = _posting(con)
+    db.mark_form_opened(con, job_id)
+    staged = f"{config.UPLOAD_DIR}/Bewerbung_Andrei_Sili_Beispiel_GmbH.pdf"
+    db.set_upload(con, job_id, staged, "vollständig")
+    con.commit()
+
+    await user.open("/")
+
+    await user.should_see("Bewerbung_Andrei_Sili_Beispiel_GmbH.pdf")
+    button = next(e for e in user.client.elements.values()
+                  if isinstance(e, ui.button)
+                  and "Bewerbung_Andrei_Sili_Beispiel_GmbH.pdf" in str(e.text))
+    assert button.enabled
+
+
+async def test_a_posting_with_nothing_staged_offers_no_path(
+        user: User, con, data_dir):
+    """A copy button for a file that is not there is worse than none."""
+    job_id = _posting(con)
+    db.mark_form_opened(con, job_id)
+    con.commit()
+
+    await user.open("/")
+
+    await user.should_see("Mappe NICHT fertig")
+    assert not any(isinstance(e, ui.button) and "⧉" in str(e.text)
+                   for e in user.client.elements.values())
