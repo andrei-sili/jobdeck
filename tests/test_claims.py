@@ -211,7 +211,8 @@ def test_migrating_an_actual_v8_database_creates_the_register(con):
 
     migrations.migrate(con)
 
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 9
+    assert (con.execute("PRAGMA user_version").fetchone()[0]
+            == migrations.SCHEMA_VERSION)
     claim_id = db.add_claim(con, {"fact": "IHK-Abschluss"})
     assert [r["id"] for r in db.list_claims(con)] == [claim_id]
 

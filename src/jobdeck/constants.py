@@ -47,8 +47,17 @@ STATUS_RANK = {
     "Zurückgezogen": 4,
 }
 
-# Lifecycle of a discovered job posting
-JOB_STATUS = ["new", "duplicate", "skipped", "portal", "drafted", "applied"]
+# Lifecycle of a discovered job posting. `portal` was removed in v10: having
+# opened an employer's form is a moment (`jobs.form_opened_at`), not a state of
+# the posting, and writing it as a status hid the very posting he had just
+# started — every view here pins a concrete status.
+JOB_STATUS = ["new", "duplicate", "skipped", "drafted", "applied"]
+
+# What `form_opened_at` holds for a form that was already open before v10 and
+# left no evidence of when. A literal rather than a date, so nothing can format
+# it into a plausible age: eleven real rows carried no clue, and inventing one
+# would sort them among applications started this minute.
+FORM_OPENED_UNKNOWN = "unbekannt"
 
 # What the last liveness probe observed about a posting's ad ('' = never asked).
 # Here rather than in services/liveness.py because db.py builds SQL from these
