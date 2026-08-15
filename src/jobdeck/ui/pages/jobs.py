@@ -268,12 +268,22 @@ def apply_steps(job: dict, already: dict | None = None) -> list[Step]:
                      "in den Einstellungen anheben." if room is False
                 else ""),
         ))
+    # Only once something was actually started. Without this the step is the
+    # first ENABLED one whenever "Bewerbung starten" is refused — the daily
+    # letter cap used up, or a posting with no openable address — so
+    # "Abgeschickt" became the SOLID recommended button, and ⏎ under a cursor
+    # moving down the list wrote a ledger row for a form that was never opened.
+    # That row permanently spends the company's only application slot.
+    started = bool(job.get("form_opened_at")) or by_email
     steps.append(Step(
         STEP_RECORD,
         "Abgeschickt" if not by_email else "Beworben eintragen",
         done=str(job.get("status") or "") == "applied",
-        enabled=not blocked,
-        reason=blocked or "Drück das erst, wenn die Bewerbung wirklich raus ist.",
+        enabled=not blocked and started,
+        reason=blocked or ("Drück das erst, wenn die Bewerbung wirklich raus ist."
+                           if started else
+                           "Erst die Bewerbung starten — oder von Hand "
+                           "bewerben und dann hier eintragen."),
     ))
     return steps
 
@@ -640,8 +650,10 @@ def _open_upload_folder() -> None:
 
 
 def _clear_form_opened(job_id: int):
-    with db.db() as con:
-        db.clear_form_opened(con, job_id)
+    """Through the service, so the staged file goes with the stamp — the
+    database layer cannot unlink, and blanking the pointer first would leave
+    the Mappe in the upload folder with nothing able to find it."""
+    apply_record.abandon_form(job_id)
 
 
 def _set_bookmark(job_id: int, marked: bool):

@@ -89,6 +89,16 @@ async def _press(user: User, key: str, *, action: str = "keydown",
     await asyncio.sleep(0.4)
 
 
+def _ancestors(element):
+    """Every parent of an element, up to the page."""
+    node = element
+    while node is not None:
+        node = getattr(node, "parent_slot", None)
+        node = getattr(node, "parent", None) if node is not None else None
+        if node is not None:
+            yield node
+
+
 def _rows(user: User):
     """The list's own rows, in the order they are drawn."""
     return [e for e in user.client.elements.values()
@@ -895,6 +905,7 @@ async def test_recording_from_the_reader_makes_the_posting_leave_for_good(
                      company="Beta GmbH")
     db.set_job_score(con, job_id, 90, "passt")     # so he lands on this one
     db.set_job_score(con, other, 70, "auch")
+    db.mark_form_opened(con, job_id)   # recording follows a start, never precedes it
     con.commit()
     await user.open("/")
     await user.should_see("Beispiel GmbH")
@@ -974,24 +985,31 @@ async def test_a_started_form_appears_on_the_strip_and_stays_there(
 
 
 async def test_the_strip_gets_older_without_redrawing_the_page(
-        user: User, con, data_dir):
+        user: User, con, data_dir, monkeypatch):
     """The relabel runs on every tick, including while he is reading — so it
     must be `set_text` and never a rebuild. A rebuild here empties both scroll
     containers and takes the advert away from him mid-sentence."""
+    import datetime
+
+    from jobdeck.ui.pages import jobs as jobs_page
     job_id = _posting(con)
-    db.mark_form_opened(con, job_id)
     con.execute("UPDATE jobs SET form_opened_at=? WHERE id=?",
-                ((__import__("datetime").datetime.now()
-                  - __import__("datetime").timedelta(minutes=11)).isoformat(),
-                 job_id))
+                ((datetime.datetime.now()
+                  - datetime.timedelta(minutes=5)).isoformat(), job_id))
     con.commit()
     await user.open("/")
-    await user.should_see("Formular bei Beispiel GmbH")
+    # it reports its age first — the label has to CHANGE, or the assertion
+    # below passes on a strip that was already saying the right thing
+    await user.should_see("seit 5 Min.")
     row = _rows(user)[0]
     entry = next(e for e in user.client.elements.values()
                  if isinstance(e, ui.label)
                  and "Formular bei Beispiel GmbH" in str(e.text))
 
+    # time passes. The THRESHOLD is moved rather than the stamp, because the
+    # stamp is what never changes in production — moving it would test a write
+    # the app does not make, and the beat reads the row it already holds.
+    monkeypatch.setattr(jobs_page, "ASK_AFTER_MIN", 1)
     await _tick(user)
 
     # the question is on screen …
@@ -1013,6 +1031,19 @@ async def test_recording_from_the_strip_closes_the_loop(
     con.commit()
     await user.open("/")
     await user.should_see("Formular bei Beispiel GmbH")
+
+    # the STRIP's button, not the reading pane's — they carry the same label,
+    # so finding by text alone would be satisfied by either and the strip's
+    # could be deleted with this test still green
+    # The button that does this belongs to the STRIP, not to the reading pane —
+    # they carry the same label, so a test that only searched by text would be
+    # satisfied by either and the strip's control could be deleted with the
+    # suite green.
+    on_strip = [e for e in user.client.elements.values()
+                if isinstance(e, ui.button) and "Abgeschickt" in str(e.text)
+                and any("jd-laeuft-row" in getattr(p, "_classes", [])
+                        for p in _ancestors(e))]
+    assert len(on_strip) == 1, "the running application has no Abgeschickt of its own"
 
     user.find("Abgeschickt", kind=ui.button).click()
     await asyncio.sleep(0.5)
@@ -1080,6 +1111,57 @@ async def test_the_daily_letter_limit_is_enforced_where_the_money_is_spent(
 
     await user.open("/")
     await user.should_see("Tageslimit")
+
+
+async def test_the_whole_press_runs_and_records_nothing(
+        user: User, con, data_dir, monkeypatch):
+    """The SUCCESS half of the press, executed end to end.
+
+    Every other functional test stops at the letter, because drafting fails
+    without an API key — so everything after it was unexecuted code, and a
+    recorder placed there would have gone unnoticed by 1338 tests. Both halves
+    are stubbed here so the rest actually runs."""
+    from jobdeck.services import drafting, mappe
+    job_id = _posting(con)
+    db.set_apply_channel(con, job_id, "ats_form", "JOIN", "https://join.com/x/apply")
+    con.commit()
+    await user.open("/")
+    monkeypatch.setattr(ui.navigate, "to", lambda url, **kw: None)
+
+    async def letter(jid):
+        with db.db() as c:
+            db.upsert_draft(c, jid, {"status": "ready",
+                                     "anschreiben_body": "Sehr geehrte Damen,"})
+            c.commit()
+        return {"ok": True, "error": "", "draft": {"id": 1}}
+
+    async def built(jid):
+        with db.db() as c:
+            db.set_upload(c, jid, "/tmp/Bewerbung.pdf", "vollständig")
+            c.commit()
+        return {"ok": True, "error": "", "pdf_path": "/tmp/Bewerbung.pdf",
+                "warning": "", "pages": 10, "size_bytes": 2_100_000,
+                "size_before_bytes": 3_700_000, "compression": "", "anlagen": []}
+
+    opened = []
+    monkeypatch.setattr(drafting, "draft_for_job", letter)
+    monkeypatch.setattr(mappe, "create_mappe", built)
+    monkeypatch.setattr("jobdeck.ui.helpers.open_in_system",
+                        lambda path: opened.append(str(path)))
+
+    user.find("Bewerbung starten", kind=ui.button).click()
+    await asyncio.sleep(0.8)
+
+    job = db.get_job(con, job_id)
+    assert job["form_opened_at"] != ""
+    assert job["mappe_kind"] == "vollständig"
+    # the folder is opened for him — the folder, because that is what teaches
+    # the file dialog where to land
+    assert opened and opened[0].endswith("Bewerbung-hochladen")
+    # and NOTHING was recorded: the app cannot see whether he pressed submit
+    assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 0
+    assert job["status"] == "new"
+    await user.should_see("Mappe bereit")
 
 
 async def test_the_editor_the_queue_uses_opens_over_the_list_too(
@@ -1211,6 +1293,7 @@ async def test_a_recorded_application_can_be_taken_straight_back(
     Asserted on the database, not on the button text: a label saying
     "Rückgängig gemacht" beside a row that is still there proves nothing."""
     job_id = _posting(con)
+    db.mark_form_opened(con, job_id)
     con.commit()
     history_before = con.execute(
         "SELECT COUNT(*) FROM status_history").fetchone()[0]
@@ -1240,6 +1323,7 @@ async def test_a_refused_application_offers_no_undo_at_all(
     blocking application BEFORE refusing, so there is no earlier state an undo
     could restore — offering one would restore a state that never existed."""
     job_id = _posting(con)
+    db.mark_form_opened(con, job_id)
     con.commit()
     await user.open("/")
     await user.should_see("Beispiel GmbH")
@@ -1327,3 +1411,13 @@ async def test_x_on_a_started_form_asks_instead_of_erasing_the_record(
         "x threw away the only hint that an application may be out"
     assert db.count_started_forms(con) == 1
     await user.should_see("hast du dich beworben?")
+
+
+async def test_the_cockpits_old_address_lands_on_the_postings(user: User,
+                                                              con, data_dir):
+    """The route string being present in the source proves nothing about where
+    it goes. An old tab or a bookmark has to land somewhere real."""
+    job_id = _posting(con)
+    await user.open(f"/cockpit/{job_id}")
+    await user.should_see("Stellen")
+    await user.should_see("Beispiel GmbH")

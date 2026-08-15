@@ -126,9 +126,14 @@ body { background: var(--paper); color: var(--ink); font-family: var(--jd-sans);
 /* The ten seconds in which a recorded application can be taken back. Quiet,
    because it is a confirmation and not a warning — but it holds a control, so
    it sits on its own surface rather than reading as one more note. */
-.jd-undo { border:1px solid var(--accent); border-radius:8px;
-           background: var(--surface-2); padding:6px 8px 6px 12px;
-           margin-top:12px; }
+/* Pinned to the bottom of the viewport, because `overlay` renders as a
+   sibling PRECEDING the 100vh screen: laid out in flow it sat above the fold,
+   and this is the control that replaced a confirmation dialog — one he cannot
+   see is one he cannot use. */
+.jd-undo { position:fixed; bottom:18px; left:50%; transform:translateX(-50%);
+           z-index:2500; border:1px solid var(--accent); border-radius:8px;
+           background: var(--surface); box-shadow:0 3px 14px rgba(0,0,0,.16);
+           padding:6px 8px 6px 12px; }
 @media (max-width: 1080px) {
   .jd-panes { grid-template-columns: 1fr; }
   .jd-screen { height: auto; }

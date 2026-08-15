@@ -1499,13 +1499,33 @@ def test_an_unresolved_posting_is_never_asked_about():
     assert list(_steps(_row())) == [jobs.STEP_START, jobs.STEP_RECORD]
 
 
-def test_recording_is_offered_whatever_else_is_true():
-    """The detour that started this: a form filled in outside the app could
-    only be recorded by going through the cockpit."""
+def test_recording_is_offered_once_something_was_actually_started():
+    """A form application can only be recorded after one was begun, and that
+    is a guard rather than tidiness.
+
+    On the form path the step list is two entries long, so whenever
+    "Bewerbung starten" is refused — the daily letter cap used up, or a
+    posting with no openable address — an ungated "Abgeschickt" became the
+    first ENABLED step: drawn as the SOLID recommended button, and run by ⏎
+    under a cursor moving down the list. That writes a ledger row for a form
+    that was never opened, permanently spending the company's only slot.
+
+    The e-mail path keeps it open: he may have written and sent one by hand."""
     for job in (_row(), _row(apply_channel="ats_form"),
-                _row(apply_channel="direct_email", contact_email="hr@x.de"),
-                _row(status="portal")):
+                _row(apply_channel="ats_form", draft_room=False),
+                _row(apply_channel="ats_form", url="", apply_url="")):
+        step = _steps(job)[jobs.STEP_RECORD]
+        assert step.enabled is False
+        assert "Erst die Bewerbung starten" in step.reason
+
+    for job in (_row(apply_channel="direct_email", contact_email="hr@x.de"),
+                _row(apply_channel="ats_form",
+                     form_opened_at="2026-08-15T20:00:00")):
         assert _steps(job)[jobs.STEP_RECORD].enabled is True
+
+    # and nothing is ever the solid button when nothing may be pressed
+    refused = jobs.apply_steps(_row(apply_channel="ats_form", draft_room=False))
+    assert jobs._next_step(refused) == -1
 
 
 def test_a_written_letter_marks_its_step_done_and_opens_the_next():
@@ -1739,12 +1759,16 @@ def test_the_press_never_records_an_application_by_itself():
         node for node in ast.walk(ast.parse(source))
         if isinstance(node, ast.AsyncFunctionDef)
         and node.name == "start_application")
-    called = {n.func.attr for n in ast.walk(func)
-              if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
-    called |= {n.func.id for n in ast.walk(func)
-               if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    # Every NAME the function mentions, not only the ones in callee position.
+    # This codebase's idiom for exactly this work is
+    # `await run.io_bound(_record_application, job_id, kanal)`, where the
+    # recorder is an ARGUMENT — a rule that collected callees alone could not
+    # see the one shape it exists to forbid.
+    mentioned = {n.attr for n in ast.walk(func) if isinstance(n, ast.Attribute)}
+    mentioned |= {n.id for n in ast.walk(func) if isinstance(n, ast.Name)}
     for forbidden in ("_record_application", "record_application",
-                      "record_form_application", "apply_job", "confirm_applied"):
-        assert forbidden not in called, (
-            f"start_application calls {forbidden} — nothing may write an "
+                      "record_form_application", "apply_job",
+                      "confirm_applied", "_undo_bar", "add_bewerbung"):
+        assert forbidden not in mentioned, (
+            f"start_application names {forbidden} — nothing may write an "
             f"application on a timer or a guess")

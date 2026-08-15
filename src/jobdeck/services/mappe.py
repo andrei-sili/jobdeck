@@ -268,6 +268,13 @@ def _build_mappe(job_id: int) -> dict:
             return _error("the draft changed while the Mappe was rendering "
                           "— create the PDF again for the new text")
         db.upsert_draft(con, job_id, {"pdf_path": str(out_path)})
+        # Staged only for an application that is actually being uploaded to a
+        # form. Every channel builds a Mappe — the review-and-send editor and
+        # the prepare batch both come through here — and only the form
+        # recorder ever takes a file back out, so staging unconditionally
+        # would fill the folder with documents nobody is uploading and nothing
+        # would ever remove them.
+        #
         # Staged HERE and nowhere earlier, for two reasons that both end with
         # the employer opening the wrong file. `compress_to_target` writes
         # `out` up to four times in one call and both installers end in
@@ -276,8 +283,9 @@ def _build_mappe(job_id: int) -> dict:
         # would keep the unlinked inode ALIVE: the upload folder would hold a
         # complete, plausible Mappe carrying the OLD letter while the app
         # reported the build failed — and that is the file the picker offers.
-        staged = upload.stage(out_path)
-        db.set_upload(con, job_id, str(staged), MAPPE_COMPLETE)
+        if job["form_opened_at"]:
+            staged = upload.stage(out_path, job["upload_path"])
+            db.set_upload(con, job_id, str(staged), MAPPE_COMPLETE)
     return {"ok": True, "error": "", "pdf_path": str(out_path),
             "warning": warning, "pages": pages, "size_bytes": size,
             "size_before_bytes": compression.original_bytes,

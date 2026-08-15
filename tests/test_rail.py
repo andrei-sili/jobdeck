@@ -328,3 +328,16 @@ def test_nothing_running_says_nothing():
     rubric = _rubric(_view(started=0), "stellen")
     assert "laufen" not in rubric.sub
     assert rubric.amber is False
+
+
+def test_the_rail_counts_the_running_forms_from_the_database(con, data_dir):
+    """`facts()["started"]` could be hardcoded to 0 with the suite green: the
+    rubric tests all feed a hand-written view."""
+    from jobdeck import db
+    job_id = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "e1", "title": "Entwickler",
+        "company": "Firma", "url": "https://firma.de/x"})
+    db.mark_form_opened(con, job_id)
+    con.commit()
+
+    assert rail.facts()["started"] == 1

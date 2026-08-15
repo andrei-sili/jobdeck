@@ -19,9 +19,11 @@ is about to hold someone else's Bewerbung.
 """
 
 import logging
+import pathlib
 
 from jobdeck import db
 from jobdeck.services import upload
+from jobdeck.services.mappe import MAPPE_COMPLETE
 
 log = logging.getLogger(__name__)
 
@@ -88,8 +90,43 @@ def record_application(job_id: int, kanal: str,
 
 
 def undo(job_id: int, bewerbung_id: int, previous_status: str) -> None:
-    """Take the application back out again — every write, or none."""
+    """Take the application back out again — every write, or none.
+
+    Including the two the ledger does not hold. Recording clears the staged
+    file and blanks `upload_path`/`mappe_kind`, so an undo that reversed only
+    `apply_job` handed him back an application whose strip entry read "Mappe
+    NICHT fertig" while the complete Mappe sat untouched at `drafts.pdf_path`
+    — and whose "Ordner öffnen" had disappeared.
+    """
     with db.db() as con:
         db.unrecord_application(con, job_id, bewerbung_id, previous_status)
+        job = db.get_job(con, job_id)
+        draft = db.get_draft_by_job(con, job_id)
+        archive = str((draft["pdf_path"] if draft is not None else "") or "")
+        if job is not None and job["form_opened_at"] and archive:
+            source = pathlib.Path(archive)
+            if source.is_file():
+                staged = upload.stage(source)
+                db.set_upload(con, job_id, str(staged), MAPPE_COMPLETE)
+        con.commit()
     log.info("undid the form application for job %s (bewerbung %s)",
              job_id, bewerbung_id)
+
+
+def abandon_form(job_id: int) -> None:
+    """He says no application went out here after all.
+
+    Takes back the start AND the file: a Mappe left in the upload folder for
+    an application that was abandoned is the next thing an employer's picker
+    offers. The removal has to happen before the pointer is blanked — the same
+    statement clears `upload_path`, so afterwards nothing in the app could ever
+    find that file again.
+    """
+    with db.db() as con:
+        job = db.get_job(con, job_id)
+        if job is None:
+            return
+        upload.clear(job["upload_path"])
+        db.clear_form_opened(con, job_id)
+        con.commit()
+    log.info("took back the started form application for job %s", job_id)

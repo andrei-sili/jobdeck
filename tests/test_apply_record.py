@@ -167,3 +167,42 @@ def test_recording_a_posting_with_no_mappe_is_honest_rather_than_refused(
 def test_a_vanished_posting_answers_instead_of_raising(con, data_dir):
     result = apply_record.record_form_application(999999)
     assert not result["ok"] and result["undo"] is False
+
+
+def test_abandoning_a_start_takes_the_document_out_of_the_folder(con, data_dir):
+    """A Mappe left in the upload folder for an application he abandoned is
+    the next thing an employer's picker offers. The file has to go before the
+    pointer is blanked — afterwards nothing in the app could find it."""
+    job_id = _job(con)
+    archive, staged = _with_mappe(con, data_dir, job_id)
+    assert staged.exists()
+
+    apply_record.abandon_form(job_id)
+
+    assert not staged.exists()
+    assert archive.exists(), "the archive is not what gets removed"
+    job = db.get_job(con, job_id)
+    assert job["form_opened_at"] == ""
+    assert job["upload_path"] == "" and job["mappe_kind"] == ""
+
+
+def test_the_undo_gives_the_documents_back_too(con, data_dir):
+    """Recording performs FIVE writes, not four: it also clears the staged
+    file and blanks the columns. An undo that reversed only `apply_job` handed
+    him back an application whose strip entry read "Mappe NICHT fertig" while
+    the complete Mappe sat untouched on disk, and whose "Ordner öffnen" had
+    disappeared."""
+    from jobdeck.ui.pages import jobs as jobs_page
+    job_id = _job(con)
+    archive, staged = _with_mappe(con, data_dir, job_id)
+    result = apply_record.record_form_application(job_id)
+    assert not staged.exists()
+
+    apply_record.undo(job_id, result["bewerbung_id"], result["previous_status"])
+
+    job = db.get_job(con, job_id)
+    assert job["mappe_kind"] == "vollständig"
+    assert job["upload_path"] != ""
+    assert pathlib.Path(job["upload_path"]).exists()
+    assert pathlib.Path(job["upload_path"]).read_bytes() == archive.read_bytes()
+    assert jobs_page.mappe_line(dict(job)) == ("Mappe bereit", "")

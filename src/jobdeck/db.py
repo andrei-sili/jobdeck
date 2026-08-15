@@ -18,6 +18,7 @@ from jobdeck.constants import (
     DEFAULT_DAILY_DRAFT_CAP,
     EMAIL_OUTBOUND,
     EMAIL_OUTBOUND_TEST,
+    FORM_OPENED_UNKNOWN,
     LIVENESS_GONE,
     STATUS_RANK,
 )
@@ -960,7 +961,13 @@ def list_started_forms(con: sqlite3.Connection) -> list[sqlite3.Row]:
         f"SELECT jobs.*, {_DRAFT_STATUS_SQL} AS draft_status, "
         f"{_DRAFT_PDF_SQL} AS pdf_path "
         f"  FROM jobs WHERE {_STARTED_FORM_SQL} "
-        " ORDER BY form_opened_at ASC, id ASC"
+        # The sentinel first, not last. It sorts above every ISO timestamp only
+        # by accident of collation, so it is ordered explicitly: a form opened
+        # before the app could stamp it is the OLDEST thing here by
+        # construction — it predates the release — and the strip is read
+        # top-down.
+        f" ORDER BY (form_opened_at <> ?) ASC, form_opened_at ASC, id ASC",
+        (FORM_OPENED_UNKNOWN,),
     ).fetchall()
 
 
@@ -986,9 +993,10 @@ def mark_form_opened(con: sqlite3.Connection, job_id: int) -> None:
 def clear_form_opened(con: sqlite3.Connection, job_id: int) -> None:
     """Take back "I started applying here" — he says no application went out.
 
-    Clears what was staged along with it: a file left in the upload folder for
-    an application that was abandoned is the next thing an employer's file
-    picker offers."""
+    Blanks the staging columns too, but it cannot remove the FILE: this layer
+    has no business touching the filesystem. `services.apply_record.
+    abandon_form` is the way in, and it unlinks first — afterwards the pointer
+    is gone and nothing could find that file again."""
     con.execute(
         "UPDATE jobs SET form_opened_at='', upload_path='', mappe_kind='' "
         "WHERE id=?",

@@ -848,3 +848,49 @@ def test_a_closed_loop_leaves_the_strip(con, status):
 
     assert db.list_started_forms(con) == []
     assert db.count_started_forms(con) == 0
+
+
+# --------------------------------------------------------------------------
+# The daily letter quota — its own counter, because drafts.updated_at moves
+# when the Mappe is written and counting rows would charge him for a PDF
+# --------------------------------------------------------------------------
+def test_the_letter_counter_counts(con):
+    assert db.count_drafts_today(con) == 0
+    db.note_draft_written(con)
+    db.note_draft_written(con)
+    assert db.count_drafts_today(con) == 2
+
+
+def test_yesterdays_letters_do_not_count_against_today(con):
+    """The stored count belongs to the stored DATE. Without that, the first
+    write after midnight would find yesterday's total and refuse."""
+    import datetime
+    db.note_draft_written(con)
+    yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+    con.execute("UPDATE app_settings SET value=? WHERE key='drafts_written_date'",
+                (yesterday,))
+
+    assert db.count_drafts_today(con) == 0
+    db.note_draft_written(con)
+    assert db.count_drafts_today(con) == 1, "the new day started from yesterday's total"
+
+
+@pytest.mark.parametrize("stored, expected", [
+    ("", 10), ("3", 3), ("0", 0), ("  7 ", 7),
+    ("abc", 10),        # app_settings is a file he is invited to edit
+    ("-4", 0),          # a negative cap is a refusal, not a licence
+    ("1e999", 10),      # float('inf'); int(inf) raises past a ValueError guard
+    ("2.7", 2),
+])
+def test_the_cap_survives_whatever_is_in_the_setting(con, stored, expected):
+    db.set_setting(con, "daily_draft_cap", stored)
+    assert db.daily_draft_cap(con) == expected
+
+
+def test_a_garbled_counter_reads_as_none_written(con):
+    """Never as "the cap is spent": that would lock him out of writing any
+    letter at all until he found the settings row."""
+    import datetime
+    db.set_setting(con, "drafts_written_date", datetime.date.today().isoformat())
+    db.set_setting(con, "drafts_written_count", "nonsense")
+    assert db.count_drafts_today(con) == 0

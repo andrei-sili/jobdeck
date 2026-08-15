@@ -121,3 +121,39 @@ def test_clearing_refuses_a_path_outside_the_upload_folder(data_dir, victim):
     upload.clear(target)
 
     assert target.exists()
+
+
+def test_two_applications_that_produce_one_filename_never_share_a_file(data_dir):
+    """`pdf.safe_filename` collapses every non-alphanumeric run and truncates,
+    so "Müller & Co. KG" and "Mueller Co KG" produce ONE name — and two
+    postings at one company produce one by construction (his corpus has an
+    employer with 27 of them). Under the old per-job folders that could not
+    happen. Sharing the file means one application's letter is uploaded to the
+    other's employer, and closing one deletes the other's document."""
+    a = _pdf(data_dir / "output" / "job_1" / "Bewerbung_X_Mueller_Co_KG.pdf", "A")
+    b = _pdf(data_dir / "output" / "job_2" / "Bewerbung_X_Mueller_Co_KG.pdf", "B")
+
+    sa = upload.stage(a)
+    sb = upload.stage(b)
+
+    assert sa != sb
+    assert sa.read_bytes() == b"A"
+    assert sb.read_bytes() == b"B"
+    upload.clear(sa)
+    assert sb.exists(), "closing one application deleted the other's document"
+
+
+def test_a_rebuild_lands_on_its_own_file_rather_than_walking_along(data_dir):
+    """Otherwise every rebuild of the second application would claim the next
+    free name and the folder would fill with its own stale copies."""
+    a = _pdf(data_dir / "output" / "job_1" / "Bewerbung_X_Firma.pdf", "A")
+    b = _pdf(data_dir / "output" / "job_2" / "Bewerbung_X_Firma.pdf", "B")
+    upload.stage(a)
+    mine = upload.stage(b)
+
+    b.write_bytes(b"B zwei")
+    again = upload.stage(b, previous=str(mine))
+
+    assert again == mine
+    assert again.read_bytes() == b"B zwei"
+    assert len(list(pathlib.Path(config.UPLOAD_DIR).glob("*.pdf"))) == 2
