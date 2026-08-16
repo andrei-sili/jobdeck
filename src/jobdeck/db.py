@@ -1301,6 +1301,55 @@ def count_waiting_drafts(con: sqlite3.Connection) -> int:
     ).fetchone()[0]
 
 
+def pipeline_counts(con: sqlite3.Connection) -> dict:
+    """Every population the Bewerbungen screen measures, in one statement.
+
+    One SELECT rather than six, because they are shown side by side and read
+    against each other: taken separately, sqlite3 gives each its own snapshot,
+    so a poll committing between two of them can put a posting in the later
+    number and not the earlier one — and "more letters than postings" is
+    exactly the kind of impossible pair a reader stops trusting the screen for.
+
+    `drafted_unread` is the one that has to be measured rather than inferred:
+    the daily batch and the form flow both write a letter without the posting
+    ever being opened, so the column is not a chain of subsets and the screen
+    has to say where it breaks.
+    """
+    row = con.execute(
+        """
+        SELECT
+          (SELECT COUNT(*) FROM jobs) AS jobs_total,
+          (SELECT COUNT(*) FROM jobs WHERE match_score > 0) AS scored_above_zero,
+          (SELECT COUNT(*) FROM jobs WHERE match_score = 0) AS scored_zero,
+          (SELECT COUNT(*) FROM jobs WHERE opened_at <> '') AS opened,
+          (SELECT COUNT(DISTINCT job_id) FROM drafts) AS drafted,
+          (SELECT COUNT(DISTINCT d.job_id) FROM drafts d
+             JOIN jobs j ON j.id = d.job_id
+            WHERE j.opened_at = '') AS drafted_unread,
+          (SELECT COUNT(*) FROM jobs WHERE bewerbung_id IS NOT NULL) AS applied
+        """
+    ).fetchone()
+    return dict(row)
+
+
+def applications_by_source(con: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Per board: how many postings it delivered, and how many became one.
+
+    Counted off `jobs`, so only the applications this app recorded appear —
+    an imported row carries no posting and therefore no board, and folding
+    those into a per-source figure would credit a board with work it never did.
+    """
+    return con.execute(
+        """
+        SELECT source,
+               COUNT(*) AS jobs,
+               SUM(CASE WHEN bewerbung_id IS NOT NULL THEN 1 ELSE 0 END) AS applied
+          FROM jobs
+         GROUP BY source
+        """
+    ).fetchall()
+
+
 def count_drafts_created_today(con: sqlite3.Connection) -> int:
     """Drafts written since local midnight — reported so the cost of the day is
     visible, never used as the quota (see count_waiting_drafts)."""
