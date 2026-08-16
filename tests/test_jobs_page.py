@@ -1615,9 +1615,21 @@ def _own_nodes(func):
     return own
 
 
-@pytest.mark.parametrize("page_module",
-                         ["jobs.py", "queue.py", "unterlagen.py",
-                          "../draft_editor.py"])
+def _overlay_files() -> list[str]:
+    """Every module that can hold a handler with an overlay, DERIVED.
+
+    Written out by hand, this list silently skipped whichever page was newest
+    — the same shape as the signature rule that matched a spelling and covered
+    nothing for a whole slice. A page added tomorrow is scanned by existing.
+    """
+    pages = pathlib.Path(jobs.__file__).parent
+    return sorted(
+        [path.name for path in pages.glob("*.py") if path.stem != "__init__"]
+        + [f"../{path.name}" for path in pages.parent.glob("*.py")
+           if path.stem not in ("__init__", "app")])
+
+
+@pytest.mark.parametrize("page_module", _overlay_files())
 def test_no_handler_clears_the_overlay_after_an_await(page_module):
     """`overlay.clear()` before an await is housekeeping; after one it is a
     demolition. The page stays fully interactive while a handler waits on a
@@ -1653,7 +1665,7 @@ def test_no_handler_clears_the_overlay_after_an_await(page_module):
         "overlay.clear() runs after an await at " + ", ".join(offenders)
         + " — a dialog opened while that await was pending is destroyed, and "
           "anything parked on it never resolves")
-    if page_module in ("jobs.py", "unterlagen.py"):
+    if page_module in ("jobs.py", "unterlagen.py", "bewerbungen.py"):
         assert scanned, "no handler clears the overlay at all — scan is broken"
 
 

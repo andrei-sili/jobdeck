@@ -176,8 +176,8 @@ async def test_the_dashboard_counts_an_application_recorded_elsewhere(
 
 async def test_the_application_registry_shows_a_send_from_another_tab(
         user: User, con, data_dir):
-    await user.open("/applications")
-    await user.should_see("0 applications")
+    await user.open("/bewerbungen")
+    await user.should_see("Keine Bewerbung passt zu dieser Suche.")
 
     db.add_bewerbung(con, {"gesendet_am": "2026-08-11", "firma": "Beispiel GmbH",
                            "email": "hr@beispiel.example", "kanal": "E-Mail",
@@ -185,7 +185,7 @@ async def test_the_application_registry_shows_a_send_from_another_tab(
     con.commit()
     await _tick(user)
 
-    await user.should_see("1 applications")
+    await user.should_see("Beispiel GmbH")
 
 
 async def test_the_profile_list_shows_a_poll_that_just_happened(

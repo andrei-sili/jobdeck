@@ -112,7 +112,7 @@ def test_the_search_paths_never_reach_the_identity_function():
 
     from jobdeck import dedupe
     from jobdeck.sources import arbeitnow
-    from jobdeck.ui.pages import applications
+    from jobdeck.ui.pages import bewerbungen as applications
     for module in (arbeitnow, applications):
         source = pathlib.Path(module.__file__).read_text()
         body = source[source.index("import"):]

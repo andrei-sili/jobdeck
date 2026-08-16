@@ -257,5 +257,23 @@ def facts() -> dict:
             "apps": [dict(row) for row in db.list_bewerbungen(con)],
             "sources": [dict(row) for row in db.applications_by_source(con)],
             "waiting_letters": db.count_waiting_drafts(con),
+            "follow_up_days": follow_up_setting(
+                db.get_setting(con, "follow_up_days", "")),
             **counts,
         }
+
+
+# After how many silent days an application is worth chasing, when he has
+# never said. The same default the rail uses, read the same forgiving way: a
+# setting is free text in a table he can edit, and `int("")` taking down the
+# screen is the shape that once took down the inbox over an age threshold.
+FOLLOW_UP_DEFAULT = 14
+
+
+def follow_up_setting(raw: str) -> int:
+    """The stored threshold as a whole number of days, never raising."""
+    try:
+        days = int(float(str(raw).strip()))
+    except (TypeError, ValueError, OverflowError):
+        return FOLLOW_UP_DEFAULT
+    return days if days > 0 else FOLLOW_UP_DEFAULT

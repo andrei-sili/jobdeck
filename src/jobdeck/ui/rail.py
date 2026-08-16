@@ -22,13 +22,11 @@ from jobdeck.dates import days_since
 from jobdeck.services import liveness
 from jobdeck.ui import live
 
-# Where each rubric goes. Two of them still open the screens they will absorb
-# in their own slices — Unterlagen already means "the Suchprofil and what gets
-# sent", and Bewerbungen already means the register. Pointing them at nothing
-# until then would take away the only way he has to send anything.
+# Where each rubric goes. Antworten is the only one still pointing at nothing,
+# and it says so rather than opening an empty screen.
 UNTERLAGEN_PATH = "/unterlagen"
 STELLEN_PATH = "/"
-BEWERBUNGEN_PATH = "/applications"
+BEWERBUNGEN_PATH = "/bewerbungen"
 EINSTELLUNGEN_PATH = "/settings"
 
 FOLLOW_UP_DEFAULT = 14

@@ -184,6 +184,72 @@ body { background: var(--paper); color: var(--ink); font-family: var(--jd-sans);
 .jd-letter .body { margin-top:10px; color: var(--ink-3); font-style:italic; }
 .jd-letter .gap { color: var(--warn); font-family: var(--jd-mono); }
 
+/* ---- Bewerbungen: where the work went, and what came back ------------ */
+/* Name, bar, figure, and the caveat the figure needs — one grid, so the
+   numbers line up in a column the eye can run down without reading names. */
+.jd-funnel { display:grid; grid-template-columns:minmax(0,15rem) 1fr auto;
+             gap:3px 14px; width:100%; align-items:center; }
+.jd-funnel .name { font:400 13px/1.5 var(--jd-sans); color: var(--ink-2); }
+.jd-funnel .num { font:500 13px/1.5 var(--jd-mono); text-align:right;
+                  font-variant-numeric: tabular-nums; }
+/* The note spans all three columns under its own step: a caveat parked in a
+   caption at the foot of the card is a caveat about nothing in particular. */
+.jd-funnel .why { grid-column:1 / -1; font:400 11.5px/1.5 var(--jd-sans);
+                  color: var(--warn); padding:0 0 5px 2px; }
+.jd-bar { display:block; height:9px; border-radius:3px; background: var(--sunken); }
+.jd-bar > i { display:block; height:100%; background: var(--accent-2);
+              border-radius:3px; min-width:2px; }
+.jd-bar > i.dim { background: var(--accent-soft); border:1px solid var(--accent-2); }
+.jd-bar > i.warn { background: var(--warn); }
+
+/* Sixty days, one column each. Height is the day's count against the busiest
+   day, so an empty day is a visible gap rather than a missing column. */
+.jd-rhythm { display:flex; align-items:flex-end; gap:2px; height:56px;
+             width:100%; }
+.jd-rhythm > i { flex:1 1 0; min-width:0; background: var(--accent-2);
+                 border-radius:2px 2px 0 0; }
+.jd-rhythm > i.empty { background: var(--sunken); }
+.jd-rhythm > i.today { background: var(--accent-deep); }
+.jd-ends { display:flex; justify-content:space-between; width:100%;
+           font:400 11px/1.4 var(--jd-mono); color: var(--ink-4); }
+
+/* Who has not answered, and for how long. */
+.jd-wait { display:grid; grid-template-columns:minmax(0,1fr) 7rem auto;
+           gap:0 12px; align-items:center; width:100%; }
+.jd-wait > * { padding:6px 0; border-bottom:1px solid var(--rule); min-width:0; }
+.jd-wait > .last { border-bottom:0; }
+.jd-wait .firma { font:400 13px/1.5 var(--jd-sans); overflow:hidden;
+                  text-overflow:ellipsis; white-space:nowrap; }
+.jd-wait .age { font:400 12px/1.5 var(--jd-mono); text-align:right;
+                color: var(--ink-3); font-variant-numeric: tabular-nums;
+                white-space:nowrap; }
+.jd-wait .age.over { color: var(--warn); }
+
+/* One application of the register, as a row that opens. */
+.jd-app { display:grid; grid-template-columns:minmax(0,1fr) 6rem 7rem 8rem 5rem;
+          gap:0 12px; align-items:center; width:100%; text-align:left;
+          border:0; border-bottom:1px solid var(--rule); background:transparent;
+          padding:0; cursor:pointer; font:inherit; }
+.jd-app:hover { background: var(--accent-soft); }
+.jd-app > * { padding:7px 0; min-width:0; }
+.jd-app .firma { font:500 13px/1.5 var(--jd-sans); overflow:hidden;
+                 text-overflow:ellipsis; white-space:nowrap; }
+.jd-app .cell { font:400 11.5px/1.5 var(--jd-mono); color: var(--ink-3);
+                font-variant-numeric: tabular-nums; overflow:hidden;
+                text-overflow:ellipsis; white-space:nowrap; }
+.jd-app .cell.right { text-align:right; }
+.jd-app .cell.over { color: var(--warn); }
+.jd-head { display:grid; grid-template-columns:minmax(0,1fr) 6rem 7rem 8rem 5rem;
+           gap:0 12px; width:100%; border-bottom:1px solid var(--rule-2);
+           font:600 9.5px/1 var(--jd-sans); letter-spacing:.1em;
+           text-transform:uppercase; color: var(--ink-4); padding-bottom:6px; }
+.jd-pill { display:inline-block; border-radius:20px; padding:2px 9px;
+           font:400 11px/1.5 var(--jd-sans); background: var(--sunken);
+           color: var(--ink-2); white-space:nowrap; }
+.jd-pill.ok { background: var(--accent-soft); color: var(--accent-deep); }
+.jd-pill.warn { background: var(--warn-soft); color: var(--warn); }
+.jd-pill.danger { background: var(--danger-soft); color: var(--danger); }
+
 /* One row of the register: a permission, and how often a letter used it. */
 .jd-claim { display:grid; grid-template-columns:1fr auto auto; gap:0 12px;
             align-items:center; width:100%; border-bottom:1px solid var(--rule); }
