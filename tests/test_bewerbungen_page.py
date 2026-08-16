@@ -187,3 +187,27 @@ def test_the_follow_up_threshold_survives_whatever_is_stored():
     assert register.follow_up_setting("21") == 21
     for stored in ("", "   ", "bald", None, "inf", "-3", "0"):
         assert register.follow_up_setting(stored) == register.FOLLOW_UP_DEFAULT
+
+
+# --------------------------------------------------------------------------
+# One rubric, two faces
+# --------------------------------------------------------------------------
+async def test_each_face_of_the_rubric_can_reach_the_other(user: User, con):
+    """The stack that drains and the register that grows are two routes — a
+    bookmark keeps working and the send path was not relocated for a layout —
+    so the strip is what makes them read as one rubric rather than two."""
+    await user.open("/bewerbungen")
+    await user.should_see("Postausgang")
+
+    await user.open("/queue")
+    await user.should_see("Register")
+    await user.should_see("Postausgang")
+
+
+async def test_the_send_screen_speaks_the_language_of_the_app(user: User, con):
+    """It sat in English long after the rubric around it changed language, and
+    it is the last screen a message passes through."""
+    await user.open("/queue")
+
+    await user.should_see("TESTMODUS")
+    await user.should_see("Nichts wartet")

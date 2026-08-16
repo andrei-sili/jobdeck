@@ -28,6 +28,9 @@ UNTERLAGEN_PATH = "/unterlagen"
 STELLEN_PATH = "/"
 BEWERBUNGEN_PATH = "/bewerbungen"
 EINSTELLUNGEN_PATH = "/settings"
+# The second face of the Bewerbungen rubric, not a rubric of its own — see
+# `shelf` below for why the queue never became one.
+POSTAUSGANG_PATH = "/queue"
 
 FOLLOW_UP_DEFAULT = 14
 SEND_CAP_DEFAULT = int(constants.DEFAULT_DAILY_CAP)
@@ -332,6 +335,26 @@ def budget(view: dict) -> tuple[int, int]:
     return min(view["sent_today"], cap), cap
 
 
+def shelf(view: dict) -> str:
+    """"2 Briefe warten · 3 von 5 heute frei", or '' for no shelf at all.
+
+    His decision (2026-08-14): the review queue gets no sixth rubric. A rubric
+    found empty nine times out of ten teaches you to ignore it, and the queue
+    is not somewhere you browse — it is a stack that drains to zero. So it
+    appears in the foot only while something is in it, and disappears rather
+    than standing there reading "0 warten".
+
+    It carries the one figure that decides whether pressing Senden is even
+    possible, which until now he only met inside the send screen itself.
+    """
+    waiting = view["in_progress"]
+    if waiting <= 0:
+        return ""
+    used, cap = budget(view)
+    letters = "1 Brief wartet" if waiting == 1 else f"{waiting} Briefe warten"
+    return f"{letters} · {max(0, cap - used)} von {cap} heute frei"
+
+
 def _render_rubric(rubric: Rubric, current: str) -> None:
     element = ui.element("button").classes("jd-sec").props(
         f'data-current={"true" if rubric.key == current else "false"} '
@@ -358,6 +381,15 @@ def _render(view: dict, current: str, now: datetime.datetime) -> None:
 
 def _render_foot(view: dict, now: datetime.datetime) -> None:
     used, cap = budget(view)
+    line = shelf(view)
+    if line:
+        # Above the budget rather than below it: it is the only thing in the
+        # foot he can act on, and it is the reason the budget matters.
+        element = ui.element("button").classes("jd-shelf")
+        element.on("click", lambda _=None: ui.navigate.to(POSTAUSGANG_PATH))
+        with element:
+            ui.label("Postausgang").classes("jd-shelf-name")
+            ui.label(line).classes("jd-shelf-sub")
     ui.label("Heute gesendet").classes("jd-flabel")
     with ui.row().classes("items-center gap-1 mb-3"):
         for index in range(min(cap, BUDGET_BOXES)):

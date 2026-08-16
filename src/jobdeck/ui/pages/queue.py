@@ -1,9 +1,11 @@
-"""Review queue: edit, approve and send drafted applications.
+"""Postausgang: the letters written and not yet sent.
 
-Every send is human-approved here (auto-send only transmits drafts the
-user explicitly approved). The page is loud about the sending mode: while
-real sending is OFF, the banner and the pre-send confirmation both show
-the test recipient every message will actually go to.
+The second face of the Bewerbungen rubric — the stack that drains to zero,
+beside the register that only grows. Every send is human-approved here
+(auto-send only transmits drafts the user explicitly approved). The page is
+loud about the sending mode: while real sending is OFF, the banner and the
+pre-send confirmation both show the test recipient every message will
+actually go to.
 """
 
 import logging
@@ -15,11 +17,14 @@ from jobdeck.dedupe import duplicates_for_jobs
 from jobdeck.services import drafting, liveness, send
 from jobdeck.ui import draft_editor, helpers, live
 from jobdeck.ui.helpers import open_in_system, openable_url
-from jobdeck.ui.layout import frame
+from jobdeck.ui.layout import BEWERBUNGEN_TABS, frame, tabs
 
 log = logging.getLogger(__name__)
 
-FILTERS = ["open", "sent", "discarded"]
+# The stack, what has gone, and what was put away. German like the rest of
+# the app: this screen sat in English long after the rubric around it changed
+# language, and it is the last one a message passes through.
+FILTERS = {"open": "Warten", "sent": "Raus", "discarded": "Verworfen"}
 FILTER_STATUSES = {
     # 'failed' belongs here too: its only other surface is the Job inbox's
     # Draft button, which disappears once the job leaves status 'new'.
@@ -34,9 +39,9 @@ FILTER_STATUSES = {
     "discarded": ["discarded"],
 }
 EMPTY_TEXT = {
-    "open": "No drafts waiting. Draft an application from the Job inbox first.",
-    "sent": "Nothing sent yet.",
-    "discarded": "No discarded drafts.",
+    "open": "Nichts wartet. Ein Anschreiben entsteht in den Stellen.",
+    "sent": "Bisher ist nichts rausgegangen.",
+    "discarded": "Nichts verworfen.",
 }
 
 # How often the queue re-reads itself while a draft is being written, so the
@@ -118,7 +123,7 @@ def _load(filter_value: str) -> dict:
 
 @ui.page("/queue")
 async def queue_page():
-    async with frame("Review queue", current="bewerbungen"):
+    async with frame("Postausgang", current="bewerbungen"):
         filter_state = {"value": "open"}
         refresh_gen = {"n": 0}  # rapid filter flips: last request wins
         shown = {"live_claim": False}
@@ -126,6 +131,7 @@ async def queue_page():
         reading = {"rows": 0}
         applied: dict[int, dict] = {}
 
+        tabs("postausgang", BEWERBUNGEN_TABS)
         banner = ui.row().classes("w-full items-center gap-2")
         # Beside the banner rather than inside it: refresh() clears `banner`.
         banner_extra = ui.row().classes("items-center")
@@ -169,16 +175,17 @@ async def queue_page():
             banner.clear()
             with banner:
                 if status["real"]:
-                    ui.label("REAL sending is ON — e-mails go to the "
-                             "companies.").classes(
+                    ui.label("ECHTER VERSAND IST AN — die E-Mails gehen an "
+                             "die Firmen.").classes(
                         "text-sm font-bold text-red-700")
                 else:
                     target = status["test_recipient"] or \
-                        "nobody — set a test recipient in Settings"
-                    ui.label(f"TEST MODE — every send goes to: {target}") \
+                        "niemanden — in den Einstellungen eine Testadresse " \
+                        "eintragen"
+                    ui.label(f"TESTMODUS — jeder Versand geht an: {target}") \
                         .classes("text-sm font-bold text-amber-700")
-                ui.label(f"{status['sent_today']}/{status['cap']} sent today") \
-                    .classes("text-xs text-gray-500")
+                ui.label(f"{status['sent_today']} von {status['cap']} heute "
+                         "gesendet").classes("text-xs text-gray-500")
             container.clear()
             with container:
                 if not drafts:
@@ -227,8 +234,8 @@ async def queue_page():
                     ui.label(text).classes(classes)
                     render_posting_link(row)
                     return
-                ui.label(f"To: {row['recipient'] or '(no recipient yet)'} · "
-                         f"updated {row['updated_at'][:16]}") \
+                ui.label(f"An: {row['recipient'] or '(noch kein Empfänger)'} "
+                         f"· geändert {row['updated_at'][:16]}") \
                     .classes("text-xs text-gray-500")
                 ui.label(row["betreff"]).classes("text-sm")
                 if row["job_liveness"] == liveness.LIVENESS_GONE:
@@ -249,29 +256,31 @@ async def queue_page():
                     ui.label(f"Mappe: {row['pdf_path']}") \
                         .classes("text-xs text-gray-600")
                 else:
-                    ui.label("No Mappe PDF yet — required before sending.") \
-                        .classes("text-xs text-amber-700")
+                    ui.label("Noch keine Bewerbungsmappe — ohne sie geht "
+                             "nichts raus.").classes("text-xs text-amber-700")
                 if row["error"]:
                     ui.label(row["error"]).classes("text-sm text-red-700")
                 with ui.row().classes("gap-2"):
                     if row["status"] in ("ready", "approved"):
-                        ui.button("Review & send", icon="edit_note",
+                        ui.button("Prüfen und senden", icon="edit_note",
                                   on_click=lambda r=row: show_editor(r)) \
                             .props("outline")
                         if row["status"] == "ready":
-                            ui.button("Approve for auto-send", icon="schedule_send",
+                            ui.button("Für Auto-Versand freigeben",
+                                      icon="schedule_send",
                                       on_click=lambda r=row: approve(r)) \
                                 .props("outline")
                         else:
-                            ui.button("Return to ready", icon="undo",
+                            ui.button("Freigabe zurücknehmen", icon="undo",
                                       on_click=lambda r=row: unapprove(r)) \
                                 .props("outline")
-                        ui.button("Discard", icon="delete",
+                        ui.button("Verwerfen", icon="delete",
                                   on_click=lambda r=row: discard(r)) \
                             .props("outline color=grey")
                     if row["status"] == "failed":
-                        ui.label("Drafting failed — write it again, or discard "
-                                 "it.").classes("text-sm text-amber-700")
+                        ui.label("Das Schreiben ist fehlgeschlagen — neu "
+                                 "schreiben oder verwerfen.") \
+                            .classes("text-sm text-amber-700")
                         # It used to send him to the Job inbox for this, where
                         # the button only appears while the posting is still
                         # 'new' — so a failed draft for a posting he had already
@@ -279,18 +288,20 @@ async def queue_page():
                         again = ui.button("Neu schreiben", icon="refresh") \
                             .props("outline")
                         again.on_click(lambda r=row, b=again: redraft(r, b))
-                        ui.button("Discard", icon="delete",
+                        ui.button("Verwerfen", icon="delete",
                                   on_click=lambda r=row: discard(r)) \
                             .props("outline color=grey")
                     if row["status"] == "sending":
-                        ui.label("A send is in progress — or it died mid-way. "
-                                 "Check the Gmail 'Sent' folder before "
-                                 "resolving. A stuck TEST send is always "
-                                 "'not sent'.").classes("text-sm text-amber-700")
-                        ui.button("Not sent — return to ready", icon="undo",
+                        ui.label("Ein Versand läuft — oder ist mittendrin "
+                                 "abgebrochen. Vor dem Auflösen im Gmail-"
+                                 "Ordner „Gesendet“ nachsehen. Ein "
+                                 "steckengebliebener TESTversand gilt immer "
+                                 "als „nicht gesendet“.") \
+                            .classes("text-sm text-amber-700")
+                        ui.button("Nicht gesendet — zurücklegen", icon="undo",
                                   on_click=lambda r=row: resolve(r, False)) \
                             .props("outline")
-                        ui.button("It was sent — record it", icon="check",
+                        ui.button("Doch gesendet — eintragen", icon="check",
                                   on_click=lambda r=row: resolve(r, True)) \
                             .props("outline color=positive")
                     if row["status"] in ("sent", "filed"):
@@ -301,17 +312,17 @@ async def queue_page():
                             f"mit der Bewerbung eingereicht "
                             f"{row['updated_at'][:16]}"
                             if row["status"] == "filed"
-                            else f"sent {row['updated_at'][:16]}")
+                            else f"gesendet {row['updated_at'][:16]}")
                         if row["gmail_message_id"]:
                             sent_info += f" · gmail id {row['gmail_message_id']}"
                         ui.label(sent_info).classes("text-xs text-gray-500")
                         if row["pdf_path"]:
-                            ui.button("Open PDF", icon="open_in_new",
+                            ui.button("Mappe öffnen", icon="open_in_new",
                                       on_click=lambda r=row:
                                       open_in_system(r["pdf_path"])) \
                                 .props("outline")
                     if row["status"] == "discarded":
-                        ui.button("Restore", icon="restore",
+                        ui.button("Zurückholen", icon="restore",
                                   on_click=lambda r=row: restore(r)) \
                             .props("outline")
                     render_posting_link(row)
@@ -320,7 +331,7 @@ async def queue_page():
             """The one button every draft row offers, whatever its status."""
             posting_url = openable_url(row["job_url"])
             if posting_url:
-                ui.button("Open posting", icon="open_in_new",
+                ui.button("Anzeige öffnen", icon="open_in_new",
                           on_click=lambda u=posting_url:
                           ui.navigate.to(u, new_tab=True)) \
                     .props("flat")
@@ -353,31 +364,31 @@ async def queue_page():
 
         async def approve(row: dict):
             await _simple_action(send.approve, row["job_id"],
-                                 "Approved — auto-send will pick it up")
+                                 "Freigegeben — der Auto-Versand nimmt sie")
 
         async def unapprove(row: dict):
             await _simple_action(send.unapprove, row["job_id"],
-                                 "Returned to ready")
+                                 "Freigabe zurückgenommen")
 
         async def discard(row: dict):
-            await _simple_action(send.discard, row["job_id"], "Discarded")
+            await _simple_action(send.discard, row["job_id"], "Verworfen")
 
         async def restore(row: dict):
-            await _simple_action(send.restore, row["job_id"], "Restored")
+            await _simple_action(send.restore, row["job_id"], "Zurückgeholt")
 
         async def resolve(row: dict, assume_sent: bool):
             if assume_sent:
                 overlay.clear()
                 with overlay, ui.dialog() as confirm, ui.card():
-                    ui.label("Record as sent?").classes("font-bold")
-                    ui.label("Only if the Gmail 'Sent' folder shows this "
-                             "message went out. It will be recorded without "
-                             "Gmail ids.").classes("text-sm")
+                    ui.label("Als gesendet eintragen?").classes("font-bold")
+                    ui.label("Nur wenn der Gmail-Ordner „Gesendet“ diese "
+                             "Nachricht zeigt. Sie wird ohne Gmail-Kennungen "
+                             "eingetragen.").classes("text-sm")
                     with ui.row().classes("justify-end gap-2 w-full"):
-                        ui.button("Cancel",
+                        ui.button("Abbrechen",
                                   on_click=lambda: confirm.submit(False)) \
                             .props("flat")
-                        ui.button("Record as sent",
+                        ui.button("Eintragen",
                                   on_click=lambda: confirm.submit(True)) \
                             .props("color=positive")
                 confirm.open()
@@ -386,7 +397,8 @@ async def queue_page():
             await _simple_action(
                 lambda job_id: send.resolve_sending(job_id, assume_sent),
                 row["job_id"],
-                "Recorded as sent" if assume_sent else "Returned to ready",
+                "Als gesendet eingetragen" if assume_sent
+                else "Zurückgelegt",
             )
 
         def show_editor(row: dict):

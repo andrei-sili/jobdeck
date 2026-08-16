@@ -27,6 +27,35 @@ FULL_BLEED = "w-full p-0 gap-0"
 PADDED = "w-full max-w-6xl mx-auto p-4 gap-4"
 
 
+# The Bewerbungen rubric, in the order his decision put them: the stack that
+# drains first, the record that only grows second.
+BEWERBUNGEN_TABS = [
+    ("postausgang", "Postausgang", rail.POSTAUSGANG_PATH),
+    ("register", "Register", rail.BEWERBUNGEN_PATH),
+]
+
+
+def tabs(current: str, entries: list[tuple[str, str, str]]) -> None:
+    """The faces of one rubric, as a strip at the top of each of them.
+
+    Bewerbungen is two screens: the stack of letters still to send, and the
+    register of everything that went. They stayed two ROUTES rather than
+    becoming one page with a switch — a bookmark keeps working, and the send
+    path is the riskiest code in the app to relocate for a layout — so this
+    strip is what makes them read as one rubric.
+
+    `entries` is (key, label, path); the current one is marked, not linked.
+    """
+    with ui.row().classes("jd-tabs w-full gap-1 items-center"):
+        for key, label, path in entries:
+            element = ui.element("button").classes("jd-tab").props(
+                f'data-current={"true" if key == current else "false"}')
+            if key != current:
+                element.on("click", lambda _=None, p=path: ui.navigate.to(p))
+            with element:
+                ui.label(label)
+
+
 @asynccontextmanager
 async def frame(title: str, current: str = "", padded: bool = True):
     """Standard page scaffolding. `current` is the rubric key the rail marks.

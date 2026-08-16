@@ -341,3 +341,31 @@ def test_the_rail_counts_the_running_forms_from_the_database(con, data_dir):
     con.commit()
 
     assert rail.facts()["started"] == 1
+
+
+# --------------------------------------------------------------------------
+# The Postausgang shelf: present only while something is in it
+# --------------------------------------------------------------------------
+def test_the_shelf_states_what_waits_and_what_may_still_leave_today():
+    """It carries the one figure that decides whether pressing Senden is even
+    possible, which until now he only met inside the send screen itself."""
+    assert rail.shelf(_view(in_progress=2, sent_today=2, send_cap=5)) == (
+        "2 Briefe warten · 3 von 5 heute frei")
+
+
+def test_one_waiting_letter_is_not_two():
+    assert rail.shelf(_view(in_progress=1, sent_today=0, send_cap=5)) \
+        .startswith("1 Brief wartet ·")
+
+
+def test_an_empty_queue_gets_no_shelf_at_all():
+    """His decision: a rubric found empty nine times out of ten teaches you to
+    ignore it, so it disappears rather than reading "0 warten"."""
+    assert rail.shelf(_view(in_progress=0)) == ""
+
+
+def test_a_used_up_budget_never_reads_as_a_negative_allowance():
+    """The cap counts test sends too, so it can be spent past its own figure —
+    and "-2 von 5 heute frei" beside a stack of letters is nonsense."""
+    assert "0 von 5 heute frei" in rail.shelf(
+        _view(in_progress=3, sent_today=9, send_cap=5))

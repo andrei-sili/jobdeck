@@ -200,7 +200,7 @@ async def test_send_now_reaches_the_confirmation_with_the_resolved_recipient(
     con.commit()
 
     await user.open("/queue")
-    user.find("Review & send").click()
+    user.find("Prüfen und senden").click()
     await asyncio.sleep(0.2)
     user.find("Send now").click()
     await asyncio.sleep(0.3)
@@ -266,7 +266,7 @@ async def test_the_send_confirmation_repeats_the_duplicate_warning(
     db.set_setting(con, "test_recipient", "probe@example.org")
     con.commit()
     await user.open("/queue")
-    user.find("Review & send").click()
+    user.find("Prüfen und senden").click()
     await asyncio.sleep(0.2)
 
     user.find("Send now").click()

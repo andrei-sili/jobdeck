@@ -139,6 +139,27 @@ body { background: var(--paper); color: var(--ink); font-family: var(--jd-sans);
   .jd-screen { height: auto; }
 }
 
+/* The two faces of one rubric. Underlined rather than boxed: they are places
+   in the same room, and a boxed tab reads as a mode you have to leave. */
+.jd-tabs { border-bottom:1px solid var(--rule); padding-bottom:0; }
+.jd-tab { border:0; background:transparent; cursor:pointer; padding:6px 12px 7px;
+          font:400 13.5px/1.4 var(--jd-sans); color: var(--ink-3);
+          border-bottom:2px solid transparent; margin-bottom:-1px; }
+.jd-tab:hover { color: var(--accent-deep); }
+.jd-tab[data-current="true"] { color: var(--ink); font-weight:600;
+                               border-bottom-color: var(--accent); cursor:default; }
+
+/* The stack that drains to zero. Present only while something is in it, so
+   it is drawn as a thing that arrived rather than as a permanent row. */
+.jd-shelf { display:block; width:100%; text-align:left; padding:7px 9px;
+            margin-bottom:14px; border:1px solid var(--accent-2);
+            border-radius:7px; background: var(--accent-soft); cursor:pointer; }
+.jd-shelf:hover { background: var(--surface); }
+.jd-shelf-name { display:block; font:600 12px/1.2 var(--jd-sans);
+                 color: var(--accent-deep); }
+.jd-shelf-sub { display:block; margin-top:2px; font:400 11px/1.4 var(--jd-mono);
+                color: var(--ink-2); }
+
 /* ---- the foot: what may still leave today, and what the engine is at -- */
 .jd-flabel { font:600 9.5px/1 var(--jd-sans); letter-spacing:.13em;
              text-transform:uppercase; color: var(--ink-4); }

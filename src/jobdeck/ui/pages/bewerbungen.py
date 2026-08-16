@@ -26,7 +26,7 @@ from jobdeck.dedupe import find_duplicate_bewerbung, fold
 from jobdeck.services import register
 from jobdeck.ui import live
 from jobdeck.ui.helpers import open_in_system
-from jobdeck.ui.layout import frame
+from jobdeck.ui.layout import BEWERBUNGEN_TABS, frame, tabs
 
 BEWERBUNGEN_PATH = "/bewerbungen"
 
@@ -132,6 +132,7 @@ async def bewerbungen_page():
         state = {"query": "", "status": VIEW_ALL}
         drawn: dict = {}
 
+        tabs("register", BEWERBUNGEN_TABS)
         header = ui.row().classes("w-full items-center gap-3")
         container = ui.column().classes("w-full gap-4")
         # A permanent sibling of the panels rather than a child of them, so
