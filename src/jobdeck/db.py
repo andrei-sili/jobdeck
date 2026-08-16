@@ -1226,8 +1226,11 @@ def jobs_needing_liveness_check(
 
 # Draft states that mean "this posting already has an application in progress",
 # so the daily batch must not draft it a second time. `failed` is deliberately
-# absent: a posting whose drafting broke is a fair candidate again.
-PREPARED_DRAFT_STATUS = ("generating", "ready", "approved", "sending", "sent")
+# absent: a posting whose drafting broke is a fair candidate again. `filed` is
+# present for the same reason as `sent` — the letter is with the employer, and
+# paying to write a second one would be paying to duplicate an application.
+PREPARED_DRAFT_STATUS = ("generating", "ready", "approved", "sending", "sent",
+                         "filed")
 
 
 def jobs_to_prepare(
@@ -1678,6 +1681,40 @@ def claim_for_send(
     )
 
 
+def file_draft(con: sqlite3.Connection, draft_id: int,
+               bewerbung_id: int) -> None:
+    """Mark a letter as delivered by hand, inside an uploaded Mappe.
+
+    The form path's counterpart to `record_send`, and a dedicated writer for
+    the same reason: 'filed' is a claim that an employer has this letter, so
+    only the code that recorded the application may make it.
+
+    Without it a letter stayed 'ready' for ever after its own application went
+    out — twelve of the seventeen letters waiting in his queue were of that
+    kind, each one offering to be e-mailed to a company he had applied to that
+    same afternoon.
+    """
+    con.execute(
+        "UPDATE drafts SET status='filed', bewerbung_id=?, error='',"
+        " updated_at=? WHERE id=?",
+        (bewerbung_id, _now(), draft_id),
+    )
+
+
+def unfile_draft(con: sqlite3.Connection, bewerbung_id: int) -> None:
+    """Give a filed letter back when its application is taken back.
+
+    Part of `unrecord_application`'s all-or-nothing undo: an undo that left
+    the letter filed would leave him with no way to send it and no way to
+    rewrite it — the shape that once made a posting undraftable for ever.
+    """
+    con.execute(
+        "UPDATE drafts SET status='ready', bewerbung_id=NULL, updated_at=?"
+        " WHERE bewerbung_id=? AND status='filed'",
+        (_now(), bewerbung_id),
+    )
+
+
 def record_send(
     con: sqlite3.Connection,
     draft_id: int,
@@ -1967,6 +2004,12 @@ def unrecord_application(
         )
         con.execute("DELETE FROM status_history WHERE bewerbung_id=?",
                     (bewerbung_id,))
+        # `drafts.bewerbung_id` is a THIRD foreign key into the row being
+        # deleted, written by the filing that recording just did. Leaving it
+        # would make the DELETE raise — in a worker thread, so a log line and
+        # a bar that simply vanishes — and would strand the letter in a state
+        # nothing can send and nothing can rewrite.
+        unfile_draft(con, bewerbung_id)
         con.execute("DELETE FROM bewerbungen WHERE id=?", (bewerbung_id,))
     except Exception:
         con.rollback()

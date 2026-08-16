@@ -351,6 +351,41 @@ def _backfill_application_documents(con: sqlite3.Connection) -> None:
                         (pdf_path, bewerbung_id))
 
 
+def _file_letters_of_recorded_applications(con: sqlite3.Connection) -> None:
+    """Close the letters whose application is already in the ledger.
+
+    Until now recording a form application left its letter at 'ready', so it
+    went on waiting in the Postausgang for ever. Twelve of the seventeen
+    letters in his queue were of that kind — each offering to be e-mailed to a
+    company he had applied to hours earlier, one press away from a second
+    application at a firm that already has one.
+
+    Only where the POSTING carries the application itself (`jobs.bewerbung_id`)
+    — that is the pair whose letter provably went out together. A letter at a
+    company reached through some OTHER posting is left exactly where it is:
+    the queue already warns on that row and the send gate refuses it, and
+    filing it would claim an employer holds a letter nobody ever sent.
+
+    Repeated on every start rather than gated on a version, like the two
+    backfills above: it only ever closes a letter whose application already
+    exists, so it is idempotent, and it heals a row recorded by an older build.
+    """
+    draft_cols = [row[1] for row in con.execute("PRAGMA table_info(drafts)")]
+    job_cols = [row[1] for row in con.execute("PRAGMA table_info(jobs)")]
+    if "bewerbung_id" not in draft_cols or "bewerbung_id" not in job_cols:
+        return  # too old to know which application belongs to which posting
+    con.execute(
+        """
+        UPDATE drafts SET status='filed', bewerbung_id=(
+                SELECT j.bewerbung_id FROM jobs j WHERE j.id = drafts.job_id)
+         WHERE status IN ('ready', 'approved')
+           AND EXISTS (SELECT 1 FROM jobs j
+                        WHERE j.id = drafts.job_id
+                          AND j.bewerbung_id IS NOT NULL)
+        """
+    )
+
+
 def _ensure_source_fact_columns(con: sqlite3.Connection) -> None:
     """Facts the boards state and the app used to throw away (schema v7).
 
@@ -431,6 +466,7 @@ def migrate(con: sqlite3.Connection) -> None:
     _ensure_draft_columns(con)
     _backfill_published_on(con)
     _backfill_application_documents(con)
+    _file_letters_of_recorded_applications(con)
     if version < 10:
         _restate_portal_as_a_moment(con)
     if version < 2:

@@ -557,3 +557,54 @@ def test_migrate_points_an_application_at_the_mappe_that_was_built_for_it(tmp_pa
     migrations.migrate(con)
     assert db.get_bewerbung(con, ids["has_file"])["dokument"] == "/hand/gewaehlt.pdf"
     con.close()
+
+
+def test_migrate_files_letters_whose_application_is_already_recorded(tmp_path,
+                                                                    monkeypatch):
+    """Recording a form application used to leave its letter at 'ready', so it
+    waited in the Postausgang for ever. On his real database twelve of the
+    seventeen waiting letters were of that kind — each offering to be e-mailed
+    to a company he had applied to hours before.
+
+    Only where the POSTING carries the application. A letter at a company
+    reached through a DIFFERENT posting is left alone: the queue already warns
+    on that row, and filing it would claim an employer holds a letter nobody
+    ever sent."""
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    con = sqlite3.connect(tmp_path / "fresh.db")
+    con.row_factory = sqlite3.Row
+    migrations.migrate(con)
+
+    bewerbung_id = db.add_bewerbung(con, {
+        "firma": "Formular GmbH", "kanal": "Online-Portal",
+        "status": "Gesendet"})
+    own = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "own", "company": "Formular GmbH",
+        "title": "Entwickler", "url": "https://x.example/1"})
+    db.set_job_status(con, own, "applied", bewerbung_id=bewerbung_id)
+    db.upsert_draft(con, own, {"status": "ready", "betreff": "Bewerbung"})
+    # same company, a second posting: refused by the duplicate gate, so it
+    # points at the application without being the one that carried the letter
+    other = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "other", "company": "Formular GmbH",
+        "title": "Entwickler II", "url": "https://x.example/2"})
+    con.execute("UPDATE jobs SET status='duplicate', duplicate_of=? WHERE id=?",
+                (bewerbung_id, other))
+    db.upsert_draft(con, other, {"status": "ready", "betreff": "Bewerbung II"})
+    # and one that is simply waiting, at a company with no application at all
+    waiting = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "waiting", "company": "Offen GmbH",
+        "title": "Entwickler III", "url": "https://x.example/3"})
+    db.upsert_draft(con, waiting, {"status": "ready", "betreff": "Bewerbung III"})
+    con.commit()
+    assert db.count_waiting_drafts(con) == 3
+
+    migrations.migrate(con)
+
+    filed = db.get_draft_by_job(con, own)
+    assert filed["status"] == "filed"
+    assert filed["bewerbung_id"] == bewerbung_id
+    assert db.get_draft_by_job(con, other)["status"] == "ready"
+    assert db.get_draft_by_job(con, waiting)["status"] == "ready"
+    assert db.count_waiting_drafts(con) == 2
+    con.close()

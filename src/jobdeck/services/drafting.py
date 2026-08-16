@@ -34,6 +34,8 @@ NO_REGEN = {
                "in the review queue before re-drafting",
     "sent": "this application was already sent — re-drafting would rewrite "
             "the record of what went out",
+    "filed": "this letter went out with the Bewerbung you recorded for this "
+             "posting — take that application back first if it did not",
 }
 
 

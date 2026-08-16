@@ -34,6 +34,20 @@ KANAL_EMAIL = "E-Mail"
 # ledger can later be asked how many applications the app closed by itself.
 SOURCE_HAND = "hand"
 
+# Draft states whose letter is finished and has not gone anywhere else, so an
+# application recorded now is what carried it. Every other state is left alone
+# and says why: 'generating' has no letter yet, 'failed' has none at all,
+# 'sent' went by e-mail (and its own duplicate gate would have refused this
+# record), and 'filed'/'discarded' are already closed.
+FILEABLE = ("ready", "approved")
+
+
+def _file_letter(con, draft, bewerbung_id: int) -> None:
+    """Bind the letter that went out to the application it went out with."""
+    if draft is None or draft["status"] not in FILEABLE:
+        return
+    db.file_draft(con, draft["id"], bewerbung_id)
+
 
 def record_form_application(job_id: int, source: str = SOURCE_HAND) -> dict:
     """Write the application for a posting whose form he filled in.
@@ -78,6 +92,11 @@ def record_application(job_id: int, kanal: str,
             return {"ok": False, "bewerbung_id": None, "company": company,
                     "duplicate": dict(dup) if dup is not None else None,
                     "undo": False}
+        # The letter left with it. Filing binds the two rows together, so the
+        # register can show what actually went to this company — and, the part
+        # that was costing him, so the Postausgang stops offering to e-mail a
+        # letter whose application is already out.
+        _file_letter(con, draft, bewerbung_id)
         # the loop is closed: nothing should still be offered for upload
         upload.clear(job["upload_path"])
         db.set_upload(con, job_id, "", "")

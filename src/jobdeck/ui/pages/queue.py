@@ -27,7 +27,10 @@ FILTER_STATUSES = {
     # to write — and while no view listed it, pressing Draft a second time was
     # the only way to learn the app was working.
     "open": ["generating", "ready", "approved", "sending", "failed"],
-    "sent": ["sent"],
+    # 'filed' belongs beside 'sent' and nowhere else: both letters are with an
+    # employer, and the only difference is that this one travelled inside a
+    # Mappe he uploaded rather than in an e-mail this app addressed.
+    "sent": ["sent", "filed"],
     "discarded": ["discarded"],
 }
 EMPTY_TEXT = {
@@ -290,8 +293,15 @@ async def queue_page():
                         ui.button("It was sent — record it", icon="check",
                                   on_click=lambda r=row: resolve(r, True)) \
                             .props("outline color=positive")
-                    if row["status"] == "sent":
-                        sent_info = f"sent {row['updated_at'][:16]}"
+                    if row["status"] in ("sent", "filed"):
+                        # Which hand carried it. "sent" beside a letter that
+                        # went into an employer's upload field would credit
+                        # this app with an e-mail it never addressed.
+                        sent_info = (
+                            f"mit der Bewerbung eingereicht "
+                            f"{row['updated_at'][:16]}"
+                            if row["status"] == "filed"
+                            else f"sent {row['updated_at'][:16]}")
                         if row["gmail_message_id"]:
                             sent_info += f" · gmail id {row['gmail_message_id']}"
                         ui.label(sent_info).classes("text-xs text-gray-500")

@@ -227,3 +227,83 @@ def test_the_undo_survives_a_posting_that_was_refused_because_of_it(con, data_di
     twin_row = db.get_job(con, twin)
     assert twin_row["duplicate_of"] is None
     assert twin_row["status"] == "new", "left as a duplicate of nothing"
+
+
+# --------------------------------------------------------------------------
+# The letter goes out with the application
+# --------------------------------------------------------------------------
+def test_recording_files_the_letter_that_went_out(con, data_dir):
+    """The defect, measured on his data: recording left the letter at 'ready',
+    so twelve of the seventeen letters waiting in his Postausgang were letters
+    whose application had already gone out through a form that same afternoon
+    — each one press away from a SECOND application at that company."""
+    job_id = _job(con)
+    _with_mappe(con, data_dir, job_id)
+
+    result = apply_record.record_form_application(job_id)
+
+    draft = db.get_draft_by_job(con, job_id)
+    assert draft["status"] == "filed"
+    assert draft["bewerbung_id"] == result["bewerbung_id"]
+    assert db.count_waiting_drafts(con) == 0, "it must leave the Postausgang"
+
+
+def test_a_filed_letter_may_not_be_rewritten(con, data_dir):
+    """Re-drafting one would rewrite the record of what an employer holds."""
+    from jobdeck.services import drafting
+    job_id = _job(con)
+    _with_mappe(con, data_dir, job_id)
+    apply_record.record_form_application(job_id)
+
+    assert "filed" in drafting.NO_REGEN
+
+
+def test_only_a_finished_unsent_letter_is_filed(con, data_dir):
+    """A letter still being written did not go into anyone's form, and one
+    that failed was never written at all — filing either would claim an
+    employer holds something that does not exist."""
+    for status in ("generating", "failed", "discarded"):
+        job_id = _job(con, external_id=f"e-{status}", company=f"{status} GmbH")
+        db.mark_form_opened(con, job_id)
+        db.upsert_draft(con, job_id, {"status": status})
+        con.commit()
+
+        result = apply_record.record_form_application(job_id)
+
+        assert result["ok"]
+        assert db.get_draft_by_job(con, job_id)["status"] == status
+
+
+def test_the_undo_gives_the_letter_back(con, data_dir):
+    """`drafts.bewerbung_id` is a THIRD foreign key into the row the undo
+    deletes. Leaving it makes the DELETE raise — in a worker thread, so a log
+    line and a bar that vanishes — and strands the letter in a state nothing
+    can send and nothing can rewrite."""
+    job_id = _job(con)
+    _with_mappe(con, data_dir, job_id)
+    result = apply_record.record_form_application(job_id)
+    assert db.get_draft_by_job(con, job_id)["status"] == "filed"
+
+    apply_record.undo(job_id, result["bewerbung_id"], result["previous_status"])
+
+    draft = db.get_draft_by_job(con, job_id)
+    assert draft["status"] == "ready", "sendable again, and rewritable"
+    assert draft["bewerbung_id"] is None
+    assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 0
+
+
+def test_a_filed_letter_never_earns_a_second_one(con, data_dir):
+    """`jobs_to_prepare` skips a posting that already has a draft, so a state
+    it does not know about would let the daily batch pay to write the letter a
+    second time — for an application that is already out."""
+    job_id = _job(con)
+    _with_mappe(con, data_dir, job_id)
+    con.execute("UPDATE jobs SET match_score=90, status='new' WHERE id=?",
+                (job_id,))
+    db.upsert_draft(con, job_id, {"status": "filed"})
+    con.commit()
+
+    candidates = db.jobs_to_prepare(con, limit=10, max_age_days=365,
+                                    min_score=1)
+
+    assert job_id not in [row["id"] for row in candidates]

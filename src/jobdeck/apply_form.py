@@ -83,8 +83,9 @@ def personal_fields(settings: dict) -> list[Field]:
 
 # Draft states whose text is an ANSWER. A discarded draft was rejected and a
 # failed one was never finished, so offering either as the Anschreiben would put
-# words he threw away into someone's form.
-USABLE_DRAFT_STATUS = ("ready", "approved", "sent")
+# words he threw away into someone's form. A 'filed' letter is the one that
+# actually went into a form, so it is the most answerable of them all.
+USABLE_DRAFT_STATUS = ("ready", "approved", "sent", "filed")
 
 
 def usable(draft: dict | None) -> dict | None:

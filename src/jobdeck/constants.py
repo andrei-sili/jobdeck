@@ -66,8 +66,16 @@ FORM_OPENED_UNKNOWN = "unbekannt"
 LIVENESS_ALIVE = "alive"
 LIVENESS_GONE = "gone"
 
-# Lifecycle of an AI-generated application draft
-DRAFT_STATUS = ["generating", "ready", "failed", "approved", "sending", "sent", "discarded"]
+# Lifecycle of an AI-generated application draft. 'sent' means this app put it
+# in an e-mail; 'filed' means it left inside the Bewerbungsmappe he uploaded to
+# an employer's form. Both are terminal and both name a real application — the
+# difference is which hand carried it, and the register says so.
+DRAFT_STATUS = ["generating", "ready", "failed", "approved", "sending", "sent",
+                "filed", "discarded"]
+
+# A letter that has gone out, whichever way. Nothing may rewrite one of these,
+# and neither waits in the Postausgang.
+DRAFT_DELIVERED = ("sent", "filed")
 
 # How many messages may leave in a day when he has never said. Stated once, in
 # the layer both the send gate and the screens that draw the budget can see: a
