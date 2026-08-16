@@ -598,6 +598,8 @@ def test_migrate_files_letters_whose_application_is_already_recorded(tmp_path,
     db.upsert_draft(con, waiting, {"status": "ready", "betreff": "Bewerbung III"})
     con.commit()
     assert db.count_waiting_drafts(con) == 3
+    # the state a v10 database is in when this build first opens it
+    con.execute("PRAGMA user_version = 10")
 
     migrations.migrate(con)
 
@@ -630,4 +632,90 @@ def test_the_filing_backfill_skips_a_database_too_old_to_know_the_pairing(
     migrations._file_letters_of_recorded_applications(con)
 
     assert con.execute("SELECT status FROM drafts").fetchone()[0] == "ready"
+    con.close()
+
+
+def test_the_filing_backfill_never_raises_on_a_dangling_reference(tmp_path,
+                                                                  monkeypatch):
+    """`drafts.bewerbung_id` is a foreign key and `PRAGMA foreign_keys` is ON,
+    so one `jobs.bewerbung_id` pointing at a deleted row made the UPDATE raise
+    IntegrityError out of `migrate()` — which runs at startup, before any
+    screen, so it is not a broken screen but an app that cannot open."""
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    con = sqlite3.connect(tmp_path / "dangling.db")
+    con.row_factory = sqlite3.Row
+    migrations.migrate(con)
+    job_id = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "x", "company": "Firma",
+        "title": "Entwickler", "url": "https://x.example/1"})
+    db.upsert_draft(con, job_id, {"status": "ready"})
+    con.execute("PRAGMA foreign_keys=OFF")
+    con.execute("UPDATE jobs SET bewerbung_id=999, status='applied' WHERE id=?",
+                (job_id,))
+    con.execute("PRAGMA foreign_keys=ON")
+    con.execute("PRAGMA user_version = 10")
+    con.commit()
+
+    migrations.migrate(con)   # must not raise
+
+    assert db.get_draft_by_job(con, job_id)["status"] == "ready"
+    con.close()
+
+
+def test_the_filing_backfill_governs_history_and_not_the_future(tmp_path,
+                                                                monkeypatch):
+    """'ready' is a state a draft comes BACK to. Run on every start this would
+    stop healing history and start freezing letters he had deliberately
+    restored or re-written, silently, at the next launch."""
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    con = sqlite3.connect(tmp_path / "again.db")
+    con.row_factory = sqlite3.Row
+    migrations.migrate(con)
+    bewerbung_id = db.add_bewerbung(con, {"firma": "Firma", "kanal": "E-Mail",
+                                          "status": "Gesendet"})
+    job_id = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "x", "company": "Firma",
+        "title": "Entwickler", "url": "https://x.example/1"})
+    db.set_job_status(con, job_id, "applied", bewerbung_id=bewerbung_id)
+    db.upsert_draft(con, job_id, {"status": "ready"})
+    con.commit()
+
+    migrations.migrate(con)   # the next app start, already at this version
+
+    assert db.get_draft_by_job(con, job_id)["status"] == "ready"
+    con.close()
+
+
+def test_the_backfill_files_the_letter_the_running_app_would_mean(tmp_path,
+                                                                  monkeypatch):
+    """`drafts.job_id` has no UNIQUE constraint. Filing all of a posting's
+    letters would make the migration and `apply_record` — which files only
+    `get_draft_by_job`, the newest — disagree about how many an application
+    carried, and the undo would then hand several back."""
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    con = sqlite3.connect(tmp_path / "two.db")
+    con.row_factory = sqlite3.Row
+    migrations.migrate(con)
+    bewerbung_id = db.add_bewerbung(con, {"firma": "Firma", "kanal": "E-Mail",
+                                          "status": "Gesendet"})
+    job_id = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "x", "company": "Firma",
+        "title": "Entwickler", "url": "https://x.example/1"})
+    db.set_job_status(con, job_id, "applied", bewerbung_id=bewerbung_id)
+    older = con.execute(
+        "INSERT INTO drafts (job_id, status, created_at, updated_at) "
+        "VALUES (?, 'ready', 't', 't')", (job_id,)).lastrowid
+    newer = con.execute(
+        "INSERT INTO drafts (job_id, status, created_at, updated_at) "
+        "VALUES (?, 'ready', 't', 't')", (job_id,)).lastrowid
+    con.execute("PRAGMA user_version = 10")
+    con.commit()
+
+    migrations.migrate(con)
+
+    assert db.get_draft(con, newer)["status"] == "filed"
+    assert db.get_draft(con, older)["status"] == "ready"
+    # …and it stamps the moment, so the Postausgang does not print the
+    # letter's last edit as the moment the Mappe was handed over
+    assert db.get_draft(con, newer)["updated_at"] != "t"
     con.close()

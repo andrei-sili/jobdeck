@@ -16,6 +16,7 @@ from jobdeck import apply_channel, backup, config, dates, freshness, migrations
 from jobdeck.constants import (
     DEFAULT_DAILY_CAP,
     DEFAULT_DAILY_DRAFT_CAP,
+    DRAFT_STATUS,
     EMAIL_OUTBOUND,
     EMAIL_OUTBOUND_TEST,
     FORM_OPENED_UNKNOWN,
@@ -194,10 +195,21 @@ def update_bewerbung(con: sqlite3.Connection, row_id: int, values: dict) -> None
 
 
 def delete_bewerbung(con: sqlite3.Connection, row_id: int) -> None:
+    """Remove an application and every reference to it.
+
+    A FILED letter is handed back, a SENT one is not, and the difference is
+    what evidence survives the deletion. A sent letter has a Gmail message id:
+    it really left, whatever the ledger says afterwards, and 'sent' stays true.
+    A filed letter's only evidence that it reached anyone IS this row — so
+    deleting the row and leaving the letter at 'filed' would strand it in a
+    state that cannot be sent, cannot be discarded and cannot be re-written,
+    for an application the user has just said did not happen.
+    """
     con.execute("DELETE FROM status_history WHERE bewerbung_id=?", (row_id,))
     con.execute(
         "UPDATE email_log SET bewerbung_id=NULL WHERE bewerbung_id=?", (row_id,)
     )
+    unfile_draft(con, row_id)
     con.execute(
         "UPDATE drafts SET bewerbung_id=NULL WHERE bewerbung_id=?", (row_id,)
     )
@@ -1301,6 +1313,23 @@ def count_waiting_drafts(con: sqlite3.Connection) -> int:
     ).fetchone()[0]
 
 
+def count_open_drafts(con: sqlite3.Connection) -> int:
+    """Everything the Postausgang's own "Warten" tab lists.
+
+    Wider than `count_waiting_drafts` on purpose, and for a different reader:
+    that one is the "prepare N a day" quota and counts only letters that could
+    be SENT, while this one is what the rail's shelf promises to open. With
+    the narrower figure a register holding one failed draft and one stuck send
+    drew no shelf at all, while the tab behind it held two rows each waiting
+    on a decision — and the shelf is that tab's only entry point.
+    """
+    places = ",".join("?" * len(OPEN_DRAFT_STATUSES))
+    return con.execute(
+        f"SELECT COUNT(*) FROM drafts WHERE status IN ({places})",
+        OPEN_DRAFT_STATUSES,
+    ).fetchone()[0]
+
+
 def pipeline_counts(con: sqlite3.Connection) -> dict:
     """Every population the Bewerbungen screen measures, in one statement.
 
@@ -1322,10 +1351,15 @@ def pipeline_counts(con: sqlite3.Connection) -> dict:
           (SELECT COUNT(*) FROM jobs WHERE match_score > 0) AS scored_above_zero,
           (SELECT COUNT(*) FROM jobs WHERE match_score = 0) AS scored_zero,
           (SELECT COUNT(*) FROM jobs WHERE opened_at <> '') AS opened,
-          (SELECT COUNT(DISTINCT job_id) FROM drafts) AS drafted,
+          -- a letter EXISTS, not a draft row exists: 'generating' has an
+          -- empty body until the model answers and 'failed' never got one at
+          -- all, so counting rows would print them under "Anschreiben
+          -- geschrieben". A discarded letter was written and stays counted.
+          (SELECT COUNT(DISTINCT job_id) FROM drafts
+            WHERE anschreiben_body <> '') AS drafted,
           (SELECT COUNT(DISTINCT d.job_id) FROM drafts d
              JOIN jobs j ON j.id = d.job_id
-            WHERE j.opened_at = '') AS drafted_unread,
+            WHERE d.anschreiben_body <> '' AND j.opened_at = '') AS drafted_unread,
           (SELECT COUNT(*) FROM jobs WHERE bewerbung_id IS NOT NULL) AS applied
         """
     ).fetchone()
@@ -1582,14 +1616,16 @@ SELECT COUNT(*), MAX(id), COUNT(match_score), TOTAL(match_score),
 # the timestamp has second resolution, so two moves inside one second (a
 # discard and a re-draft, a test that writes both) would compare equal while
 # the queue shows something different.
-_DRAFTS_SIGNATURE_SQL = """
-SELECT COUNT(*), MAX(id), MAX(updated_at),
-       TOTAL(status='generating'), TOTAL(status='ready'),
-       TOTAL(status='approved'), TOTAL(status='sending'),
-       TOTAL(status='sent'), TOTAL(status='failed'),
-       TOTAL(status='discarded')
-  FROM drafts
-"""
+# Derived from the vocabulary rather than written out: the hand-written list
+# was missing 'filed' the moment that status existed, so two moves inside one
+# second between a filed row and a ready one compared equal — exactly the case
+# the per-status totals were added for. A new status now joins it by existing.
+_DRAFTS_SIGNATURE_SQL = (
+    "SELECT COUNT(*), MAX(id), MAX(updated_at), "
+    + ", ".join(f"TOTAL(status='{status}')"
+                for status in DRAFT_STATUS)
+    + " FROM drafts"
+)
 
 _APPLICATIONS_SIGNATURE_SQL = """
 SELECT (SELECT COUNT(*) FROM bewerbungen), (SELECT MAX(id) FROM bewerbungen),
@@ -2049,6 +2085,15 @@ def unrecord_application(
         con.execute(
             "UPDATE jobs SET status='new', duplicate_of=NULL "
             " WHERE duplicate_of=? AND bewerbung_id IS NULL",
+            (bewerbung_id,),
+        )
+        # `email_log.bewerbung_id` is a FOURTH foreign key into the row about
+        # to be deleted. `delete_bewerbung` clears it and this path did not, so
+        # an undo after any e-mail had been logged against the application
+        # raised — inside a worker thread, so a log line and a bar that simply
+        # vanishes, and a user who believes the undo happened.
+        con.execute(
+            "UPDATE email_log SET bewerbung_id=NULL WHERE bewerbung_id=?",
             (bewerbung_id,),
         )
         con.execute("DELETE FROM status_history WHERE bewerbung_id=?",

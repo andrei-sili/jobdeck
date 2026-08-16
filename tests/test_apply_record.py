@@ -307,3 +307,87 @@ def test_a_filed_letter_never_earns_a_second_one(con, data_dir):
                                     min_score=1)
 
     assert job_id not in [row["id"] for row in candidates]
+
+
+def test_a_letter_is_filed_only_where_it_provably_travelled(con, data_dir):
+    """'filed' is a claim that an EMPLOYER holds this letter, so it needs
+    evidence and not merely two rows existing at once. The only evidence this
+    app has is that it built a COMPLETE Mappe around the letter and staged it
+    for the employer's upload field."""
+    # a form application whose Mappe never finished
+    broken = _job(con, external_id="broken", company="Halbe Mappe GmbH")
+    db.mark_form_opened(con, broken)
+    db.upsert_draft(con, broken, {"status": "ready",
+                                  "anschreiben_body": "Sehr geehrte"})
+    con.commit()
+
+    assert apply_record.record_form_application(broken)["ok"]
+
+    assert db.get_draft_by_job(con, broken)["status"] == "ready", \
+        "the strip says the Mappe is not complete; the letter did not travel"
+
+
+def test_an_e_mail_application_recorded_by_hand_files_nothing(con, data_dir):
+    """This app did not send it — `send.py` records its own sends and marks
+    them 'sent'. All that is known is that he says he applied, which says
+    nothing about which text the employer read. Filing it would also make the
+    register label it "mit der Bewerbungsmappe eingereicht"."""
+    job_id = _job(con, external_id="mail", company="Per Mail GmbH")
+    _with_mappe(con, data_dir, job_id)
+
+    result = apply_record.record_application(job_id, apply_record.KANAL_EMAIL)
+
+    assert result["ok"]
+    assert db.get_draft_by_job(con, job_id)["status"] == "ready"
+
+
+def test_deleting_the_application_hands_its_letter_back(con, data_dir):
+    """Every route out of 'filed' keys on the application: `unfile_draft`
+    matches on it, discard and restore refuse the status, and re-drafting is
+    refused. Deleting the row and leaving the letter filed strands it for
+    ever — unsendable, undiscardable, unrewritable — for an application the
+    user has just said did not happen."""
+    job_id = _job(con)
+    _with_mappe(con, data_dir, job_id)
+    result = apply_record.record_form_application(job_id)
+    assert db.get_draft_by_job(con, job_id)["status"] == "filed"
+
+    db.delete_bewerbung(con, result["bewerbung_id"])
+    con.commit()
+
+    draft = db.get_draft_by_job(con, job_id)
+    assert draft["status"] == "ready"
+    assert draft["bewerbung_id"] is None
+
+
+def test_a_sent_letter_survives_its_application_being_deleted(con, data_dir):
+    """The asymmetry is deliberate and is about evidence: a sent letter has a
+    Gmail message id, so it really left whatever the ledger says afterwards. A
+    filed letter's only evidence IS the ledger row."""
+    job_id = _job(con, external_id="sent", company="Gesendet GmbH")
+    draft_id = db.upsert_draft(con, job_id, {"status": "ready"})
+    bewerbung_id = db.apply_job(con, job_id, kanal="E-Mail")
+    db.record_send(con, draft_id, "gmail-1", "thread-1", bewerbung_id)
+    con.commit()
+
+    db.delete_bewerbung(con, bewerbung_id)
+    con.commit()
+
+    assert db.get_draft_by_job(con, job_id)["status"] == "sent"
+
+
+def test_the_undo_survives_an_e_mail_logged_against_the_application(con,
+                                                                   data_dir):
+    """`email_log.bewerbung_id` is a FOURTH foreign key into the row the undo
+    deletes. `delete_bewerbung` clears it and this path did not, so the DELETE
+    raised — in a worker thread, so a log line and a bar that vanishes."""
+    job_id = _job(con)
+    _with_mappe(con, data_dir, job_id)
+    result = apply_record.record_form_application(job_id)
+    db.add_email_log(con, {"direction": "outbound", "to_addr": "hr@x.example",
+                           "bewerbung_id": result["bewerbung_id"]})
+    con.commit()
+
+    apply_record.undo(job_id, result["bewerbung_id"], result["previous_status"])
+
+    assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 0

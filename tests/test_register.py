@@ -283,8 +283,10 @@ def test_the_populations_are_counted_the_way_the_screen_reads_them(con):
                 "WHERE id=?", (read,))
     batch = _job(con, "batch")   # a letter written without the ad being opened
     con.execute("UPDATE jobs SET match_score=70 WHERE id=?", (batch,))
-    db.upsert_draft(con, batch, {"status": "ready"})
-    db.upsert_draft(con, read, {"status": "ready"})
+    db.upsert_draft(con, batch, {"status": "ready",
+                                 "anschreiben_body": "Sehr geehrte"})
+    db.upsert_draft(con, read, {"status": "ready",
+                                "anschreiben_body": "Sehr geehrte"})
     zero = _job(con, "zero")
     con.execute("UPDATE jobs SET match_score=0 WHERE id=?", (zero,))
     con.commit()
@@ -354,3 +356,97 @@ def test_a_bar_must_say_what_it_measures():
 def test_a_comparison_with_nothing_in_it_draws_nothing():
     assert register.bar_widths([], "ratio") == []
     assert register.bar_widths([Share("x", 0, 0, 0.0)], "whole") == [0.0]
+
+
+# --------------------------------------------------------------------------
+# What the panel found: claims the data could not carry
+# --------------------------------------------------------------------------
+def test_a_draft_row_is_not_a_letter():
+    """"Anschreiben geschrieben" counted rows, so a draft still being written
+    (empty body) and one that failed (never got a body) were both reported as
+    letters that exist."""
+    steps = {step.key: step for step in register.pipeline(
+        _view(drafted=0, drafted_unread=0))}
+
+    assert steps["anschreiben"].count == 0
+
+
+def test_an_application_with_no_letter_behind_it_says_so():
+    """`applied` is not a subset of `drafted` either: pressing "Abgeschickt"
+    on a posting whose letter failed records one, and every pre-v10 form
+    application was entered that way. The step that is not a subset says so."""
+    steps = {step.key: step for step in register.pipeline(
+        _view(drafted=2, applied=5))}
+
+    assert "3 davon ohne Anschreiben" in steps["beworben"].note
+
+
+def test_a_pipeline_whose_applications_all_had_letters_makes_no_excuse():
+    steps = {step.key: step for step in register.pipeline(
+        _view(drafted=5, applied=5))}
+
+    assert steps["beworben"].note == ""
+
+
+def test_postings_the_scorer_has_not_reached_are_accounted_for():
+    """They are in neither figure below "gefunden", so without this the drop
+    is partly unexplained and the one note under it reads as the whole
+    reason."""
+    steps = {step.key: step for step in register.pipeline(
+        _view(jobs_total=100, scored_above_zero=60, scored_zero=30))}
+
+    assert "10 noch nicht bewertet" in steps["passend"].note
+
+
+def test_the_register_never_prints_a_negative_remainder():
+    """Two tables counted against each other, and nothing constrains them to
+    agree: `total` counts ledger rows and `applied` counts postings that point
+    at one."""
+    steps = {step.key: step for step in register.ledger(
+        _view(applied=9, apps=[_app(row_id=n) for n in range(3)]))}
+
+    assert steps["register"].note == ""
+
+
+def test_one_application_on_a_third_channel_wins_no_argument():
+    """Summed across channels, a single row rendered "1 beantwortet · 100 %",
+    was ranked first and produced "Post antwortet häufiger" — a finding
+    invented out of one application, on the panel built to refuse exactly
+    that."""
+    shares = [Share("E-Mail", 9, 35, 9 / 35),
+              Share("Online-Portal", 11, 41, 11 / 41),
+              Share("Post", 1, 1, 1.0)]
+
+    assert not register.enough_for_a_rate(shares)
+
+
+def test_every_channel_has_to_carry_the_threshold():
+    assert register.enough_for_a_rate(
+        [Share("a", 5, 20, 0.25), Share("b", 5, 20, 0.25)])
+    assert not register.enough_for_a_rate(
+        [Share("a", 5, 20, 0.25), Share("b", 5, 19, 0.26)])
+    assert not register.enough_for_a_rate([])
+
+
+def test_a_bar_can_never_be_drawn_backwards():
+    """An application dated in the FUTURE gives a negative age, `width:-98%`
+    is invalid CSS that the browser DROPS, and a block element then fills its
+    whole column — so the row furthest from overdue drew the longest bar."""
+    assert register.clamp(-0.98) == 0.0
+    assert register.clamp(1.7) == 1.0
+    assert register.clamp(float("nan")) == 0.0
+    assert register.clamp(0.42) == 0.42
+
+
+def test_a_future_dated_application_is_not_drawn_as_the_most_overdue():
+    rows = register.silence(
+        [_app(gesendet_am="2026-09-30", firma="Zukunft GmbH", row_id=1),
+         _app(gesendet_am="2026-07-01", firma="Alt GmbH", row_id=2)],
+        14, TODAY)
+    longest = max((row.days or 0) for row in rows) or 1
+
+    widths = [register.clamp((row.days or 0) / longest) for row in rows]
+
+    assert max(widths) <= 1.0 and min(widths) >= 0.0
+    assert widths[rows.index(next(r for r in rows
+                                  if r.firma == "Zukunft GmbH"))] == 0.0

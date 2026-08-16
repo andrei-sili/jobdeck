@@ -57,25 +57,59 @@ def test_no_row_takes_its_identity_from_the_client():
     handler, because the defect is a SHAPE — the next table added to this page
     would reintroduce it and no behavioural test would notice.
     """
-    tree = ast.parse(pathlib.Path(bewerbungen.__file__).read_text())
+    source = pathlib.Path(bewerbungen.__file__).read_text()
+    offenders = _client_payload_reads(source)
 
-    offenders = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        target = ast.unparse(node.func)
-        if target.endswith(".on") and node.args:
-            event = ast.unparse(node.args[0]).strip("'\"")
-            if event in ("rowClick", "row-click", "selection"):
-                offenders.append(f"line {node.lineno}: {event}")
-        # `e.args` is the client's payload; only its presence in a handler
-        # that then reads fields off it is the defect, and the simplest
-        # enforceable rule is that this page never unpacks one at all.
-        if target in ("ui.table", "ui.aggrid"):
-            offenders.append(f"line {node.lineno}: {target}")
     assert offenders == [], (
         "a client-composed row payload is back on this page: " +
         ", ".join(offenders))
+
+
+def _client_payload_reads(source: str) -> list[str]:
+    """Every place this module reads data OUT of a browser-sent event.
+
+    The shape, not two spellings of it. The first version of this rule listed
+    the event names "rowClick"/"row-click"/"selection" and the constructors
+    `ui.table`/`ui.aggrid` — so `element.on("click", lambda e:
+    open_in_system(e.args["dokument"]))` sailed through it, which is the
+    original defect written on one line.
+
+    What actually matters is that no handler on this page ever SUBSCRIPTS or
+    attribute-reads an event's payload: `e.args` is whatever the browser sent.
+    A handler may take the event and ignore it, which is what every row does.
+    """
+    tree = ast.parse(source)
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute) or node.attr != "args":
+            continue
+        # `<something>.args` — flag it unless it is plainly not an event, and
+        # err toward flagging: a false positive here costs one rewritten line.
+        offenders.append(f"line {node.lineno}: {ast.unparse(node)}")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and ast.unparse(node.func) in (
+                "ui.table", "ui.aggrid", "ui.table.from_pandas",
+                "ui.aggrid.from_pandas"):
+            offenders.append(f"line {node.lineno}: {ast.unparse(node.func)}")
+    return offenders
+
+
+def test_the_rule_catches_the_defect_written_any_other_way():
+    """A rule that only knows the spelling it was written against is a rule
+    that passes the next spelling. These four are the ways the deleted screen's
+    defect can come back; all four must be refused."""
+    reintroductions = [
+        'table.on("rowClick", lambda e: edit(e.args[1]))',
+        'element.on("click", lambda e: open_in_system(e.args["dokument"]))',
+        'grid = ui.aggrid.from_pandas(df)',
+        'def h(e):\n    path = e.args[1]["dokument"]\n    open_in_system(path)',
+    ]
+    for source in reintroductions:
+        assert _client_payload_reads(source), f"not caught: {source!r}"
+
+    # …and the shape the page really uses is not flagged
+    assert _client_payload_reads(
+        'element.on("click", lambda _=None, i=row_id: open_application(i))') == []
 
 
 async def test_opening_a_row_reads_it_from_the_database(user: User, con):
@@ -124,7 +158,7 @@ async def test_the_screen_states_the_shape_before_it_lists_the_rows(
     await user.should_see("Rhythmus")
     await user.should_see("Wer schweigt, seit wann")
     await user.should_see("Was antwortet")
-    await user.should_see("Die Firmen")
+    await user.should_see("Die Bewerbungen")
     await user.should_see("Eine GmbH")
 
 
@@ -211,3 +245,80 @@ async def test_the_send_screen_speaks_the_language_of_the_app(user: User, con):
 
     await user.should_see("TESTMODUS")
     await user.should_see("Nichts wartet")
+
+
+# --------------------------------------------------------------------------
+# A generic navigator carries its own gate
+# --------------------------------------------------------------------------
+def test_a_tab_may_only_open_a_route_of_this_app():
+    """`ui.navigate.to` is window.open in the app's own origin. The AST rule
+    that guards that refuses a call which SUBSCRIPTS its way to a target —
+    which this helper does not do, because its target arrives as a plain
+    parameter. So the helper gates itself, or the next caller hands it a
+    stored employer URL and nothing notices."""
+    from jobdeck.ui import layout
+    for hostile in ("javascript:alert(1)", "//evil.example/x", "/\\evil.example",
+                    "https://evil.example/x", "data:text/html,x", ""):
+        with pytest.raises(ValueError):
+            layout.tabs("a", [("a", "A", "/ok"), ("b", "B", hostile)])
+
+
+def test_the_rubrics_own_tabs_are_in_app_routes():
+    from jobdeck.ui import layout
+    assert all(layout._is_internal(path)
+               for _key, _label, path in layout.BEWERBUNGEN_TABS)
+
+
+# --------------------------------------------------------------------------
+# Sentences that were true only of the shape they were written for
+# --------------------------------------------------------------------------
+async def test_an_empty_register_is_not_congratulated(user: User, con):
+    """"Jede Bewerbung ist beantwortet" is also what an EMPTY register
+    produces — and what one holding only withdrawn applications produces."""
+    await user.open("/bewerbungen")
+
+    await user.should_see("Noch keine Bewerbung im Register.")
+
+
+async def test_a_quiet_window_is_not_called_a_stretch_without_pauses(
+        user: User, con):
+    """"ohne Pause" is only true of a window that HAS working days to be
+    uninterrupted between. Over sixty empty columns it praised a stretch in
+    which nothing at all went out."""
+    await user.open("/bewerbungen")
+
+    await user.should_see("nichts raus")
+
+
+async def test_a_date_no_panel_could_read_is_refused_at_the_dialog(
+        user: User, con):
+    """It printed in the register and was read as no date at all by every
+    panel above it: the age column said "?", the silence panel filed it under
+    "seit unbekannt", and the rhythm strip moved no column for it."""
+    row_id = _app_row(con, firma="Datum GmbH")
+    await user.open("/bewerbungen")
+    user.find(marker=f"application-{row_id}").click()
+    await asyncio.sleep(0.3)
+
+    user.find("Gesendet am (JJJJ-MM-TT)").type("15.08.2026")
+    user.find("Speichern").click()
+    await asyncio.sleep(0.3)
+
+    await user.should_see("JJJJ-MM-TT")
+    assert db.get_bewerbung(con, row_id)["gesendet_am"] == "2026-08-11"
+
+
+def test_a_letter_is_offered_only_in_a_state_that_means_it_went_out(con):
+    """The query had no status predicate, so the guarantee rested entirely on
+    a convention about which writers touch `bewerbung_id`."""
+    row_id = _app_row(con, firma="Offen GmbH")
+    job_id = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "x", "company": "Offen GmbH",
+        "title": "Entwickler", "url": "https://x.example/1"})
+    draft_id = db.upsert_draft(con, job_id, {"status": "ready",
+                                             "betreff": "Entwurf"})
+    con.execute("UPDATE drafts SET bewerbung_id=? WHERE id=?",
+                (row_id, draft_id))
+    con.commit()
+
+    assert bewerbungen._letter(row_id) is None

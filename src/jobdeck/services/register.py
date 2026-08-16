@@ -88,22 +88,37 @@ def pipeline(view: dict) -> list[Step]:
     """
     found = view["jobs_total"]
     drafted, unread_drafts = view["drafted"], view["drafted_unread"]
+    applied = view["applied"]
+    # Everything the scorer has not reached yet: it is in neither figure below
+    # it, so without this the drop from "gefunden" is partly unexplained and
+    # the one note under it would be read as the whole reason.
+    unscored = max(0, found - view["scored_above_zero"] - view["scored_zero"])
+    passend_note = ", ".join(filter(None, [
+        f"{view['scored_zero']} verletzen eine harte Anforderung"
+        if view["scored_zero"] else "",
+        f"{unscored} noch nicht bewertet" if unscored else "",
+    ]))
     return [
         Step("gefunden", "gefunden", found, 1.0 if found else 0.0),
         Step("passend", "passen zu einem Profil", view["scored_above_zero"],
-             _share(view["scored_above_zero"], found),
-             f"{view['scored_zero']} verletzen eine harte Anforderung"
-             if view["scored_zero"] else ""),
+             _share(view["scored_above_zero"], found), passend_note),
         Step("angesehen", "von dir geöffnet", view["opened"],
              _share(view["opened"], found)),
+        # The two places the column is not a chain, each said where it happens
+        # rather than in a caption further away.
         Step("anschreiben", "Anschreiben geschrieben", drafted,
              _share(drafted, found),
-             # The one place the column is not a chain, said where it happens.
              f"{unread_drafts} davon, ohne die Anzeige zu öffnen — der "
              f"Tagesstapel und das Formular schreiben von selbst"
              if unread_drafts else ""),
-        Step("beworben", "hier als Bewerbung eingetragen", view["applied"],
-             _share(view["applied"], found)),
+        Step("beworben", "hier als Bewerbung eingetragen", applied,
+             _share(applied, found),
+             # An application can be recorded for a posting nothing was ever
+             # written for — that is what pressing "Abgeschickt" does on a
+             # posting whose letter failed, and how every pre-v10 form
+             # application was entered.
+             f"{applied - drafted} davon ohne Anschreiben aus JobDeck"
+             if applied > drafted else ""),
     ]
 
 
@@ -113,7 +128,11 @@ def ledger(view: dict) -> list[Step]:
     total = len(apps)
     answered = sum(1 for a in apps if _status(a) in BEANTWORTET_STATUS)
     open_rows = sum(1 for a in apps if _status(a) in OFFENE_STATUS)
-    imported = total - view["applied"]
+    # Two tables counted against each other, and nothing constrains them to
+    # agree: `total` counts ledger rows, `applied` counts postings pointing at
+    # one, and a posting can be repointed or a row edited until the pair drifts.
+    # Never print a negative remainder — say nothing rather than something false.
+    imported = max(0, total - view["applied"])
     return [
         Step("register", "im Register", total, 1.0 if total else 0.0,
              f"{view['applied']} über JobDeck · {imported} von Hand oder aus "
@@ -254,12 +273,34 @@ def bar_widths(shares: list[Share], measure: str) -> list[float]:
     values = [share.ratio if measure == "ratio" else float(share.whole)
               for share in shares]
     widest = max(values, default=0.0)
-    return [(value / widest if widest > 0 else 0.0) for value in values]
+    return [clamp(value / widest) if widest > 0 else 0.0 for value in values]
+
+
+def clamp(width: float) -> float:
+    """A bar width inside 0..1, whatever arithmetic produced it.
+
+    Every width on the screen goes through here, because the one that did not
+    was the one that broke: an application dated in the future gives a
+    negative age, `width:-98%` is invalid CSS and is DROPPED, and a block
+    element with no width then fills its whole column — so the row furthest
+    from being overdue drew the longest bar on the panel.
+    """
+    if width != width:      # NaN: neither branch of a comparison would catch it
+        return 0.0
+    return max(0.0, min(1.0, width))
 
 
 def enough_for_a_rate(shares: list[Share]) -> bool:
-    """Whether a comparison of these shares may be stated as a percentage."""
-    return sum(share.whole for share in shares) >= ENOUGH_FOR_A_RATE
+    """Whether a comparison of these shares may be stated as percentages.
+
+    EVERY share has to carry the threshold, not the total across them. Summed,
+    one application through a third channel rendered "1 beantwortet · 100 %",
+    was ranked first, and produced the sentence "Post antwortet häufiger" —
+    a finding invented out of a single row, on the panel whose whole purpose
+    is to refuse exactly that.
+    """
+    return bool(shares) and all(
+        share.whole >= ENOUGH_FOR_A_RATE for share in shares)
 
 
 def de_day(day: datetime.date) -> str:

@@ -35,16 +35,33 @@ KANAL_EMAIL = "E-Mail"
 SOURCE_HAND = "hand"
 
 # Draft states whose letter is finished and has not gone anywhere else, so an
-# application recorded now is what carried it. Every other state is left alone
-# and says why: 'generating' has no letter yet, 'failed' has none at all,
+# application recorded now may be what carried it. Every other state is left
+# alone and says why: 'generating' has no letter yet, 'failed' has none at all,
 # 'sent' went by e-mail (and its own duplicate gate would have refused this
 # record), and 'filed'/'discarded' are already closed.
 FILEABLE = ("ready", "approved")
 
 
-def _file_letter(con, draft, bewerbung_id: int) -> None:
-    """Bind the letter that went out to the application it went out with."""
+def _file_letter(con, job, draft, kanal: str, bewerbung_id: int) -> None:
+    """Bind the letter to the application, but only where it provably went.
+
+    'filed' is a claim that an EMPLOYER holds this letter, so it needs evidence
+    and not merely two rows existing at the same time. There is exactly one
+    kind of evidence this app has: it built a complete Bewerbungsmappe around
+    the letter and staged that file for the employer's upload field.
+
+    So a by-e-mail application recorded by hand files nothing. This app did not
+    send it — `send.py` records its own sends and marks them 'sent' — so all
+    that is known is that he says he applied, which says nothing about which
+    text the employer read. The same for a form application whose Mappe never
+    finished: the strip already tells him it is not complete, and filing the
+    letter would contradict that on the next screen.
+    """
     if draft is None or draft["status"] not in FILEABLE:
+        return
+    if kanal != KANAL_FORM:
+        return
+    if job["mappe_kind"] != MAPPE_COMPLETE or not (draft["pdf_path"] or ""):
         return
     db.file_draft(con, draft["id"], bewerbung_id)
 
@@ -92,11 +109,11 @@ def record_application(job_id: int, kanal: str,
             return {"ok": False, "bewerbung_id": None, "company": company,
                     "duplicate": dict(dup) if dup is not None else None,
                     "undo": False}
-        # The letter left with it. Filing binds the two rows together, so the
-        # register can show what actually went to this company — and, the part
-        # that was costing him, so the Postausgang stops offering to e-mail a
-        # letter whose application is already out.
-        _file_letter(con, draft, bewerbung_id)
+        # If the letter provably left with it, bind the two rows together: the
+        # register can then show what actually went to this company, and the
+        # Postausgang stops offering to e-mail a letter whose application is
+        # already out.
+        _file_letter(con, job, draft, kanal, bewerbung_id)
         # the loop is closed: nothing should still be offered for upload
         upload.clear(job["upload_path"])
         db.set_upload(con, job_id, "", "")

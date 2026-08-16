@@ -18,6 +18,7 @@ from nicegui import app, run, ui
 
 from jobdeck import db, export
 from jobdeck.constants import (
+    DRAFT_DELIVERED,
     KANAL_OPTIONS,
     OFFENE_STATUS,
     STATUS_OPTIONS,
@@ -40,6 +41,10 @@ VIEW_ALL = "Alle"
 # the register below. Enough to see the shape of the tail, few enough that
 # the panel does not become the page.
 SILENCE_ROWS = 8
+
+# The height an empty column of the rhythm strip is drawn at, in per cent.
+# A day that held something is drawn above it, so the two never read alike.
+RHYTHM_FLOOR = 3
 
 # How the register's own status vocabulary is coloured. Amber is for an
 # application that is merely waiting, not for a bad outcome — a rejection is a
@@ -79,6 +84,21 @@ def _row(row_id: int) -> dict | None:
 
 
 def _save(row_id, values, new_status):
+    """Write an application, refusing a date no panel above could read.
+
+    `gesendet_am` was free text. A row saved as "15.08.2026" printed that in
+    the register and was read as no date at all by everything else — the age
+    column said "?", the silence panel filed it under "seit unbekannt", and the
+    rhythm strip moved no column for it. A screen must judge a value the way
+    its CONSUMER will, and every consumer here is `date.fromisoformat`.
+    """
+    stamped = (values.get("gesendet_am") or "").strip()
+    if stamped:
+        try:
+            datetime.date.fromisoformat(stamped)
+        except ValueError:
+            return ("„Gesendet am“ braucht das Format JJJJ-MM-TT — sonst "
+                    "zählt die Bewerbung in keiner Auswertung mit.")
     with db.db() as con:
         dup = find_duplicate_bewerbung(
             con, values["firma"], values["email"], exclude_id=row_id
@@ -111,10 +131,12 @@ def _letter(row_id):
     from here, 'filed' means it went inside the Mappe he uploaded. A draft that
     merely happens to sit on the same posting is not what the employer read.
     """
+    places = ",".join("?" * len(DRAFT_DELIVERED))
     with db.db() as con:
         found = con.execute(
             "SELECT betreff, anschreiben_body, status, pdf_path FROM drafts "
-            " WHERE bewerbung_id=? ORDER BY id DESC LIMIT 1", (row_id,)
+            f" WHERE bewerbung_id=? AND status IN ({places})"
+            "  ORDER BY id DESC LIMIT 1", (row_id, *DRAFT_DELIVERED)
         ).fetchone()
         return dict(found) if found is not None else None
 
@@ -173,7 +195,7 @@ async def bewerbungen_page():
             ui.label(step.label).classes("name")
             with ui.element("span").classes("jd-bar"):
                 ui.element("i").classes("dim" if dim else "") \
-                    .style(f"width:{round(step.share * 100, 1)}%")
+                    .style(f"width:{round(register.clamp(step.share) * 100, 1)}%")
             ui.label(f"{step.count:,}".replace(",", ".")).classes("num jd-mono")
             if step.note:
                 ui.label(step.note).classes("why")
@@ -192,13 +214,24 @@ async def bewerbungen_page():
                 with ui.element("div").classes("jd-rhythm"):
                     for day in strip:
                         share = day.count / peak.count if peak else 0.0
+                        # An empty day is drawn at the floor; a day that HELD
+                        # something must clear it, or one application beside a
+                        # forty-application day is the same grey stub as a day
+                        # nothing went out on.
+                        height = (max(RHYTHM_FLOOR + 4, round(share * 100))
+                                  if day.count else RHYTHM_FLOOR)
                         ui.element("i").classes(
                             "empty" if not day.count else
-                             "today" if day.date == today else ""
-                        ).style(f"height:{max(3, round(share * 100))}%")
+                            "today" if day.date == today else ""
+                        ).style(f"height:{height}%")
                 with ui.element("div").classes("jd-ends"):
                     ui.label(register.de_day(strip[0].date))
-                    ui.label(f"{pause} Tage Pause" if pause else "ohne Pause")
+                    # "ohne Pause" is only true of a window that HAS working
+                    # days to be uninterrupted between. Printed over sixty
+                    # empty columns it praised a stretch in which nothing at
+                    # all went out.
+                    ui.label(f"{pause} Tage Pause" if pause
+                             else "ohne Pause" if peak else "nichts raus")
                     ui.label("heute")
                 if peak is None:
                     ui.label("In diesem Zeitraum ist nichts rausgegangen.") \
@@ -223,8 +256,13 @@ async def bewerbungen_page():
                          f"längste zuerst. Ab {view['follow_up_days']} Tagen "
                          "wird die Zahl bernstein.").classes("jd-card-sub")
                 if not waiting:
-                    ui.label("Jede Bewerbung ist beantwortet.") \
-                        .classes("jd-card-sub")
+                    # "Jede Bewerbung ist beantwortet" is also what an EMPTY
+                    # register produces, and what one holding only withdrawn
+                    # applications produces — neither is an achievement.
+                    ui.label("Noch keine Bewerbung im Register."
+                             if not view["apps"]
+                             else "Keine Bewerbung wartet gerade auf eine "
+                                  "Antwort.").classes("jd-card-sub")
                     return
                 longest = max((row.days or 0) for row in waiting) or 1
                 shown = waiting[:SILENCE_ROWS]
@@ -234,8 +272,14 @@ async def bewerbungen_page():
                         ui.label(row.firma).classes("firma" + last)
                         with ui.element("span").classes("jd-bar" + last) \
                                 .style("align-self:center"):
+                            # Through the shared clamp: a date in the FUTURE
+                            # gives a negative age, and `width:-98%` is invalid
+                            # CSS that the browser drops — leaving a block
+                            # element at `width:auto`, so the row furthest from
+                            # overdue drew the longest bar on the panel.
+                            width = register.clamp((row.days or 0) / longest)
                             ui.element("i").classes("warn" if row.overdue else "") \
-                                .style(f"width:{round((row.days or 0) / longest * 100)}%")
+                                .style(f"width:{round(width * 100)}%")
                         ui.label(
                             f"{row.days} T" if row.days is not None
                             # An imported row can state no date at all. "0 T"
@@ -272,10 +316,10 @@ async def bewerbungen_page():
                     # percentage.
                     _share_rows(channels, unit="beantwortet", bar="ratio",
                                 rate=register.enough_for_a_rate(channels))
-                    ui.label(
-                        _channel_verdict(channels,
-                                         register.enough_for_a_rate(channels))
-                    ).classes("jd-card-sub")
+                    verdict = _channel_verdict(
+                        channels, register.enough_for_a_rate(channels))
+                    if verdict:
+                        ui.label(verdict).classes("jd-card-sub")
                 with ui.column().classes("jd-card gap-3"):
                     ui.label("Was jede Quelle bringt").classes("jd-card-title")
                     ui.label("Anzeigen einer Quelle, und was davon eine "
@@ -321,8 +365,13 @@ async def bewerbungen_page():
             application's worth of difference. A screen that leads with the
             higher figure teaches him to steer by noise.
             """
+            if not shares:
+                # A sentence about "the figures above" printed where no figure
+                # is drawn is worse than silence.
+                return ""
             if not rate:
-                return (f"Bei {sum(s.whole for s in shares)} Bewerbungen ist "
+                smallest = min(share.whole for share in shares)
+                return (f"Bei {smallest} Bewerbungen auf einem der Wege ist "
                         "eine Prozentzahl noch Rechnen, kein Befund — deshalb "
                         "stehen hier nur die Stückzahlen.")
             ranked = sorted(shares, key=lambda s: -s.ratio)
@@ -363,7 +412,10 @@ async def bewerbungen_page():
                                                 view["follow_up_days"], today)}
             with ui.column().classes("jd-card gap-2"):
                 with ui.row().classes("w-full items-baseline gap-3"):
-                    ui.label("Die Firmen").classes("jd-card-title")
+                    # Not "Die Firmen": the figure counts ledger ROWS, and
+                    # one company can hold two of them whenever the duplicate
+                    # gate's normaliser reads two spellings as different.
+                    ui.label("Die Bewerbungen").classes("jd-card-title")
                     ui.label(f"{len(rows)} von {len(view['apps'])}"
                              if len(rows) != len(view["apps"])
                              else f"{len(rows)}").classes("jd-card-sub")

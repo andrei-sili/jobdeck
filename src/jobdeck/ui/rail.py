@@ -143,7 +143,9 @@ def facts() -> dict:
             "working": db.count_job_groups(con, "new", **working),
             "unread": db.count_job_groups(con, "new", opened="exclude", **working),
             "bookmarked": db.count_bookmarked_jobs(con),
-            "in_progress": db.count_waiting_drafts(con),
+            # What the shelf opens, not what may be sent: the two differ by a
+            # failed draft and a stuck send, and both of those need him.
+            "in_progress": db.count_open_drafts(con),
             "started": db.count_started_forms(con),
             "apps": [dict(row) for row in db.list_bewerbungen(con)],
             "follow_up_days": _int_setting(
@@ -261,7 +263,11 @@ def rubrics(view: dict, current: str, now: datetime.datetime) -> list[Rubric]:
             key="bewerbungen",
             label="Bewerbungen",
             path=BEWERBUNGEN_PATH,
-            count=(f"{silent} ohne Antwort" if silent
+            # "überfällig", not "ohne Antwort": the screen behind this uses
+            # those three words for every open application, and this figure is
+            # only the ones past the follow-up threshold. One click apart,
+            # they were two different numbers under one wording.
+            count=(f"{silent} überfällig" if silent
                    else f"{total} Bewerbungen"),
             # "gesendet" would be a claim about this app: the register holds
             # every application he has ever recorded, including the ones

@@ -45,7 +45,19 @@ def tabs(current: str, entries: list[tuple[str, str, str]]) -> None:
     strip is what makes them read as one rubric.
 
     `entries` is (key, label, path); the current one is marked, not linked.
+
+    Every path is checked to be an in-app route. `ui.navigate.to` becomes
+    window.open in the app's own origin, and the rule that guards that
+    elsewhere refuses a call that SUBSCRIPTS its way to a target — which this
+    helper does not do, because its target arrives as a plain parameter. A
+    generic navigator therefore has to carry its own gate, or the next caller
+    can hand it a stored employer URL and the AST rule will not notice.
     """
+    # Before a single element is drawn: a strip that raised halfway would
+    # leave half a rubric on screen and the rest of the page unbuilt.
+    for _key, _label, path in entries:
+        if not _is_internal(path):
+            raise ValueError(f"a tab may only open an in-app route: {path!r}")
     with ui.row().classes("jd-tabs w-full gap-1 items-center"):
         for key, label, path in entries:
             element = ui.element("button").classes("jd-tab").props(
@@ -54,6 +66,19 @@ def tabs(current: str, entries: list[tuple[str, str, str]]) -> None:
                 element.on("click", lambda _=None, p=path: ui.navigate.to(p))
             with element:
                 ui.label(label)
+
+
+def _is_internal(path: str) -> bool:
+    """A single-slash-rooted path of this app, and nothing that can leave it.
+
+    `//host` is protocol-relative and leaves the origin; a backslash is
+    normalised to a slash by browsers, so `/\\host` leaves it too; a colon
+    before the first slash is a scheme.
+    """
+    text = str(path or "")
+    return (text.startswith("/")
+            and not text.startswith(("//", "/\\"))
+            and ":" not in text.split("/")[0])
 
 
 @asynccontextmanager

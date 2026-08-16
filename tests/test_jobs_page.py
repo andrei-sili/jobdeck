@@ -863,12 +863,43 @@ def _unhosted_ui_calls(path):
     return sorted(set(offenders))
 
 
-# Every page that CLEARS a container and rebuilds it. `applications.py` is
-# deliberately absent: its refresh assigns `table.rows` and deletes no element,
-# so no handler's slot can die under it.
-@pytest.mark.parametrize("page_module",
-                         ["jobs.py", "queue.py", "unterlagen.py",
-                          "../draft_editor.py"])
+def _overlay_files() -> list[str]:
+    """Every module that CLEARS a container and rebuilds it — DERIVED.
+
+    That is the rule's own premise, so it is read out of the source rather
+    than out of a hand-written list. The list silently skipped whichever page
+    was newest — the same shape as the signature rule that matched a spelling
+    and covered nothing for a whole slice — and it carried an excuse for a
+    page (`applications.py`) that no longer exists, while the screen that
+    replaced it clears three containers on a timer.
+
+    A module that clears nothing is excluded because no handler's slot can die
+    under it, which is exactly why `settings.py` is not in the result.
+    """
+    pages = pathlib.Path(jobs.__file__).parent
+    candidates = [(path.name, path) for path in pages.glob("*.py")] + [
+        (f"../{path.name}", path) for path in pages.parent.glob("*.py")]
+    found = []
+    for name, path in candidates:
+        if path.stem in ("__init__", "app"):
+            continue
+        tree = ast.parse(path.read_text())
+        clears = any(isinstance(node, ast.Call)
+                     and ast.unparse(node.func).endswith(".clear")
+                     and not node.args
+                     for node in ast.walk(tree))
+        if clears:
+            found.append(name)
+    return sorted(found)
+
+
+# Every page that CLEARS a container and rebuilds it — DERIVED, like the
+# overlay rule below. The hand-written list carried an excuse for
+# `applications.py` ("its refresh assigns table.rows and deletes no element"),
+# and that excuse outlived the page: `bewerbungen.py` replaced it and clears
+# three containers on a timer, so the list would have skipped the very screen
+# most exposed to this.
+@pytest.mark.parametrize("page_module", _overlay_files())
 def test_nothing_is_shown_on_a_slot_that_may_already_be_gone(page_module):
     """The defect CLASS, not the one place it was found. A handler runs in the
     slot of the element that fired it; any refresh — its own, a concurrent
@@ -1618,20 +1649,6 @@ def _own_nodes(func):
                 continue
             stack.append(child)
     return own
-
-
-def _overlay_files() -> list[str]:
-    """Every module that can hold a handler with an overlay, DERIVED.
-
-    Written out by hand, this list silently skipped whichever page was newest
-    — the same shape as the signature rule that matched a spelling and covered
-    nothing for a whole slice. A page added tomorrow is scanned by existing.
-    """
-    pages = pathlib.Path(jobs.__file__).parent
-    return sorted(
-        [path.name for path in pages.glob("*.py") if path.stem != "__init__"]
-        + [f"../{path.name}" for path in pages.parent.glob("*.py")
-           if path.stem not in ("__init__", "app")])
 
 
 @pytest.mark.parametrize("page_module", _overlay_files())
