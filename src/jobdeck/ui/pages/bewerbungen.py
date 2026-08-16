@@ -264,7 +264,13 @@ async def bewerbungen_page():
                     ui.label("Was antwortet").classes("jd-card-title")
                     ui.label("Beantwortete Bewerbungen je Weg.") \
                         .classes("jd-card-sub")
-                    _share_rows(channels, unit="beantwortet",
+                    # The bar is the RATE here, because that is what this
+                    # panel compares. Drawn as the population it would have
+                    # said the opposite of the sentence beneath it: 41 against
+                    # 35 is a visibly longer bar for Online-Portal, and the
+                    # eye reads the bar nearest a percentage as that
+                    # percentage.
+                    _share_rows(channels, unit="beantwortet", bar="ratio",
                                 rate=register.enough_for_a_rate(channels))
                     ui.label(
                         _channel_verdict(channels,
@@ -274,23 +280,35 @@ async def bewerbungen_page():
                     ui.label("Was jede Quelle bringt").classes("jd-card-title")
                     ui.label("Anzeigen einer Quelle, und was davon eine "
                              "Bewerbung wurde.").classes("jd-card-sub")
-                    _share_rows(sources, unit="beworben", rate=False)
+                    # …and the POPULATION here, because this panel is about
+                    # what a board delivers: a long bar with a small figure
+                    # beside it is the finding — most postings, fewest
+                    # applications.
+                    _share_rows(sources, unit="beworben", bar="whole",
+                                rate=False)
                     ui.label("Nur die Bewerbungen, die JobDeck eingetragen "
                              "hat — eine von Hand übernommene Zeile kennt "
                              "keine Quelle.").classes("jd-card-sub")
 
-        def _share_rows(shares: list[register.Share], unit: str,
+        def _share_rows(shares: list[register.Share], unit: str, bar: str,
                         rate: bool) -> None:
-            widest = max((share.whole for share in shares), default=0) or 1
+            """`bar` names what the bar measures — 'ratio' or 'whole'.
+
+            Named at the call site rather than assumed, because the two panels
+            drawn with this helper compare different things, and a bar whose
+            meaning has to be inferred from its neighbours is a bar that will
+            eventually be read as the wrong one.
+            """
+            widths = register.bar_widths(shares, bar)
             with ui.element("div").classes("jd-wait"):
-                for index, share in enumerate(shares):
+                for index, (share, width) in enumerate(zip(shares, widths,
+                                                           strict=True)):
                     last = " last" if index == len(shares) - 1 else ""
                     ui.label(f"{share.label} · {share.whole}") \
                         .classes("firma" + last)
                     with ui.element("span").classes("jd-bar" + last) \
                             .style("align-self:center"):
-                        ui.element("i").style(
-                            f"width:{round(share.whole / widest * 100)}%")
+                        ui.element("i").style(f"width:{round(width * 100)}%")
                     ui.label(f"{share.part} {unit}"
                              + (f" · {round(share.ratio * 100)} %" if rate
                                 else "")).classes("age" + last)

@@ -7,8 +7,11 @@ the 44 applications that predate it.
 
 import datetime
 
+import pytest
+
 from jobdeck import db
 from jobdeck.services import register
+from jobdeck.services.register import Share
 
 TODAY = datetime.date(2026, 8, 16)
 
@@ -311,3 +314,43 @@ def test_a_board_only_gets_credit_for_the_applications_it_carried(con):
     assert rows["jooble"]["jobs"] == 1
     assert rows["jooble"]["applied"] == 1
     assert sum(row["applied"] for row in rows.values()) == 1, "not the hand row"
+
+
+# --------------------------------------------------------------------------
+# A bar is a claim
+# --------------------------------------------------------------------------
+def test_a_rate_bar_is_the_rate_and_not_the_crowd_behind_it():
+    """The answer panel drew the POPULATION while printing the RATE beside it,
+    so 41 applications answered at 27 % out-drew 35 answered at 26 % — a
+    visibly longer bar directly under a sentence saying the two are level."""
+    shares = [Share("Online-Portal", 11, 41, 11 / 41),
+              Share("E-Mail", 9, 35, 9 / 35)]
+
+    widths = register.bar_widths(shares, "ratio")
+
+    assert widths[0] == 1.0
+    assert 0.95 < widths[1] < 1.0, "level rates must draw level bars"
+
+
+def test_a_population_bar_still_shows_the_crowd_where_that_is_the_finding():
+    """"Most postings, fewest applications" is only visible if the bar is the
+    postings."""
+    shares = [Share("arbeitnow", 12, 523, 12 / 523),
+              Share("jooble", 5, 129, 5 / 129)]
+
+    widths = register.bar_widths(shares, "whole")
+
+    assert widths[0] == 1.0
+    assert round(widths[1], 3) == round(129 / 523, 3)
+
+
+def test_a_bar_must_say_what_it_measures():
+    """The two panels drawn by one helper compare different things. A meaning
+    inferred from the neighbours is a meaning that gets read wrong."""
+    with pytest.raises(ValueError):
+        register.bar_widths([Share("x", 1, 2, 0.5)], "guess")
+
+
+def test_a_comparison_with_nothing_in_it_draws_nothing():
+    assert register.bar_widths([], "ratio") == []
+    assert register.bar_widths([Share("x", 0, 0, 0.0)], "whole") == [0.0]

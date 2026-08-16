@@ -234,6 +234,29 @@ def by_source(rows: list[dict]) -> list[Share]:
     return sorted(shares, key=lambda s: (-s.whole, s.label))
 
 
+# What a comparison's bars are allowed to mean. 'ratio' draws the share itself
+# — the right choice whenever a percentage is printed beside it. 'whole' draws
+# the population, which is the finding when the panel is about what a source
+# delivers rather than how well it converts.
+BAR_MEASURES = ("ratio", "whole")
+
+
+def bar_widths(shares: list[Share], measure: str) -> list[float]:
+    """Bar widths in 0..1 for one comparison, scaled to its own largest.
+
+    Computed here rather than in the drawing code because a bar is a CLAIM: on
+    the answer panel the bar was the population while the figure beside it was
+    the rate, so Online-Portal's 41 applications drew a visibly longer bar than
+    E-Mail's 35 — directly under a sentence saying the two answer equally often.
+    """
+    if measure not in BAR_MEASURES:
+        raise ValueError(f"a bar may mean {BAR_MEASURES}, not {measure!r}")
+    values = [share.ratio if measure == "ratio" else float(share.whole)
+              for share in shares]
+    widest = max(values, default=0.0)
+    return [(value / widest if widest > 0 else 0.0) for value in values]
+
+
 def enough_for_a_rate(shares: list[Share]) -> bool:
     """Whether a comparison of these shares may be stated as a percentage."""
     return sum(share.whole for share in shares) >= ENOUGH_FOR_A_RATE
@@ -256,7 +279,6 @@ def facts() -> dict:
             "signature": signature,
             "apps": [dict(row) for row in db.list_bewerbungen(con)],
             "sources": [dict(row) for row in db.applications_by_source(con)],
-            "waiting_letters": db.count_waiting_drafts(con),
             "follow_up_days": follow_up_setting(
                 db.get_setting(con, "follow_up_days", "")),
             **counts,
