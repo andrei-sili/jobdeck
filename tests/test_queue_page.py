@@ -150,8 +150,9 @@ def test_an_abandoned_claim_says_so_instead_of_promising_a_minute():
     # and it names a screen that exists: it used to send him to "Draft
     # application" in the "Job inbox", and neither has been called that for
     # two slices — the label there now depends on the posting's channel, so
-    # the sentence names the SCREEN and lets the row carry its own word
-    assert "In den Stellen" in text
+    # the sentence names the SCREEN, in quotes, and says what to do there
+    assert "„Stellen“" in text
+    assert "Anschreiben" in text
     assert "amber" in classes
     # the number it prints is the real age, not a constant
     assert str(drafting.CLAIM_TIMEOUT_MIN + 2) in text
@@ -311,13 +312,13 @@ def test_building_the_mappe_refreshes_what_the_send_pins(con, data_dir):
 
 def test_a_draft_that_is_already_going_is_not_offered_a_send_button(con, data_dir):
     """A draft in `sending` or `sent` is the record of what went out. Offering
-    "Send now" on one made the pre-send confirmation state "REAL send to the
+    "Jetzt senden" on one made the pre-send confirmation state "ECHTER Versand
     company" for a message the service refuses inside its claim — and that
     dialog's whole job is to be trustworthy."""
     assert "sending" not in draft_editor.EDITABLE_STATUS
     assert "sent" not in draft_editor.EDITABLE_STATUS
     source = pathlib.Path(draft_editor.__file__).read_text()
-    guard = source[:source.index('"Send now"')]
+    guard = source[:source.index('"Jetzt senden"')]
     assert 'if row["status"] in EDITABLE_STATUS:' in guard
 
 

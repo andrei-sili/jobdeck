@@ -202,11 +202,11 @@ async def test_send_now_reaches_the_confirmation_with_the_resolved_recipient(
     await user.open("/queue")
     user.find("Prüfen und senden").click()
     await asyncio.sleep(0.2)
-    user.find("Send now").click()
+    user.find("Jetzt senden").click()
     await asyncio.sleep(0.3)
 
-    await user.should_see("Send this application?")
-    await user.should_see("TEST send: probe@example.org")
+    await user.should_see("Diese Bewerbung abschicken?")
+    await user.should_see("Testversand an: probe@example.org")
     assert db.count_outbound_today(con) == 0, "nothing may be sent by a test"
 
 
@@ -269,16 +269,16 @@ async def test_the_send_confirmation_repeats_the_duplicate_warning(
     user.find("Prüfen und senden").click()
     await asyncio.sleep(0.2)
 
-    user.find("Send now").click()
+    user.find("Jetzt senden").click()
     await asyncio.sleep(0.3)
 
     # scoped to the dialog: the row behind it carries the same sentence, so a
     # page-wide search would pass with the dialog's own line deleted
     confirm = next(e for e in user.client.elements.values()
                    if isinstance(e, ui.dialog) and e.value
-                   and any("Send this application?" in getattr(d, "text", "")
+                   and any("Diese Bewerbung abschicken?" in getattr(d, "text", "")
                            for d in e.descendants()))
     shown = [getattr(el, "text", "") for el in confirm.descendants()]
-    assert any("Send this application?" in (t or "") for t in shown)
+    assert any("Diese Bewerbung abschicken?" in (t or "") for t in shown)
     assert any("bereits beworben" in (t or "") for t in shown), \
         "the last screen before the press does not repeat the warning"

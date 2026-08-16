@@ -24,7 +24,10 @@ log = logging.getLogger(__name__)
 # The stack, what has gone, and what was put away. German like the rest of
 # the app: this screen sat in English long after the rubric around it changed
 # language, and it is the last one a message passes through.
-FILTERS = {"open": "Warten", "sent": "Raus", "discarded": "Verworfen"}
+# Three nouns, one word class. "Warten" asserted of five states what is true
+# of one (a failed draft is not waiting), and "Raus" was markedly colloquial
+# for the tab that lists what has gone to employers.
+FILTERS = {"open": "Offen", "sent": "Erledigt", "discarded": "Verworfen"}
 FILTER_STATUSES = {
     # 'failed' belongs here too: its only other surface is the Job inbox's
     # Draft button, which disappears once the job leaves status 'new'.
@@ -39,7 +42,7 @@ FILTER_STATUSES = {
     "discarded": ["discarded"],
 }
 EMPTY_TEXT = {
-    "open": "Nichts wartet. Ein Anschreiben entsteht in den Stellen.",
+    "open": "Nichts offen. Ein Anschreiben entsteht unter „Stellen“.",
     "sent": "Bisher ist nichts rausgegangen.",
     "discarded": "Nichts verworfen.",
 }
@@ -65,7 +68,10 @@ DRAFT_STATE = {
     "approved": "freigegeben",
     "sending": "wird gesendet…",
     "sent": "gesendet",
-    "filed": "eingereicht",
+    # NOT "eingereicht": that word claims an employer received this text, and
+    # 'filed' only knows that an application for the posting is in the ledger.
+    # The register says which, because it holds the row that can tell.
+    "filed": "abgelegt",
     "failed": "fehlgeschlagen",
     "discarded": "verworfen",
 }
@@ -85,8 +91,8 @@ def generating_line(updated_at: object) -> tuple[str, str]:
     if drafting.claim_is_stale(updated_at):
         minutes = int(drafting.claim_age_minutes(updated_at))
         return (f"⚠ Seit {minutes} Minuten kein Ergebnis — der Vorgang wurde "
-                "abgebrochen. In den Stellen lässt sie sich neu "
-                "schreiben.", "text-sm text-amber-700")
+                "abgebrochen. Unter „Stellen“ lässt sich das Anschreiben "
+                "neu schreiben.", "text-sm text-amber-700")
     return ("Die Bewerbung wird gerade geschrieben — das dauert etwa eine "
             "Minute. Die Zeile aktualisiert sich von selbst.",
             "text-sm text-blue-700")
@@ -144,7 +150,7 @@ def _load(filter_value: str) -> dict:
 
 @ui.page("/queue")
 async def queue_page():
-    async with frame("Postausgang", current="bewerbungen"):
+    async with frame("Postausgang", current="bewerbungen", shelf=False):
         filter_state = {"value": "open"}
         refresh_gen = {"n": 0}  # rapid filter flips: last request wins
         shown = {"live_claim": False}
@@ -196,14 +202,14 @@ async def queue_page():
             banner.clear()
             with banner:
                 if status["real"]:
-                    ui.label("ECHTER VERSAND IST AN — die E-Mails gehen an "
+                    ui.label("Echter Versand ist an — die E-Mails gehen an "
                              "die Firmen.").classes(
                         "text-sm font-bold text-red-700")
                 else:
                     target = status["test_recipient"] or \
                         "niemanden — in den Einstellungen eine Testadresse " \
                         "eintragen"
-                    ui.label(f"TESTMODUS — jeder Versand geht an: {target}") \
+                    ui.label(f"Testmodus — jeder Versand geht an: {target}") \
                         .classes("text-sm font-bold text-amber-700")
                 ui.label(f"{status['sent_today']} von {status['cap']} heute "
                          "gesendet").classes("text-xs text-gray-500")
@@ -294,7 +300,7 @@ async def queue_page():
                                   on_click=lambda r=row: discard(r)) \
                             .props("outline color=grey")
                     if row["status"] == "failed":
-                        ui.label("Das Schreiben ist fehlgeschlagen — neu "
+                        ui.label("Der Entwurf ist fehlgeschlagen — neu "
                                  "schreiben oder verwerfen.") \
                             .classes("text-sm text-amber-700")
                         # It used to send him to the Job inbox for this, where
@@ -308,11 +314,11 @@ async def queue_page():
                                   on_click=lambda r=row: discard(r)) \
                             .props("outline color=grey")
                     if row["status"] == "sending":
-                        ui.label("Ein Versand läuft — oder ist mittendrin "
-                                 "abgebrochen. Vor dem Auflösen im Gmail-"
-                                 "Ordner „Gesendet“ nachsehen. Ein "
-                                 "steckengebliebener TESTversand gilt immer "
-                                 "als „nicht gesendet“.") \
+                        ui.label("Ein Versand läuft — oder er ist stecken "
+                                 "geblieben. Vorher im Gmail-Ordner "
+                                 "„Gesendet“ nachsehen. Ein steckengebliebener "
+                                 "Testversand gilt immer als „nicht "
+                                 "gesendet“.") \
                             .classes("text-sm text-amber-700")
                         ui.button("Nicht gesendet — zurücklegen", icon="undo",
                                   on_click=lambda r=row: resolve(r, False)) \
@@ -325,12 +331,12 @@ async def queue_page():
                         # went into an employer's upload field would credit
                         # this app with an e-mail it never addressed.
                         sent_info = (
-                            f"mit der Bewerbung eingereicht "
+                            f"zur eingetragenen Bewerbung abgelegt "
                             f"{row['updated_at'][:16]}"
                             if row["status"] == "filed"
                             else f"gesendet {row['updated_at'][:16]}")
                         if row["gmail_message_id"]:
-                            sent_info += f" · gmail id {row['gmail_message_id']}"
+                            sent_info += f" · Gmail-Kennung {row['gmail_message_id']}"
                         ui.label(sent_info).classes("text-xs text-gray-500")
                         if row["pdf_path"]:
                             ui.button("Mappe öffnen", icon="open_in_new",
@@ -380,7 +386,7 @@ async def queue_page():
 
         async def approve(row: dict):
             await _simple_action(send.approve, row["job_id"],
-                                 "Freigegeben — der Auto-Versand nimmt sie")
+                                 "Freigegeben — der Auto-Versand übernimmt sie.")
 
         async def unapprove(row: dict):
             await _simple_action(send.unapprove, row["job_id"],
@@ -398,8 +404,8 @@ async def queue_page():
                 with overlay, ui.dialog() as confirm, ui.card():
                     ui.label("Als gesendet eintragen?").classes("font-bold")
                     ui.label("Nur wenn der Gmail-Ordner „Gesendet“ diese "
-                             "Nachricht zeigt. Sie wird ohne Gmail-Kennungen "
-                             "eingetragen.").classes("text-sm")
+                             "Nachricht zeigt. Die Bewerbung wird dann ohne "
+                             "Gmail-Kennung eingetragen.").classes("text-sm")
                     with ui.row().classes("justify-end gap-2 w-full"):
                         ui.button("Abbrechen",
                                   on_click=lambda: confirm.submit(False)) \

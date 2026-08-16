@@ -213,7 +213,14 @@ def delete_bewerbung(con: sqlite3.Connection, row_id: int) -> None:
     con.execute(
         "UPDATE drafts SET bewerbung_id=NULL WHERE bewerbung_id=?", (row_id,)
     )
-    con.execute("UPDATE jobs SET bewerbung_id=NULL WHERE bewerbung_id=?", (row_id,))
+    # …and the posting goes back to being a posting. Clearing the link while
+    # leaving `status='applied'` hid it from every working view with no ledger
+    # row behind it and no way back — the same shape `unrecord_application`
+    # was written to avoid, on the other of the two paths that delete a row.
+    con.execute(
+        "UPDATE jobs SET bewerbung_id=NULL, status='new' WHERE bewerbung_id=?",
+        (row_id,),
+    )
     con.execute(
         "UPDATE jobs SET duplicate_of=NULL WHERE duplicate_of=?", (row_id,)
     )

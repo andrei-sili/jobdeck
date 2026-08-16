@@ -267,7 +267,7 @@ async def test_a_filed_letter_may_not_be_rewritten(con, data_dir, monkeypatch):
     result = await drafting.draft_for_job(job_id)
 
     assert not result["ok"]
-    assert "eingereicht" in result["error"] or "recorded" in result["error"]
+    assert "Bewerbung eingetragen" in result["error"]
     assert db.get_draft_by_job(con, job_id)["status"] == "filed"
 
 
@@ -367,36 +367,34 @@ def test_a_filed_letter_never_earns_a_second_one(con, data_dir):
     assert filed not in taken
 
 
-def test_a_letter_is_filed_only_where_it_provably_travelled(con, data_dir):
-    """'filed' is a claim that an EMPLOYER holds this letter, so it needs
-    evidence and not merely two rows existing at once. The only evidence this
-    app has is that it built a COMPLETE Mappe around the letter and staged it
-    for the employer's upload field."""
-    # a form application whose Mappe never finished
-    broken = _job(con, external_id="broken", company="Halbe Mappe GmbH")
-    db.mark_form_opened(con, broken)
-    db.upsert_draft(con, broken, {"status": "ready",
-                                  "anschreiben_body": "Sehr geehrte"})
+def test_every_hand_recorded_channel_closes_its_letter(con, data_dir):
+    """The first version of this rule required a complete Mappe on the FORM
+    channel. It read well and left the headline defect half-fixed: a by-e-mail
+    application recorded by hand went on offering its letter in the Postausgang
+    for ever, at a company that already had an application. It also made the
+    one-shot migration and this writer disagree about the same rows, which is
+    what the security review refused to ship.
+
+    'filed' therefore says only what this app can know — an application for
+    this posting is in the ledger — and the SCREENS say how it went, from the
+    ledger row's own channel and document."""
+    by_mail = _job(con, external_id="mail", company="Per Mail GmbH")
+    _with_mappe(con, data_dir, by_mail)
+    # a form application whose Mappe never finished: the letter still closes,
+    # because an application for the posting exists either way
+    no_mappe = _job(con, external_id="broken", company="Halbe Mappe GmbH")
+    db.mark_form_opened(con, no_mappe)
+    db.upsert_draft(con, no_mappe, {"status": "ready",
+                                    "anschreiben_body": "Sehr geehrte"})
     con.commit()
 
-    assert apply_record.record_form_application(broken)["ok"]
+    assert apply_record.record_application(by_mail,
+                                           apply_record.KANAL_EMAIL)["ok"]
+    assert apply_record.record_form_application(no_mappe)["ok"]
 
-    assert db.get_draft_by_job(con, broken)["status"] == "ready", \
-        "the strip says the Mappe is not complete; the letter did not travel"
-
-
-def test_an_e_mail_application_recorded_by_hand_files_nothing(con, data_dir):
-    """This app did not send it — `send.py` records its own sends and marks
-    them 'sent'. All that is known is that he says he applied, which says
-    nothing about which text the employer read. Filing it would also make the
-    register label it "mit der Bewerbungsmappe eingereicht"."""
-    job_id = _job(con, external_id="mail", company="Per Mail GmbH")
-    _with_mappe(con, data_dir, job_id)
-
-    result = apply_record.record_application(job_id, apply_record.KANAL_EMAIL)
-
-    assert result["ok"]
-    assert db.get_draft_by_job(con, job_id)["status"] == "ready"
+    assert db.get_draft_by_job(con, by_mail)["status"] == "filed"
+    assert db.get_draft_by_job(con, no_mappe)["status"] == "filed"
+    assert db.count_waiting_drafts(con) == 0, "neither may go on waiting"
 
 
 def test_deleting_the_application_hands_its_letter_back(con, data_dir):

@@ -262,7 +262,9 @@ def test_a_board_is_measured_by_what_its_postings_became():
 
     shares = register.by_source(rows)
 
-    assert [s.label for s in shares] == ["arbeitnow", "jooble"]
+    # named the way the screen names them, not by the adapter's own key: the
+    # panel read "arbeitsagentur · 285" in an otherwise German screen
+    assert [s.label for s in shares] == ["Arbeitnow", "Jooble"]
     assert shares[0].ratio < shares[1].ratio, "most postings, fewest applications"
 
 
@@ -502,3 +504,21 @@ def test_the_strips_end_labels_are_written_the_way_the_screen_speaks():
     is otherwise entirely German — with the suite green."""
     assert register.de_day(datetime.date(2026, 6, 18)) == "18. Juni"
     assert register.de_day(datetime.date(2026, 3, 1)) == "1. März"
+
+
+def test_a_board_nobody_named_is_still_shown_under_its_own_key():
+    """A source added tomorrow must appear, not vanish behind a KeyError or an
+    empty label."""
+    assert register.source_name("stepstone") == "stepstone"
+    assert register.source_name("arbeitsagentur") == "Arbeitsagentur"
+
+
+def test_a_count_of_one_is_never_printed_with_a_plural():
+    """Six German sentences on this screen were written only in the plural, so
+    a register of one application read "1 Bewerbungen ohne Antwort", "mit 1
+    Bewerbungen" and "1 davon sind über der Schwelle"."""
+    assert register.plural(1, "Tag Pause", "Tage Pause") == "1 Tag Pause"
+    assert register.plural(36, "Tag Pause", "Tage Pause") == "36 Tage Pause"
+    assert register.plural(0, "Tag", "Tage") == "", "zero drops the note"
+    assert register.plural(1, "davon wartet", "davon warten", tail=" länger") \
+        == "1 davon wartet länger"

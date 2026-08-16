@@ -269,7 +269,6 @@ body { background: var(--paper); color: var(--ink); font-family: var(--jd-sans);
            color: var(--ink-2); white-space:nowrap; }
 .jd-pill.ok { background: var(--accent-soft); color: var(--accent-deep); }
 .jd-pill.warn { background: var(--warn-soft); color: var(--warn); }
-.jd-pill.danger { background: var(--danger-soft); color: var(--danger); }
 
 /* One row of the register: a permission, and how often a letter used it. */
 .jd-claim { display:grid; grid-template-columns:1fr auto auto; gap:0 12px;

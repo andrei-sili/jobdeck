@@ -1180,7 +1180,7 @@ async def test_the_editor_the_queue_uses_opens_over_the_list_too(
     await asyncio.sleep(0.4)
 
     await user.should_see("Bewerbung als Python Entwickler")
-    await user.should_see("Send now")
+    await user.should_see("Jetzt senden")
 
 
 async def test_an_application_landing_while_the_editor_is_open_reaches_the_confirmation(
@@ -1198,17 +1198,17 @@ async def test_an_application_landing_while_the_editor_is_open_reaches_the_confi
     await user.open("/")
     user.find("Prüfen und senden", kind=ui.button).click()
     await asyncio.sleep(0.4)
-    await user.should_see("Send now")
+    await user.should_see("Jetzt senden")
 
     # …and now somebody else applies at that company
     db.add_bewerbung(con, {"gesendet_am": "2026-08-12", "firma": "Beispiel GmbH",
                            "email": "", "kanal": "E-Mail", "status": "Gesendet"})
     con.commit()
 
-    user.find("Send now", kind=ui.button).click()
+    user.find("Jetzt senden", kind=ui.button).click()
     await asyncio.sleep(0.4)
 
-    await user.should_see("Send this application?")
+    await user.should_see("Diese Bewerbung abschicken?")
     await user.should_see("bereits beworben")
 
 

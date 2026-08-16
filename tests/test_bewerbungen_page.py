@@ -243,8 +243,8 @@ async def test_the_send_screen_speaks_the_language_of_the_app(user: User, con):
     it is the last screen a message passes through."""
     await user.open("/queue")
 
-    await user.should_see("TESTMODUS")
-    await user.should_see("Nichts wartet")
+    await user.should_see("Testmodus")
+    await user.should_see("Nichts offen")
 
 
 # --------------------------------------------------------------------------
@@ -410,10 +410,10 @@ async def test_the_funnel_prints_the_populations_it_measured(user: User, con):
     await user.open("/bewerbungen")
 
     await user.should_see("gefunden")
-    await user.should_see("passen zu einem Profil")
+    await user.should_see("nicht ausgeschlossen")
     await user.should_see("von dir geöffnet")
     await user.should_see("Anschreiben geschrieben")
-    await user.should_see("1 verletzen eine harte Anforderung")
+    await user.should_see("1 erfüllt ein Ausschlusskriterium nicht")
 
 
 async def test_the_register_block_names_what_this_app_did_not_do(user: User,
@@ -423,7 +423,7 @@ async def test_the_register_block_names_what_this_app_did_not_do(user: User,
     await user.open("/bewerbungen")
 
     await user.should_see("im Register")
-    await user.should_see("0 über JobDeck · 1 von Hand oder aus dem alten Tracker")
+    await user.should_see("0 über JobDeck · 1 von Hand oder aus der alten Liste")
 
 
 async def test_the_silence_panel_names_the_company_and_its_age(user: User, con):
@@ -432,7 +432,8 @@ async def test_the_silence_panel_names_the_company_and_its_age(user: User, con):
     await user.open("/bewerbungen")
 
     await user.should_see("Schweigt GmbH")
-    await user.should_see("Bewerbungen ohne Antwort")
+    await user.should_see("Bewerbung ohne Antwort")
+    await user.should_see("die am längsten wartende zuerst")
 
 
 # --------------------------------------------------------------------------
@@ -505,7 +506,7 @@ async def test_the_shelf_is_drawn_and_opens_the_stack_it_describes(user: User,
     user.find(marker="postausgang-shelf").click()
     await asyncio.sleep(0.5)
 
-    await user.should_see("TESTMODUS")
+    await user.should_see("Testmodus")
 
 
 async def test_an_empty_stack_draws_no_shelf(user: User, con):
@@ -519,7 +520,7 @@ async def test_a_tab_actually_navigates(user: User, con):
     """No test clicked one: deleting the click handler left the suite green,
     and both destinations could be pointed at /settings."""
     await user.open("/queue")
-    await user.should_see("Nichts wartet")
+    await user.should_see("Nichts offen")
 
     user.find(marker="tab-register").click()
     await asyncio.sleep(0.5)
@@ -534,3 +535,63 @@ def test_each_face_of_the_rubric_points_at_its_own_screen():
     assert paths["register"] == bewerbungen.BEWERBUNGEN_PATH
     assert paths["postausgang"] == "/queue"
     assert queue_page.queue_page.__module__.endswith("queue")
+
+
+async def test_the_shelf_is_absent_on_the_page_it_opens(user: User, con):
+    """Everything else in the foot reports; the shelf is the one element that
+    means "there is something ELSEWHERE to do", and on the Postausgang it was
+    a button that navigated to the page you were already on."""
+    job_id = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "x", "company": "Firma",
+        "title": "Entwickler", "url": "https://x.example/1"})
+    db.upsert_draft(con, job_id, {"status": "ready"})
+    con.commit()
+
+    await user.open("/bewerbungen")
+    await user.should_see("1 Brief wartet")
+
+    await user.open("/queue")
+    await user.should_not_see("1 Brief wartet")
+
+
+def test_a_bar_never_publishes_a_rate_the_card_refuses_to_state(con):
+    """When `enough_for_a_rate` is False the card prints counts and a sentence
+    saying a percentage would be noise — and then drew exactly those
+    percentages, so one application on a third channel got a full bar."""
+    thin = [register.Share("E-Mail", 9, 35, 9 / 35),
+            register.Share("Post", 1, 1, 1.0)]
+    assert not register.enough_for_a_rate(thin)
+
+    widths = register.bar_widths(thin, "whole")
+
+    assert widths[0] == 1.0, "the population leads when the rate may not"
+    assert widths[1] < 0.1
+
+
+def test_a_tab_target_is_judged_the_way_the_browser_will_read_it():
+    """The browser REMOVES ASCII tab, LF and CR before parsing, so
+    "/\\t/evil.example/x" reaches window.open as "//evil.example/x" — off this
+    origin. A screen must judge a value the way its CONSUMER will."""
+    from jobdeck.ui import layout
+    for hostile in ("/\t/evil.example/x", "/\n/evil.example/x",
+                    "/\r/evil.example/x", "/\t\\evil.example"):
+        assert not layout._is_internal(hostile), repr(hostile)
+    assert layout._is_internal("/bewerbungen")
+
+
+def test_deleting_an_application_gives_its_posting_back(con):
+    """Clearing the link while leaving `status='applied'` hid the posting from
+    every working view with no ledger row behind it and no way back."""
+    job_id = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "x", "company": "Firma GmbH",
+        "title": "Entwickler", "url": "https://x.example/1"})
+    bewerbung_id = db.apply_job(con, job_id, kanal="E-Mail")
+    con.commit()
+    assert db.get_job(con, job_id)["status"] == "applied"
+
+    db.delete_bewerbung(con, bewerbung_id)
+    con.commit()
+
+    job = db.get_job(con, job_id)
+    assert job["status"] == "new"
+    assert job["bewerbung_id"] is None

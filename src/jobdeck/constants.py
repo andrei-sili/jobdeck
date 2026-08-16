@@ -23,18 +23,6 @@ OFFENE_STATUS = {"Gesendet", "In Bearbeitung"}
 # Statuses that mean the company replied (response-rate metric)
 BEANTWORTET_STATUS = {"Antwort erhalten", "Einladung", "Absage"}
 
-# Row background colors by status (visual scanning in tables)
-STATUS_COLORS = {
-    "Gesendet": "#ffffff",
-    "In Bearbeitung": "#fff6d6",
-    "Antwort erhalten": "#d9e8f7",
-    "Einladung": "#d7f3d7",
-    "Absage": "#f6dcdc",
-    "Zurückgezogen": "#e6e6e6",
-}
-# Highlight for applications past the follow-up threshold without an answer
-FAELLIG_COLOR = "#ffd28a"
-
 # Rank used to prevent automatic status downgrades: a late confirmation
 # e-mail must never overwrite an already-recorded invitation or rejection.
 STATUS_RANK = {

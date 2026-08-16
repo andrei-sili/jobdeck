@@ -78,6 +78,20 @@ class Day:
     count: int
 
 
+def plural(count: int, one: str, many: str, tail: str = "") -> str:
+    """"1 Tag Pause" and "36 Tage Pause" — never "1 Tage Pause".
+
+    Every figure on this screen can be one. Six German sentences were written
+    only in the plural, so a register holding a single application read
+    "1 Bewerbungen ohne Antwort", "mit 1 Bewerbungen" and "1 davon sind über
+    der Schwelle" — the kind of German that makes a reader distrust the
+    number beside it. Returns '' for zero, so a caller can drop the note.
+    """
+    if not count:
+        return ""
+    return f"{count} {one if count == 1 else many}{tail}"
+
+
 def _share(part: int, whole: int) -> float:
     return min(1.0, part / whole) if whole > 0 else 0.0
 
@@ -96,14 +110,22 @@ def pipeline(view: dict) -> list[Step]:
     # it, so without this the drop from "gefunden" is partly unexplained and
     # the one note under it would be read as the whole reason.
     unscored = max(0, found - view["scored_above_zero"] - view["scored_zero"])
-    passend_note = ", ".join(filter(None, [
-        f"{view['scored_zero']} verletzen eine harte Anforderung"
-        if view["scored_zero"] else "",
+    passend_note = " · ".join(filter(None, [
+        # "verletzen eine harte Anforderung" was a calque of "violates a hard
+        # requirement"; German HR language says it with Ausschlusskriterium.
+        # Every count on this screen can be 1, so every sentence carrying one
+        # is inflected — `plural` exists because six of them printed
+        # "1 Bewerbungen", "1 Tage" and "1 davon sind".
+        plural(view["scored_zero"], "erfüllt ein Ausschlusskriterium nicht",
+               "erfüllen ein Ausschlusskriterium nicht"),
         f"{unscored} noch nicht bewertet" if unscored else "",
     ]))
     return [
         Step("gefunden", "gefunden", found, 1.0 if found else 0.0),
-        Step("passend", "passen zu einem Profil", view["scored_above_zero"],
+        # NOT "passen zu einem Profil": the figure is every posting the
+        # scorer did not zero, including one scored 3 out of 100, and that
+        # label invites it to be read as "how many actually fit me".
+        Step("passend", "nicht ausgeschlossen", view["scored_above_zero"],
              _share(view["scored_above_zero"], found), passend_note),
         Step("angesehen", "von dir geöffnet", view["opened"],
              _share(view["opened"], found)),
@@ -111,9 +133,11 @@ def pipeline(view: dict) -> list[Step]:
         # rather than in a caption further away.
         Step("anschreiben", "Anschreiben geschrieben", drafted,
              _share(drafted, found),
-             f"{unread_drafts} davon, ohne die Anzeige zu öffnen — der "
-             f"Tagesstapel und das Formular schreiben von selbst"
-             if unread_drafts else ""),
+             plural(unread_drafts,
+                    "davon entstand, ohne dass du die Anzeige geöffnet hast",
+                    "davon entstanden, ohne dass du die Anzeige geöffnet hast",
+                    tail=" — der Tagesstapel in den Einstellungen und der "
+                         "Formular-Ablauf schreiben von selbst")),
         Step("beworben", "hier als Bewerbung eingetragen", applied,
              _share(applied, found),
              # An application can be recorded for a posting nothing was ever
@@ -122,8 +146,9 @@ def pipeline(view: dict) -> list[Step]:
              # application was entered. Counted rather than subtracted: the
              # two sets overlap only partly, so a difference would read as
              # zero whenever there are more letters than applications.
-             f"{view['applied_without_letter']} davon ohne Anschreiben aus "
-             f"JobDeck" if view["applied_without_letter"] else ""),
+             plural(view["applied_without_letter"],
+                    "davon ohne Anschreiben aus JobDeck",
+                    "davon ohne Anschreiben aus JobDeck")),
     ]
 
 
@@ -141,7 +166,7 @@ def ledger(view: dict) -> list[Step]:
     return [
         Step("register", "im Register", total, 1.0 if total else 0.0,
              f"{view['applied']} über JobDeck · {imported} von Hand oder aus "
-             f"dem alten Tracker" if imported else ""),
+             f"der alten Liste" if imported else ""),
         Step("offen", "noch ohne Antwort", open_rows, _share(open_rows, total)),
         Step("beantwortet", "beantwortet", answered, _share(answered, total)),
     ]
@@ -240,6 +265,21 @@ def by_channel(apps: list[dict]) -> list[Share]:
     return sorted(shares, key=lambda s: (-s.whole, s.label))
 
 
+# What a board is CALLED, against the adapter key it is stored under. The
+# panel printed "arbeitsagentur · 285" — a lowercase technical identifier in
+# an otherwise German screen. The full legal names live in `apply_form` for
+# the "Wie haben Sie von uns erfahren?" field; a panel needs the short one.
+SOURCE_NAMES = {
+    "arbeitsagentur": "Arbeitsagentur",
+    "jooble": "Jooble",
+    "arbeitnow": "Arbeitnow",
+}
+
+
+def source_name(key: str) -> str:
+    return SOURCE_NAMES.get(key, key)
+
+
 def by_source(rows: list[dict]) -> list[Share]:
     """Applications per board, against the postings that board delivered.
 
@@ -248,7 +288,7 @@ def by_source(rows: list[dict]) -> list[Share]:
     the register while looking like a statement about all of it.
     """
     shares = [
-        Share(label=str(row.get("source") or "—"),
+        Share(label=source_name(str(row.get("source") or "—")),
               part=int(row.get("applied") or 0),
               whole=int(row.get("jobs") or 0),
               ratio=_share(int(row.get("applied") or 0), int(row.get("jobs") or 0)))

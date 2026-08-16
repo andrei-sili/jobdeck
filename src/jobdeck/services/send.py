@@ -132,7 +132,7 @@ def _claim(job_id: int, snapshot: dict, expect: dict | None) -> tuple[str, str, 
             return "the draft disappeared — refresh the queue", "", True
         if current["status"] == "sending":
             return ("a send for this application is already in progress — "
-                    "if it is stuck, resolve it from the review queue"), "", True
+                    "if it is stuck, im Postausgang auflösen"), "", True
         if current["status"] == "sent":
             return "this application was already sent", "", True
         if current["status"] not in ("ready", "approved"):
@@ -288,7 +288,7 @@ def _send_draft(job_id: int, expect: dict | None = None) -> dict:
         return _error("this application was already sent")
     if draft["status"] == "sending":
         return _error("a send for this application is already in progress — "
-                      "if it is stuck, resolve it from the review queue")
+                      "if it is stuck, im Postausgang auflösen")
     if draft["status"] not in ("ready", "approved"):
         return _error(f"the draft is not sendable (status: {draft['status']})")
     if not draft["betreff"].strip() or not draft["email_body"].strip():
@@ -377,7 +377,7 @@ def _send_draft(job_id: int, expect: dict | None = None) -> dict:
         # checking the Gmail Sent folder) is the only safe recovery.
         log.critical(
             "sent gmail message %s for job %s but recording failed — "
-            "resolve the draft from the review queue", message_id, job_id,
+            "resolve the draft from the Postausgang", message_id, job_id,
         )
         raise
     return {"ok": True, "error": note, "kind": "", "test_mode": test_mode,

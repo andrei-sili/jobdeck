@@ -217,8 +217,8 @@ async def bewerbungen_page():
         def draw_funnel(view: dict) -> None:
             with ui.column().classes("jd-card gap-3"):
                 ui.label("Der Trichter").classes("jd-card-title")
-                ui.label("Was aus dem Stapel wird — und wo die Spalte keine "
-                         "Kette ist.").classes("jd-card-sub")
+                ui.label("Von der Anzeige bis zur Bewerbung — und wo die "
+                         "Stufen keine Folge sind.").classes("jd-card-sub")
                 with ui.element("div").classes("jd-funnel"):
                     for step in register.pipeline(view):
                         _funnel_row(step)
@@ -269,18 +269,26 @@ async def bewerbungen_page():
                     # days to be uninterrupted between. Printed over sixty
                     # empty columns it praised a stretch in which nothing at
                     # all went out.
-                    ui.label(f"{pause} Tage Pause" if pause
-                             else "ohne Pause" if peak else "nichts raus")
+                    ui.label(register.plural(pause, "Tag Pause", "Tage Pause")
+                             or ("ohne Pause" if peak else "keine Bewerbung"))
                     ui.label("heute")
                 if peak is None:
                     ui.label("In diesem Zeitraum ist nichts rausgegangen.") \
                         .classes("jd-card-sub")
                 else:
+                    # Stated as an event, the way the approved mockup did it:
+                    # "der vollste Tag" is a superlative of an absolute
+                    # adjective, and it printed a date when that day is today.
+                    when = ("Heute" if peak.date == today
+                            else f"Am {register.de_day(peak.date)}")
                     ui.label(
-                        f"Der vollste Tag war der {register.de_day(peak.date)} "
-                        f"mit {peak.count} Bewerbungen."
-                        + (f" Die längste Pause dazwischen: {pause} Tage."
-                           if pause else "")).classes("jd-card-sub")
+                        f"{when} gingen "
+                        + register.plural(peak.count, "Bewerbung", "Bewerbungen")
+                        + " raus"
+                        + (", die längste Pause davor oder danach dauerte "
+                           + register.plural(pause, "Tag", "Tage")
+                           if pause else "")
+                        + ".").classes("jd-card-sub")
 
         # ------------------------------------------------------------------
         # 3. Who is silent, and since when
@@ -291,9 +299,16 @@ async def bewerbungen_page():
             overdue = [row for row in waiting if row.overdue]
             with ui.column().classes("jd-card gap-3"):
                 ui.label("Wer schweigt, seit wann").classes("jd-card-title")
-                ui.label(f"{len(waiting)} Bewerbungen ohne Antwort, die "
-                         f"längste zuerst. Ab {view['follow_up_days']} Tagen "
-                         "wird die Zahl bernstein.").classes("jd-card-sub")
+                # "die längste zuerst" agrees with die Bewerbung, so it
+                # promised the longest LETTER first; and "wird die Zahl
+                # bernstein" is not German — a screen should not describe its
+                # own CSS colour either.
+                ui.label(
+                    register.plural(len(waiting), "Bewerbung ohne Antwort",
+                                    "Bewerbungen ohne Antwort")
+                    + " — die am längsten wartende zuerst. Ab "
+                    + f"{view['follow_up_days']} Tagen ist sie überfällig."
+                ).classes("jd-card-sub")
                 if not waiting:
                     # "Jede Bewerbung ist beantwortet" is also what an EMPTY
                     # register produces, and what one holding only withdrawn
@@ -324,17 +339,23 @@ async def bewerbungen_page():
                             # An imported row can state no date at all. "0 T"
                             # would put it at the head of a list whose whole
                             # order is a claim about age.
-                            else "seit unbekannt"
+                            else "ohne Datum"
                         ).classes("age" + (" over" if row.overdue else "") + last)
                 if len(waiting) > len(shown):
-                    ui.label(f"… und {len(waiting) - len(shown)} weitere. "
-                             "Die vollständige Liste steht unten im Register.") \
-                        .classes("jd-card-sub")
+                    ui.label(
+                        "… und "
+                        + register.plural(len(waiting) - len(shown),
+                                          "weitere", "weitere")
+                        + ". Die vollständige Liste steht unten."
+                    ).classes("jd-card-sub")
                 if overdue:
-                    ui.label(f"{len(overdue)} davon sind über der Schwelle. "
-                             "Nachfassen geht noch von Hand — JobDeck schreibt "
-                             "die Nachfass-Mail noch nicht.") \
-                        .classes("jd-card-sub")
+                    ui.label(
+                        register.plural(len(overdue), "davon wartet",
+                                        "davon warten")
+                        + f" länger als {view['follow_up_days']} Tage. "
+                          "Nachfassen geht noch von Hand — JobDeck schreibt "
+                          "die Nachfass-E-Mail noch nicht."
+                    ).classes("jd-card-sub")
 
         # ------------------------------------------------------------------
         # 4 + 5. What answers, and what each board brings
@@ -347,27 +368,28 @@ async def bewerbungen_page():
                     ui.label("Was antwortet").classes("jd-card-title")
                     ui.label("Beantwortete Bewerbungen je Weg.") \
                         .classes("jd-card-sub")
-                    # The bar is the RATE here, because that is what this
-                    # panel compares. Drawn as the population it would have
-                    # said the opposite of the sentence beneath it: 41 against
-                    # 35 is a visibly longer bar for Online-Portal, and the
-                    # eye reads the bar nearest a percentage as that
-                    # percentage.
-                    _share_rows(channels, unit="beantwortet", bar="ratio",
-                                rate=register.enough_for_a_rate(channels))
-                    verdict = _channel_verdict(
-                        channels, register.enough_for_a_rate(channels))
+                    # The bar is the RATE when the rate may be stated, and
+                    # the POPULATION when it may not. Drawn as the population
+                    # it says the opposite of the sentence beneath it (41
+                    # against 35 out-draws two equal rates); drawn as the rate
+                    # while the card is refusing to print percentages, it
+                    # publishes exactly the percentages it just called noise —
+                    # one application on a third channel drawing a full bar.
+                    rate = register.enough_for_a_rate(channels)
+                    _share_rows(channels, unit="beantwortet",
+                                bar="ratio" if rate else "whole", rate=rate)
+                    verdict = _channel_verdict(channels, rate)
                     if verdict:
                         ui.label(verdict).classes("jd-card-sub")
                 with ui.column().classes("jd-card gap-3"):
                     ui.label("Was jede Quelle bringt").classes("jd-card-title")
-                    ui.label("Anzeigen einer Quelle, und was davon eine "
-                             "Bewerbung wurde.").classes("jd-card-sub")
+                    ui.label("Anzeigen je Quelle und wie viele davon zu "
+                             "einer Bewerbung wurden.").classes("jd-card-sub")
                     # …and the POPULATION here, because this panel is about
                     # what a board delivers: a long bar with a small figure
                     # beside it is the finding — most postings, fewest
                     # applications.
-                    _share_rows(sources, unit="beworben", bar="whole",
+                    _share_rows(sources, unit="Bewerbungen", bar="whole",
                                 rate=False)
                     ui.label("Nur die Bewerbungen, die JobDeck eingetragen "
                              "hat — eine von Hand übernommene Zeile kennt "
@@ -429,8 +451,11 @@ async def bewerbungen_page():
                              if len(rows) != len(view["apps"])
                              else f"{len(rows)}").classes("jd-card-sub")
                 with ui.element("div").classes("jd-head"):
+                    # NOT "Still": four nouns and one English-looking
+                    # adjective, above cells reading "12 T" — it parsed as
+                    # "still 12".
                     for column in ("Firma", "Gesendet", "Kanal", "Status",
-                                   "Still"):
+                                   "Wartet seit"):
                         ui.label(column)
                 if not rows:
                     ui.label("Keine Bewerbung passt zu dieser Suche.") \
@@ -495,7 +520,7 @@ async def bewerbungen_page():
                     fields["strasse"] = ui.input(
                         "Straße", value=data.get("strasse") or "")
                     fields["plz_ort"] = ui.input(
-                        "PLZ Ort", value=data.get("plz_ort") or "")
+                        "PLZ / Ort", value=data.get("plz_ort") or "")
                     fields["gesendet_am"] = ui.input(
                         "Gesendet am (JJJJ-MM-TT)",
                         # Today only for a NEW row. Pre-filling an existing

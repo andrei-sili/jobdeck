@@ -76,14 +76,19 @@ def _is_internal(path: str) -> bool:
     normalised to a slash by browsers, so `/\\host` leaves it too; a colon
     before the first slash is a scheme.
     """
-    text = str(path or "")
+    # The browser REMOVES every ASCII tab, LF and CR before it parses a URL
+    # (WHATWG), so "/\t/evil.example/x" reaches window.open as
+    # "//evil.example/x" — protocol-relative, and off this origin. Strip them
+    # the way the consumer will before judging, then judge.
+    text = "".join(ch for ch in str(path or "") if ch not in "\t\n\r")
     return (text.startswith("/")
             and not text.startswith(("//", "/\\"))
             and ":" not in text.split("/")[0])
 
 
 @asynccontextmanager
-async def frame(title: str, current: str = "", padded: bool = True):
+async def frame(title: str, current: str = "", padded: bool = True,
+                shelf: bool = True):
     """Standard page scaffolding. `current` is the rubric key the rail marks.
 
     Asynchronous because the rail reads the database, and every sqlite call
@@ -96,6 +101,6 @@ async def frame(title: str, current: str = "", padded: bool = True):
     with ui.left_drawer(value=True, fixed=True) \
             .classes("jd-rail flex flex-col p-0") \
             .props(f"width={RAIL_WIDTH} bordered"):
-        await rail.install(current)
+        await rail.install(current, with_shelf=shelf)
     with ui.column().classes(PADDED if padded else FULL_BLEED):
         yield

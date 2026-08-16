@@ -98,7 +98,7 @@ def open_editor(row: dict, *, overlay, say, on_change) -> None:
         hint = (f"posting contact: {row['job_contact_email']}"
                 if row["job_contact_email"] else
                 "no contact e-mail found in the posting")
-        recipient = ui.input(f"Recipient ({hint})",
+        recipient = ui.input(f"Empfänger ({hint})",
                              value=row["recipient"]).classes("w-full")
         betreff = ui.input("Betreff", value=row["betreff"]) \
             .classes("w-full")
@@ -109,7 +109,7 @@ def open_editor(row: dict, *, overlay, say, on_change) -> None:
             .classes("w-full").props("autogrow")
         pdf_label = ui.label(
             f"Mappe: {row['pdf_path']}" if row["pdf_path"]
-            else "No Mappe PDF yet — required before sending."
+            else "Noch keine Bewerbungsmappe — ohne sie geht nichts raus."
         ).classes("text-xs text-gray-600")
 
         async def save() -> bool:
@@ -138,12 +138,12 @@ def open_editor(row: dict, *, overlay, say, on_change) -> None:
                 await on_change()
                 return False
             if clear_pdf:
-                pdf_label.set_text("No Mappe PDF yet — the text "
+                pdf_label.set_text("Noch keine Bewerbungsmappe — der Text "
                                    "changed; create it again.")
-                say("Text changed — create the PDF again",
+                say("Text geändert — die Mappe neu bauen",
                           type="warning")
             if was_approved:
-                say("Edited — the draft went back to ready; "
+                say("Geändert — der Entwurf ist wieder offen; "
                           "approve it again for auto-send",
                           type="warning", multi_line=True)
             return True
@@ -151,13 +151,13 @@ def open_editor(row: dict, *, overlay, say, on_change) -> None:
         async def save_only():
             if not await save():
                 return
-            say("Saved", type="positive")
+            say("Gespeichert", type="positive")
             await on_change()
 
         async def make_pdf():
             if not await save():
                 return
-            say("Creating Bewerbungsmappe…")
+            say("Bewerbungsmappe wird gebaut…")
             result = await mappe.create_mappe(job_id)
             if not result["ok"]:
                 say(result["error"], type="warning",
@@ -184,9 +184,9 @@ def open_editor(row: dict, *, overlay, say, on_change) -> None:
         def open_pdf():
             path = current.get("pdf_path", "")
             if not path:
-                say("create the Mappe first", type="warning")
+                say("Erst die Bewerbungsmappe bauen", type="warning")
             elif not pathlib.Path(path).exists():
-                say("the Mappe file is gone — create it again",
+                say("Die Mappe-Datei ist weg — neu bauen",
                           type="warning")
             else:
                 open_in_system(path)
@@ -218,13 +218,17 @@ def open_editor(row: dict, *, overlay, say, on_change) -> None:
             if error:
                 say(error, type="warning", multi_line=True)
                 return
-            mode = ("TEST send" if test_mode
-                    else "REAL send to the company")
+            # The last line he reads before a message leaves. It was English
+            # on a German screen — and this is the one sentence in the app
+            # where the difference between a test and a real employer is
+            # stated, so it is the last place that should need translating.
+            mode = ("Testversand an" if test_mode
+                    else "ECHTER Versand an die Firma")
             attachment = (pathlib.Path(current["pdf_path"]).name
-                          if current["pdf_path"] else "NONE")
+                          if current["pdf_path"] else "keiner")
             already = await run.io_bound(applied_at_this_company, job_id)
             with overlay, ui.dialog() as confirm, ui.card():
-                ui.label("Send this application?").classes("font-bold")
+                ui.label("Diese Bewerbung abschicken?").classes("font-bold")
                 ui.label(f"{mode}: {final}").classes(
                     "text-sm font-bold text-red-700" if not test_mode
                     else "text-sm font-bold text-amber-700")
@@ -238,18 +242,18 @@ def open_editor(row: dict, *, overlay, say, on_change) -> None:
                         .classes("text-sm font-bold text-amber-700")
                 ui.label(f"Betreff: {current['betreff']}") \
                     .classes("text-sm")
-                ui.label(f"Attachment: {attachment}").classes("text-sm")
+                ui.label(f"Anhang: {attachment}").classes("text-sm")
                 with ui.row().classes("justify-end gap-2 w-full"):
-                    ui.button("Cancel",
+                    ui.button("Abbrechen",
                               on_click=lambda: confirm.submit(False)) \
                         .props("flat")
-                    ui.button("Send", icon="send",
+                    ui.button("Abschicken", icon="send",
                               on_click=lambda: confirm.submit(True)) \
                         .props("color=positive")
             confirm.open()
             if not await confirm:
                 return
-            say("Sending…")
+            say("Wird gesendet…")
             # Pin what the confirmation actually showed: between the
             # dialog and this call another tab could have edited the
             # draft or flipped the sending mode.
@@ -283,20 +287,20 @@ def open_editor(row: dict, *, overlay, say, on_change) -> None:
                 say(result["error"], type="warning",
                           multi_line=True)
                 return
-            say("Approved — auto-send will pick it up",
+            say("Freigegeben — der Auto-Versand übernimmt sie.",
                       type="positive")
             dialog.close()
             await on_change()
 
         with ui.row().classes("w-full justify-end gap-2"):
-            ui.button("Save", icon="save", on_click=save_only) \
+            ui.button("Speichern", icon="save", on_click=save_only) \
                 .props("outline")
-            ui.button("Create PDF", icon="picture_as_pdf",
+            ui.button("Mappe bauen", icon="picture_as_pdf",
                       on_click=make_pdf).props("outline")
-            ui.button("Open PDF", icon="open_in_new",
+            ui.button("Mappe öffnen", icon="open_in_new",
                       on_click=open_pdf).props("outline")
             if row["status"] == "ready":
-                ui.button("Approve for auto-send", icon="schedule_send",
+                ui.button("Für Auto-Versand freigeben", icon="schedule_send",
                           on_click=approve_from_editor).props("outline")
             if row["status"] in EDITABLE_STATUS:
                 # A draft that is sending or sent is the record of what went
@@ -304,7 +308,7 @@ def open_editor(row: dict, *, overlay, say, on_change) -> None:
                 # confirmation state "REAL send to the company" for a message
                 # the service refuses inside its own claim — and that dialog's
                 # whole job is to be trustworthy.
-                ui.button("Send now", icon="send", on_click=send_now) \
+                ui.button("Jetzt senden", icon="send", on_click=send_now) \
                     .props("color=positive")
             ui.button("Close", on_click=dialog.close).props("flat")
     dialog.open()

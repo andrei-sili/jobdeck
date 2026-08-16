@@ -388,9 +388,10 @@ def _render(view: dict, current: str, now: datetime.datetime) -> None:
         _render_rubric(rubric, current)
 
 
-def _render_foot(view: dict, now: datetime.datetime) -> None:
+def _render_foot(view: dict, now: datetime.datetime,
+                 with_shelf: bool = True) -> None:
     used, cap = budget(view)
-    line = shelf(view)
+    line = shelf(view) if with_shelf else ""
     if line:
         # Above the budget rather than below it: it is the only thing in the
         # foot he can act on, and it is the reason the budget matters.
@@ -415,7 +416,7 @@ def _render_foot(view: dict, now: datetime.datetime) -> None:
                 ui.label(beat.detail).classes("jd-pulse ml-auto")
 
 
-async def install(current: str) -> None:
+async def install(current: str, with_shelf: bool = True) -> None:
     """Build the rail into the current slot and keep it true while he works.
 
     Awaited as part of building the page rather than handed to a timer: a
@@ -428,6 +429,12 @@ async def install(current: str) -> None:
     Never defers: the rail holds no text he is reading and no row he could be
     acting on, so there is nothing for fresh numbers to yank out from under
     him — the chip the watcher owns therefore never appears.
+
+    `with_shelf` is False on the Postausgang itself. Everything else in the
+    foot reports; the shelf is the one element that means "there is something
+    ELSEWHERE to do", and on that screen it was a button navigating to the
+    page you were already on. It cannot be derived from `current`, because
+    both faces of the rubric mark the same one.
     """
     ui.label("JobDeck").classes("jd-brand px-2 pt-1")
     spine = ui.column().classes("w-full gap-0 px-1 pt-2")
@@ -444,7 +451,7 @@ async def install(current: str) -> None:
         with spine:
             _render(view, current, now)
         with foot:
-            _render_foot(view, now)
+            _render_foot(view, now, with_shelf)
 
     watcher = live.watch(signature, refresh)
     await refresh()

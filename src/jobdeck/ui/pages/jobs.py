@@ -23,7 +23,7 @@ from jobdeck.services import (
     mappe,
     preparing,
 )
-from jobdeck.ui import draft_editor, helpers, live
+from jobdeck.ui import draft_editor, helpers, live, rail
 from jobdeck.ui.helpers import (
     open_in_system,
     openable_url,
@@ -1865,7 +1865,7 @@ async def jobs_page():
                               on_click=lambda: redraft(dialog, job)) \
                         .props("outline no-caps")
                     ui.button("Postausgang", icon="outbox",
-                              on_click=lambda: ui.navigate.to("/queue")) \
+                              on_click=lambda: ui.navigate.to(rail.POSTAUSGANG_PATH)) \
                         .props("outline no-caps")
                     ui.button("Schließen", on_click=dialog.close) \
                         .props("flat no-caps")

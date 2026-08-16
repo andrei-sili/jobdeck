@@ -35,33 +35,30 @@ KANAL_EMAIL = "E-Mail"
 SOURCE_HAND = "hand"
 
 # Draft states whose letter is finished and has not gone anywhere else, so an
-# application recorded now may be what carried it. Every other state is left
-# alone and says why: 'generating' has no letter yet, 'failed' has none at all,
-# 'sent' went by e-mail (and its own duplicate gate would have refused this
-# record), and 'filed'/'discarded' are already closed.
+# application recorded now closes it. Every other state is left alone and says
+# why: 'generating' has no letter yet, 'failed' has none at all, 'sent' went by
+# e-mail and IS the record of that e-mail, and 'filed'/'discarded' are closed.
 FILEABLE = ("ready", "approved")
 
 
-def _file_letter(con, job, draft, kanal: str, bewerbung_id: int) -> None:
-    """Bind the letter to the application, but only where it provably went.
+def _file_letter(con, draft, bewerbung_id: int) -> None:
+    """Close the letter against the application that was recorded for it.
 
-    'filed' is a claim that an EMPLOYER holds this letter, so it needs evidence
-    and not merely two rows existing at the same time. There is exactly one
-    kind of evidence this app has: it built a complete Bewerbungsmappe around
-    the letter and staged that file for the employer's upload field.
+    'filed' says only what this app can know: an application for this posting
+    is in the ledger, so the letter is no longer waiting to be sent and must
+    not be rewritten. It deliberately does NOT claim that an employer read
+    this text — the screens derive that from the ledger row's own evidence,
+    its channel and its `dokument`, and say plainly when they cannot tell.
 
-    So a by-e-mail application recorded by hand files nothing. This app did not
-    send it — `send.py` records its own sends and marks them 'sent' — so all
-    that is known is that he says he applied, which says nothing about which
-    text the employer read. The same for a form application whose Mappe never
-    finished: the strip already tells him it is not complete, and filing the
-    letter would contradict that on the next screen.
+    That is what lets one rule serve every hand-recorded channel. The first
+    version required a complete Mappe on the form channel, which read well but
+    left the headline defect half-fixed: a by-e-mail application recorded by
+    hand went on offering its letter in the Postausgang for ever, at a company
+    that already had an application — the exact shape this slice exists to
+    end. It also made the one-shot migration and this writer disagree about
+    the same rows, which is how a state stops meaning one thing.
     """
     if draft is None or draft["status"] not in FILEABLE:
-        return
-    if kanal != KANAL_FORM:
-        return
-    if job["mappe_kind"] != MAPPE_COMPLETE or not (draft["pdf_path"] or ""):
         return
     db.file_draft(con, draft["id"], bewerbung_id)
 
@@ -109,11 +106,11 @@ def record_application(job_id: int, kanal: str,
             return {"ok": False, "bewerbung_id": None, "company": company,
                     "duplicate": dict(dup) if dup is not None else None,
                     "undo": False}
-        # If the letter provably left with it, bind the two rows together: the
-        # register can then show what actually went to this company, and the
+        # The letter is closed by it: the register can show which text belongs
+        # to this company, and — the part that was costing him — the
         # Postausgang stops offering to e-mail a letter whose application is
         # already out.
-        _file_letter(con, job, draft, kanal, bewerbung_id)
+        _file_letter(con, draft, bewerbung_id)
         # the loop is closed: nothing should still be offered for upload
         upload.clear(job["upload_path"])
         db.set_upload(con, job_id, "", "")

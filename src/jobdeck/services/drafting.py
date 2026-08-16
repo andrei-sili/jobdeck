@@ -27,15 +27,19 @@ log = logging.getLogger(__name__)
 CLAIM_TIMEOUT_MIN = 15
 
 # Statuses a regeneration must refuse, with the way out for each.
+# German, because every one of these is shown to the user verbatim: the job
+# inbox and the Postausgang both do `say(result["error"])`. They were English
+# on German screens, and the one added with 'filed' was broken English at that.
 NO_REGEN = {
-    "approved": "this draft is approved for sending — return it to ready in "
-                "the Postausgang before re-drafting",
-    "sending": "a send for this posting is in progress or stuck — resolve it "
-               "in the Postausgang before re-drafting",
-    "sent": "this application was already sent — re-drafting would rewrite "
-            "the record of what went out",
-    "filed": "this letter went out with the Bewerbung you recorded for this "
-             "posting — take that application back first if it did not",
+    "approved": "Dieser Entwurf ist für den Auto-Versand freigegeben — die "
+                "Freigabe im Postausgang zurücknehmen, dann neu schreiben.",
+    "sending": "Für diese Anzeige läuft ein Versand, oder er ist stecken "
+               "geblieben — erst im Postausgang auflösen.",
+    "sent": "Diese Bewerbung ist schon raus — neu schreiben würde die "
+            "Aufzeichnung dessen überschreiben, was gesendet wurde.",
+    "filed": "Zu dieser Anzeige ist eine Bewerbung eingetragen, also ist das "
+             "Anschreiben abgelegt. Wenn das nicht stimmt, erst die Bewerbung "
+             "im Register löschen.",
 }
 
 

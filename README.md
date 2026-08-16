@@ -8,7 +8,7 @@
 
 - **Multi-source discovery** — parallel saved search profiles against the Bundesagentur für Arbeit Jobsuche, Jooble, and Arbeitnow, with cross-source deduplication and duplicate protection against companies you already applied to.
 - **AI-tailored drafting** — reads the full posting and writes a concise, posting-specific German cover letter and email. Facts come only from your profile file; the AI cannot invent experience.
-- **Human-in-the-loop sending** — a review queue where you edit and approve every application before it goes out through the Gmail API. Optional per-profile auto-send with a hard daily cap, off by default.
+- **Human-in-the-loop sending** — a Postausgang where you edit and approve every application before it goes out through the Gmail API. Optional per-profile auto-send with a hard daily cap, off by default.
 - **Local-first** — your data lives in a local SQLite database with automatic rotating backups. No cloud, no accounts, no telemetry.
 
 ### Planned
