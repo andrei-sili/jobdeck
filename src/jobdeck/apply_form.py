@@ -149,7 +149,7 @@ def posting_fields(job: dict, draft: dict | None) -> list[Field]:
         Field("Anschreiben", drafted("anschreiben_body"),
               "draft the application first", multiline=True),
         Field("Bewerbungsmappe (PDF)", drafted("pdf_path"),
-              "create the Mappe in the review queue"),
+              "create the Mappe in the Postausgang"),
     ]
 
 

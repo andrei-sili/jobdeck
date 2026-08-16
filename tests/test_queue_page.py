@@ -146,7 +146,12 @@ def test_an_abandoned_claim_says_so_instead_of_promising_a_minute():
     stale = datetime.datetime.now() - datetime.timedelta(
         minutes=drafting.CLAIM_TIMEOUT_MIN + 2)
     text, classes = queue.generating_line(stale.isoformat(timespec="seconds"))
-    assert "abgebrochen" in text and "Draft" in text
+    assert "abgebrochen" in text
+    # and it names a screen that exists: it used to send him to "Draft
+    # application" in the "Job inbox", and neither has been called that for
+    # two slices — the label there now depends on the posting's channel, so
+    # the sentence names the SCREEN and lets the row carry its own word
+    assert "In den Stellen" in text
     assert "amber" in classes
     # the number it prints is the real age, not a constant
     assert str(drafting.CLAIM_TIMEOUT_MIN + 2) in text
@@ -344,3 +349,23 @@ def test_the_editor_asks_the_database_rather_than_being_told(con, data_dir):
     found = draft_editor.applied_at_this_company(job_id)
     assert found is not None and found["firma"] == "Eine GmbH"
     assert draft_editor.applied_at_this_company(999999) is None
+
+
+# --------------------------------------------------------------------------
+# The one line an unopened row shows
+# --------------------------------------------------------------------------
+def test_every_draft_state_has_a_word_he_can_read():
+    """The head is the only part an unopened row shows, and it carried the
+    database's own vocabulary — 'ready', and after the form slice 'filed' —
+    in the middle of a German screen."""
+    from jobdeck.constants import DRAFT_STATUS
+    for status in DRAFT_STATUS:
+        assert status in queue.DRAFT_STATE, f"{status} has no German word"
+        assert queue.draft_state(status) != status
+
+
+def test_a_state_nobody_taught_it_is_shown_rather_than_swallowed():
+    """Falling through to the raw name is ugly on purpose: a blank would hide
+    a state entirely, and this row is the last stop before a send."""
+    assert queue.draft_state("etwas_neues") == "etwas_neues"
+    assert queue.draft_state(None) == ""

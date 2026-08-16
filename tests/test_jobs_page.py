@@ -1589,12 +1589,17 @@ def test_a_posting_whose_form_he_opened_can_come_back():
 
 def test_a_letter_already_on_its_way_says_where_to_resolve_it():
     """A draft that is `sending` or `sent` is the record of what went out, and
-    only the review queue can tell those two apart."""
+    only the Postausgang can tell those two apart. It must be named by the
+    name it wears: this line said "Review queue" for two slices after the
+    screen stopped being called that."""
+    from jobdeck.ui.layout import BEWERBUNGEN_TABS
     steps = {s.key: s for s in jobs.apply_steps(
         _row(apply_channel="direct_email", contact_email="hr@x.de",
              draft_status="sending"))}
     assert steps[jobs.STEP_SEND].enabled is False
-    assert "Review queue" in steps[jobs.STEP_SEND].reason
+    label = next(label for key, label, _ in BEWERBUNGEN_TABS
+                 if key == "postausgang")
+    assert label in steps[jobs.STEP_SEND].reason
 
 
 def _own_nodes(func):

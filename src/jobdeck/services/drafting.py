@@ -29,9 +29,9 @@ CLAIM_TIMEOUT_MIN = 15
 # Statuses a regeneration must refuse, with the way out for each.
 NO_REGEN = {
     "approved": "this draft is approved for sending — return it to ready in "
-                "the review queue before re-drafting",
+                "the Postausgang before re-drafting",
     "sending": "a send for this posting is in progress or stuck — resolve it "
-               "in the review queue before re-drafting",
+               "in the Postausgang before re-drafting",
     "sent": "this application was already sent — re-drafting would rewrite "
             "the record of what went out",
     "filed": "this letter went out with the Bewerbung you recorded for this "
@@ -208,5 +208,5 @@ async def draft_for_job(job_id: int) -> dict:
     )
     if draft is None:
         return _error("the draft changed while it was being generated — "
-                      "check the review queue")
+                      "check the Postausgang")
     return {"ok": True, "error": "", "draft": draft}

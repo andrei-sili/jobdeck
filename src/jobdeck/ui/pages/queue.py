@@ -55,6 +55,27 @@ GENERATING_POLL_SECONDS = 5.0
 IDLE_POLL_EVERY = 6
 
 
+# The head of a row is the only part an unopened one shows, so it has to be
+# read rather than decoded: 'ready' and 'filed' are the words the database
+# uses. A status this map has not been taught falls through to its own name,
+# which is ugly on purpose — a silent blank would hide a state entirely.
+DRAFT_STATE = {
+    "generating": "wird geschrieben…",
+    "ready": "wartet",
+    "approved": "freigegeben",
+    "sending": "wird gesendet…",
+    "sent": "gesendet",
+    "filed": "eingereicht",
+    "failed": "fehlgeschlagen",
+    "discarded": "verworfen",
+}
+
+
+def draft_state(status: object) -> str:
+    """The German word for a draft's state, for the one line he reads."""
+    return DRAFT_STATE.get(str(status or ""), str(status or ""))
+
+
 def generating_line(updated_at: object) -> tuple[str, str]:
     """(text, CSS classes) for a draft that is being written right now.
 
@@ -64,8 +85,8 @@ def generating_line(updated_at: object) -> tuple[str, str]:
     if drafting.claim_is_stale(updated_at):
         minutes = int(drafting.claim_age_minutes(updated_at))
         return (f"⚠ Seit {minutes} Minuten kein Ergebnis — der Vorgang wurde "
-                "abgebrochen. Im Job-Postfach erneut auf „Draft "
-                "application“ drücken.", "text-sm text-amber-700")
+                "abgebrochen. In den Stellen lässt sie sich neu "
+                "schreiben.", "text-sm text-amber-700")
     return ("Die Bewerbung wird gerade geschrieben — das dauert etwa eine "
             "Minute. Die Zeile aktualisiert sich von selbst.",
             "text-sm text-blue-700")
@@ -218,13 +239,8 @@ async def queue_page():
         def render_draft(row: dict):
             score = (f" · match {row['job_score']}"
                      if row["job_score"] is not None else "")
-            # The head is the only part an unopened row shows, so a draft
-            # being written has to say so THERE — 'generating' in the status
-            # slot is the word the database uses, not the one he reads.
-            state = ("wird geschrieben…" if row["status"] == "generating"
-                     else row["status"])
             head = (f"{row['job_company']}  —  {row['job_title']}"
-                    f"  ({state}{score})")
+                    f"  ({draft_state(row['status'])}{score})")
             with ui.expansion(head, on_value_change=track_reading) \
                     .classes("w-full border rounded"):
                 if row["status"] == "generating":

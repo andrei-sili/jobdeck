@@ -236,7 +236,7 @@ def apply_steps(job: dict, already: dict | None = None) -> list[Step]:
             STEP_SEND, "Prüfen und senden", done=draft_status == "sent",
             enabled=has_letter and not blocked,
             reason=blocked or ("" if has_letter else
-                               "In der Review queue auflösen." if letter_gone
+                               "Im Postausgang auflösen." if letter_gone
                                else "Erst das Anschreiben schreiben."),
         ))
     else:
