@@ -692,16 +692,29 @@ def test_changing_the_view_always_returns_to_the_first_page(con, data_dir):
 # --------------------------------------------------------------------------
 @pytest.mark.parametrize("status, expected_in_line", [
     ("generating", "wird gerade geschrieben"),
-    ("ready", "Review queue"),
-    ("approved", "Review queue"),
+    ("ready", "Postausgang"),
+    ("approved", "Postausgang"),
     ("sending", "Versand"),
     ("failed", "fehlgeschlagen"),
     ("sent", "gesendet"),
+    ("filed", "eingereicht"),
 ])
 def test_the_row_says_what_its_draft_is_doing(status, expected_in_line):
     text, classes = jobs._draft_line(status)
     assert expected_in_line in text
     assert classes.startswith("text-sm ")
+
+
+def test_a_letter_with_an_employer_is_never_offered_for_rewriting():
+    """'filed' joins 'sent': both mean an employer holds the letter, so
+    offering "Anschreiben neu schreiben" would offer to rewrite the record of
+    what went out. The row said nothing at all for a filed one."""
+    from jobdeck.constants import DRAFT_DELIVERED
+    for status in DRAFT_DELIVERED:
+        steps = {s.key: s for s in jobs.apply_steps(
+            _row(apply_channel="direct_email", contact_email="hr@x.de",
+                 draft_status=status))}
+        assert steps[jobs.STEP_DRAFT].enabled is False, status
 
 
 @pytest.mark.parametrize("status", ["discarded", "", None])

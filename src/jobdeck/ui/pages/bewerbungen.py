@@ -67,20 +67,37 @@ def _load() -> dict:
 
 def _signature() -> tuple:
     with db.db() as con:
-        return db.data_signature(con)
+        return register.signature(con)
 
 
-def _row(row_id: int) -> dict | None:
-    """One application, read on the server by id.
+def _one(row_id: int) -> dict | None:
+    """Everything the dialog shows, in ONE read: the row, its letter, its
+    history. None when the application is gone.
 
-    The old screen handed Quasar's `rowClick` payload straight into the dialog,
-    so the path it later gave `xdg-open` and the id it later deleted both came
-    from the client. Every row here closes over its id in Python and the row
-    itself is read here — the browser never states what a row contains.
+    Read on the server by id, which is the property this whole screen exists
+    to keep: the old one handed Quasar's `rowClick` payload straight into the
+    dialog, so the path it later gave `xdg-open` and the id it later deleted
+    both came from the client. Every row here closes over its id in Python.
+
+    One connection rather than three, and one snapshot: opening a row while
+    the poller commits used to be able to show a letter belonging to a state
+    the row above it no longer had.
     """
+    places = ",".join("?" * len(DRAFT_DELIVERED))
     with db.db() as con:
         found = db.get_bewerbung(con, row_id)
-        return dict(found) if found is not None else None
+        if found is None:
+            return None
+        letter = con.execute(
+            "SELECT betreff, anschreiben_body, status, pdf_path FROM drafts "
+            f" WHERE bewerbung_id=? AND status IN ({places})"
+            "  ORDER BY id DESC LIMIT 1", (row_id, *DRAFT_DELIVERED)
+        ).fetchone()
+        return {
+            "row": dict(found),
+            "letter": dict(letter) if letter is not None else None,
+            "history": [dict(r) for r in db.list_status_history(con, row_id)],
+        }
 
 
 def _save(row_id, values, new_status):
@@ -119,26 +136,16 @@ def _delete(row_id):
         db.delete_bewerbung(con, row_id)
 
 
-def _history(row_id):
-    with db.db() as con:
-        return [dict(r) for r in db.list_status_history(con, row_id)]
-
-
 def _letter(row_id):
     """The Anschreiben that went out with this application, if the app wrote it.
 
     Only a letter this application actually carried: 'sent' means an e-mail
     from here, 'filed' means it went inside the Mappe he uploaded. A draft that
-    merely happens to sit on the same posting is not what the employer read.
+    merely happens to sit on the same posting is not what the employer read,
+    so the status is part of the query and not merely of the docstring.
     """
-    places = ",".join("?" * len(DRAFT_DELIVERED))
-    with db.db() as con:
-        found = con.execute(
-            "SELECT betreff, anschreiben_body, status, pdf_path FROM drafts "
-            f" WHERE bewerbung_id=? AND status IN ({places})"
-            "  ORDER BY id DESC LIMIT 1", (row_id, *DRAFT_DELIVERED)
-        ).fetchone()
-        return dict(found) if found is not None else None
+    found = _one(row_id)
+    return found["letter"] if found else None
 
 
 @app.get("/applications")
@@ -153,6 +160,7 @@ async def bewerbungen_page():
     async with frame("Bewerbungen", current="bewerbungen"):
         state = {"query": "", "status": VIEW_ALL}
         drawn: dict = {}
+        refresh_gen = {"n": 0}
 
         tabs("register", BEWERBUNGEN_TABS)
         header = ui.row().classes("w-full items-center gap-3")
@@ -454,20 +462,19 @@ async def bewerbungen_page():
         # Opening one application
         # ------------------------------------------------------------------
         async def open_application(row_id: int | None) -> None:
-            # Before the reads, never after: clearing this slot after an await
+            # Before the read, never after: clearing this slot after an await
             # would destroy a dialog opened while the read was in flight, and
             # in NiceGUI that also drops the canary whose finalizer resolves
             # `await confirm` — so a confirmation would hang for the life of
             # the page. Housekeeping first, then the work.
             overlay.clear()
-            data = await run.io_bound(_row, row_id) if row_id else {}
-            if data is None:
+            found = await run.io_bound(_one, row_id) if row_id else None
+            if row_id and found is None:
                 say("Diese Bewerbung gibt es nicht mehr.", type="warning")
                 await refresh()
                 return
-            letter = await run.io_bound(_letter, row_id) if row_id else None
-            history = await run.io_bound(_history, row_id) if row_id else []
-            _dialog(data, letter, history)
+            found = found or {"row": {}, "letter": None, "history": []}
+            _dialog(found["row"], found["letter"], found["history"])
 
         def _dialog(data: dict, letter: dict | None,
                     history: list[dict]) -> None:
@@ -489,8 +496,13 @@ async def bewerbungen_page():
                         "PLZ Ort", value=data.get("plz_ort") or "")
                     fields["gesendet_am"] = ui.input(
                         "Gesendet am (JJJJ-MM-TT)",
+                        # Today only for a NEW row. Pre-filling an existing
+                        # dateless one meant that merely opening it and
+                        # pressing Speichern replaced the "seit unbekannt" the
+                        # panel above deliberately preserves with today's date.
                         value=data.get("gesendet_am")
-                        or datetime.date.today().isoformat())
+                        or ("" if data.get("id")
+                            else datetime.date.today().isoformat()))
                     kanal = ui.select(
                         KANAL_OPTIONS, label="Kanal",
                         value=data.get("kanal") or KANAL_OPTIONS[0])
@@ -605,9 +617,14 @@ async def bewerbungen_page():
                 draw_register(view, drawn["today"])
 
         async def refresh():
+            # Last request wins: a save and the watcher's tick can be in flight
+            # together, and the older result finishing second would repaint the
+            # screen with rows from before the write. Same guard as the queue's.
+            refresh_gen["n"] += 1
+            generation = refresh_gen["n"]
             view = await run.io_bound(_load)
-            if view is None:
-                return  # the page is going away; nothing left to draw on
+            if view is None or generation != refresh_gen["n"]:
+                return  # going away, or superseded by a newer refresh
             live_view.mark(view["signature"])
             today = datetime.date.today()
             drawn["view"], drawn["today"] = view, today
@@ -622,7 +639,7 @@ async def bewerbungen_page():
 
         with header:
             ui.input("Suchen", on_change=lambda e: set_query(e.value)) \
-                .props("dense clearable").classes("w-64")
+                .props("dense clearable debounce=350").classes("w-64")
             ui.select([VIEW_ALL, *STATUS_OPTIONS], value=VIEW_ALL,
                       label="Status", on_change=lambda e: set_status(e.value)) \
                 .props("dense").classes("w-48")

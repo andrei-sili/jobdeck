@@ -202,7 +202,7 @@ def open_editor(row: dict, *, overlay, say, on_change) -> None:
             if latest is None or latest["status"] not in EDITABLE_STATUS:
                 say(f"Dieser Entwurf ist nicht mehr sendbar (Status: "
                     f"{latest['status'] if latest else 'weg'}) — "
-                    f"in der Review queue auflösen.",
+                    f"im Postausgang auflösen.",
                     type="warning", multi_line=True)
                 await on_change()
                 return

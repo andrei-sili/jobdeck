@@ -308,16 +308,34 @@ def de_day(day: datetime.date) -> str:
     return f"{day.day}. {MONATE_DE[day.month]}"
 
 
+# The setting this screen PRINTS and colours by, which no table signature can
+# see. The rail learned this the hard way: connecting Gmail on the page beside
+# it left the rail reading "Gmail fehlt" for the life of that page.
+_WATCHED_SETTINGS = ("follow_up_days",)
+
+
+def signature(con) -> tuple:
+    """Everything this screen shows, cheaply comparable (see ui/live.py).
+
+    Wider than the pipeline: the silence panel states the threshold, sorts by
+    it and colours by it, so raising it in Einstellungen has to reach this
+    screen — otherwise the number beside "Ab N Tagen" and the rows beneath it
+    describe two different settings until the page is reloaded.
+    """
+    return (*db.data_signature(con),
+            *(db.get_setting(con, key, "") for key in _WATCHED_SETTINGS))
+
+
 def facts() -> dict:
     """Everything the Bewerbungen screen states, in one read."""
     with db.db() as con:
         # First, before a single count: sqlite3 gives every SELECT its own
         # snapshot, so a write landing between them would marry stale rows to
         # a fresh signature and the watcher would record that as current.
-        signature = db.data_signature(con)
+        sig = signature(con)
         counts = db.pipeline_counts(con)
         return {
-            "signature": signature,
+            "signature": sig,
             "apps": [dict(row) for row in db.list_bewerbungen(con)],
             "sources": [dict(row) for row in db.applications_by_source(con)],
             "follow_up_days": follow_up_setting(

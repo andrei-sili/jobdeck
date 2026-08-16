@@ -322,3 +322,31 @@ def test_a_letter_is_offered_only_in_a_state_that_means_it_went_out(con):
     con.commit()
 
     assert bewerbungen._letter(row_id) is None
+
+
+async def test_opening_a_dateless_application_does_not_stamp_it_with_today(
+        user: User, con):
+    """An imported row can state no date at all, and the panel above shows it
+    as "seit unbekannt" on purpose. Pre-filling the field meant that merely
+    opening the row and pressing Speichern replaced that with today."""
+    row_id = _app_row(con, firma="Ohne Datum GmbH", gesendet_am="")
+    await user.open("/bewerbungen")
+    user.find(marker=f"application-{row_id}").click()
+    await asyncio.sleep(0.3)
+
+    user.find("Speichern").click()
+    await asyncio.sleep(0.3)
+
+    assert db.get_bewerbung(con, row_id)["gesendet_am"] == ""
+
+
+def test_the_screen_watches_the_setting_it_prints_and_colours_by(con):
+    """The silence panel states the threshold, sorts by it and colours by it,
+    so raising it in Einstellungen has to reach this screen — otherwise the
+    number beside "Ab N Tagen" and the rows beneath it describe two different
+    settings until the page is reloaded."""
+    before = register.signature(con)
+    db.set_setting(con, "follow_up_days", "30")
+    con.commit()
+
+    assert register.signature(con) != before
