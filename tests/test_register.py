@@ -20,7 +20,7 @@ def _view(**over):
     """A pipeline reading with every population named, so a test can move one."""
     view = {"jobs_total": 100, "scored_above_zero": 60, "scored_zero": 40,
             "opened": 20, "drafted": 10, "drafted_unread": 0, "applied": 5,
-            "apps": []}
+            "applied_without_letter": 0, "apps": []}
     view.update(over)
     return view
 
@@ -376,14 +376,14 @@ def test_an_application_with_no_letter_behind_it_says_so():
     on a posting whose letter failed records one, and every pre-v10 form
     application was entered that way. The step that is not a subset says so."""
     steps = {step.key: step for step in register.pipeline(
-        _view(drafted=2, applied=5))}
+        _view(drafted=2, applied=5, applied_without_letter=3))}
 
     assert "3 davon ohne Anschreiben" in steps["beworben"].note
 
 
 def test_a_pipeline_whose_applications_all_had_letters_makes_no_excuse():
     steps = {step.key: step for step in register.pipeline(
-        _view(drafted=5, applied=5))}
+        _view(drafted=5, applied=5, applied_without_letter=0))}
 
     assert steps["beworben"].note == ""
 
@@ -450,3 +450,27 @@ def test_a_future_dated_application_is_not_drawn_as_the_most_overdue():
     assert max(widths) <= 1.0 and min(widths) >= 0.0
     assert widths[rows.index(next(r for r in rows
                                   if r.firma == "Zukunft GmbH"))] == 0.0
+
+
+def test_a_letterless_application_is_counted_and_not_inferred(con):
+    """`applied` and `drafted` are different SETS. Subtracting them reads as
+    zero whenever more letters exist than applications, however many of those
+    applications actually carried none."""
+    with_letter = _job(con, "with")
+    db.upsert_draft(con, with_letter, {"status": "sent",
+                                       "anschreiben_body": "Sehr geehrte"})
+    db.apply_job(con, with_letter, kanal="E-Mail")
+    without = _job(con, "without")
+    db.apply_job(con, without, kanal="Online-Portal")
+    # …and a third posting that carries a letter but no application, so the
+    # aggregate difference (applied 2 - drafted 2) would be zero
+    spare = _job(con, "spare")
+    db.upsert_draft(con, spare, {"status": "ready",
+                                 "anschreiben_body": "Sehr geehrte"})
+    con.commit()
+
+    counts = db.pipeline_counts(con)
+
+    assert counts["applied"] == 2
+    assert counts["drafted"] == 2
+    assert counts["applied_without_letter"] == 1, "measured, not subtracted"

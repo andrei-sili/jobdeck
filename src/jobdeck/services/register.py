@@ -116,9 +116,11 @@ def pipeline(view: dict) -> list[Step]:
              # An application can be recorded for a posting nothing was ever
              # written for — that is what pressing "Abgeschickt" does on a
              # posting whose letter failed, and how every pre-v10 form
-             # application was entered.
-             f"{applied - drafted} davon ohne Anschreiben aus JobDeck"
-             if applied > drafted else ""),
+             # application was entered. Counted rather than subtracted: the
+             # two sets overlap only partly, so a difference would read as
+             # zero whenever there are more letters than applications.
+             f"{view['applied_without_letter']} davon ohne Anschreiben aus "
+             f"JobDeck" if view["applied_without_letter"] else ""),
     ]
 
 

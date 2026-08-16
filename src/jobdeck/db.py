@@ -1360,7 +1360,17 @@ def pipeline_counts(con: sqlite3.Connection) -> dict:
           (SELECT COUNT(DISTINCT d.job_id) FROM drafts d
              JOIN jobs j ON j.id = d.job_id
             WHERE d.anschreiben_body <> '' AND j.opened_at = '') AS drafted_unread,
-          (SELECT COUNT(*) FROM jobs WHERE bewerbung_id IS NOT NULL) AS applied
+          (SELECT COUNT(*) FROM jobs WHERE bewerbung_id IS NOT NULL) AS applied,
+          -- MEASURED, not subtracted: `applied` and `drafted` are different
+          -- sets, so `applied - drafted` is only a lower bound and reads as
+          -- zero whenever more letters exist than applications, however many
+          -- of those applications carried none.
+          (SELECT COUNT(*) FROM jobs j
+            WHERE j.bewerbung_id IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM drafts d
+                               WHERE d.job_id = j.id
+                                 AND d.anschreiben_body <> ''))
+            AS applied_without_letter
         """
     ).fetchone()
     return dict(row)
