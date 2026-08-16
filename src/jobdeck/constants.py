@@ -23,18 +23,6 @@ OFFENE_STATUS = {"Gesendet", "In Bearbeitung"}
 # Statuses that mean the company replied (response-rate metric)
 BEANTWORTET_STATUS = {"Antwort erhalten", "Einladung", "Absage"}
 
-# Row background colors by status (visual scanning in tables)
-STATUS_COLORS = {
-    "Gesendet": "#ffffff",
-    "In Bearbeitung": "#fff6d6",
-    "Antwort erhalten": "#d9e8f7",
-    "Einladung": "#d7f3d7",
-    "Absage": "#f6dcdc",
-    "Zurückgezogen": "#e6e6e6",
-}
-# Highlight for applications past the follow-up threshold without an answer
-FAELLIG_COLOR = "#ffd28a"
-
 # Rank used to prevent automatic status downgrades: a late confirmation
 # e-mail must never overwrite an already-recorded invitation or rejection.
 STATUS_RANK = {
@@ -66,8 +54,22 @@ FORM_OPENED_UNKNOWN = "unbekannt"
 LIVENESS_ALIVE = "alive"
 LIVENESS_GONE = "gone"
 
-# Lifecycle of an AI-generated application draft
-DRAFT_STATUS = ["generating", "ready", "failed", "approved", "sending", "sent", "discarded"]
+# Lifecycle of an AI-generated application draft. 'sent' means this app put it
+# in an e-mail; 'filed' means it left inside the Bewerbungsmappe he uploaded to
+# an employer's form. Both are terminal and both name a real application — the
+# difference is which hand carried it, and the register says so.
+DRAFT_STATUS = ["generating", "ready", "failed", "approved", "sending", "sent",
+                "filed", "discarded"]
+
+# A letter that has gone out, whichever way. Nothing may rewrite one of these,
+# and neither waits in the Postausgang.
+DRAFT_DELIVERED = ("sent", "filed")
+
+# After how many silent days an application is worth chasing, when he has
+# never said. Stated once: it lived in two modules with a comment in each
+# claiming it matched the other, and the only test compared it to itself — so
+# one could move while the other went on saying 14 about the same rows.
+DEFAULT_FOLLOW_UP_DAYS = 14
 
 # How many messages may leave in a day when he has never said. Stated once, in
 # the layer both the send gate and the screens that draw the budget can see: a

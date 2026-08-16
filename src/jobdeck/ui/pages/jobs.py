@@ -12,6 +12,7 @@ from nicegui import app, run, ui
 from jobdeck import apply_channel, apply_form, config, db, freshness
 from jobdeck.ai import scoring
 from jobdeck.ai.drafting import clean_title
+from jobdeck.constants import DRAFT_DELIVERED
 from jobdeck.dedupe import duplicates_for_jobs
 from jobdeck.services import (
     apply_record,
@@ -22,7 +23,7 @@ from jobdeck.services import (
     mappe,
     preparing,
 )
-from jobdeck.ui import draft_editor, helpers, live
+from jobdeck.ui import draft_editor, helpers, live, rail
 from jobdeck.ui.helpers import (
     open_in_system,
     openable_url,
@@ -217,7 +218,10 @@ def apply_steps(job: dict, already: dict | None = None) -> list[Step]:
     # sent is the record of what went out; resolving one belongs to the review
     # queue, which is the only screen that can tell the two apart.
     has_letter = draft_status in draft_editor.EDITABLE_STATUS
-    letter_gone = draft_status in ("sending", "sent")
+    # A letter that is with an employer, however it got there: neither can be
+    # rewritten, and offering "Anschreiben neu schreiben" for one would offer
+    # to rewrite the record of what went out.
+    letter_gone = draft_status in ("sending", *DRAFT_DELIVERED)
     writing = (draft_status == "generating"
                and not drafting.claim_is_stale(job.get("draft_updated_at")))
     steps: list[Step] = []
@@ -236,7 +240,7 @@ def apply_steps(job: dict, already: dict | None = None) -> list[Step]:
             STEP_SEND, "Prüfen und senden", done=draft_status == "sent",
             enabled=has_letter and not blocked,
             reason=blocked or ("" if has_letter else
-                               "In der Review queue auflösen." if letter_gone
+                               "Im Postausgang auflösen." if letter_gone
                                else "Erst das Anschreiben schreiben."),
         ))
     else:
@@ -708,15 +712,19 @@ def _apply_line(job: dict) -> str:
 # back to where it started, and a line about a draft that no longer exists
 # would only be in the way.
 _DRAFT_LINES = {
-    "ready": ("✓ Entwurf fertig — in der Review queue prüfen und senden.",
+    "ready": ("✓ Entwurf fertig — im Postausgang prüfen und senden.",
               "text-sm text-green-700"),
-    "approved": ("✓ Entwurf freigegeben — wartet in der Review queue auf den "
+    "approved": ("✓ Entwurf freigegeben — wartet im Postausgang auf den "
                  "Versand.", "text-sm text-green-700"),
-    "sending": ("Ein Versand läuft — oder er ist stecken geblieben. In der "
-                "Review queue auflösen.", "text-sm text-amber-700"),
-    "failed": ("⚠ Der Entwurf ist fehlgeschlagen — neu schreiben, oder in der "
-               "Review queue verwerfen.", "text-sm text-red-700"),
+    "sending": ("Ein Versand läuft — oder er ist stecken geblieben. Im "
+                "Postausgang auflösen.", "text-sm text-amber-700"),
+    "failed": ("⚠ Der Entwurf ist fehlgeschlagen — neu schreiben, oder im "
+               "Postausgang verwerfen.", "text-sm text-red-700"),
     "sent": ("✓ Bewerbung gesendet.", "text-sm text-gray-600"),
+    # The form path's counterpart to 'sent'. Without it a posting whose letter
+    # went out inside an uploaded Mappe said nothing at all on its row.
+    "filed": ("✓ Anschreiben mit der Bewerbung eingereicht.",
+              "text-sm text-gray-600"),
 }
 
 
@@ -1820,7 +1828,7 @@ async def jobs_page():
                     .classes("w-full").props("readonly autogrow")
                 ui.label(
                     f"Modell: {draft_row['llm_model']} · bearbeiten und senden "
-                    f"in der Review queue"
+                    f"im Postausgang"
                 ).classes("text-xs text-gray-500")
                 pdf_label = ui.label(
                     f"Mappe: {draft_row['pdf_path']}" if draft_row["pdf_path"]
@@ -1856,8 +1864,8 @@ async def jobs_page():
                     ui.button("Neu schreiben", icon="refresh",
                               on_click=lambda: redraft(dialog, job)) \
                         .props("outline no-caps")
-                    ui.button("Review queue", icon="outbox",
-                              on_click=lambda: ui.navigate.to("/queue")) \
+                    ui.button("Postausgang", icon="outbox",
+                              on_click=lambda: ui.navigate.to(rail.POSTAUSGANG_PATH)) \
                         .props("outline no-caps")
                     ui.button("Schließen", on_click=dialog.close) \
                         .props("flat no-caps")

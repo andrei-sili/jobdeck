@@ -692,16 +692,29 @@ def test_changing_the_view_always_returns_to_the_first_page(con, data_dir):
 # --------------------------------------------------------------------------
 @pytest.mark.parametrize("status, expected_in_line", [
     ("generating", "wird gerade geschrieben"),
-    ("ready", "Review queue"),
-    ("approved", "Review queue"),
+    ("ready", "Postausgang"),
+    ("approved", "Postausgang"),
     ("sending", "Versand"),
     ("failed", "fehlgeschlagen"),
     ("sent", "gesendet"),
+    ("filed", "eingereicht"),
 ])
 def test_the_row_says_what_its_draft_is_doing(status, expected_in_line):
     text, classes = jobs._draft_line(status)
     assert expected_in_line in text
     assert classes.startswith("text-sm ")
+
+
+def test_a_letter_with_an_employer_is_never_offered_for_rewriting():
+    """'filed' joins 'sent': both mean an employer holds the letter, so
+    offering "Anschreiben neu schreiben" would offer to rewrite the record of
+    what went out. The row said nothing at all for a filed one."""
+    from jobdeck.constants import DRAFT_DELIVERED
+    for status in DRAFT_DELIVERED:
+        steps = {s.key: s for s in jobs.apply_steps(
+            _row(apply_channel="direct_email", contact_email="hr@x.de",
+                 draft_status=status))}
+        assert steps[jobs.STEP_DRAFT].enabled is False, status
 
 
 @pytest.mark.parametrize("status", ["discarded", "", None])
@@ -863,12 +876,43 @@ def _unhosted_ui_calls(path):
     return sorted(set(offenders))
 
 
-# Every page that CLEARS a container and rebuilds it. `applications.py` is
-# deliberately absent: its refresh assigns `table.rows` and deletes no element,
-# so no handler's slot can die under it.
-@pytest.mark.parametrize("page_module",
-                         ["jobs.py", "queue.py", "unterlagen.py",
-                          "../draft_editor.py"])
+def _overlay_files() -> list[str]:
+    """Every module that CLEARS a container and rebuilds it — DERIVED.
+
+    That is the rule's own premise, so it is read out of the source rather
+    than out of a hand-written list. The list silently skipped whichever page
+    was newest — the same shape as the signature rule that matched a spelling
+    and covered nothing for a whole slice — and it carried an excuse for a
+    page (`applications.py`) that no longer exists, while the screen that
+    replaced it clears three containers on a timer.
+
+    A module that clears nothing is excluded because no handler's slot can die
+    under it, which is exactly why `settings.py` is not in the result.
+    """
+    pages = pathlib.Path(jobs.__file__).parent
+    candidates = [(path.name, path) for path in pages.glob("*.py")] + [
+        (f"../{path.name}", path) for path in pages.parent.glob("*.py")]
+    found = []
+    for name, path in candidates:
+        if path.stem in ("__init__", "app"):
+            continue
+        tree = ast.parse(path.read_text())
+        clears = any(isinstance(node, ast.Call)
+                     and ast.unparse(node.func).endswith(".clear")
+                     and not node.args
+                     for node in ast.walk(tree))
+        if clears:
+            found.append(name)
+    return sorted(found)
+
+
+# Every page that CLEARS a container and rebuilds it — DERIVED, like the
+# overlay rule below. The hand-written list carried an excuse for
+# `applications.py` ("its refresh assigns table.rows and deletes no element"),
+# and that excuse outlived the page: `bewerbungen.py` replaced it and clears
+# three containers on a timer, so the list would have skipped the very screen
+# most exposed to this.
+@pytest.mark.parametrize("page_module", _overlay_files())
 def test_nothing_is_shown_on_a_slot_that_may_already_be_gone(page_module):
     """The defect CLASS, not the one place it was found. A handler runs in the
     slot of the element that fired it; any refresh — its own, a concurrent
@@ -1589,12 +1633,17 @@ def test_a_posting_whose_form_he_opened_can_come_back():
 
 def test_a_letter_already_on_its_way_says_where_to_resolve_it():
     """A draft that is `sending` or `sent` is the record of what went out, and
-    only the review queue can tell those two apart."""
+    only the Postausgang can tell those two apart. It must be named by the
+    name it wears: this line said "Review queue" for two slices after the
+    screen stopped being called that."""
+    from jobdeck.ui.layout import BEWERBUNGEN_TABS
     steps = {s.key: s for s in jobs.apply_steps(
         _row(apply_channel="direct_email", contact_email="hr@x.de",
              draft_status="sending"))}
     assert steps[jobs.STEP_SEND].enabled is False
-    assert "Review queue" in steps[jobs.STEP_SEND].reason
+    label = next(label for key, label, _ in BEWERBUNGEN_TABS
+                 if key == "postausgang")
+    assert label in steps[jobs.STEP_SEND].reason
 
 
 def _own_nodes(func):
@@ -1615,9 +1664,7 @@ def _own_nodes(func):
     return own
 
 
-@pytest.mark.parametrize("page_module",
-                         ["jobs.py", "queue.py", "unterlagen.py",
-                          "../draft_editor.py"])
+@pytest.mark.parametrize("page_module", _overlay_files())
 def test_no_handler_clears_the_overlay_after_an_await(page_module):
     """`overlay.clear()` before an await is housekeeping; after one it is a
     demolition. The page stays fully interactive while a handler waits on a
@@ -1653,7 +1700,7 @@ def test_no_handler_clears_the_overlay_after_an_await(page_module):
         "overlay.clear() runs after an await at " + ", ".join(offenders)
         + " — a dialog opened while that await was pending is destroyed, and "
           "anything parked on it never resolves")
-    if page_module in ("jobs.py", "unterlagen.py"):
+    if page_module in ("jobs.py", "unterlagen.py", "bewerbungen.py"):
         assert scanned, "no handler clears the overlay at all — scan is broken"
 
 

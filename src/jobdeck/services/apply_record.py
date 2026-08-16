@@ -34,6 +34,34 @@ KANAL_EMAIL = "E-Mail"
 # ledger can later be asked how many applications the app closed by itself.
 SOURCE_HAND = "hand"
 
+# Draft states whose letter is finished and has not gone anywhere else, so an
+# application recorded now closes it. Every other state is left alone and says
+# why: 'generating' has no letter yet, 'failed' has none at all, 'sent' went by
+# e-mail and IS the record of that e-mail, and 'filed'/'discarded' are closed.
+FILEABLE = ("ready", "approved")
+
+
+def _file_letter(con, draft, bewerbung_id: int) -> None:
+    """Close the letter against the application that was recorded for it.
+
+    'filed' says only what this app can know: an application for this posting
+    is in the ledger, so the letter is no longer waiting to be sent and must
+    not be rewritten. It deliberately does NOT claim that an employer read
+    this text — the screens derive that from the ledger row's own evidence,
+    its channel and its `dokument`, and say plainly when they cannot tell.
+
+    That is what lets one rule serve every hand-recorded channel. The first
+    version required a complete Mappe on the form channel, which read well but
+    left the headline defect half-fixed: a by-e-mail application recorded by
+    hand went on offering its letter in the Postausgang for ever, at a company
+    that already had an application — the exact shape this slice exists to
+    end. It also made the one-shot migration and this writer disagree about
+    the same rows, which is how a state stops meaning one thing.
+    """
+    if draft is None or draft["status"] not in FILEABLE:
+        return
+    db.file_draft(con, draft["id"], bewerbung_id)
+
 
 def record_form_application(job_id: int, source: str = SOURCE_HAND) -> dict:
     """Write the application for a posting whose form he filled in.
@@ -78,6 +106,11 @@ def record_application(job_id: int, kanal: str,
             return {"ok": False, "bewerbung_id": None, "company": company,
                     "duplicate": dict(dup) if dup is not None else None,
                     "undo": False}
+        # The letter is closed by it: the register can show which text belongs
+        # to this company, and — the part that was costing him — the
+        # Postausgang stops offering to e-mail a letter whose application is
+        # already out.
+        _file_letter(con, draft, bewerbung_id)
         # the loop is closed: nothing should still be offered for upload
         upload.clear(job["upload_path"])
         db.set_upload(con, job_id, "", "")

@@ -5,12 +5,13 @@ legacy `bewerbungen` table keeps its exact shape so the historical data
 (and any legacy tooling still reading it) continues to work unchanged.
 """
 
+import datetime
 import pathlib
 import sqlite3
 
 from jobdeck import constants, dates
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # Legacy table, exactly as the previous tracker created it.
 BEWERBUNGEN_SQL = """
@@ -351,6 +352,59 @@ def _backfill_application_documents(con: sqlite3.Connection) -> None:
                         (pdf_path, bewerbung_id))
 
 
+def _file_letters_of_recorded_applications(con: sqlite3.Connection) -> None:
+    """Close the letters whose application is already in the ledger.
+
+    Until now recording a form application left its letter at 'ready', so it
+    went on waiting in the Postausgang for ever. Twelve of the seventeen
+    letters in his queue were of that kind — each offering to be e-mailed to a
+    company he had applied to hours earlier, one press away from a second
+    application at a firm that already has one.
+
+    Only where the POSTING carries the application itself (`jobs.bewerbung_id`)
+    — that is the pair whose letter provably went out together. A letter at a
+    company reached through some OTHER posting is left exactly where it is:
+    the queue already warns on that row and the send gate refuses it, and
+    filing it would claim an employer holds a letter nobody ever sent.
+
+    Run ONCE, at the upgrade, unlike the two backfills above — they only ever
+    fill a blank nothing else writes, while 'ready' is a state a draft comes
+    BACK to. Repeated every start this would stop healing history and start
+    governing the future: restoring a discarded letter, or re-writing one, on
+    a posting already applied to would be silently frozen again at the next
+    launch, with no notice and no way out of 'filed'.
+
+    Only the NEWEST draft of a posting, which is the one `get_draft_by_job`
+    and therefore `apply_record` mean by "the letter" — `drafts.job_id` has no
+    UNIQUE constraint, and filing all of them would make the migration and the
+    running app disagree about how many letters an application carried.
+
+    And only where the application row really exists: `drafts.bewerbung_id` is
+    a foreign key with `PRAGMA foreign_keys=ON`, so a single dangling
+    `jobs.bewerbung_id` would raise IntegrityError out of `migrate()` — which
+    runs at startup, before any screen, so it would not be a broken screen but
+    an app that cannot open at all.
+    """
+    draft_cols = [row[1] for row in con.execute("PRAGMA table_info(drafts)")]
+    job_cols = [row[1] for row in con.execute("PRAGMA table_info(jobs)")]
+    if "bewerbung_id" not in draft_cols or "bewerbung_id" not in job_cols:
+        return  # too old to know which application belongs to which posting
+    con.execute(
+        """
+        UPDATE drafts SET status='filed', updated_at=?, bewerbung_id=(
+                SELECT j.bewerbung_id FROM jobs j WHERE j.id = drafts.job_id)
+         WHERE status IN ('ready', 'approved')
+           AND id = (SELECT d2.id FROM drafts d2
+                      WHERE d2.job_id = drafts.job_id
+                      ORDER BY d2.id DESC LIMIT 1)
+           AND EXISTS (SELECT 1 FROM jobs j
+                        JOIN bewerbungen b ON b.id = j.bewerbung_id
+                       WHERE j.id = drafts.job_id)
+        """,
+        (datetime.datetime.now().isoformat(timespec="seconds"),),
+    )
+
+
 def _ensure_source_fact_columns(con: sqlite3.Connection) -> None:
     """Facts the boards state and the app used to throw away (schema v7).
 
@@ -431,6 +485,11 @@ def migrate(con: sqlite3.Connection) -> None:
     _ensure_draft_columns(con)
     _backfill_published_on(con)
     _backfill_application_documents(con)
+    if version < 11:
+        # ONCE, at the upgrade — see the function's own docstring: 'ready' is a
+        # state a draft returns to, so a backfill that ran every start would
+        # freeze a letter he had deliberately restored or re-written.
+        _file_letters_of_recorded_applications(con)
     if version < 10:
         _restate_portal_as_a_moment(con)
     if version < 2:

@@ -313,9 +313,10 @@ def test_the_signature_first_rule_actually_covers_the_newest_screen():
             if "signature" in calls and len(calls) > 1:
                 covered.append(f"{path.stem}:{func.name}")
 
-    assert "unterlagen:_load" in covered, (
-        f"the Unterlagen loader is not checked by the signature-first rule; "
-        f"covered: {sorted(covered)}")
+    for loader in ("unterlagen:_load", "register:facts"):
+        assert loader in covered, (
+            f"{loader} is not checked by the signature-first rule; "
+            f"covered: {sorted(covered)}")
 
 
 def test_the_rule_recognises_a_signature_read_however_it_is_spelled():

@@ -146,7 +146,13 @@ def test_an_abandoned_claim_says_so_instead_of_promising_a_minute():
     stale = datetime.datetime.now() - datetime.timedelta(
         minutes=drafting.CLAIM_TIMEOUT_MIN + 2)
     text, classes = queue.generating_line(stale.isoformat(timespec="seconds"))
-    assert "abgebrochen" in text and "Draft" in text
+    assert "abgebrochen" in text
+    # and it names a screen that exists: it used to send him to "Draft
+    # application" in the "Job inbox", and neither has been called that for
+    # two slices — the label there now depends on the posting's channel, so
+    # the sentence names the SCREEN, in quotes, and says what to do there
+    assert "„Stellen“" in text
+    assert "Anschreiben" in text
     assert "amber" in classes
     # the number it prints is the real age, not a constant
     assert str(drafting.CLAIM_TIMEOUT_MIN + 2) in text
@@ -306,13 +312,13 @@ def test_building_the_mappe_refreshes_what_the_send_pins(con, data_dir):
 
 def test_a_draft_that_is_already_going_is_not_offered_a_send_button(con, data_dir):
     """A draft in `sending` or `sent` is the record of what went out. Offering
-    "Send now" on one made the pre-send confirmation state "REAL send to the
+    "Jetzt senden" on one made the pre-send confirmation state "ECHTER Versand
     company" for a message the service refuses inside its claim — and that
     dialog's whole job is to be trustworthy."""
     assert "sending" not in draft_editor.EDITABLE_STATUS
     assert "sent" not in draft_editor.EDITABLE_STATUS
     source = pathlib.Path(draft_editor.__file__).read_text()
-    guard = source[:source.index('"Send now"')]
+    guard = source[:source.index('"Jetzt senden"')]
     assert 'if row["status"] in EDITABLE_STATUS:' in guard
 
 
@@ -344,3 +350,52 @@ def test_the_editor_asks_the_database_rather_than_being_told(con, data_dir):
     found = draft_editor.applied_at_this_company(job_id)
     assert found is not None and found["firma"] == "Eine GmbH"
     assert draft_editor.applied_at_this_company(999999) is None
+
+
+# --------------------------------------------------------------------------
+# The one line an unopened row shows
+# --------------------------------------------------------------------------
+def test_every_draft_state_has_a_word_he_can_read():
+    """The head is the only part an unopened row shows, and it carried the
+    database's own vocabulary — 'ready', and after the form slice 'filed' —
+    in the middle of a German screen."""
+    from jobdeck.constants import DRAFT_STATUS
+    for status in DRAFT_STATUS:
+        assert status in queue.DRAFT_STATE, f"{status} has no German word"
+        assert queue.draft_state(status) != status
+
+
+def test_a_state_nobody_taught_it_is_shown_rather_than_swallowed():
+    """Falling through to the raw name is ugly on purpose: a blank would hide
+    a state entirely, and this row is the last stop before a send."""
+    assert queue.draft_state("etwas_neues") == "etwas_neues"
+    assert queue.draft_state(None) == ""
+
+
+# --------------------------------------------------------------------------
+# Which drafts each tab lists — untested until a new status needed classifying
+# --------------------------------------------------------------------------
+def test_a_letter_already_with_an_employer_never_waits_to_be_sent():
+    """Adding 'filed' to the open filter puts a letter whose application is
+    already out back into the stack that offers "Prüfen und senden" — one
+    press from a second application at a firm that has one. The filter had no
+    test at all, so that mutation was green."""
+    assert "filed" not in queue.FILTER_STATUSES["open"]
+    assert "sent" not in queue.FILTER_STATUSES["open"]
+    assert "filed" in queue.FILTER_STATUSES["sent"]
+
+
+def test_every_draft_status_is_reachable_through_exactly_one_tab():
+    """A status in no tab is a letter with no screen — the shape that once
+    made a posting undraftable, undiscardable and unpreparable for ever."""
+    from jobdeck.constants import DRAFT_STATUS
+    seen = [status for statuses in queue.FILTER_STATUSES.values()
+            for status in statuses]
+    assert sorted(seen) == sorted(set(seen)), "a status is listed twice"
+    assert set(seen) == set(DRAFT_STATUS)
+
+
+def test_the_two_ways_a_letter_can_have_gone_are_not_one_word():
+    """"gesendet" beside a letter that went into an employer's upload field
+    credits this app with an e-mail it never addressed."""
+    assert queue.draft_state("filed") != queue.draft_state("sent")

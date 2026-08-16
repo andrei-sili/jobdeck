@@ -361,7 +361,7 @@ async def settings_page():
                         if res["no_mappe"] else "")
                 ui.notify(
                     f"{res['prepared']} prepared{tail}, {res['failed']} failed "
-                    f"— ${res['cost_usd']:.2f}. Open the Review queue.",
+                    f"— ${res['cost_usd']:.2f}. Open the Postausgang.",
                     type="positive" if not res["failed"] else "warning",
                     multi_line=True)
                 for problem in res["errors"][:3]:

@@ -694,9 +694,10 @@ async def test_recent_claim_still_blocks_just_under_the_timeout(
 
 
 @pytest.mark.parametrize("status,hint", [
-    ("approved", "return it to ready"),
-    ("sending", "resolve it"),
-    ("sent", "already sent"),
+    ("approved", "Freigabe im Postausgang zurücknehmen"),
+    ("sending", "im Postausgang auflösen"),
+    ("sent", "schon raus"),
+    ("filed", "Bewerbung eingetragen"),
 ])
 async def test_send_path_drafts_are_never_regenerated(
     con, ai_on, applicant, profile_file, monkeypatch, status, hint

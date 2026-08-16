@@ -22,16 +22,17 @@ from jobdeck.dates import days_since
 from jobdeck.services import liveness
 from jobdeck.ui import live
 
-# Where each rubric goes. Two of them still open the screens they will absorb
-# in their own slices — Unterlagen already means "the Suchprofil and what gets
-# sent", and Bewerbungen already means the register. Pointing them at nothing
-# until then would take away the only way he has to send anything.
+# Where each rubric goes. Antworten is the only one still pointing at nothing,
+# and it says so rather than opening an empty screen.
 UNTERLAGEN_PATH = "/unterlagen"
 STELLEN_PATH = "/"
-BEWERBUNGEN_PATH = "/applications"
+BEWERBUNGEN_PATH = "/bewerbungen"
 EINSTELLUNGEN_PATH = "/settings"
+# The second face of the Bewerbungen rubric, not a rubric of its own — see
+# `shelf` below for why the queue never became one.
+POSTAUSGANG_PATH = "/queue"
 
-FOLLOW_UP_DEFAULT = 14
+FOLLOW_UP_DEFAULT = constants.DEFAULT_FOLLOW_UP_DAYS
 SEND_CAP_DEFAULT = int(constants.DEFAULT_DAILY_CAP)
 
 # How recently the poller must have run for the rail to call discovery live.
@@ -142,7 +143,9 @@ def facts() -> dict:
             "working": db.count_job_groups(con, "new", **working),
             "unread": db.count_job_groups(con, "new", opened="exclude", **working),
             "bookmarked": db.count_bookmarked_jobs(con),
-            "in_progress": db.count_waiting_drafts(con),
+            # What the shelf opens, not what may be sent: the two differ by a
+            # failed draft and a stuck send, and both of those need him.
+            "in_progress": db.count_open_drafts(con),
             "started": db.count_started_forms(con),
             "apps": [dict(row) for row in db.list_bewerbungen(con)],
             "follow_up_days": _int_setting(
@@ -260,7 +263,11 @@ def rubrics(view: dict, current: str, now: datetime.datetime) -> list[Rubric]:
             key="bewerbungen",
             label="Bewerbungen",
             path=BEWERBUNGEN_PATH,
-            count=(f"{silent} ohne Antwort" if silent
+            # "überfällig", not "ohne Antwort": the screen behind this uses
+            # those three words for every open application, and this figure is
+            # only the ones past the follow-up threshold. One click apart,
+            # they were two different numbers under one wording.
+            count=(f"{silent} überfällig" if silent
                    else f"{total} Bewerbungen"),
             # "gesendet" would be a claim about this app: the register holds
             # every application he has ever recorded, including the ones
@@ -334,6 +341,29 @@ def budget(view: dict) -> tuple[int, int]:
     return min(view["sent_today"], cap), cap
 
 
+def shelf(view: dict) -> str:
+    """"2 Briefe warten · 3 von 5 heute frei", or '' for no shelf at all.
+
+    His decision (2026-08-14): the review queue gets no sixth rubric. A rubric
+    found empty nine times out of ten teaches you to ignore it, and the queue
+    is not somewhere you browse — it is a stack that drains to zero. So it
+    appears in the foot only while something is in it, and disappears rather
+    than standing there reading "0 warten".
+
+    It carries the one figure that decides whether pressing Senden is even
+    possible, which until now he only met inside the send screen itself.
+    """
+    waiting = view["in_progress"]
+    if waiting <= 0:
+        return ""
+    used, cap = budget(view)
+    letters = "1 Brief wartet" if waiting == 1 else f"{waiting} Briefe warten"
+    # `budget` already clamps `used` to the cap, so the subtraction cannot go
+    # negative — a second guard here was unreachable code that read like a
+    # guarantee, and the test named after it could not fail.
+    return f"{letters} · {cap - used} von {cap} heute frei"
+
+
 def _render_rubric(rubric: Rubric, current: str) -> None:
     element = ui.element("button").classes("jd-sec").props(
         f'data-current={"true" if rubric.key == current else "false"} '
@@ -358,8 +388,19 @@ def _render(view: dict, current: str, now: datetime.datetime) -> None:
         _render_rubric(rubric, current)
 
 
-def _render_foot(view: dict, now: datetime.datetime) -> None:
+def _render_foot(view: dict, now: datetime.datetime,
+                 with_shelf: bool = True) -> None:
     used, cap = budget(view)
+    line = shelf(view) if with_shelf else ""
+    if line:
+        # Above the budget rather than below it: it is the only thing in the
+        # foot he can act on, and it is the reason the budget matters.
+        element = ui.element("button").classes("jd-shelf") \
+            .mark("postausgang-shelf")
+        element.on("click", lambda _=None: ui.navigate.to(POSTAUSGANG_PATH))
+        with element:
+            ui.label("Postausgang").classes("jd-shelf-name")
+            ui.label(line).classes("jd-shelf-sub")
     ui.label("Heute gesendet").classes("jd-flabel")
     with ui.row().classes("items-center gap-1 mb-3"):
         for index in range(min(cap, BUDGET_BOXES)):
@@ -375,7 +416,7 @@ def _render_foot(view: dict, now: datetime.datetime) -> None:
                 ui.label(beat.detail).classes("jd-pulse ml-auto")
 
 
-async def install(current: str) -> None:
+async def install(current: str, with_shelf: bool = True) -> None:
     """Build the rail into the current slot and keep it true while he works.
 
     Awaited as part of building the page rather than handed to a timer: a
@@ -388,6 +429,12 @@ async def install(current: str) -> None:
     Never defers: the rail holds no text he is reading and no row he could be
     acting on, so there is nothing for fresh numbers to yank out from under
     him — the chip the watcher owns therefore never appears.
+
+    `with_shelf` is False on the Postausgang itself. Everything else in the
+    foot reports; the shelf is the one element that means "there is something
+    ELSEWHERE to do", and on that screen it was a button navigating to the
+    page you were already on. It cannot be derived from `current`, because
+    both faces of the rubric mark the same one.
     """
     ui.label("JobDeck").classes("jd-brand px-2 pt-1")
     spine = ui.column().classes("w-full gap-0 px-1 pt-2")
@@ -404,7 +451,7 @@ async def install(current: str) -> None:
         with spine:
             _render(view, current, now)
         with foot:
-            _render_foot(view, now)
+            _render_foot(view, now, with_shelf)
 
     watcher = live.watch(signature, refresh)
     await refresh()

@@ -2,13 +2,13 @@
 
 from nicegui import run, ui
 
-from jobdeck import db
+from jobdeck import constants, db
 from jobdeck.constants import BEANTWORTET_STATUS, OFFENE_STATUS, STATUS_OPTIONS
 from jobdeck.dates import days_since, iso_to_de
 from jobdeck.ui import live
 from jobdeck.ui.layout import frame
 
-FOLLOW_UP_DEFAULT = 14
+FOLLOW_UP_DEFAULT = constants.DEFAULT_FOLLOW_UP_DAYS
 
 
 def _load():

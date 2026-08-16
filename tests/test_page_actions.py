@@ -123,14 +123,14 @@ async def test_deleting_an_application_asks_first(user: User, con, data_dir):
                                     "email": "hr@beispiel.example",
                                     "kanal": "E-Mail", "status": "Gesendet"})
     con.commit()
-    await user.open("/applications")
-    await user.should_see("1 applications")
+    await user.open("/bewerbungen")
+    await user.should_see("Beispiel GmbH")
 
-    # the editor opens on a row click, which is a Quasar event with the row as
-    # its second argument — the same payload the page's own handler reads
-    row = dict(db.get_bewerbung(con, row_id))
-    user.find(kind=ui.table).trigger("rowClick", [None, row])
-    await asyncio.sleep(0.2)
+    # A row is opened by clicking the row itself. Its id lives in a Python
+    # closure, so — unlike the Quasar table this replaced — the browser never
+    # states which application the click was on.
+    user.find(marker=f"application-{row_id}").click()
+    await asyncio.sleep(0.3)
     user.find(marker="delete-application").click()
     await asyncio.sleep(0.2)
 
@@ -149,15 +149,14 @@ async def test_a_confirmed_application_delete_goes_through(user: User, con,
                                     "email": "hr@beispiel.example",
                                     "kanal": "E-Mail", "status": "Gesendet"})
     con.commit()
-    await user.open("/applications")
-    await user.should_see("1 applications")
-    user.find(kind=ui.table).trigger("rowClick",
-                                     [None, dict(db.get_bewerbung(con, row_id))])
-    await asyncio.sleep(0.2)
+    await user.open("/bewerbungen")
+    await user.should_see("Beispiel GmbH")
+    user.find(marker=f"application-{row_id}").click()
+    await asyncio.sleep(0.3)
     user.find(marker="delete-application").click()
     await asyncio.sleep(0.2)
 
-    user.find("Löschen").click()
+    user.find(marker="confirm-delete-application").click()
     await asyncio.sleep(0.3)
 
     assert db.get_bewerbung(con, row_id) is None
@@ -201,13 +200,13 @@ async def test_send_now_reaches_the_confirmation_with_the_resolved_recipient(
     con.commit()
 
     await user.open("/queue")
-    user.find("Review & send").click()
+    user.find("Prüfen und senden").click()
     await asyncio.sleep(0.2)
-    user.find("Send now").click()
+    user.find("Jetzt senden").click()
     await asyncio.sleep(0.3)
 
-    await user.should_see("Send this application?")
-    await user.should_see("TEST send: probe@example.org")
+    await user.should_see("Diese Bewerbung abschicken?")
+    await user.should_see("Testversand an: probe@example.org")
     assert db.count_outbound_today(con) == 0, "nothing may be sent by a test"
 
 
@@ -267,19 +266,19 @@ async def test_the_send_confirmation_repeats_the_duplicate_warning(
     db.set_setting(con, "test_recipient", "probe@example.org")
     con.commit()
     await user.open("/queue")
-    user.find("Review & send").click()
+    user.find("Prüfen und senden").click()
     await asyncio.sleep(0.2)
 
-    user.find("Send now").click()
+    user.find("Jetzt senden").click()
     await asyncio.sleep(0.3)
 
     # scoped to the dialog: the row behind it carries the same sentence, so a
     # page-wide search would pass with the dialog's own line deleted
     confirm = next(e for e in user.client.elements.values()
                    if isinstance(e, ui.dialog) and e.value
-                   and any("Send this application?" in getattr(d, "text", "")
+                   and any("Diese Bewerbung abschicken?" in getattr(d, "text", "")
                            for d in e.descendants()))
     shown = [getattr(el, "text", "") for el in confirm.descendants()]
-    assert any("Send this application?" in (t or "") for t in shown)
+    assert any("Diese Bewerbung abschicken?" in (t or "") for t in shown)
     assert any("bereits beworben" in (t or "") for t in shown), \
         "the last screen before the press does not repeat the warning"
