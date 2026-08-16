@@ -21,7 +21,11 @@ import datetime
 from dataclasses import dataclass
 
 from jobdeck import db
-from jobdeck.constants import BEANTWORTET_STATUS, OFFENE_STATUS
+from jobdeck.constants import (
+    BEANTWORTET_STATUS,
+    DEFAULT_FOLLOW_UP_DAYS,
+    OFFENE_STATUS,
+)
 from jobdeck.dates import MONATE_DE
 
 # How far back the rhythm strip reaches. Sixty days is what makes a pause
@@ -54,7 +58,6 @@ class Waiting:
     firma: str
     days: int | None      # None when the row states no date at all
     overdue: bool
-    kanal: str
 
 
 @dataclass(frozen=True)
@@ -215,7 +218,6 @@ def silence(apps: list[dict], follow_up_days: int,
             firma=str(app.get("firma") or ""),
             days=days,
             overdue=days is not None and days >= follow_up_days,
-            kanal=str(app.get("kanal") or ""),
         ))
     # Unknown ages last: they carry no claim, so they cannot lead a list whose
     # whole order is a claim about age.
@@ -347,10 +349,11 @@ def facts() -> dict:
 
 
 # After how many silent days an application is worth chasing, when he has
-# never said. The same default the rail uses, read the same forgiving way: a
-# setting is free text in a table he can edit, and `int("")` taking down the
-# screen is the shape that once took down the inbox over an age threshold.
-FOLLOW_UP_DEFAULT = 14
+# never said. Imported rather than repeated: it was declared here as 14 with a
+# comment claiming it was "the same default the rail uses", and the only test
+# compared it to itself — so it could be moved to 99 with the suite green
+# while the rail went on saying 14 about the same applications.
+FOLLOW_UP_DEFAULT = DEFAULT_FOLLOW_UP_DAYS
 
 
 def follow_up_setting(raw: str) -> int:

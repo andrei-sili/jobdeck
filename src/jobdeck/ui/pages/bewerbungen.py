@@ -61,6 +61,37 @@ def _pill_class(status: str) -> str:
     return _PILL.get(status, "warn" if status in OFFENE_STATUS else "")
 
 
+def _channel_verdict(shares: list[register.Share], rate: bool) -> str:
+    """What the two numbers may be read as — and what they may not.
+
+    The mockup asserted that forms answer more often. On the real
+    register they answer at 27 % against 26 %, which is one
+    application's worth of difference. A screen that leads with the
+    higher figure teaches him to steer by noise.
+    """
+    if not shares:
+        # A sentence about "the figures above" printed where no figure
+        # is drawn is worse than silence.
+        return ""
+    if not rate:
+        smallest = min(share.whole for share in shares)
+        return (f"Bei {smallest} Bewerbungen auf einem der Wege ist "
+                "eine Prozentzahl noch Rechnen, kein Befund — deshalb "
+                "stehen hier nur die Stückzahlen.")
+    ranked = sorted(shares, key=lambda s: -s.ratio)
+    if len(ranked) < 2:
+        return ""
+    gap = ranked[0].ratio - ranked[1].ratio
+    if gap < 0.10:
+        return (f"{ranked[0].label} und {ranked[1].label} liegen "
+                "gleichauf — der Unterschied ist kleiner als eine "
+                "einzelne Antwort. Danach lohnt es sich nicht zu "
+                "steuern.")
+    return (f"{ranked[0].label} antwortet häufiger — "
+            f"{round(ranked[0].ratio * 100)} % gegen "
+            f"{round(ranked[1].ratio * 100)} %.")
+
+
 def _load() -> dict:
     return register.facts()
 
@@ -365,36 +396,6 @@ async def bewerbungen_page():
                              + (f" · {round(share.ratio * 100)} %" if rate
                                 else "")).classes("age" + last)
 
-        def _channel_verdict(shares: list[register.Share], rate: bool) -> str:
-            """What the two numbers may be read as — and what they may not.
-
-            The mockup asserted that forms answer more often. On the real
-            register they answer at 27 % against 26 %, which is one
-            application's worth of difference. A screen that leads with the
-            higher figure teaches him to steer by noise.
-            """
-            if not shares:
-                # A sentence about "the figures above" printed where no figure
-                # is drawn is worse than silence.
-                return ""
-            if not rate:
-                smallest = min(share.whole for share in shares)
-                return (f"Bei {smallest} Bewerbungen auf einem der Wege ist "
-                        "eine Prozentzahl noch Rechnen, kein Befund — deshalb "
-                        "stehen hier nur die Stückzahlen.")
-            ranked = sorted(shares, key=lambda s: -s.ratio)
-            if len(ranked) < 2:
-                return ""
-            gap = ranked[0].ratio - ranked[1].ratio
-            if gap < 0.10:
-                return (f"{ranked[0].label} und {ranked[1].label} liegen "
-                        "gleichauf — der Unterschied ist kleiner als eine "
-                        "einzelne Antwort. Danach lohnt es sich nicht zu "
-                        "steuern.")
-            return (f"{ranked[0].label} antwortet häufiger — "
-                    f"{round(ranked[0].ratio * 100)} % gegen "
-                    f"{round(ranked[1].ratio * 100)} %.")
-
         # ------------------------------------------------------------------
         # 6. The register itself
         # ------------------------------------------------------------------
@@ -484,7 +485,8 @@ async def bewerbungen_page():
                 fields = {}
                 with ui.grid(columns=2).classes("w-full gap-2"):
                     fields["firma"] = ui.input(
-                        "Firma", value=data.get("firma") or "")
+                        "Firma", value=data.get("firma") or "") \
+                        .mark("field-firma")
                     fields["email"] = ui.input(
                         "E-Mail", value=data.get("email") or "")
                     fields["ansprechpartner"] = ui.input(
@@ -639,7 +641,8 @@ async def bewerbungen_page():
 
         with header:
             ui.input("Suchen", on_change=lambda e: set_query(e.value)) \
-                .props("dense clearable debounce=350").classes("w-64")
+                .props("dense clearable debounce=350").classes("w-64") \
+                .mark("register-search")
             ui.select([VIEW_ALL, *STATUS_OPTIONS], value=VIEW_ALL,
                       label="Status", on_change=lambda e: set_status(e.value)) \
                 .props("dense").classes("w-48")

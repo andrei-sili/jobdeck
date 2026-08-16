@@ -291,30 +291,42 @@ def test_the_populations_are_counted_the_way_the_screen_reads_them(con):
     con.execute("UPDATE jobs SET match_score=0 WHERE id=?", (zero,))
     con.commit()
 
+    # a claim being written right now: the row exists, the letter does not
+    writing = _job(con, "writing")
+    con.execute("UPDATE jobs SET match_score=70 WHERE id=?", (writing,))
+    db.upsert_draft(con, writing, {"status": "generating"})
+    con.commit()
+
     counts = db.pipeline_counts(con)
 
-    assert counts["jobs_total"] == 3
-    assert counts["scored_above_zero"] == 2
+    assert counts["jobs_total"] == 4
+    assert counts["scored_above_zero"] == 3
     assert counts["scored_zero"] == 1
     assert counts["opened"] == 1
-    assert counts["drafted"] == 2
+    assert counts["drafted"] == 2, "a draft row being written is not a letter"
     assert counts["drafted_unread"] == 1, "the batch wrote one unread"
     assert counts["applied"] == 0
 
 
 def test_a_board_only_gets_credit_for_the_applications_it_carried(con):
     """An imported row has no posting and therefore no board. Folding those
-    into a per-source figure would credit a board with work it never did."""
-    job_id = _job(con, "one", source="jooble")
-    db.apply_job(con, job_id, kanal="Online-Portal")
+    into a per-source figure would credit a board with work it never did.
+
+    The second jooble posting is what makes `applied` an assertion: with one
+    posting that was applied to, `SUM(CASE WHEN bewerbung_id …)` and `COUNT(*)`
+    give the same answer, so the whole 'applied' half of the panel was
+    unpinned."""
+    applied_to = _job(con, "one", source="jooble")
+    db.apply_job(con, applied_to, kanal="Online-Portal")
+    _job(con, "two", source="jooble")          # delivered, never applied to
     db.add_bewerbung(con, {"firma": "Von Hand GmbH", "kanal": "E-Mail",
                            "status": "Gesendet"})
     con.commit()
 
     rows = {row["source"]: dict(row) for row in db.applications_by_source(con)}
 
-    assert rows["jooble"]["jobs"] == 1
-    assert rows["jooble"]["applied"] == 1
+    assert rows["jooble"]["jobs"] == 2
+    assert rows["jooble"]["applied"] == 1, "postings delivered != applied to"
     assert sum(row["applied"] for row in rows.values()) == 1, "not the hand row"
 
 
@@ -474,3 +486,19 @@ def test_a_letterless_application_is_counted_and_not_inferred(con):
     assert counts["applied"] == 2
     assert counts["drafted"] == 2
     assert counts["applied_without_letter"] == 1, "measured, not subtracted"
+
+
+def test_the_rate_threshold_is_pinned_at_its_own_boundary():
+    """Tested at 4 and at 30, the boundary at 20 was never approached — the
+    constant could move to 25 with the suite green."""
+    at = register.ENOUGH_FOR_A_RATE
+    assert register.enough_for_a_rate([Share("a", 1, at, 0.1)])
+    assert not register.enough_for_a_rate([Share("a", 1, at - 1, 0.1)])
+
+
+def test_the_strips_end_labels_are_written_the_way_the_screen_speaks():
+    """`de_day` is the only place they are produced, and its body could be
+    replaced with `day.isoformat()` — printing "2026-06-18" on a screen that
+    is otherwise entirely German — with the suite green."""
+    assert register.de_day(datetime.date(2026, 6, 18)) == "18. Juni"
+    assert register.de_day(datetime.date(2026, 3, 1)) == "1. März"

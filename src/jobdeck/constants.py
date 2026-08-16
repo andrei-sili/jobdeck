@@ -77,6 +77,12 @@ DRAFT_STATUS = ["generating", "ready", "failed", "approved", "sending", "sent",
 # and neither waits in the Postausgang.
 DRAFT_DELIVERED = ("sent", "filed")
 
+# After how many silent days an application is worth chasing, when he has
+# never said. Stated once: it lived in two modules with a comment in each
+# claiming it matched the other, and the only test compared it to itself — so
+# one could move while the other went on saying 14 about the same rows.
+DEFAULT_FOLLOW_UP_DAYS = 14
+
 # How many messages may leave in a day when he has never said. Stated once, in
 # the layer both the send gate and the screens that draw the budget can see: a
 # second copy would let a bar promise a send the gate below it refuses.

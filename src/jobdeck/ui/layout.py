@@ -61,7 +61,8 @@ def tabs(current: str, entries: list[tuple[str, str, str]]) -> None:
     with ui.row().classes("jd-tabs w-full gap-1 items-center"):
         for key, label, path in entries:
             element = ui.element("button").classes("jd-tab").props(
-                f'data-current={"true" if key == current else "false"}')
+                f'data-current={"true" if key == current else "false"}') \
+                .mark(f"tab-{key}")
             if key != current:
                 element.on("click", lambda _=None, p=path: ui.navigate.to(p))
             with element:

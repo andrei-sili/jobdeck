@@ -350,3 +350,187 @@ def test_the_screen_watches_the_setting_it_prints_and_colours_by(con):
     con.commit()
 
     assert register.signature(con) != before
+
+
+# --------------------------------------------------------------------------
+# The panel's anti-noise guard, and the figures it guards
+# --------------------------------------------------------------------------
+def test_two_level_rates_are_reported_as_level():
+    """His real register: 27 % against 26 %, which is one application's worth.
+    The threshold could be raised to 0.99 — calling every comparison level —
+    and the ranking could be INVERTED, both with the suite green."""
+    shares = [register.Share("Online-Portal", 11, 41, 11 / 41),
+              register.Share("E-Mail", 9, 35, 9 / 35)]
+
+    said = bewerbungen._channel_verdict(shares, True)
+
+    assert "gleichauf" in said
+    assert "Online-Portal" in said and "E-Mail" in said
+
+
+def test_a_real_difference_names_the_channel_that_answers_more():
+    shares = [register.Share("E-Mail", 2, 40, 0.05),
+              register.Share("Online-Portal", 20, 40, 0.5)]
+
+    said = bewerbungen._channel_verdict(shares, True)
+
+    assert said.startswith("Online-Portal antwortet häufiger")
+    assert "50 %" in said and "5 %" in said
+
+
+def test_a_population_too_small_for_a_rate_says_so_and_names_the_smallest():
+    shares = [register.Share("E-Mail", 2, 40, 0.05),
+              register.Share("Post", 1, 3, 1 / 3)]
+
+    said = bewerbungen._channel_verdict(shares, False)
+
+    assert "Bei 3 Bewerbungen" in said
+    assert "Stückzahlen" in said
+
+
+def test_a_panel_with_no_rows_says_nothing_at_all():
+    """The sentence pointed at figures that were not drawn."""
+    assert bewerbungen._channel_verdict([], False) == ""
+
+
+# --------------------------------------------------------------------------
+# What the panels SAY, not merely that they are there
+# --------------------------------------------------------------------------
+async def test_the_funnel_prints_the_populations_it_measured(user: User, con):
+    """Only the six headings were asserted, so every step could be relabelled
+    'x', every note blanked and every bar zeroed with the suite green."""
+    for n in range(3):
+        job_id = db.insert_job_if_new(con, {
+            "source": "stub", "external_id": f"j{n}", "company": f"Firma {n}",
+            "title": "Entwickler", "url": f"https://x.example/{n}"})
+        con.execute("UPDATE jobs SET match_score=? WHERE id=?",
+                    (0 if n == 2 else 80, job_id))
+    con.commit()
+
+    await user.open("/bewerbungen")
+
+    await user.should_see("gefunden")
+    await user.should_see("passen zu einem Profil")
+    await user.should_see("von dir geöffnet")
+    await user.should_see("Anschreiben geschrieben")
+    await user.should_see("1 verletzen eine harte Anforderung")
+
+
+async def test_the_register_block_names_what_this_app_did_not_do(user: User,
+                                                                 con):
+    _app_row(con, firma="Von Hand GmbH")
+
+    await user.open("/bewerbungen")
+
+    await user.should_see("im Register")
+    await user.should_see("0 über JobDeck · 1 von Hand oder aus dem alten Tracker")
+
+
+async def test_the_silence_panel_names_the_company_and_its_age(user: User, con):
+    _app_row(con, firma="Schweigt GmbH", gesendet_am="2026-01-01")
+
+    await user.open("/bewerbungen")
+
+    await user.should_see("Schweigt GmbH")
+    await user.should_see("Bewerbungen ohne Antwort")
+
+
+# --------------------------------------------------------------------------
+# Controls no test was driving
+# --------------------------------------------------------------------------
+async def test_the_search_box_narrows_the_register(user: User, con):
+    """The LIST narrows; the panels above it do not, because they describe the
+    whole register and a filtered funnel would be a different claim. So the
+    assertion is the printed range, not the absence of a name — the silent
+    company is still named one card higher, on purpose."""
+    _app_row(con, firma="Gesucht GmbH")
+    _app_row(con, firma="Andere GmbH", email="hr@andere.example")
+    await user.open("/bewerbungen")
+    await user.should_see("Die Bewerbungen")
+
+    user.find(marker="register-search").type("Gesucht")
+    await asyncio.sleep(0.6)
+
+    await user.should_see("1 von 2")
+    await user.should_not_see("hr@andere.example")
+
+
+async def test_a_second_application_at_one_company_is_refused_in_the_dialog(
+        user: User, con):
+    """One application per company — the rule the send gate enforces. The
+    refusal branch in `_save` was driven by nothing."""
+    _app_row(con, firma="Einmal GmbH")
+    await user.open("/bewerbungen")
+
+    user.find("Neue Bewerbung").click()
+    await asyncio.sleep(0.3)
+    user.find(marker="field-firma").type("Einmal GmbH")
+    user.find("Speichern").click()
+    await asyncio.sleep(0.4)
+
+    await user.should_see("eine Bewerbung pro Firma")
+    assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 1
+
+
+async def test_an_application_without_a_company_is_refused(user: User, con):
+    await user.open("/bewerbungen")
+
+    user.find("Neue Bewerbung").click()
+    await asyncio.sleep(0.3)
+    user.find("Speichern").click()
+    await asyncio.sleep(0.3)
+
+    await user.should_see("Ohne Firma geht es nicht")
+    assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 0
+
+
+# --------------------------------------------------------------------------
+# The shelf and the tabs: rendered, and pointing where they promise
+# --------------------------------------------------------------------------
+async def test_the_shelf_is_drawn_and_opens_the_stack_it_describes(user: User,
+                                                                   con):
+    """It was exercised as a pure string function only: the block that builds
+    the button and attaches the navigation could be wrapped in `if False:`
+    with the suite green, and its data source could be swapped for an
+    unrelated counter."""
+    job_id = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "x", "company": "Firma",
+        "title": "Entwickler", "url": "https://x.example/1"})
+    db.upsert_draft(con, job_id, {"status": "ready"})
+    con.commit()
+
+    await user.open("/bewerbungen")
+    await user.should_see("1 Brief wartet")
+
+    user.find(marker="postausgang-shelf").click()
+    await asyncio.sleep(0.5)
+
+    await user.should_see("TESTMODUS")
+
+
+async def test_an_empty_stack_draws_no_shelf(user: User, con):
+    await user.open("/bewerbungen")
+
+    await user.should_not_see("Briefe warten")
+    await user.should_not_see("Brief wartet")
+
+
+async def test_a_tab_actually_navigates(user: User, con):
+    """No test clicked one: deleting the click handler left the suite green,
+    and both destinations could be pointed at /settings."""
+    await user.open("/queue")
+    await user.should_see("Nichts wartet")
+
+    user.find(marker="tab-register").click()
+    await asyncio.sleep(0.5)
+
+    await user.should_see("Der Trichter")
+
+
+def test_each_face_of_the_rubric_points_at_its_own_screen():
+    from jobdeck.ui import layout
+    from jobdeck.ui.pages import queue as queue_page
+    paths = {key: path for key, _label, path in layout.BEWERBUNGEN_TABS}
+    assert paths["register"] == bewerbungen.BEWERBUNGEN_PATH
+    assert paths["postausgang"] == "/queue"
+    assert queue_page.queue_page.__module__.endswith("queue")

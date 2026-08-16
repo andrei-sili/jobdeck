@@ -369,3 +369,32 @@ def test_a_state_nobody_taught_it_is_shown_rather_than_swallowed():
     a state entirely, and this row is the last stop before a send."""
     assert queue.draft_state("etwas_neues") == "etwas_neues"
     assert queue.draft_state(None) == ""
+
+
+# --------------------------------------------------------------------------
+# Which drafts each tab lists — untested until a new status needed classifying
+# --------------------------------------------------------------------------
+def test_a_letter_already_with_an_employer_never_waits_to_be_sent():
+    """Adding 'filed' to the open filter puts a letter whose application is
+    already out back into the stack that offers "Prüfen und senden" — one
+    press from a second application at a firm that has one. The filter had no
+    test at all, so that mutation was green."""
+    assert "filed" not in queue.FILTER_STATUSES["open"]
+    assert "sent" not in queue.FILTER_STATUSES["open"]
+    assert "filed" in queue.FILTER_STATUSES["sent"]
+
+
+def test_every_draft_status_is_reachable_through_exactly_one_tab():
+    """A status in no tab is a letter with no screen — the shape that once
+    made a posting undraftable, undiscardable and unpreparable for ever."""
+    from jobdeck.constants import DRAFT_STATUS
+    seen = [status for statuses in queue.FILTER_STATUSES.values()
+            for status in statuses]
+    assert sorted(seen) == sorted(set(seen)), "a status is listed twice"
+    assert set(seen) == set(DRAFT_STATUS)
+
+
+def test_the_two_ways_a_letter_can_have_gone_are_not_one_word():
+    """"gesendet" beside a letter that went into an employer's upload field
+    credits this app with an e-mail it never addressed."""
+    assert queue.draft_state("filed") != queue.draft_state("sent")

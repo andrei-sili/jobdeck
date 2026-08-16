@@ -248,14 +248,56 @@ def test_recording_files_the_letter_that_went_out(con, data_dir):
     assert db.count_waiting_drafts(con) == 0, "it must leave the Postausgang"
 
 
-def test_a_filed_letter_may_not_be_rewritten(con, data_dir):
-    """Re-drafting one would rewrite the record of what an employer holds."""
+async def test_a_filed_letter_may_not_be_rewritten(con, data_dir, monkeypatch):
+    """Re-drafting one would rewrite the record of what an employer holds.
+
+    Driven through `draft_for_job`, not asserted against the dict: the refusal
+    lives in `_claim`, and a version of it that simply skipped 'filed' passed
+    a test that only checked the key was present."""
     from jobdeck.services import drafting
+    monkeypatch.setattr(drafting, "_ai_enabled", lambda: True)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-only")
+    monkeypatch.setattr(drafting.profile, "load_profile", lambda: "Fakten")
+    monkeypatch.setattr(drafting, "_applicant_name", lambda: "Andrei Sili")
     job_id = _job(con)
     _with_mappe(con, data_dir, job_id)
     apply_record.record_form_application(job_id)
+    assert db.get_draft_by_job(con, job_id)["status"] == "filed"
 
-    assert "filed" in drafting.NO_REGEN
+    result = await drafting.draft_for_job(job_id)
+
+    assert not result["ok"]
+    assert "eingereicht" in result["error"] or "recorded" in result["error"]
+    assert db.get_draft_by_job(con, job_id)["status"] == "filed"
+
+
+def test_a_letter_approved_for_auto_send_is_filed_too(con, data_dir):
+    """`FILEABLE` could be narrowed to ('ready',) with the suite green: the
+    helper only ever builds a 'ready' draft, so the 'approved' arm was never
+    executed."""
+    job_id = _job(con, external_id="approved", company="Freigegeben GmbH")
+    _with_mappe(con, data_dir, job_id)
+    db.upsert_draft(con, job_id, {"status": "approved"})
+    con.commit()
+
+    apply_record.record_form_application(job_id)
+
+    assert db.get_draft_by_job(con, job_id)["status"] == "filed"
+
+
+def test_an_already_sent_letter_is_never_re_filed(con, data_dir):
+    """`FILEABLE` could also be WIDENED to include 'sent' with the suite
+    green. A sent draft is the record of an e-mail this app addressed;
+    re-filing it would overwrite that record with a claim about a form."""
+    job_id = _job(con, external_id="sent2", company="Schon Gesendet GmbH")
+    _with_mappe(con, data_dir, job_id)
+    draft_id = db.get_draft_by_job(con, job_id)["id"]
+    db.record_send(con, draft_id, "gmail-9", "thread-9", None)
+    con.commit()
+
+    apply_record.record_form_application(job_id)
+
+    assert db.get_draft_by_job(con, job_id)["status"] == "sent"
 
 
 def test_only_a_finished_unsent_letter_is_filed(con, data_dir):
@@ -292,21 +334,37 @@ def test_the_undo_gives_the_letter_back(con, data_dir):
     assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 0
 
 
+def _preparable(con, external_id, draft_status):
+    """A posting the daily batch would otherwise take, carrying one draft.
+
+    Deliberately NOT built with `_with_mappe`: that helper stamps
+    `form_opened_at`, and `jobs_to_prepare` excludes a started form on its own
+    — so the assertion below would have held with any draft status at all.
+    """
+    job_id = _job(con, external_id=external_id, company=f"Firma {external_id}")
+    con.execute("UPDATE jobs SET match_score=90, status='new', "
+                "published_on=date('now') WHERE id=?", (job_id,))
+    db.upsert_draft(con, job_id, {"status": draft_status})
+    con.commit()
+    return job_id
+
+
 def test_a_filed_letter_never_earns_a_second_one(con, data_dir):
     """`jobs_to_prepare` skips a posting that already has a draft, so a state
     it does not know about would let the daily batch pay to write the letter a
-    second time — for an application that is already out."""
-    job_id = _job(con)
-    _with_mappe(con, data_dir, job_id)
-    con.execute("UPDATE jobs SET match_score=90, status='new' WHERE id=?",
-                (job_id,))
-    db.upsert_draft(con, job_id, {"status": "filed"})
-    con.commit()
+    second time — for an application that is already out.
 
-    candidates = db.jobs_to_prepare(con, limit=10, max_age_days=365,
-                                    min_score=1)
+    The `discarded` posting is what makes this an assertion rather than a
+    tautology: it proves the batch WOULD take this shape, so the filed one
+    being absent is the status doing the work."""
+    filed = _preparable(con, "filed", "filed")
+    thrown_away = _preparable(con, "discarded", "discarded")
 
-    assert job_id not in [row["id"] for row in candidates]
+    taken = [row["id"] for row in db.jobs_to_prepare(
+        con, limit=10, max_age_days=365, min_score=1)]
+
+    assert thrown_away in taken, "the fixture is not excluded for other reasons"
+    assert filed not in taken
 
 
 def test_a_letter_is_filed_only_where_it_provably_travelled(con, data_dir):
@@ -391,3 +449,32 @@ def test_the_undo_survives_an_e_mail_logged_against_the_application(con,
     apply_record.undo(job_id, result["bewerbung_id"], result["previous_status"])
 
     assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 0
+
+
+def test_filing_clears_the_error_of_the_attempt_that_failed_before_it(con,
+                                                                      data_dir):
+    """Otherwise a letter filed after a failed attempt keeps its stale red
+    line in the Postausgang, under a row that says it has gone out."""
+    job_id = _job(con)
+    _with_mappe(con, data_dir, job_id)
+    db.upsert_draft(con, job_id, {"status": "ready", "error": "vorher kaputt"})
+    con.commit()
+
+    apply_record.record_form_application(job_id)
+
+    assert db.get_draft_by_job(con, job_id)["error"] == ""
+
+
+def test_the_undo_never_reaches_a_letter_that_was_e_mailed(con, data_dir):
+    """`unfile_draft` matches on the status as well as the application. Without
+    that guard the undo would turn a SENT draft — the record of a real Gmail
+    message — back into a waiting letter."""
+    job_id = _job(con, external_id="mailed", company="Gemailt GmbH")
+    draft_id = db.upsert_draft(con, job_id, {"status": "ready"})
+    bewerbung_id = db.apply_job(con, job_id, kanal="E-Mail")
+    db.record_send(con, draft_id, "gmail-2", "thread-2", bewerbung_id)
+    con.commit()
+
+    db.unfile_draft(con, bewerbung_id)
+
+    assert db.get_draft(con, draft_id)["status"] == "sent"

@@ -32,7 +32,7 @@ EINSTELLUNGEN_PATH = "/settings"
 # `shelf` below for why the queue never became one.
 POSTAUSGANG_PATH = "/queue"
 
-FOLLOW_UP_DEFAULT = 14
+FOLLOW_UP_DEFAULT = constants.DEFAULT_FOLLOW_UP_DAYS
 SEND_CAP_DEFAULT = int(constants.DEFAULT_DAILY_CAP)
 
 # How recently the poller must have run for the rail to call discovery live.
@@ -358,7 +358,10 @@ def shelf(view: dict) -> str:
         return ""
     used, cap = budget(view)
     letters = "1 Brief wartet" if waiting == 1 else f"{waiting} Briefe warten"
-    return f"{letters} · {max(0, cap - used)} von {cap} heute frei"
+    # `budget` already clamps `used` to the cap, so the subtraction cannot go
+    # negative — a second guard here was unreachable code that read like a
+    # guarantee, and the test named after it could not fail.
+    return f"{letters} · {cap - used} von {cap} heute frei"
 
 
 def _render_rubric(rubric: Rubric, current: str) -> None:
@@ -391,7 +394,8 @@ def _render_foot(view: dict, now: datetime.datetime) -> None:
     if line:
         # Above the budget rather than below it: it is the only thing in the
         # foot he can act on, and it is the reason the budget matters.
-        element = ui.element("button").classes("jd-shelf")
+        element = ui.element("button").classes("jd-shelf") \
+            .mark("postausgang-shelf")
         element.on("click", lambda _=None: ui.navigate.to(POSTAUSGANG_PATH))
         with element:
             ui.label("Postausgang").classes("jd-shelf-name")
