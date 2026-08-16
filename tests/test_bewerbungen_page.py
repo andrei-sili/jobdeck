@@ -366,6 +366,7 @@ def test_two_level_rates_are_reported_as_level():
 
     assert "gleichauf" in said
     assert "Online-Portal" in said and "E-Mail" in said
+    assert "Danach solltest du dich nicht richten" in said
 
 
 def test_a_real_difference_names_the_channel_that_answers_more():
@@ -384,8 +385,8 @@ def test_a_population_too_small_for_a_rate_says_so_and_names_the_smallest():
 
     said = bewerbungen._channel_verdict(shares, False)
 
-    assert "Bei 3 Bewerbungen" in said
-    assert "Stückzahlen" in said
+    assert "Bei nur 3 Bewerbungen" in said
+    assert "nur die Zahlen" in said
 
 
 def test_a_panel_with_no_rows_says_nothing_at_all():

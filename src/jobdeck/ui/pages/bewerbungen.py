@@ -75,9 +75,13 @@ def _channel_verdict(shares: list[register.Share], rate: bool) -> str:
         return ""
     if not rate:
         smallest = min(share.whole for share in shares)
-        return (f"Bei {smallest} Bewerbungen auf einem der Wege ist "
-                "eine Prozentzahl noch Rechnen, kein Befund — deshalb "
-                "stehen hier nur die Stückzahlen.")
+        # "ist … noch Rechnen" is not a German construction, "Befund" is
+        # medical and "Stückzahlen" belongs to manufacturing.
+        return ("Bei "
+                + ("nur einer Bewerbung" if smallest == 1
+                   else f"nur {smallest} Bewerbungen")
+                + " auf einem der Wege sagt eine Prozentzahl noch nichts — "
+                  "deshalb stehen hier nur die Zahlen.")
     ranked = sorted(shares, key=lambda s: -s.ratio)
     if len(ranked) < 2:
         return ""
@@ -85,8 +89,8 @@ def _channel_verdict(shares: list[register.Share], rate: bool) -> str:
     if gap < 0.10:
         return (f"{ranked[0].label} und {ranked[1].label} liegen "
                 "gleichauf — der Unterschied ist kleiner als eine "
-                "einzelne Antwort. Danach lohnt es sich nicht zu "
-                "steuern.")
+                "einzelne Antwort. Danach solltest du dich nicht "
+                "richten.")
     return (f"{ranked[0].label} antwortet häufiger — "
             f"{round(ranked[0].ratio * 100)} % gegen "
             f"{round(ranked[1].ratio * 100)} %.")
