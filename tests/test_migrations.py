@@ -608,3 +608,26 @@ def test_migrate_files_letters_whose_application_is_already_recorded(tmp_path,
     assert db.get_draft_by_job(con, waiting)["status"] == "ready"
     assert db.count_waiting_drafts(con) == 2
     con.close()
+
+
+def test_the_filing_backfill_skips_a_database_too_old_to_know_the_pairing(
+        tmp_path, monkeypatch):
+    """A migration must never RAISE on a shape it can simply skip: it runs at
+    startup, before any screen, so an exception there is the whole app.
+
+    The early return is the branch a fresh database can never exercise, so it
+    is exercised here — with the two columns the pairing is derived from
+    absent, which is what a database from before schema v6 looks like."""
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    con = sqlite3.connect(tmp_path / "ancient.db")
+    con.row_factory = sqlite3.Row
+    con.execute("CREATE TABLE jobs (id INTEGER PRIMARY KEY, company TEXT)")
+    con.execute("CREATE TABLE drafts (id INTEGER PRIMARY KEY, job_id INTEGER, "
+                "status TEXT)")
+    con.execute("INSERT INTO drafts (job_id, status) VALUES (1, 'ready')")
+    con.commit()
+
+    migrations._file_letters_of_recorded_applications(con)
+
+    assert con.execute("SELECT status FROM drafts").fetchone()[0] == "ready"
+    con.close()
