@@ -190,6 +190,50 @@ def test_normalising_whitespace_does_not_defeat_the_conditional_screen():
     assert verdict is not None and verdict.classification == "eingang"
 
 
+@pytest.mark.parametrize("body", [
+    "Nach Sichtung Ihrer Unterlagen können wir Sie leider nicht zu einem "
+    "persönlichen Gespräch einladen.",
+    "Eine Einladung zu einem Vorstellungsgespräch können wir Ihnen leider "
+    "nicht aussprechen.",
+])
+def test_a_rejection_dressed_as_an_invitation_only_proposes(body):
+    """German builds the rejection out of the invitation's own words, and no
+    amount of invitation phrasing tells them apart. Filed confidently this
+    was the worst thing the rules could do: Einladung is rank 4, so it closes
+    the application AND blocks the true Absage arriving behind it."""
+    verdict = replies.classify("Ihre Bewerbung", body)
+    assert verdict is not None and verdict.classification == "einladung"
+    assert not verdict.confident
+
+
+def test_a_negation_in_another_sentence_leaves_an_invitation_confident():
+    """The screen is per SENTENCE. A real invitation routinely says "nicht"
+    about something else — where the interview is, what not to bring — and
+    demoting it there would cost a click on every genuine invitation."""
+    verdict = replies.classify(
+        "Termin",
+        "Wir laden Sie zu einem Vorstellungsgespräch ein. Das Gespräch findet "
+        "nicht in unserer Zentrale statt.")
+    assert verdict.classification == "einladung" and verdict.confident
+
+
+def test_the_polite_opener_alone_never_writes_a_status():
+    """Every German reply opens by thanking for the application — a rejection
+    included — so the opener is the weakest evidence in the module. Carrying
+    a CONFIDENT verdict, it filed every unrecognised rejection as "your
+    application arrived": status In Bearbeitung, the Offen label, and no
+    review row, so nothing ever asked about it again."""
+    verdict = replies.classify(
+        "Ihre Bewerbung",
+        "Vielen Dank für Ihre Bewerbung. Wir haben uns anderweitig "
+        "entschieden.")
+    assert verdict is not None and verdict.classification == "eingang"
+    assert not verdict.confident
+    # …while a receipt that states the arrival keeps writing by itself.
+    real = replies.classify("Eingang", EINGANG_SCHLICHT)
+    assert real.classification == "eingang" and real.confident
+
+
 def test_an_out_of_office_subject_overrides_every_family():
     verdict = replies.classify("Automatische Antwort: Ihre Bewerbung",
                                OOO_MIT_DELEGATION)

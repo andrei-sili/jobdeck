@@ -120,6 +120,16 @@ _CONDITIONAL = re.compile(
     re.IGNORECASE,
 )
 
+# A negation sharing a sentence with invitation vocabulary. German builds a
+# rejection out of the invitation's own words — "wir können Sie leider nicht
+# einladen", "eine Einladung können wir Ihnen nicht aussprechen" — and no
+# amount of invitation phrasing distinguishes the two. Used to demote, never
+# to suppress: see classify().
+_NEGATION = re.compile(
+    r"\bnicht\b|\bkein(?:e[nmrs]?)?\b|\babsehen\b|\bleider nicht\b",
+    re.IGNORECASE,
+)
+
 # Sentences end at punctuation or a paragraph break — NOT at every newline:
 # real mail arrives hard-wrapped at ~72 columns, and splitting on the wrap
 # both breaks multi-line phrases and detaches a sentence's opening "Sollten"
@@ -192,10 +202,14 @@ class RuleVerdict:
     confident: bool = True
 
 
-def _hits(sentences: list[str], screened: bool) -> dict[str, str]:
-    """First matching phrase per family; `screened` skips conditional
-    sentences (the verdict) or keeps them (what the screen suppressed)."""
-    found: dict[str, str] = {}
+def _hits(sentences: list[str], screened: bool) -> dict[str, tuple[str, str]]:
+    """First matching phrase per family, with the sentence that carried it.
+
+    `screened` skips conditional sentences (the verdict) or keeps them (what
+    the screen suppressed). The sentence travels with the phrase because a
+    negation next to the phrase changes what it means — see _NEGATION.
+    """
+    found: dict[str, tuple[str, str]] = {}
     for family, patterns in _COMPILED:
         for sentence in sentences:
             if screened and _CONDITIONAL.search(sentence):
@@ -203,7 +217,7 @@ def _hits(sentences: list[str], screened: bool) -> dict[str, str]:
             for pattern in patterns:
                 match = pattern.search(sentence)
                 if match:
-                    found.setdefault(family, match.group(0))
+                    found.setdefault(family, (match.group(0), sentence))
                     break
             if family in found:
                 break
@@ -227,11 +241,22 @@ def classify(subject: str, body: str) -> RuleVerdict | None:
     sentences = [s for s in _SENTENCE_SPLIT.split(text) if s.strip()]
     hits = _hits(sentences, screened=True)
     if len(hits) == 1:
-        family, phrase = next(iter(hits.items()))
+        family, (phrase, sentence) = next(iter(hits.items()))
         # Confident unless the screen is what removed the competition.
         unscreened = _hits(sentences, screened=False)
         confident = (family == CLASS_EINGANG
                      or set(unscreened) == set(hits))
+        if family == CLASS_EINLADUNG and _NEGATION.search(sentence):
+            # "Wir können Sie leider nicht zu einem Gespräch einladen" is a
+            # REJECTION built entirely out of invitation vocabulary, and the
+            # family has no way to tell it from the real thing. Filed
+            # confidently it was the worst outcome the rules can produce: an
+            # Einladung is rank 4, so it closes the application AND, by the
+            # anti-downgrade rule, blocks the true Absage arriving behind it.
+            # Demoted rather than suppressed — a genuine invitation that
+            # happens to say "nicht" ("das Gespräch findet nicht in unserer
+            # Zentrale statt") then costs a click instead of vanishing.
+            confident = False
         return RuleVerdict(family, phrase, confident)
     if hits:
         # More than one family. A rejection that also states receipt is the
@@ -239,16 +264,23 @@ def classify(subject: str, body: str) -> RuleVerdict | None:
         # the same shape is produced by a receipt that merely NAMES a
         # possible rejection, and the two are not distinguishable here.
         if set(hits) == {CLASS_ABSAGE, CLASS_EINGANG}:
-            return RuleVerdict(CLASS_ABSAGE, hits[CLASS_ABSAGE],
+            return RuleVerdict(CLASS_ABSAGE, hits[CLASS_ABSAGE][0],
                                confident=False)
         return None
     for pattern in _COURTESY:
         for sentence in sentences:
             match = pattern.search(sentence)
             if match:
-                # Nothing but the polite opener: it arrived, and that is all
-                # this mail says.
-                return RuleVerdict(CLASS_EINGANG, match.group(0))
+                # Nothing but the polite opener — and EVERY German reply
+                # opens that way, a rejection included. So this is the
+                # weakest evidence in the module, and it must never write a
+                # status: an unrecognised rejection would file itself as
+                # "In Bearbeitung", wear the Offen label, and skip the review
+                # pile entirely, so nothing would ever ask about it again.
+                # A receipt that really is one almost always states the
+                # arrival too, and that path stays confident.
+                return RuleVerdict(CLASS_EINGANG, match.group(0),
+                                   confident=False)
     return None
 
 
