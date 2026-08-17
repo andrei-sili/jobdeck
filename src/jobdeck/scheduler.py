@@ -10,7 +10,14 @@ import zoneinfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from jobdeck.services import apply_resolve, autosend, liveness, polling, scoring
+from jobdeck.services import (
+    apply_resolve,
+    autosend,
+    liveness,
+    polling,
+    replies,
+    scoring,
+)
 
 log = logging.getLogger(__name__)
 
@@ -81,6 +88,21 @@ def create_scheduler() -> AsyncIOScheduler:
         "interval",
         minutes=1,  # cheap due-check; business hours + spacing gate real work
         id="auto_send",
+        coalesce=True,
+        max_instances=1,
+    )
+    scheduler.add_job(
+        replies.ingest_replies,
+        "interval",
+        minutes=10,  # the ROADMAP's reply-polling cadence
+        # First pass shortly after launch, like liveness and the channel
+        # resolver, and staggered behind both (90 s / 120 s): a reply he is
+        # waiting on should not wait for the first full interval — and with
+        # no read permission yet, the pass costs one file read and writes
+        # the honest banner instead.
+        next_run_time=(datetime.datetime.now(TIMEZONE)
+                       + datetime.timedelta(seconds=150)),
+        id="ingest_replies",
         coalesce=True,
         max_instances=1,
     )

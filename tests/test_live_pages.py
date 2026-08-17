@@ -356,7 +356,9 @@ async def test_the_rail_states_the_corpus_it_is_standing_next_to(
     await user.should_see("Unterlagen")
     await user.should_see("2 neu")
     await user.should_see("2 Anzeigen · 2 von 2 Firmen offen")
-    await user.should_see("Gmail liest mit — Phase 3")
+    # no token in the test data dir: the Antworten rubric must say the
+    # reader's real precondition, not pretend an empty inbox
+    await user.should_see("Gmail ist nicht verbunden")
 
 
 async def test_the_rail_follows_the_engine_without_being_asked(
@@ -758,7 +760,7 @@ async def test_a_rubric_really_navigates(user: User, con, data_dir):
                if "jd-sec" in getattr(e, "_classes", [])]
     assert len(rubrics) == 5
     live_ones = [r for r in rubrics if r.props.get("data-enabled") == "true"]
-    assert len(live_ones) == 4, "only Antworten is meant to be a dead end"
+    assert len(live_ones) == 5, "since Phase 3 every rubric opens a screen"
     for rubric in live_ones:
         assert any(listener.type == "click"
                    for listener in rubric._event_listeners.values()), \

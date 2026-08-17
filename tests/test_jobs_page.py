@@ -1733,6 +1733,14 @@ def test_the_strip_survives_a_search_and_a_view_that_hides_everything(
     # so there is nothing to dismiss and nothing to learn to dismiss
     (10, "Formular bei Eine GmbH — abgeschickt?"),
     (600, "Formular bei Eine GmbH — abgeschickt?"),
+    # one minute inside the receipt window the short question still stands …
+    (72 * 60 - 1, "Formular bei Eine GmbH — abgeschickt?"),
+    # … and past it the strip stops implying a receipt is coming. The 72 is
+    # the SAME constant the reply reader matches receipts within — one
+    # number, or a receipt at 60 hours falls between two claims.
+    (72 * 60, "Formular bei Eine GmbH — abgeschickt? Keine "
+              "Eingangsbestätigung nach 3 Tagen; viele Portale "
+              "schicken keine."),
 ])
 def test_a_running_application_reports_then_asks(minutes, expected):
     import datetime

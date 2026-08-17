@@ -894,3 +894,31 @@ def test_a_garbled_counter_reads_as_none_written(con):
     db.set_setting(con, "drafts_written_date", datetime.date.today().isoformat())
     db.set_setting(con, "drafts_written_count", "nonsense")
     assert db.count_drafts_today(con) == 0
+
+
+def test_an_automatic_source_may_not_swap_one_settled_verdict_for_another(con):
+    """Einladung and Absage share rank 4. A strict `<` let an automatic
+    writer move sideways between them — and the reply reader drains a
+    backlog, so an OLDER invitation read after a newer rejection silently
+    reopened a closed application. He may correct it; a reader may not."""
+    row_id = db.add_bewerbung(con, {"firma": "Eine GmbH", "kanal": "E-Mail",
+                                    "status": "Gesendet"})
+    assert db.set_status(con, row_id, "Absage", source="reply_auto") is True
+
+    assert db.set_status(con, row_id, "Einladung", source="reply_auto") is False
+    assert db.get_bewerbung(con, row_id)["status"] == "Absage"
+
+    # his own hand still wins
+    assert db.set_status(con, row_id, "Einladung", source="user") is True
+    assert db.get_bewerbung(con, row_id)["status"] == "Einladung"
+
+
+def test_an_automatic_source_may_still_raise_a_status(con):
+    """The guard must block lateral moves without blocking the reader's
+    whole purpose: a rejection after a receipt is a real upgrade."""
+    row_id = db.add_bewerbung(con, {"firma": "Zwei GmbH", "kanal": "E-Mail",
+                                    "status": "Gesendet"})
+    assert db.set_status(con, row_id, "In Bearbeitung",
+                         source="reply_auto") is True
+    assert db.set_status(con, row_id, "Absage", source="reply_auto") is True
+    assert db.get_bewerbung(con, row_id)["status"] == "Absage"

@@ -1,13 +1,16 @@
-"""Gmail connection and sending: OAuth tokens in, message ids out.
+"""Gmail connection, sending and reading: OAuth tokens in, messages out.
 
 Synchronous by design — callers on the event loop go through asyncio.to_thread,
 matching the sqlite and Anthropic-wrapper conventions in this codebase.
 
-Scope policy: gmail.send only (a "sensitive" scope — the unverified personal-use
-OAuth app keeps a non-expiring refresh token), plus openid/email so the UI can
-show which account is connected. The "restricted" read scopes that reply
-tracking will need are deliberately NOT requested here; they raise the OAuth
-verification bar and are a Phase 3 decision.
+Scope policy since Phase 3: gmail.send (sending) plus gmail.modify (reading
+replies and applying the JobDeck labels), plus openid/email so the UI can show
+which account is connected. gmail.modify is "restricted", and a consent run on
+2026-08-05 proved the unverified personal-use OAuth app is granted it, with a
+refresh token issued. Incremental authorization does not exist for installed
+apps, so a token from before Phase 3 carries only the send scope: sending
+keeps working on it, and every read path checks for the modify scope itself
+and asks for a re-connect rather than failing obscurely.
 
 Deliverability choices (researched 2026-07): the MIME body is
 multipart/alternative (plain text + a faithful minimal HTML part) inside
@@ -41,11 +44,19 @@ from jobdeck.pdf import safe_filename
 log = logging.getLogger(__name__)
 
 SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
+MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
 SCOPES = [
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
     SEND_SCOPE,
+    MODIFY_SCOPE,
 ]
+
+# What each scope buys, in the words the reconnect message uses.
+_SCOPE_PURPOSE = {
+    SEND_SCOPE: "send permission",
+    MODIFY_SCOPE: "read permission for replies (gmail.modify)",
+}
 USERINFO_ENDPOINT = "https://openidconnect.googleapis.com/v1/userinfo"
 REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke"
 
@@ -83,9 +94,35 @@ class GmailUncertain(GmailError):
     be in the recipient's inbox, so retrying risks a double-send."""
 
 
+class GmailHistoryExpired(GmailError):
+    """The stored history checkpoint is too old for an incremental sync.
+
+    Documented Gmail behavior (a historyId is typically valid for at least a
+    week); the caller must fall back to a full sync and re-baseline."""
+
+
 def is_connected() -> bool:
     """Cheap gate/UI check; load_credentials() is the real validation."""
     return config.TOKEN_PATH.exists()
+
+
+def has_scope(scope: str) -> bool:
+    """Whether the SAVED authorization carries a scope — no network, no
+    refresh. A pre-Phase-3 token has send only; the consent screen also lets
+    the user untick a scope, so presence of the file proves nothing about
+    either capability."""
+    if not config.TOKEN_PATH.exists():
+        return False
+    try:
+        creds = Credentials.from_authorized_user_file(str(config.TOKEN_PATH))
+    except (OSError, ValueError):
+        return False
+    return scope in (creds.scopes or [])
+
+
+def can_read() -> bool:
+    """Whether reply reading may even be attempted — the UI/service gate."""
+    return has_scope(MODIFY_SCOPE)
 
 
 def normalize_address(addr: str) -> str:
@@ -158,12 +195,15 @@ def disconnect() -> None:
         config.TOKEN_PATH.unlink(missing_ok=True)
 
 
-def load_credentials() -> Credentials:
+def load_credentials(required_scope: str = SEND_SCOPE) -> Credentials:
     """Load, validate and (if needed) refresh the saved authorization.
 
+    `required_scope` is what the CALLER is about to do: the send path keeps
+    working on a pre-Phase-3 token, and the reply reader asks for the modify
+    scope and gets a message naming exactly what a re-connect would add.
     Raises GmailNotConnected with a user-actionable message when the token
-    is missing, unreadable, lacks the send scope, or was revoked (Google
-    revokes Gmail-scoped tokens on password changes, among other causes).
+    is missing, unreadable, lacks that scope, or was revoked (Google revokes
+    Gmail-scoped tokens on password changes, among other causes).
     """
     if not config.TOKEN_PATH.exists():
         raise GmailNotConnected("Gmail is not connected — use Connect Gmail in Settings")
@@ -173,10 +213,11 @@ def load_credentials() -> Credentials:
         raise GmailNotConnected(
             f"the saved Gmail authorization is unreadable — reconnect in Settings ({exc})"
         ) from exc
-    if SEND_SCOPE not in (creds.scopes or []):
+    if required_scope not in (creds.scopes or []):
+        purpose = _SCOPE_PURPOSE.get(required_scope, required_scope)
         raise GmailNotConnected(
-            "the saved Gmail authorization is missing the send permission — "
-            "reconnect in Settings"
+            f"the saved Gmail authorization is missing the {purpose} — "
+            f"reconnect in Settings"
         )
     if creds.valid:
         return creds
@@ -215,6 +256,12 @@ def connect() -> str:
         raise GmailError("a Gmail connection is already in progress — finish "
                          "it in the browser window that is already open")
     try:
+        # oauthlib aborts the flow with a Warning when Google's token answer
+        # lists the granted scopes in a different order (or expanded form)
+        # than the request — routine with more than one Gmail scope. Relaxing
+        # accepts the answer as issued; what was actually granted is then
+        # enforced where it matters, per call, by load_credentials.
+        os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
         flow = InstalledAppFlow.from_client_secrets_file(
             str(config.CLIENT_SECRET_PATH), SCOPES
         )
@@ -334,3 +381,219 @@ def send_message(message: EmailMessage) -> tuple[str, str]:
         # with only the response lost — the send is ambiguous, not failed.
         raise GmailUncertain(f"could not reach Gmail: {exc}") from exc
     return str(response.get("id", "")), str(response.get("threadId", ""))
+
+
+# --------------------------------------------------------------------------
+# Reading (Phase 3) — every function here requires the modify scope.
+#
+# Reads carry none of sending's ambiguity: nothing leaves the account, so a
+# lost response costs nothing and the next scheduled pass simply asks again.
+# One error class (GmailError) therefore covers transport and API failures
+# alike, with GmailHistoryExpired split out because the caller must react to
+# it differently (full re-sync) rather than merely retry later.
+# --------------------------------------------------------------------------
+
+# The headers the ingestion pass reads. Fetched by name so the metadata
+# answer stays small; Authentication-Results is Gmail's OWN verdict on the
+# sender (SPF/DKIM), which is what lets the receipt path refuse a spoofed
+# confirmation, and the Auto-Submitted family is what tells an
+# out-of-office machine answer from a human reply.
+METADATA_HEADERS = (
+    "From", "To", "Subject", "Date", "Message-ID",
+    "Auto-Submitted", "Precedence", "List-Unsubscribe",
+    "X-Autoreply", "X-Auto-Response-Suppress", "Authentication-Results",
+)
+
+
+def _read_service():
+    return service(load_credentials(MODIFY_SCOPE))
+
+
+def _execute(request):
+    """Run one API request under the read error posture."""
+    try:
+        return request.execute()
+    except HttpError as exc:
+        raise GmailError(f"Gmail refused the request: {exc.reason}") from exc
+    except (httplib2.HttpLib2Error, GoogleAuthError, OSError) as exc:
+        raise GmailError(f"could not reach Gmail: {exc}") from exc
+
+
+def profile_history_id() -> str:
+    """The mailbox's current history checkpoint (users.getProfile, 1 unit)."""
+    response = _execute(_read_service().users().getProfile(userId="me"))
+    return str(response.get("historyId", ""))
+
+
+def list_new_message_ids(query: str, max_results: int) -> list[str]:
+    """Message ids matching a Gmail search, newest first, bounded.
+
+    The full-sync path: q= is the whole Gmail search grammar, and the bound
+    is over ALL pages — a first run against a busy mailbox must not walk
+    years of archive in one pass."""
+    svc = _read_service()
+    ids: list[str] = []
+    page_token = None
+    while len(ids) < max_results:
+        response = _execute(svc.users().messages().list(
+            userId="me", q=query, pageToken=page_token,
+            maxResults=min(100, max_results - len(ids)),
+        ))
+        ids.extend(str(m["id"]) for m in response.get("messages", []))
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+    return ids[:max_results]
+
+
+def history_added_messages(
+    start_history_id: str, max_results: int
+) -> tuple[list[str], str]:
+    """Inbox arrivals since a checkpoint, plus the new checkpoint.
+
+    The incremental path (users.history.list, 2 units): only messageAdded
+    records for INBOX, so archive re-labelling can never look like new mail.
+    Raises GmailHistoryExpired on the documented 404 — the checkpoint is
+    typically valid for at least a week, and the caller then re-baselines
+    with a full sync."""
+    svc = _read_service()
+    ids: list[str] = []
+    seen: set[str] = set()
+    latest = ""
+    truncated = False
+    page_token = None
+    while True:
+        try:
+            response = svc.users().history().list(
+                userId="me", startHistoryId=start_history_id,
+                historyTypes="messageAdded", labelId="INBOX",
+                pageToken=page_token,
+            ).execute()
+        except HttpError as exc:
+            if exc.resp.status == 404:
+                raise GmailHistoryExpired(
+                    "the Gmail history checkpoint expired — full sync needed"
+                ) from exc
+            raise GmailError(f"Gmail refused the request: {exc.reason}") from exc
+        except (httplib2.HttpLib2Error, GoogleAuthError, OSError) as exc:
+            raise GmailError(f"could not reach Gmail: {exc}") from exc
+        latest = str(response.get("historyId", latest))
+        for record in response.get("history", []):
+            for added in record.get("messagesAdded", []):
+                message_id = str(added.get("message", {}).get("id", ""))
+                # The sync guide warns the same message may appear in
+                # several records; the bound below must count messages,
+                # not records, or a chatty history bursts it.
+                if message_id and message_id not in seen:
+                    seen.add(message_id)
+                    ids.append(message_id)
+        page_token = response.get("nextPageToken")
+        if len(ids) >= max_results:
+            # More history than this pass may carry. `historyId` is the
+            # MAILBOX's current position, not the point this listing
+            # reached, so storing it would step over everything past the
+            # bound — permanently, since nothing lists it again. An empty
+            # checkpoint says "not drained" and the caller keeps the old one.
+            truncated = bool(page_token) or len(ids) > max_results
+            break
+        if not page_token:
+            break
+    return ids[:max_results], ("" if truncated else latest)
+
+
+def get_message_metadata(message_id: str) -> dict:
+    """One message's envelope: headers, snippet, size — never the body.
+
+    This is what the match cascade runs on, so the bodies of mail that
+    belongs to nobody are never even fetched. Headers land lower-cased,
+    first occurrence wins — for Authentication-Results the topmost header
+    is the one Gmail itself stamped."""
+    response = _execute(_read_service().users().messages().get(
+        userId="me", id=message_id, format="metadata",
+        metadataHeaders=list(METADATA_HEADERS),
+    ))
+    headers: dict[str, str] = {}
+    for header in response.get("payload", {}).get("headers", []):
+        name = str(header.get("name", "")).lower()
+        if name and name not in headers:
+            headers[name] = str(header.get("value", ""))
+    return {
+        "id": str(response.get("id", "")),
+        "thread_id": str(response.get("threadId", "")),
+        "snippet": str(response.get("snippet", "")),
+        "internal_date_ms": int(response.get("internalDate", 0) or 0),
+        "size_estimate": int(response.get("sizeEstimate", 0) or 0),
+        "label_ids": [str(label) for label in response.get("labelIds", [])],
+        "headers": headers,
+    }
+
+
+def get_message_raw(message_id: str) -> bytes:
+    """The full RFC-822 message, for mail the cascade has already matched.
+
+    format=raw + the email stdlib is the one decoding path that gets
+    charset and transfer encoding right by construction; the parsed
+    payload's per-part bytes have no documented charset contract."""
+    response = _execute(_read_service().users().messages().get(
+        userId="me", id=message_id, format="raw",
+    ))
+    raw = str(response.get("raw", ""))
+    return base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
+
+
+def ensure_labels(names: list[str]) -> dict[str, str]:
+    """Name → id for these labels, creating what is missing.
+
+    Order matters to Gmail's UI only in that a parent ('JobDeck') should
+    exist before its children — the caller passes it first. Creating a name
+    that appeared meanwhile answers 409; that is success, re-read the id."""
+    svc = _read_service()
+    def _existing() -> dict[str, str]:
+        response = _execute(svc.users().labels().list(userId="me"))
+        return {str(label["name"]): str(label["id"])
+                for label in response.get("labels", [])}
+    by_name = _existing()
+    resolved: dict[str, str] = {}
+    for name in names:
+        if name in by_name:
+            resolved[name] = by_name[name]
+            continue
+        try:
+            created = svc.users().labels().create(
+                userId="me",
+                body={"name": name, "labelListVisibility": "labelShow",
+                      "messageListVisibility": "show"},
+            ).execute()
+            resolved[name] = str(created["id"])
+            by_name[name] = resolved[name]
+        except HttpError as exc:
+            if exc.resp.status == 409:
+                by_name = _existing()
+                if name in by_name:
+                    resolved[name] = by_name[name]
+                    continue
+            raise GmailError(
+                f"could not create the Gmail label {name!r}: {exc.reason}"
+            ) from exc
+        except (httplib2.HttpLib2Error, GoogleAuthError, OSError) as exc:
+            raise GmailError(f"could not reach Gmail: {exc}") from exc
+    return resolved
+
+
+def set_labels(message_id: str, add: list[str], remove: list[str]) -> None:
+    """Make one message carry exactly the labels it should (messages.modify).
+
+    Add AND remove in one call, because a verdict that changes has to take
+    its old label with it: a mail relabelled Einladung while still carrying
+    Absagen is worse in his inbox than one carrying nothing, and Gmail's
+    own filters would see both."""
+    body: dict[str, list[str]] = {}
+    if add:
+        body["addLabelIds"] = add
+    if remove:
+        body["removeLabelIds"] = remove
+    if not body:
+        return
+    _execute(_read_service().users().messages().modify(
+        userId="me", id=message_id, body=body,
+    ))

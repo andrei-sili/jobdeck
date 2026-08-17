@@ -13,6 +13,7 @@ from jobdeck.services import (
     preparing,
     scoring,
 )
+from jobdeck.services import replies as replies_service
 from jobdeck.ui import live
 from jobdeck.ui.helpers import open_in_system
 from jobdeck.ui.layout import frame
@@ -29,6 +30,7 @@ def _get_settings():
             "drafts_today": db.count_drafts_today(con),
             "ai_enabled": db.ai_enabled(con),
             "web_contact_search": db.get_setting(con, "web_contact_search", "0"),
+            "reply_ai_classify": db.get_setting(con, "reply_ai_classify", "0"),
             "applicant_name": db.get_setting(con, "applicant_name", ""),
             "applicant_ort": db.get_setting(con, "applicant_ort", ""),
             # the apply-cockpit fields, one entry per APPLICANT_LABELS key
@@ -131,6 +133,22 @@ async def settings_page():
                 else ""
             ).classes("text-sm text-gray-600")
 
+            def _scope_line() -> str:
+                """Sending and reading are two grants: a pre-Phase-3 token
+                sends but cannot read replies, and only a re-connect (one
+                consent) adds the read scope — installed apps cannot widen
+                an existing token."""
+                if not config.TOKEN_PATH.exists():
+                    return ""
+                if gmail.can_read():
+                    return "Senden ✓ · Antworten lesen ✓"
+                return ("Senden ✓ · Antworten lesen FEHLT — einmal "
+                        "„Connect Gmail“ erteilt den Lese-Zugriff")
+
+            scope_label = ui.label(
+                await run.io_bound(_scope_line)).classes(
+                    "text-sm text-gray-600")
+
             async def connect_gmail():
                 # Pre-check the common first-run case so the notification
                 # cannot promise a consent window that never opens.
@@ -151,12 +169,14 @@ async def settings_page():
                 await run.io_bound(_set_setting, "gmail_address", address)
                 gmail_label.set_text(f"Gmail connected as {address}"
                                      if address else "Gmail connected")
+                scope_label.set_text(await run.io_bound(_scope_line))
                 ui.notify("Gmail connected ✓", type="positive")
 
             async def disconnect_gmail():
                 await run.io_bound(gmail.disconnect)
                 await run.io_bound(_set_setting, "gmail_address", "")
                 gmail_label.set_text("")
+                scope_label.set_text("")
                 ui.notify("Gmail disconnected — the authorization was revoked "
                           "at Google and removed locally", type="info")
 
@@ -503,6 +523,26 @@ async def settings_page():
                 "bewerbung@ address (domain-verified). A few cents per lookup; "
                 "off by default."
             ).classes("text-xs text-gray-500")
+
+            async def toggle_reply_ai(e):
+                async with toggle_write_lock:
+                    await run.io_bound(_set_setting, "reply_ai_classify",
+                                       "1" if e.value else "0")
+                ui.notify("Reply classification by AI on — ambiguous replies "
+                          "get a proposed category" if e.value
+                          else "Reply classification by AI off",
+                          type="positive" if e.value else "info")
+
+            ui.switch("Classify ambiguous replies with AI",
+                      value=settings["reply_ai_classify"] == "1",
+                      on_change=toggle_reply_ai)
+            ui.label(
+                "Only for replies the German keyword rules cannot place, and "
+                "only as a PROPOSAL on the Antworten page — the AI never "
+                "changes a status by itself. Reply text is sent to the API "
+                "solely for this classification. Fractions of a cent per "
+                "mail; off by default."
+            ).classes("text-xs text-gray-500")
             global_tags = ui.textarea(
                 "Hard requirements for EVERY search (one per line)",
                 value=settings["global_hard_tags"],
@@ -622,6 +662,22 @@ async def settings_page():
                         multi_line=True,
                     )
 
+                async def ingest_replies_now():
+                    ui.notify("Reading the inbox for replies…")
+                    r = await replies_service.ingest_replies()
+                    if r.get("skipped"):
+                        ui.notify("A pass is already running.", type="warning")
+                        return
+                    if r.get("error"):
+                        ui.notify(str(r["error"]), type="warning",
+                                  multi_line=True)
+                        return
+                    ui.notify(
+                        f"Read {r['seen']}: {r['auto_status']} filed, "
+                        f"{r['receipts']} receipts, {r['review']} to review",
+                        type="positive",
+                    )
+
                 ui.button("Backup now", icon="save", on_click=backup_now) \
                     .props("outline")
                 ui.button("Resolve apply channels", icon="alt_route",
@@ -632,3 +688,5 @@ async def settings_page():
                     .props("outline")
                 ui.button("Score new jobs now", icon="grade", on_click=score_now) \
                     .props("outline")
+                ui.button("Read replies now", icon="mark_email_read",
+                          on_click=ingest_replies_now).props("outline")

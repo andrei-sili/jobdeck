@@ -247,7 +247,8 @@ body { background: var(--paper); color: var(--ink); font-family: var(--jd-sans);
 .jd-wait .age.over { color: var(--warn); }
 
 /* One application of the register, as a row that opens. */
-.jd-app { display:grid; grid-template-columns:minmax(0,1fr) 6rem 7rem 8rem 5rem;
+.jd-app { display:grid;
+          grid-template-columns:minmax(0,1fr) 6rem 7rem 8rem 6rem 5rem;
           gap:0 12px; align-items:center; width:100%; text-align:left;
           border:0; border-bottom:1px solid var(--rule); background:transparent;
           padding:0; cursor:pointer; font:inherit; }
@@ -260,7 +261,8 @@ body { background: var(--paper); color: var(--ink); font-family: var(--jd-sans);
                 text-overflow:ellipsis; white-space:nowrap; }
 .jd-app .cell.right { text-align:right; }
 .jd-app .cell.over { color: var(--warn); }
-.jd-head { display:grid; grid-template-columns:minmax(0,1fr) 6rem 7rem 8rem 5rem;
+.jd-head { display:grid;
+           grid-template-columns:minmax(0,1fr) 6rem 7rem 8rem 6rem 5rem;
            gap:0 12px; width:100%; border-bottom:1px solid var(--rule-2);
            font:600 9.5px/1 var(--jd-sans); letter-spacing:.1em;
            text-transform:uppercase; color: var(--ink-4); padding-bottom:6px; }
@@ -269,6 +271,14 @@ body { background: var(--paper); color: var(--ink); font-family: var(--jd-sans);
            color: var(--ink-2); white-space:nowrap; }
 .jd-pill.ok { background: var(--accent-soft); color: var(--accent-deep); }
 .jd-pill.warn { background: var(--warn-soft); color: var(--warn); }
+
+/* One reply on the review pile: separated by a rule, never by a card. */
+.jd-reply-row { border-top:1px solid var(--rule); padding-top:10px; }
+/* An invitation is the one row with a date and a person waiting. */
+.jd-reply-row-urgent { border-left:3px solid var(--accent); padding-left:10px;
+                       background: var(--accent-soft); border-radius:3px; }
+.jd-urgent { font:600 11px/1.4 var(--jd-sans); letter-spacing:.04em;
+             color: var(--accent-deep); text-transform:uppercase; }
 
 /* One row of the register: a permission, and how often a letter used it. */
 .jd-claim { display:grid; grid-template-columns:1fr auto auto; gap:0 12px;

@@ -22,11 +22,11 @@ from jobdeck.dates import days_since
 from jobdeck.services import liveness
 from jobdeck.ui import live
 
-# Where each rubric goes. Antworten is the only one still pointing at nothing,
-# and it says so rather than opening an empty screen.
+# Where each rubric goes.
 UNTERLAGEN_PATH = "/unterlagen"
 STELLEN_PATH = "/"
 BEWERBUNGEN_PATH = "/bewerbungen"
+ANTWORTEN_PATH = "/antworten"
 EINSTELLUNGEN_PATH = "/settings"
 # The second face of the Bewerbungen rubric, not a rubric of its own — see
 # `shelf` below for why the queue never became one.
@@ -154,6 +154,12 @@ def facts() -> dict:
             "send_cap": _int_setting(
                 db.get_setting(con, "daily_send_cap", ""), SEND_CAP_DEFAULT),
             "connections": connections(),
+            "replies_pending": db.count_pending_replies(con),
+            "replies_total": db.count_inbound_replies(con),
+            "replies_recent_einladung": db.count_recent_invitations(con),
+            "replies_last_poll": db.get_setting(con, "replies_last_poll_at", ""),
+            "replies_last_error": db.get_setting(con, "replies_last_error", ""),
+            "gmail_can_read": gmail.can_read(),
         }
 
 
@@ -161,7 +167,8 @@ def facts() -> dict:
 # the surface this redesign added to END silent staleness, so it must not be
 # stale itself: connecting Gmail on the very page beside it used to leave it
 # reading "Gmail fehlt" for the life of the page.
-_WATCHED_SETTINGS = ("follow_up_days", "daily_send_cap", "stale_age_days")
+_WATCHED_SETTINGS = ("follow_up_days", "daily_send_cap", "stale_age_days",
+                     "replies_last_poll_at", "replies_last_error")
 
 
 def _signature(con) -> tuple:
@@ -177,6 +184,9 @@ def _signature(con) -> tuple:
         db.count_active_profiles(con),
         *(db.get_setting(con, key, "") for key in _WATCHED_SETTINGS),
         *(present for _name, present in connections()),
+        # token PRESENCE is above; the read SCOPE is a different fact, and a
+        # re-connect that adds it must reach the Antworten rubric
+        gmail.can_read(),
     )
 
 
@@ -276,15 +286,7 @@ def rubrics(view: dict, current: str, now: datetime.datetime) -> list[Rubric]:
             fill=_share(answered, total),
             amber=bool(silent),
         ),
-        Rubric(
-            key="antworten",
-            label="Antworten",
-            path="",
-            count="bald",
-            sub="Gmail liest mit — Phase 3",
-            fill=0.0,
-            enabled=False,
-        ),
+        _antworten_rubric(view, now),
         Rubric(
             key="einstellungen",
             label="Einstellungen",
@@ -297,6 +299,51 @@ def rubrics(view: dict, current: str, now: datetime.datetime) -> list[Rubric]:
             amber=bool(missing),
         ),
     ]
+
+
+def _antworten_rubric(view: dict, now: datetime.datetime) -> Rubric:
+    """The reply rubric, honest about its precondition.
+
+    Reading needs the modify scope, which a pre-Phase-3 token does not
+    carry — so the first thing this line can say is what a re-connect would
+    add. Once reading runs, an unreviewed pile outranks the ledger count,
+    and a fresh invitation outranks both: it is the one inbound event he
+    would want tapped on the shoulder for."""
+    pending = int(view["replies_pending"])
+    total = int(view["replies_total"])
+    invitations = int(view["replies_recent_einladung"])
+    gmail_connected = dict(view["connections"]).get("Gmail", False)
+    if invitations:
+        count = ("1 Einladung!" if invitations == 1
+                 else f"{invitations} Einladungen!")
+    elif pending:
+        count = f"{pending} zu prüfen"
+    elif total == 1:
+        count = "1 Antwort"
+    else:
+        count = f"{total} Antworten"
+    if not gmail_connected:
+        sub = "Gmail ist nicht verbunden"
+    elif not view["gmail_can_read"]:
+        sub = "Gmail ohne Lese-Zugriff — neu verbinden"
+    elif view["replies_last_error"]:
+        sub = "Gmail-Lesen gestört"
+    elif view["replies_last_poll"]:
+        sub = f"Gmail liest mit · zuletzt {_clock(view['replies_last_poll'], now)}"
+    else:
+        sub = "Gmail liest mit — erster Lauf steht aus"
+    amber = bool(pending or invitations
+                 or not gmail_connected or not view["gmail_can_read"]
+                 or view["replies_last_error"])
+    return Rubric(
+        key="antworten",
+        label="Antworten",
+        path=ANTWORTEN_PATH,
+        count=count,
+        sub=sub,
+        fill=_share(total, total + pending),
+        amber=amber,
+    )
 
 
 def pulse(view: dict, now: datetime.datetime) -> list[Pulse]:

@@ -23,6 +23,7 @@ from jobdeck.services import (
     mappe,
     preparing,
 )
+from jobdeck.services.replies import RECEIPT_WINDOW_H
 from jobdeck.ui import draft_editor, helpers, live, rail
 from jobdeck.ui.helpers import (
     open_in_system,
@@ -514,8 +515,12 @@ def started_line(job: dict, now: datetime.datetime | None = None) -> str:
 
     Under ten minutes it reports; past ten it asks. The question is the LABEL
     rather than a prompt, so there is nothing to dismiss and therefore nothing
-    to learn to dismiss — and when replies are read it simply stops being
-    needed.
+    to learn to dismiss — and since replies are read, an arriving
+    Eingangsbestätigung closes it by itself. Past the receipt window (the
+    SAME number the reader matches receipts within — two claims from one
+    constant, or a receipt at 60 hours falls between them) the strip stops
+    implying one is coming: plenty of German portals send nothing, and the
+    entry is his to close.
 
     A form opened before the app could stamp it says so. Eleven of his
     postings were in that state and three left no evidence of when; giving
@@ -528,6 +533,10 @@ def started_line(job: dict, now: datetime.datetime | None = None) -> str:
         return f"Formular bei {company} — seit unbekannt"
     now = now or datetime.datetime.now()
     minutes = max(0, int((now - when).total_seconds() // 60))
+    if minutes >= RECEIPT_WINDOW_H * 60:
+        return (f"Formular bei {company} — abgeschickt? Keine "
+                f"Eingangsbestätigung nach {RECEIPT_WINDOW_H // 24} Tagen; "
+                f"viele Portale schicken keine.")
     if minutes >= ASK_AFTER_MIN:
         return f"Formular bei {company} — abgeschickt?"
     if minutes < 1:
