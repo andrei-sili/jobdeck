@@ -16,8 +16,8 @@ def _fresh_scheduler():
 
 def test_every_background_job_is_registered_once_and_single_flight():
     jobs = {job.id: job for job in scheduler.create_scheduler().get_jobs()}
-    assert sorted(jobs) == ["auto_send", "check_liveness", "poll_profiles",
-                            "resolve_channels", "score_jobs"]
+    assert sorted(jobs) == ["auto_send", "check_liveness", "ingest_replies",
+                            "poll_profiles", "resolve_channels", "score_jobs"]
     for job in jobs.values():
         # a slow run must never stack up behind itself
         assert job.coalesce is True
@@ -51,11 +51,23 @@ def test_the_channel_backlog_starts_draining_inside_this_session():
     assert job.trigger.interval == datetime.timedelta(minutes=30)
 
 
-def test_the_two_startup_passes_do_not_land_together():
-    """Both fire shortly after launch and both make outbound requests. Landing
-    on the same second doubles what other people's servers see from one app
-    starting up."""
+def test_the_startup_passes_do_not_land_together():
+    """All fire shortly after launch and all make outbound requests. Landing
+    on the same second multiplies what other people's servers see from one
+    app starting up."""
     jobs = {j.id: j for j in scheduler.create_scheduler().get_jobs()}
-    apart = abs(jobs["resolve_channels"].next_run_time
-                - jobs["check_liveness"].next_run_time)
-    assert apart >= datetime.timedelta(seconds=20)
+    starts = [jobs[name].next_run_time for name in
+              ("check_liveness", "resolve_channels", "ingest_replies")]
+    for index, first in enumerate(starts):
+        for second in starts[index + 1:]:
+            assert abs(first - second) >= datetime.timedelta(seconds=20)
+
+
+def test_the_reply_pass_starts_inside_this_session():
+    """A reply he is waiting on must not wait for the first full interval —
+    and with no read permission yet the pass costs one file read and writes
+    the honest banner instead of doing network work."""
+    job = {j.id: j for j in scheduler.create_scheduler().get_jobs()}["ingest_replies"]
+    delay = job.next_run_time - datetime.datetime.now(job.next_run_time.tzinfo)
+    assert datetime.timedelta(0) < delay < datetime.timedelta(minutes=5)
+    assert job.trigger.interval == datetime.timedelta(minutes=10)
