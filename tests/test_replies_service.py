@@ -244,9 +244,11 @@ async def test_a_domain_match_only_proposes(inbox, con):
     row = _inbound_rows(con)[0]
     assert (row["matched_by"], row["classification"], row["needs_review"]) \
         == ("domain", "absage", 1)
-    # …and it IS marked in Gmail — as waiting, not as a rejection. Leaving
-    # the unsettled mail unlabelled hid exactly the messages that need him.
-    assert inbox.labeled == [("m-1", "L_JobDeck/Zu prüfen")]
+    # …and it IS marked in Gmail, on both axes: what the mail is, and that
+    # it is still waiting for him. Leaving the unsettled mail unlabelled hid
+    # exactly the messages that need him.
+    _message, add, _remove = inbox.label_calls[0]
+    assert set(add) == {"L_JobDeck/Absagen", "L_JobDeck/Zu prüfen"}
 
 
 async def test_an_llm_verdict_only_proposes_and_is_metered(
@@ -744,7 +746,8 @@ async def test_a_receipt_proposal_is_marked_as_waiting_in_gmail(inbox, con):
     outcome = await service.ingest_replies()
 
     assert outcome["review"] == 1
-    assert inbox.labeled == [("m-1", "L_JobDeck/Zu prüfen")]
+    _message, add, _remove = inbox.label_calls[0]
+    assert set(add) == {"L_JobDeck/Offen", "L_JobDeck/Zu prüfen"}
 
 
 async def test_one_bad_message_never_ends_the_pass(inbox, con, monkeypatch):
@@ -821,8 +824,11 @@ async def test_a_waiting_mail_is_labelled_as_waiting(inbox, con):
     await service.ingest_replies()
 
     message, add, remove = inbox.label_calls[0]
-    assert add == ("L_JobDeck/Zu prüfen",)
-    assert "L_JobDeck/Absagen" in remove  # and nothing else clings on
+    # BOTH axes: what it is, and that it needs him. The verdict label is
+    # what he looks for in Gmail; 'Zu prüfen' is what tells him it is not
+    # yet filed.
+    assert set(add) == {"L_JobDeck/Absagen", "L_JobDeck/Zu prüfen"}
+    assert "L_JobDeck/Einladungen" in remove  # nothing else clings on
 
 
 async def test_a_settled_verdict_takes_the_old_label_off(inbox, con):
@@ -869,3 +875,25 @@ async def test_unmatched_mail_is_never_labelled(inbox, con):
     await service.ingest_replies()
 
     assert inbox.label_calls == []
+
+
+async def test_an_invitation_says_so_in_gmail_even_when_it_needs_review(
+        inbox, con):
+    """His report: 'the most important einladung mail was not identified
+    correctly'. It WAS classified as an invitation — but because it matched
+    by domain it only carried 'Zu prüfen', so in Gmail it was
+    indistinguishable from an unclear receipt. The two facts — what the
+    mail is, and whether it needs him — are separate axes."""
+    _sent_application(con, email_addr="poststelle@firma-beispiel.de")
+    inbox.add("m-1", from_header="Frau Muster <nele.muster@firma-beispiel.de>",
+              subject="Ihre Bewerbung um die ausgeschriebene Stelle",
+              body=EINLADUNG_BODY)
+
+    await service.ingest_replies()
+
+    row = _inbound_rows(con)[0]
+    assert (row["matched_by"], row["classification"], row["needs_review"]) \
+        == ("domain", "einladung", 1)
+    _message, add, remove = inbox.label_calls[0]
+    assert set(add) == {"L_JobDeck/Einladungen", "L_JobDeck/Zu prüfen"}
+    assert "L_JobDeck/Offen" in remove

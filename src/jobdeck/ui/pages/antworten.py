@@ -172,11 +172,26 @@ async def antworten_page():
                     len(pending), "Antwort wartet auf dein Urteil",
                     "Antworten warten auf dein Urteil")) \
                     .classes("jd-card-sub")
-                for row in pending:
+                # An invitation first, and marked. It is the one thing on
+                # this screen with a date and a person waiting for an
+                # answer, and drawn in list order it sat between two
+                # receipts looking exactly like them.
+                for row in sorted(pending, key=_urgency):
                     _pending_row(row)
 
+        def _urgency(row: dict) -> tuple:
+            """Invitations first, then everything else, newest first."""
+            invitation = (row.get("classification") or "") != "einladung"
+            return (invitation, -int(row.get("id") or 0))
+
         def _pending_row(row: dict) -> None:
-            with ui.column().classes("w-full gap-1 jd-reply-row"):
+            invitation = (row.get("classification") or "") == "einladung"
+            with ui.column().classes(
+                    "w-full gap-1 jd-reply-row"
+                    + (" jd-reply-row-urgent" if invitation else "")):
+                if invitation:
+                    ui.label("Einladung — hier wartet jemand auf deine "
+                             "Antwort").classes("jd-urgent")
                 ui.label(_sender_line(row)).classes("jd-card-sub")
                 ui.label(row.get("subject") or "(kein Betreff)") \
                     .classes("font-medium")

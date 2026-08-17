@@ -274,6 +274,11 @@ body { background: var(--paper); color: var(--ink); font-family: var(--jd-sans);
 
 /* One reply on the review pile: separated by a rule, never by a card. */
 .jd-reply-row { border-top:1px solid var(--rule); padding-top:10px; }
+/* An invitation is the one row with a date and a person waiting. */
+.jd-reply-row-urgent { border-left:3px solid var(--accent); padding-left:10px;
+                       background: var(--accent-soft); border-radius:3px; }
+.jd-urgent { font:600 11px/1.4 var(--jd-sans); letter-spacing:.04em;
+             color: var(--accent-deep); text-transform:uppercase; }
 
 /* One row of the register: a permission, and how often a letter used it. */
 .jd-claim { display:grid; grid-template-columns:1fr auto auto; gap:0 12px;

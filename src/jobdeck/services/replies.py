@@ -53,15 +53,19 @@ MAX_RAW_BYTES = 5_000_000
 # a closed window and a not-yet-shown notice.
 RECEIPT_WINDOW_H = 72
 
-# Gmail-side mirror of the verdicts (approved 2026-07-15). 'Offen' carries
-# everything that leaves the application open and undecided — a receipt, and
-# an out-of-office, which answers nothing.
+# Gmail-side mirror of the verdicts (approved 2026-07-15), on TWO axes,
+# because they answer different questions and conflating them hid the most
+# important mail of his job search.
 #
-# 'Zu prüfen' is the one this list was missing, and its absence was the
-# defect he reported: the mails JobDeck could NOT settle were the only ones
-# with no label at all, so in Gmail — on his phone, where the labels are the
-# whole point — the messages that need him were invisible while the settled
-# ones were filed.
+# WHAT IT IS — Absagen / Einladungen / Offen. 'Offen' carries everything
+# that leaves the application open and undecided: a receipt, and an
+# out-of-office, which answers nothing.
+#
+# WHETHER IT NEEDS HIM — 'Zu prüfen', carried IN ADDITION. The first version
+# made these one axis, so a confident interview invitation that happened to
+# match by domain was filed under "Zu prüfen" and nowhere else: on his phone
+# it looked exactly like an unclear receipt, and the label that would have
+# told him an invitation had arrived was the one it did not get.
 LABEL_PARENT = "JobDeck"
 LABEL_REVIEW = "JobDeck/Zu prüfen"
 LABELS = {
@@ -70,8 +74,8 @@ LABELS = {
     "eingang": "JobDeck/Offen",
     "auto": "JobDeck/Offen",
 }
-# Every label this app owns. A message carries exactly one of them, so a
-# changed verdict must remove the others rather than accumulate.
+# Every label this app owns; a message carries the ones that are true of it
+# and none of the others, so a changed verdict cannot accumulate.
 ALL_LABELS = sorted({*LABELS.values(), LABEL_REVIEW})
 
 # How a receipt reached the ledger. The distinction decides whether an undo
@@ -606,25 +610,29 @@ def _propose(row: dict, counters: dict, meta: dict) -> None:
 
 def _apply_label(message_id: str, classification: str,
                  needs_review: bool = False) -> None:
-    """Make the message carry exactly the one JobDeck label it should.
+    """Make the message carry exactly the JobDeck labels that are true of it.
 
-    Every mail this app matched gets one — including the ones it could NOT
-    settle, which is the whole point: in Gmail those are the messages that
-    need him, and leaving them unlabelled meant his phone showed the filed
-    mail and hid the waiting mail. Whatever it carried before is removed, so
-    a corrected verdict cannot leave its old label behind."""
+    Two axes, not one. WHAT IT IS goes on whenever the rules read it —
+    a confident invitation is an invitation whether or not the app was
+    allowed to write the status — and 'Zu prüfen' goes on IN ADDITION when
+    it needs him. Carrying only one hid his most important mail: an
+    interview invitation matched by domain got 'Zu prüfen' and nothing
+    else, so in Gmail it was indistinguishable from an unclear receipt.
+
+    Everything else this app owns is removed, so a corrected verdict cannot
+    leave its old label behind."""
     if not message_id:
         return
-    name = LABEL_REVIEW if needs_review else LABELS.get(classification)
-    if not name:
-        # Matched, but nothing to say about it (a dismissed row). Strip any
-        # label a previous verdict left rather than leaving a stale one.
-        name = ""
+    names = []
+    verdict_label = LABELS.get(classification)
+    if verdict_label:
+        names.append(verdict_label)
+    if needs_review:
+        names.append(LABEL_REVIEW)
     try:
-        wanted = [LABEL_PARENT, *ALL_LABELS]
-        resolved = gmail.ensure_labels(wanted)
-        keep = [resolved[name]] if name else []
-        drop = [resolved[other] for other in ALL_LABELS if other != name]
+        resolved = gmail.ensure_labels([LABEL_PARENT, *ALL_LABELS])
+        keep = [resolved[name] for name in names]
+        drop = [resolved[other] for other in ALL_LABELS if other not in names]
         gmail.set_labels(message_id, keep, drop)
     except (gmail.GmailError, KeyError) as exc:
         log.warning("reply ingestion: could not label %s: %s",
