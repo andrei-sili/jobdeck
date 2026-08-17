@@ -16,7 +16,7 @@ import datetime
 
 from nicegui import run, ui
 
-from jobdeck import db, gmail
+from jobdeck import db, gmail, replies
 from jobdeck.services import register
 from jobdeck.services import replies as reply_service
 from jobdeck.ui import live
@@ -195,8 +195,8 @@ async def antworten_page():
                 ui.label(_sender_line(row)).classes("jd-card-sub")
                 ui.label(row.get("subject") or "(kein Betreff)") \
                     .classes("font-medium")
-                excerpt = " ".join(
-                    (row.get("body_text") or row.get("snippet") or "").split())
+                excerpt = " ".join(replies.letter_body(
+                    row.get("body_text") or row.get("snippet") or "").split())
                 if excerpt:
                     ui.label(excerpt[:EXCERPT_CHARS]
                              + ("…" if len(excerpt) > EXCERPT_CHARS else ""))
@@ -327,7 +327,8 @@ async def antworten_page():
                 ui.label(row.get("subject") or "(kein Betreff)") \
                     .classes("font-medium")
                 ui.label(_sender_line(row)).classes("jd-card-sub")
-                body = row.get("body_text") or row.get("snippet") or ""
+                body = replies.letter_body(
+                    row.get("body_text") or row.get("snippet") or "")
                 ui.label(body or "(kein Text gespeichert)") \
                     .style("white-space: pre-wrap") \
                     .classes("text-sm")

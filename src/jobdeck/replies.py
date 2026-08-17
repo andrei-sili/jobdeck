@@ -300,6 +300,29 @@ def extract_text(raw: bytes) -> str:
         return ""
 
 
+# Where a German letter actually begins. Everything before the salutation is
+# furniture: the sender's letterhead, his own postal address, file numbers,
+# fax lines. A formal reply from a public authority puts hundreds of
+# characters of it in front of the sentence that matters.
+_SALUTATION = re.compile(
+    r"^\s*(sehr geehrte[rs]?\b|guten (?:tag|morgen)\b|hallo\b|liebe[rs]?\b"
+    r"|hi\b|dear\b)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def letter_body(text: str) -> str:
+    """The letter without its letterhead, for an excerpt worth reading.
+
+    The invitation that prompted this showed 'Postfach 13 20 | Telefon
+    0651 …' where the room and the time should have been — the appointment
+    was four hundred characters past the start."""
+    if not text:
+        return ""
+    match = _SALUTATION.search(text)
+    return text[match.start():].lstrip() if match else text
+
+
 def from_address(header: str) -> str:
     """The bare address out of a From header, lowercased; '' when absent."""
     _name, addr = email.utils.parseaddr(header or "")

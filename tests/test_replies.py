@@ -413,3 +413,40 @@ def test_a_german_invitation_saying_interview_still_counts():
     verdict = replies.classify("Ihre Bewerbung", EINLADUNG_MIT_INTERVIEW)
     assert verdict is not None
     assert verdict.classification == "einladung"
+
+
+FORMELLER_BRIEF = """Behörde für Beispiele | Postfach 13 20 | 54203 Trier
+
+Herr Max Beispiel
+Musterweg 1
+12345 Musterstadt
+
+Telefon 0651 9494-0
+Telefax 0651 9494-170
+poststelle@behoerde.example
+
+Mein Aktenzeichen 03 041/12
+Bitte immer angeben!
+
+Sehr geehrter Herr Beispiel,
+
+ich möchte Sie zu einem Vorstellungsgespräch am Dienstag, 25. August 2026,
+um 11:30 Uhr in Raum 201 einladen.
+
+Mit freundlichen Grüßen"""
+
+
+def test_the_letterhead_is_not_the_letter():
+    """A formal German reply puts hundreds of characters of letterhead in
+    front of the sentence that matters — the excerpt of a real invitation
+    showed a postbox and a fax number where the room and the time were."""
+    body = replies.letter_body(FORMELLER_BRIEF)
+    assert body.startswith("Sehr geehrter Herr Beispiel")
+    assert "Vorstellungsgespräch" in body[:200]
+    assert "Postfach" not in body
+
+
+def test_a_letter_without_a_salutation_is_left_whole():
+    text = "Ihre Bewerbung ist eingegangen."
+    assert replies.letter_body(text) == text
+    assert replies.letter_body("") == ""
