@@ -435,16 +435,27 @@ def _handle_reply(match: dict, meta: dict, from_addr: str, subject: str,
             needs_review = 0  # a machine answer answers nothing — ledger only
         elif (verdict.confident
               and not match.get("ambiguous")
+              and not replies.is_bulk_mailing(meta["headers"])
               and match["matched_by"] in ("thread", "address")
               and (match["matched_by"] == "thread"
                    or replies.sender_authenticated(meta["headers"]))):
-            # Three conditions, each earned: the rules must not have leaned
+            # Four conditions, each earned: the rules must not have leaned
             # on the conditional screen (a gap there is a silent wrong
-            # status), the mail must be tied to the application by more than
-            # a domain, and — on the address arm — Gmail itself must vouch
-            # for the sender, because a From header is what a forger writes.
-            # A thread id is not forgeable: only mail Gmail itself threaded
-            # into a message this app sent carries one.
+            # status), the mail must not be addressed to a list, it must be
+            # tied to the application by more than a domain, and — on the
+            # address arm — Gmail itself must vouch for the sender, because
+            # a From header is what a forger writes. A thread id is not
+            # forgeable: only mail Gmail itself threaded into a message this
+            # app sent carries one.
+            #
+            # The list screen is here because an HR mailbox sends both kinds
+            # of mail. A Bewerberpool round-robin from the very address he
+            # corresponded with trips "keine passende Stelle anbieten" and
+            # would close a live application without a word — and once that
+            # rank-4 Absage is filed, the real invitation behind it can no
+            # longer overwrite it. A mass mail is by construction not an
+            # answer to HIS application: nobody read his file before sending
+            # it. It still gets classified and filed; it just waits for him.
             needs_review = 0
     elif replies.is_auto_submitted(meta["headers"]):
         classification = replies.CLASS_AUTO

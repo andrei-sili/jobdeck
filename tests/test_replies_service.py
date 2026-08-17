@@ -251,6 +251,31 @@ async def test_a_domain_match_only_proposes(inbox, con):
     assert set(add) == {"L_JobDeck/Absagen", "L_JobDeck/Zu prüfen"}
 
 
+async def test_a_mass_mailing_never_closes_an_application_by_itself(
+        inbox, con):
+    """An HR mailbox sends both kinds of mail. A talent-pool round-robin
+    from the very address he corresponded with trips a confident rejection
+    pattern, and every other gate passes it: exact address, DMARC, no
+    ambiguity. Nobody read his file before sending it, so it may not answer
+    for it — and a wrongly filed rank-4 Absage would then block the real
+    answer behind it."""
+    bewerbung_id = _sent_application(con, email_addr="hr@firma-beispiel.de")
+    inbox.add("m-1", subject="Unser Bewerberpool",
+              body="Guten Tag,\n\nleider können wir Ihnen derzeit keine "
+                   "passende Stelle anbieten.\n\nMit freundlichen Grüßen",
+              headers={"list-unsubscribe": "<https://firma-beispiel.de/ab>"})
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["auto_status"] == 0
+    assert outcome["review"] == 1
+    assert db.get_bewerbung(con, bewerbung_id)["status"] == "Gesendet"
+    row = _inbound_rows(con)[0]
+    # It is still read and still filed — only the writing is withheld.
+    assert (row["matched_by"], row["classification"], row["needs_review"]) \
+        == ("address", "absage", 1)
+
+
 async def test_an_llm_verdict_only_proposes_and_is_metered(
         inbox, con, monkeypatch):
     bewerbung_id = _sent_application(con)
