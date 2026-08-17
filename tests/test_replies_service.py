@@ -745,3 +745,37 @@ async def test_one_bad_message_never_ends_the_pass(inbox, con, monkeypatch):
     assert db.get_bewerbung(con, bewerbung_id)["status"] == "Absage"
     # the checkpoint is held back so the failed message is retried
     assert db.get_setting(con, service.HISTORY_KEY, "") == ""
+
+
+async def test_the_board_domain_alone_cannot_authorize_a_receipt(inbox, con):
+    """Isolates the board-domain guard from the bulk screen: no unsubscribe
+    header, so the ONLY thing that could authorize this write is the
+    apply_url domain — which on a board_apply posting belongs to the board."""
+    job_id = _strip_job(
+        con, apply_url="https://de.jooble.org/away/4086168173421673246",
+        apply_channel="board_apply")
+    inbox.add("m-1", from_header="Jooble <no-reply@de.jooble.org>",
+              subject="Eingangsbestätigung",
+              body="Ihre Bewerbung ist eingegangen.",
+              auth=("mx.google.com; spf=pass smtp.mailfrom=de.jooble.org; "
+                    "dmarc=pass header.from=de.jooble.org"))
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 0
+    assert db.get_job(con, job_id)["bewerbung_id"] is None
+
+
+async def test_the_employers_own_apply_domain_still_authorizes(inbox, con):
+    """The guard must not cost the feature: a posting whose apply_url is the
+    EMPLOYER's still records from that domain."""
+    job_id = _strip_job(con, apply_url="https://bewerbung.firma-beispiel.de/7",
+                        apply_channel="company_site")
+    inbox.add("m-1", from_header="Firma <karriere@firma-beispiel.de>",
+              subject="Eingangsbestätigung",
+              body="Ihre Bewerbung ist eingegangen.")
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 1
+    assert db.get_job(con, job_id)["bewerbung_id"] is not None
