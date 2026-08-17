@@ -719,3 +719,66 @@ def test_the_backfill_files_the_letter_the_running_app_would_mean(tmp_path,
     # letter's last edit as the moment the Mappe was handed over
     assert db.get_draft(con, newer)["updated_at"] != "t"
     con.close()
+
+
+def test_migrate_adds_the_reply_columns_to_a_pre_v12_email_log(tmp_path):
+    """A pre-v12 email_log gains body_text (default '') and job_id (default
+    NULL) — existing outbound rows must read as having no stored body and no
+    posting link, not as anything else."""
+    path = tmp_path / "v11.db"
+    con = sqlite3.connect(path)
+    con.row_factory = sqlite3.Row
+    con.execute(
+        """
+        CREATE TABLE email_log (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            direction        TEXT NOT NULL,
+            gmail_message_id TEXT UNIQUE,
+            gmail_thread_id  TEXT NOT NULL DEFAULT '',
+            from_addr        TEXT NOT NULL DEFAULT '',
+            to_addr          TEXT NOT NULL DEFAULT '',
+            subject          TEXT NOT NULL DEFAULT '',
+            snippet          TEXT NOT NULL DEFAULT '',
+            internal_date    TEXT NOT NULL DEFAULT '',
+            draft_id         INTEGER,
+            bewerbung_id     INTEGER,
+            matched_by       TEXT NOT NULL DEFAULT '',
+            classification   TEXT NOT NULL DEFAULT '',
+            classified_by    TEXT NOT NULL DEFAULT '',
+            needs_review     INTEGER NOT NULL DEFAULT 0,
+            created_at       TEXT NOT NULL
+        )
+        """
+    )
+    con.execute(
+        "INSERT INTO email_log (direction, gmail_message_id, gmail_thread_id, "
+        "created_at) VALUES ('outbound', 'm-1', 't-1', '2026-08-01T10:00:00')"
+    )
+    con.execute("PRAGMA user_version = 11")
+    con.commit()
+
+    migrations.migrate(con)
+
+    row = con.execute("SELECT * FROM email_log").fetchone()
+    assert row["body_text"] == ""
+    assert row["job_id"] is None
+    index_names = {r["name"] for r in con.execute("PRAGMA index_list(email_log)")}
+    assert "idx_email_log_thread" in index_names
+    assert (con.execute("PRAGMA user_version").fetchone()[0]
+            == migrations.SCHEMA_VERSION)
+    migrations.migrate(con)  # idempotent with the new columns present
+    con.close()
+
+
+def test_migrate_leaves_a_fresh_database_with_the_reply_columns(tmp_path):
+    """The canonical CREATE TABLE and the ALTER path must agree — a fresh
+    database drifting from an upgraded one is how one machine works and the
+    next install fails."""
+    con = sqlite3.connect(tmp_path / "fresh.db")
+    con.row_factory = sqlite3.Row
+    migrations.migrate(con)
+    columns = {row["name"] for row in con.execute("PRAGMA table_info(email_log)")}
+    assert {"body_text", "job_id"} <= columns
+    index_names = {r["name"] for r in con.execute("PRAGMA index_list(email_log)")}
+    assert "idx_email_log_thread" in index_names
+    con.close()

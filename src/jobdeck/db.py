@@ -14,9 +14,11 @@ from pathlib import Path
 
 from jobdeck import apply_channel, backup, config, dates, freshness, migrations
 from jobdeck.constants import (
+    BEANTWORTET_STATUS,
     DEFAULT_DAILY_CAP,
     DEFAULT_DAILY_DRAFT_CAP,
     DRAFT_STATUS,
+    EMAIL_INBOUND,
     EMAIL_OUTBOUND,
     EMAIL_OUTBOUND_TEST,
     FORM_OPENED_UNKNOWN,
@@ -1649,6 +1651,16 @@ SELECT (SELECT COUNT(*) FROM bewerbungen), (SELECT MAX(id) FROM bewerbungen),
        (SELECT MAX(id) FROM status_history)
 """
 
+# Inbound mail joined the log in v12. COUNT/MAX see arrivals; the two totals
+# see the transitions review actions make without adding rows (a confirm
+# flips needs_review, a correction rewrites classification — the count of
+# rows moves for neither).
+_EMAIL_SIGNATURE_SQL = """
+SELECT COUNT(*), MAX(id), TOTAL(needs_review),
+       TOTAL(classification<>''), TOTAL(bewerbung_id IS NOT NULL)
+  FROM email_log
+"""
+
 
 def data_signature(con: sqlite3.Connection) -> tuple:
     """What the pipeline pages (inbox, queue, dashboard, applications, cockpit)
@@ -1662,6 +1674,7 @@ def data_signature(con: sqlite3.Connection) -> tuple:
         *con.execute(_JOBS_SIGNATURE_SQL, (LIVENESS_GONE,)).fetchone(),
         *con.execute(_DRAFTS_SIGNATURE_SQL).fetchone(),
         *con.execute(_APPLICATIONS_SIGNATURE_SQL).fetchone(),
+        *con.execute(_EMAIL_SIGNATURE_SQL).fetchone(),
     )
 
 
@@ -1906,8 +1919,9 @@ def add_email_log(con: sqlite3.Connection, values: dict) -> int:
         INSERT INTO email_log
             (direction, gmail_message_id, gmail_thread_id, from_addr, to_addr,
              subject, snippet, internal_date, draft_id, bewerbung_id,
-             matched_by, classification, classified_by, needs_review, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             matched_by, classification, classified_by, needs_review,
+             body_text, job_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             values["direction"],
@@ -1924,6 +1938,8 @@ def add_email_log(con: sqlite3.Connection, values: dict) -> int:
             values.get("classification", ""),
             values.get("classified_by", ""),
             int(values.get("needs_review", 0)),
+            values.get("body_text", ""),
+            values.get("job_id"),
             _now(),
         ),
     )
@@ -2126,6 +2142,174 @@ def unrecord_application(
         con.rollback()
         raise
     con.commit()
+
+
+# --------------------------------------------------------------------------
+# Inbound replies (Phase 3)
+# --------------------------------------------------------------------------
+def known_gmail_ids(con: sqlite3.Connection, ids: list[str]) -> set[str]:
+    """Which of these Gmail message ids the log already holds.
+
+    The ingestion pass asks this before fetching anything: the UNIQUE column
+    is what makes an overlapping re-list idempotent, and asking first is what
+    makes it cheap."""
+    if not ids:
+        return set()
+    placeholders = ",".join("?" * len(ids))
+    rows = con.execute(
+        f"SELECT gmail_message_id FROM email_log "
+        f" WHERE gmail_message_id IN ({placeholders})",
+        ids,
+    ).fetchall()
+    return {row[0] for row in rows}
+
+
+def find_bewerbung_by_thread(con: sqlite3.Connection, thread_id: str) -> int | None:
+    """The application a Gmail thread belongs to, if this app sent into it.
+
+    Only rows that carry a `bewerbung_id` count: a TEST send shares no thread
+    with any company, and its row has none — so rehearsal traffic can never
+    match a reply to an application."""
+    if not thread_id:
+        return None
+    row = con.execute(
+        "SELECT bewerbung_id FROM email_log "
+        " WHERE gmail_thread_id=? AND direction LIKE ? "
+        "   AND bewerbung_id IS NOT NULL "
+        " ORDER BY id DESC LIMIT 1",
+        (thread_id, f"{EMAIL_OUTBOUND}%"),
+    ).fetchone()
+    if row is not None:
+        return int(row[0])
+    row = con.execute(
+        "SELECT bewerbung_id FROM drafts "
+        " WHERE gmail_thread_id=? AND bewerbung_id IS NOT NULL "
+        " ORDER BY id DESC LIMIT 1",
+        (thread_id,),
+    ).fetchone()
+    return int(row[0]) if row is not None else None
+
+
+def bewerbungen_for_reply_match(con: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every application that could receive mail: id, address, status, firma.
+
+    The address arms of the match cascade compare against these; rows with no
+    stored address (form applications at portals) simply cannot be matched
+    that way and are excluded here rather than skipped by every caller."""
+    return con.execute(
+        "SELECT id, email, firma, status, gesendet_am FROM bewerbungen "
+        " WHERE COALESCE(email,'') <> '' ORDER BY id DESC"
+    ).fetchall()
+
+
+def bewerbung_has_inbound(con: sqlite3.Connection, bewerbung_id: int) -> bool:
+    row = con.execute(
+        "SELECT 1 FROM email_log WHERE bewerbung_id=? AND direction=? LIMIT 1",
+        (bewerbung_id, EMAIL_INBOUND),
+    ).fetchone()
+    return row is not None
+
+
+def receipt_candidates(con: sqlite3.Connection, cutoff: str) -> list[sqlite3.Row]:
+    """Postings an Eingangsbestätigung could belong to: the Läuft strip.
+
+    One to three rows, never the corpus — a receipt is matched only against
+    forms he recently opened. A posting whose application is already recorded
+    stays a candidate until an inbound row exists for it: that is what heals
+    the crash window between recording and logging, and what catches a
+    receipt arriving after he pressed „Abgeschickt" himself. `unbekannt`
+    rows (pre-v10 zombies) carry no recency and are excluded."""
+    return con.execute(
+        "SELECT * FROM jobs "
+        " WHERE form_opened_at <> '' AND form_opened_at <> ? "
+        "   AND form_opened_at >= ? "
+        "   AND (bewerbung_id IS NULL "
+        "        OR NOT EXISTS (SELECT 1 FROM email_log e "
+        "                        WHERE e.bewerbung_id = jobs.bewerbung_id "
+        "                          AND e.direction = ?))",
+        (FORM_OPENED_UNKNOWN, cutoff, EMAIL_INBOUND),
+    ).fetchall()
+
+
+def pending_review_replies(con: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Inbound mail waiting for his verdict, newest first, with names."""
+    return con.execute(
+        "SELECT e.*, b.firma AS bewerbung_firma, b.status AS bewerbung_status, "
+        "       j.company AS job_company, j.title AS job_title "
+        "  FROM email_log e "
+        "  LEFT JOIN bewerbungen b ON b.id = e.bewerbung_id "
+        "  LEFT JOIN jobs j ON j.id = e.job_id "
+        " WHERE e.direction=? AND e.needs_review=1 "
+        " ORDER BY e.id DESC",
+        (EMAIL_INBOUND,),
+    ).fetchall()
+
+
+def list_inbound_replies(con: sqlite3.Connection, limit: int = 50) -> list[sqlite3.Row]:
+    """The settled ledger: inbound mail already classified or filed."""
+    return con.execute(
+        "SELECT e.*, b.firma AS bewerbung_firma, b.status AS bewerbung_status, "
+        "       j.company AS job_company, j.title AS job_title "
+        "  FROM email_log e "
+        "  LEFT JOIN bewerbungen b ON b.id = e.bewerbung_id "
+        "  LEFT JOIN jobs j ON j.id = e.job_id "
+        " WHERE e.direction=? AND e.needs_review=0 "
+        " ORDER BY e.id DESC LIMIT ?",
+        (EMAIL_INBOUND, limit),
+    ).fetchall()
+
+
+def get_email_log(con: sqlite3.Connection, email_log_id: int) -> sqlite3.Row | None:
+    return con.execute(
+        "SELECT * FROM email_log WHERE id=?", (email_log_id,)
+    ).fetchone()
+
+
+def classify_reply_row(
+    con: sqlite3.Connection,
+    email_log_id: int,
+    classification: str,
+    classified_by: str,
+    needs_review: int,
+) -> None:
+    con.execute(
+        "UPDATE email_log SET classification=?, classified_by=?, needs_review=? "
+        " WHERE id=?",
+        (classification, classified_by, int(needs_review), email_log_id),
+    )
+
+
+def link_reply_bewerbung(
+    con: sqlite3.Connection, email_log_id: int, bewerbung_id: int | None
+) -> None:
+    """Point an inbound row at an application — or at none (his 'this mail
+    does not belong to that application' verdict)."""
+    con.execute(
+        "UPDATE email_log SET bewerbung_id=? WHERE id=?",
+        (bewerbung_id, email_log_id),
+    )
+
+
+def reopen_reply_review(con: sqlite3.Connection, email_log_id: int) -> None:
+    """Put a row back on the review pile — the receipt undo path."""
+    con.execute(
+        "UPDATE email_log SET needs_review=1 WHERE id=?", (email_log_id,)
+    )
+
+
+def first_answer_dates(con: sqlite3.Connection) -> dict[int, str]:
+    """When each application FIRST entered an answered status, whoever wrote
+    it. Uniform across hand-recorded history and ingested replies — for the
+    imported rows the recording moment is the only date there is, and mixing
+    'when the mail arrived' with 'when he typed it' under one column head
+    would make the column mean two things."""
+    placeholders = ",".join("?" * len(BEANTWORTET_STATUS))
+    rows = con.execute(
+        f"SELECT bewerbung_id, MIN(created_at) AS first_at FROM status_history "
+        f" WHERE new_status IN ({placeholders}) GROUP BY bewerbung_id",
+        tuple(sorted(BEANTWORTET_STATUS)),
+    ).fetchall()
+    return {int(row["bewerbung_id"]): str(row["first_at"] or "") for row in rows}
 
 
 # --------------------------------------------------------------------------

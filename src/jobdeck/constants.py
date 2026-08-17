@@ -86,12 +86,17 @@ DEFAULT_DAILY_DRAFT_CAP = "10"
 # email_log.direction values. Test sends (real sending OFF) get their own
 # direction: they must never look like a real application in the audit log,
 # but still count toward the daily cap — the account's reputation does not
-# care who the recipient was.
+# care who the recipient was. Inbound must never start with "outbound":
+# count_outbound_today matches the prefix.
 EMAIL_OUTBOUND = "outbound"
 EMAIL_OUTBOUND_TEST = "outbound_test"
+EMAIL_INBOUND = "inbound"
 
-# Reply classifications produced by the inbox pipeline
-CLASSIFICATIONS = ["eingang", "absage", "einladung", "sonstige"]
+# Reply classifications produced by the inbox pipeline. 'auto' is an
+# out-of-office / bulk auto-reply: kept in the ledger for honesty, but it is
+# not an answer from a human, so it must never change a status and never ask
+# for review — which is why CLASSIFICATION_TO_STATUS has no entry for it.
+CLASSIFICATIONS = ["eingang", "absage", "einladung", "sonstige", "auto"]
 
 # Mapping from reply classification to application status
 CLASSIFICATION_TO_STATUS = {

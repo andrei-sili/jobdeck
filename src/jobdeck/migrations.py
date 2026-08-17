@@ -11,7 +11,7 @@ import sqlite3
 
 from jobdeck import constants, dates
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # Legacy table, exactly as the previous tracker created it.
 BEWERBUNGEN_SQL = """
@@ -134,9 +134,14 @@ CREATE TABLE IF NOT EXISTS email_log (
     classification   TEXT NOT NULL DEFAULT '',
     classified_by    TEXT NOT NULL DEFAULT '',
     needs_review     INTEGER NOT NULL DEFAULT 0,
+    body_text        TEXT NOT NULL DEFAULT '',
+    job_id           INTEGER REFERENCES jobs(id),
     created_at       TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_email_log_bewerbung ON email_log(bewerbung_id);
+-- Reply ingestion joins an inbound message's threadId against the outbound
+-- rows; without this the join scans the whole log once per new message.
+CREATE INDEX IF NOT EXISTS idx_email_log_thread ON email_log(gmail_thread_id);
 
 CREATE TABLE IF NOT EXISTS status_history (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -457,6 +462,27 @@ def _ensure_reading_columns(con: sqlite3.Connection) -> None:
                 f"ALTER TABLE jobs ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
 
 
+def _ensure_email_log_columns(con: sqlite3.Connection) -> None:
+    """Reply-ingestion columns added in schema v12 (additive only).
+
+    * `body_text`: the extracted plain text of a MATCHED inbound message,
+      capped by the ingestion service. Stored so the review row can show him
+      what he is classifying without re-reading Gmail — and only for mail the
+      app could tie to an application; unmatched mail is never stored at all.
+    * `job_id`: an Eingangsbestätigung matches a POSTING on the Läuft strip —
+      at that moment no bewerbungen row exists yet, so the reply columns'
+      `bewerbung_id` cannot carry the link. Replies to sent applications keep
+      using `bewerbung_id`; a receipt row may carry both once recorded.
+    """
+    existing = [row[1] for row in con.execute("PRAGMA table_info(email_log)")]
+    if "body_text" not in existing:
+        con.execute(
+            "ALTER TABLE email_log ADD COLUMN body_text TEXT NOT NULL DEFAULT ''")
+    if "job_id" not in existing:
+        con.execute(
+            "ALTER TABLE email_log ADD COLUMN job_id INTEGER REFERENCES jobs(id)")
+
+
 def _ensure_draft_columns(con: sqlite3.Connection) -> None:
     """Send-tracking columns added in schema v4 (additive only).
 
@@ -483,6 +509,7 @@ def migrate(con: sqlite3.Connection) -> None:
     _ensure_reading_columns(con)
     _ensure_form_flow_columns(con)
     _ensure_draft_columns(con)
+    _ensure_email_log_columns(con)
     _backfill_published_on(con)
     _backfill_application_documents(con)
     if version < 11:
