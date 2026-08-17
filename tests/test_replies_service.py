@@ -731,6 +731,22 @@ async def test_a_bulk_mailing_can_never_be_a_receipt(inbox, con):
     assert db.get_job(con, job_id)["bewerbung_id"] is None
 
 
+async def test_a_receipt_proposal_is_marked_as_waiting_in_gmail(inbox, con):
+    """The three paths that park a receipt on the review pile each wrote
+    the row themselves and none of them labelled, so the proposals were
+    invisible in Gmail. One writer does it now."""
+    _strip_job(con, company="Musterhaus Softwarebau GmbH")
+    inbox.add("m-1",
+              from_header="Musterhaus Softwarebau GmbH <hr@musterhaus.example>",
+              subject="Ihre Bewerbung ist eingegangen",
+              body="Vielen Dank für Ihre Bewerbung.")
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["review"] == 1
+    assert inbox.labeled == [("m-1", "L_JobDeck/Zu prüfen")]
+
+
 async def test_one_bad_message_never_ends_the_pass(inbox, con, monkeypatch):
     """The first real read died on message six of sixty when a concurrent
     pass had already logged one and the UNIQUE id constraint fired. Only

@@ -383,11 +383,12 @@ def test_a_receipt_that_thanks_for_the_sending_is_still_a_receipt():
     assert verdict.classification == "eingang"
 
 
-ENGLISH_RECEIPT = """Hi Andrei,
+ENGLISH_RECEIPT = """Hi there,
 
 Your application has landed. Thank you for considering a career with us!
-We appreciate the time you took. If your profile matches, our team will be
-in touch to arrange interviews.
+We receive a high volume of applications and cannot always respond
+individually if your application is not selected for interview. If you are
+shortlisted for the next stage, we will be in touch.
 
 Best regards"""
 
