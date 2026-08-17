@@ -19,7 +19,7 @@ import sys
 from nicegui import ui
 
 PAGE_MODULES = (
-    "bewerbungen", "dashboard", "jobs", "queue", "settings",
+    "antworten", "bewerbungen", "dashboard", "jobs", "queue", "settings",
     "unterlagen",
 )
 

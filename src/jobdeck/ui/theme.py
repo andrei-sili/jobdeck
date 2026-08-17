@@ -270,6 +270,9 @@ body { background: var(--paper); color: var(--ink); font-family: var(--jd-sans);
 .jd-pill.ok { background: var(--accent-soft); color: var(--accent-deep); }
 .jd-pill.warn { background: var(--warn-soft); color: var(--warn); }
 
+/* One reply on the review pile: separated by a rule, never by a card. */
+.jd-reply-row { border-top:1px solid var(--rule); padding-top:10px; }
+
 /* One row of the register: a permission, and how often a letter used it. */
 .jd-claim { display:grid; grid-template-columns:1fr auto auto; gap:0 12px;
             align-items:center; width:100%; border-bottom:1px solid var(--rule); }

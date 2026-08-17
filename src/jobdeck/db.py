@@ -2297,6 +2297,31 @@ def reopen_reply_review(con: sqlite3.Connection, email_log_id: int) -> None:
     )
 
 
+def count_pending_replies(con: sqlite3.Connection) -> int:
+    return con.execute(
+        "SELECT COUNT(*) FROM email_log WHERE direction=? AND needs_review=1",
+        (EMAIL_INBOUND,),
+    ).fetchone()[0]
+
+
+def count_inbound_replies(con: sqlite3.Connection) -> int:
+    return con.execute(
+        "SELECT COUNT(*) FROM email_log WHERE direction=?", (EMAIL_INBOUND,)
+    ).fetchone()[0]
+
+
+def count_recent_invitations(con: sqlite3.Connection, days: int = 7) -> int:
+    """Invitations that arrived in the last week — the one inbound event the
+    rail taps him on the shoulder for."""
+    cutoff = (datetime.datetime.now()
+              - datetime.timedelta(days=days)).isoformat(timespec="seconds")
+    return con.execute(
+        "SELECT COUNT(*) FROM email_log "
+        " WHERE direction=? AND classification='einladung' AND created_at>=?",
+        (EMAIL_INBOUND, cutoff),
+    ).fetchone()[0]
+
+
 def first_answer_dates(con: sqlite3.Connection) -> dict[int, str]:
     """When each application FIRST entered an answered status, whoever wrote
     it. Uniform across hand-recorded history and ingested replies — for the

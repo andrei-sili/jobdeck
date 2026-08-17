@@ -37,6 +37,12 @@ def _view(**over) -> dict:
         "sent_today": 2,
         "send_cap": 5,
         "connections": [("Anthropic", True), ("Gmail", True), ("Jooble", True)],
+        "replies_pending": 0,
+        "replies_total": 0,
+        "replies_recent_einladung": 0,
+        "replies_last_poll": "2026-08-12T17:55:00",
+        "replies_last_error": "",
+        "gmail_can_read": True,
     }
     view.update(over)
     return view
@@ -150,13 +156,57 @@ def test_einstellungen_is_quiet_once_everything_is_connected():
     assert rubric.amber is False
 
 
-def test_antworten_is_shown_but_cannot_be_opened():
-    """Phase 3 is not built. The rubric stands there dimmed so he can see what
-    is coming, and it has nowhere to go — a link to an empty screen would be a
-    worse answer than a greyed-out name."""
+def test_antworten_opens_and_reports_the_quiet_state():
     rubric = _rubric(_view(), "antworten")
-    assert rubric.enabled is False
-    assert rubric.path == ""
+    assert rubric.enabled is True
+    assert rubric.path == "/antworten"
+    assert rubric.count == "0 Antworten"
+    assert rubric.sub == "Gmail liest mit · zuletzt 17:55"
+    assert rubric.amber is False
+
+
+def test_antworten_counts_the_review_pile_first():
+    rubric = _rubric(_view(replies_pending=3, replies_total=8), "antworten")
+    assert rubric.count == "3 zu prüfen"
+    assert rubric.amber is True
+
+
+def test_a_fresh_invitation_outranks_everything():
+    rubric = _rubric(_view(replies_pending=3, replies_total=8,
+                           replies_recent_einladung=1), "antworten")
+    assert rubric.count == "1 Einladung!"
+    assert rubric.amber is True
+
+
+def test_one_settled_reply_is_not_called_antworten_plural():
+    rubric = _rubric(_view(replies_total=1), "antworten")
+    assert rubric.count == "1 Antwort"
+
+
+def test_antworten_names_what_a_reconnect_would_add():
+    """A pre-Phase-3 token sends but cannot read; the rubric must say that
+    instead of pretending the inbox is empty."""
+    rubric = _rubric(_view(gmail_can_read=False), "antworten")
+    assert rubric.sub == "Gmail ohne Lese-Zugriff — neu verbinden"
+    assert rubric.amber is True
+
+
+def test_antworten_reports_a_disconnected_gmail_before_the_scope():
+    rubric = _rubric(_view(
+        connections=[("Anthropic", True), ("Gmail", False), ("Jooble", True)],
+        gmail_can_read=False), "antworten")
+    assert rubric.sub == "Gmail ist nicht verbunden"
+
+
+def test_a_failing_reader_is_reported_not_hidden():
+    rubric = _rubric(_view(replies_last_error="boom"), "antworten")
+    assert rubric.sub == "Gmail-Lesen gestört"
+    assert rubric.amber is True
+
+
+def test_antworten_before_the_first_pass_says_so():
+    rubric = _rubric(_view(replies_last_poll=""), "antworten")
+    assert rubric.sub == "Gmail liest mit — erster Lauf steht aus"
 
 
 # ---------------------------------------------------------------------------
