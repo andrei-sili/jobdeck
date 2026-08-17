@@ -241,6 +241,16 @@ _GMAIL_AUTHSERV = re.compile(r"^\s*(mx\.google\.com|google\.com)\s*;",
 _DMARC_PASS = re.compile(r"\bdmarc\s*=\s*pass\b", re.IGNORECASE)
 
 
+def is_bulk_mailing(headers: dict[str, str]) -> bool:
+    """A mailing rather than a message written to him.
+
+    Narrower than `is_auto_submitted`: only the markers that mean "this went
+    to a list", so it can gate the receipt arm without demoting the
+    auto-generated confirmations an ATS sends to one applicant."""
+    precedence = headers.get("precedence", "").strip().lower()
+    return "list-unsubscribe" in headers or precedence in ("bulk", "list")
+
+
 def sender_authenticated(headers: dict[str, str]) -> bool:
     """Whether Gmail's own Authentication-Results vouches for the FROM domain.
 

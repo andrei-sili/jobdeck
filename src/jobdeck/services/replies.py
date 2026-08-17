@@ -131,9 +131,14 @@ def _ingest() -> dict:
         counters["seen"] += 1
         try:
             _process_message(message_id, counters)
-        except gmail.GmailError as exc:
-            # Transient per-message failure: log, count, and hold the
-            # checkpoint back so the next pass re-lists and retries it.
+        except Exception as exc:  # noqa: BLE001 — see below
+            # ONE message must never end the pass. Catching only GmailError
+            # left every other failure fatal, and the first real read proved
+            # it: a second pass running concurrently had already logged a
+            # message, the UNIQUE id constraint fired, and the whole run
+            # died on message six of sixty. Same rule the source adapters
+            # follow — malformed item, log and skip — and the checkpoint is
+            # held back so the next pass retries it.
             log.warning("reply ingestion: message %s failed: %s",
                         message_id, exc)
             counters["errors"] += 1
@@ -295,6 +300,12 @@ def _receipt_match(con, meta: dict, from_addr: str, subject: str) -> dict | None
     candidates = db.receipt_candidates(con, cutoff)
     if not candidates:
         return None
+    if replies.is_bulk_mailing(meta["headers"]):
+        # A mailing list is not a receipt. Real ATS confirmations do
+        # occasionally carry an unsubscribe footer, so this bars only the
+        # RECEIPT arm — the one that writes an application — and leaves a
+        # reply to an application it can already identify alone.
+        return None
     sender_domain = registrable_domain(from_addr.rpartition("@")[2])
     # The body is not fetched yet at match time; strong textual evidence is
     # judged on the subject plus Gmail's snippet, which carries the opening
@@ -347,9 +358,16 @@ def _receipt_evidence(job, sender_domain: str, text: str) -> tuple[str, bool]:
     by_refnr = replies.refnr_in_text(refnr, text, "")
     if sender_domain:
         targets = set()
-        domain = registrable_domain(str(job["apply_url"] or ""))
-        if domain:
-            targets.add(domain)
+        # `apply_url` is the EMPLOYER's application address only when the
+        # channel says so. On a board_apply posting it is the board's own
+        # link (de.jooble.org/away/…), so accepting it would let the board
+        # authorize: a Jooble job newsletter really did arrive, match a
+        # posting by that domain, and move an application to "In
+        # Bearbeitung" on the first real read of his mailbox.
+        if str(job["apply_channel"] or "") != apply_channel.CHANNEL_BOARD:
+            domain = registrable_domain(str(job["apply_url"] or ""))
+            if domain:
+                targets.add(domain)
         contact_domain = registrable_domain(
             str(job["contact_email"] or "").rpartition("@")[2])
         if contact_domain:

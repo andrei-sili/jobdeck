@@ -11,6 +11,7 @@ this file pins the decisions.
 import asyncio
 import email.message
 import email.policy
+import sqlite3
 
 import pytest
 
@@ -678,3 +679,69 @@ async def test_adopting_a_receipt_for_an_already_recorded_job_attaches(
     assert (job["status"], job["bewerbung_id"]) == ("applied", bewerbung_id)
     assert db.get_email_log(con, row_id)["bewerbung_id"] == bewerbung_id
     assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 1
+
+
+async def test_a_job_boards_own_newsletter_cannot_confirm_an_application(
+        inbox, con):
+    """Found on the first real read of his mailbox: a Jooble job newsletter
+    matched a posting whose apply_url IS a jooble.org link — because on a
+    board_apply posting that URL is the BOARD's, not the employer's — and
+    moved a real application to 'In Bearbeitung'."""
+    job_id = _strip_job(
+        con, apply_url="https://de.jooble.org/away/4086168173421673246",
+        apply_channel="board_apply")
+    inbox.add("m-1", from_header="Jooble <subscribe@de.jooble.org>",
+              subject="IT-Systemadministrator (w/m/d) bei Beispiel GmbH",
+              body="Job-Newsletter 13 August 2026. Ihre Bewerbung ist "
+                   "eingegangen.",
+              auth=("mx.google.com; spf=pass smtp.mailfrom=de.jooble.org; "
+                    "dmarc=pass header.from=de.jooble.org"),
+              headers={"list-unsubscribe": "<https://de.jooble.org/unsub>"})
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 0
+    assert outcome["ignored"] == 1  # nothing but the opaque id is kept
+    assert db.get_job(con, job_id)["bewerbung_id"] is None
+    assert _inbound_rows(con) == []
+
+
+async def test_a_bulk_mailing_can_never_be_a_receipt(inbox, con):
+    """Narrower than the auto-reply screen, and deliberately only on the
+    receipt arm: a real ATS confirmation may carry an unsubscribe footer,
+    but a mailing list may not record an application."""
+    job_id = _strip_job(con, apply_url="https://bewerbung.firma-beispiel.de/7")
+    inbox.add("m-1", from_header="Firma <karriere@firma-beispiel.de>",
+              subject="Eingangsbestätigung",
+              body="Ihre Bewerbung ist eingegangen.",
+              headers={"list-unsubscribe": "<mailto:u@firma-beispiel.de>"})
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 0
+    assert db.get_job(con, job_id)["bewerbung_id"] is None
+
+
+async def test_one_bad_message_never_ends_the_pass(inbox, con, monkeypatch):
+    """The first real read died on message six of sixty when a concurrent
+    pass had already logged one and the UNIQUE id constraint fired. Only
+    GmailError was caught; everything else was fatal."""
+    bewerbung_id = _sent_application(con, thread="t-9")
+    inbox.add("m-bad", thread="t-9", body=ABSAGE_BODY)
+    inbox.add("m-good", thread="t-9", body=ABSAGE_BODY)
+    original = service._process_message
+
+    def explode(message_id, counters):
+        if message_id == "m-bad":
+            raise sqlite3.IntegrityError("UNIQUE constraint failed")
+        return original(message_id, counters)
+
+    monkeypatch.setattr(service, "_process_message", explode)
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["errors"] == 1
+    assert outcome["seen"] == 2  # it kept going
+    assert db.get_bewerbung(con, bewerbung_id)["status"] == "Absage"
+    # the checkpoint is held back so the failed message is retried
+    assert db.get_setting(con, service.HISTORY_KEY, "") == ""
