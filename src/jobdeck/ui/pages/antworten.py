@@ -186,10 +186,16 @@ async def antworten_page():
                     ui.label(excerpt[:EXCERPT_CHARS]
                              + ("…" if len(excerpt) > EXCERPT_CHARS else ""))
                 proposed = row.get("classification") or ""
-                if proposed and row.get("classified_by") == "llm":
-                    ui.label(f"Vorschlag der KI: "
-                             f"{CLASS_LABELS.get(proposed, proposed)}?") \
+                why = " ".join((row.get("matched_note") or "").split())
+                if proposed:
+                    source = ("Vorschlag der KI" if row.get("classified_by")
+                              == "llm" else "Gelesen als")
+                    ui.label(f"{source}: "
+                             f"{CLASS_LABELS.get(proposed, proposed)}?"
+                             + (f" — {why}" if why else "")) \
                         .classes("jd-reason")
+                elif why:
+                    ui.label(why).classes("jd-reason")
                 with ui.row().classes("items-center gap-2 flex-wrap"):
                     if _is_receipt_proposal(row):
                         ui.button(
@@ -240,10 +246,19 @@ async def antworten_page():
                     .classes("font-medium") \
                     .style("overflow:hidden;text-overflow:ellipsis;"
                            "white-space:nowrap")
+                dismissed = (not classification
+                             and row.get("bewerbung_id") is None)
                 with ui.element("span").classes(
+                        "jd-pill" if dismissed else
                         f"jd-pill {_PILL.get(classification, '')}"):
-                    ui.label(CLASS_LABELS.get(classification, classification))
-                ui.label("bestätigt" if row.get("classified_by")
+                    ui.label("Abgelegt" if dismissed else
+                             CLASS_LABELS.get(classification, classification))
+                # A row he pushed aside himself is not something the app
+                # decided — calling it "automatisch" next to a permanently
+                # amber "Unklar" made his own click look like a machine's
+                # unfinished business.
+                ui.label("" if dismissed else
+                         "bestätigt" if row.get("classified_by")
                          == "reply_manual" else "automatisch") \
                     .classes("jd-card-sub")
                 ui.space()

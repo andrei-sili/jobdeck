@@ -181,12 +181,17 @@ def _new_message_ids() -> tuple[list[str], str, bool]:
     return gmail.list_new_message_ids(query, LIST_AHEAD), checkpoint, False
 
 
-def _ignore(message_id: str, internal_iso: str) -> None:
+def _ignore(message_id: str) -> None:
+    """The whole trace an unmatched message leaves: its opaque Gmail id.
+
+    Not even the arrival time — that is a fact about somebody else's mail,
+    and the id alone does the one job this row exists for, which is letting
+    a bounded pass advance past a backlog without reading the same message
+    for ever."""
     with db.db() as con:
         db.add_email_log(con, {
             "direction": EMAIL_INBOUND_IGNORED,
             "gmail_message_id": message_id,
-            "internal_date": internal_iso,
         })
 
 
@@ -195,19 +200,18 @@ def _process_message(message_id: str, counters: dict) -> None:
     headers = meta["headers"]
     from_addr = replies.from_address(headers.get("from", ""))
     subject = headers.get("subject", "")
-    internal_iso = _iso_from_ms(meta["internal_date_ms"])
 
     with db.db() as con:
         own_address = db.get_setting(con, "gmail_address", "").strip().lower()
     if not from_addr or (own_address and from_addr == own_address):
         counters["ignored"] += 1
-        _ignore(message_id, internal_iso)
+        _ignore(message_id)
         return
 
     match = _match(meta, from_addr, subject)
     if match is None:
         counters["ignored"] += 1
-        _ignore(message_id, internal_iso)
+        _ignore(message_id)
         return
     counters["matched"] += 1
 
@@ -433,6 +437,7 @@ def _handle_reply(match: dict, meta: dict, from_addr: str, subject: str,
             "classified_by": classified_by,
             "needs_review": needs_review,
             "body_text": body,
+            "matched_note": note,
         })
         status = CLASSIFICATION_TO_STATUS.get(classification)
         if needs_review == 0 and classified_by == "rules" and status:
@@ -510,6 +515,9 @@ def _handle_receipt(match: dict, meta: dict, from_addr: str, subject: str,
         "matched_by": MATCHED_RECEIPT,
         "classification": said or "eingang",
         "classified_by": "rules",
+        # What identified this posting, so a proposal can say why it is only
+        # a proposal instead of leaving him to guess.
+        "matched_note": match.get("evidence", ""),
     }
     if said and said != "eingang":
         # An answer, not a receipt. There is no application in the ledger to

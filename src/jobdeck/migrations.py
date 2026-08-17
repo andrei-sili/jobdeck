@@ -136,6 +136,7 @@ CREATE TABLE IF NOT EXISTS email_log (
     needs_review     INTEGER NOT NULL DEFAULT 0,
     body_text        TEXT NOT NULL DEFAULT '',
     job_id           INTEGER REFERENCES jobs(id),
+    matched_note     TEXT NOT NULL DEFAULT '',
     created_at       TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_email_log_bewerbung ON email_log(bewerbung_id);
@@ -473,6 +474,11 @@ def _ensure_email_log_columns(con: sqlite3.Connection) -> None:
       at that moment no bewerbungen row exists yet, so the reply columns'
       `bewerbung_id` cannot carry the link. Replies to sent applications keep
       using `bewerbung_id`; a receipt row may carry both once recorded.
+    * `matched_note`: WHY this row says what it says — the evidence that
+      identified a posting ("Absender firma.de"), or the model's one German
+      sentence when the model was the one that proposed. Both were computed
+      (and, for the model, paid for) and then thrown away, leaving a
+      proposal on screen with nothing to judge it by.
     """
     existing = [row[1] for row in con.execute("PRAGMA table_info(email_log)")]
     if "body_text" not in existing:
@@ -481,6 +487,9 @@ def _ensure_email_log_columns(con: sqlite3.Connection) -> None:
     if "job_id" not in existing:
         con.execute(
             "ALTER TABLE email_log ADD COLUMN job_id INTEGER REFERENCES jobs(id)")
+    if "matched_note" not in existing:
+        con.execute("ALTER TABLE email_log ADD COLUMN matched_note "
+                    "TEXT NOT NULL DEFAULT ''")
 
 
 def _ensure_draft_columns(con: sqlite3.Connection) -> None:

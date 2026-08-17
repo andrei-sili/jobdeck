@@ -18,6 +18,7 @@ from nicegui import app, run, ui
 
 from jobdeck import db, export
 from jobdeck.constants import (
+    BEANTWORTET_STATUS,
     DRAFT_DELIVERED,
     KANAL_OPTIONS,
     OFFENE_STATUS,
@@ -488,9 +489,14 @@ async def bewerbungen_page():
                         f"jd-pill {_pill_class(status)}")
                 # The day the register FIRST held an answer — the recording
                 # moment for imported rows, the mail's arrival for ingested
-                # ones is one history-write away from it either way. "—" is
-                # honest for a row still waiting.
-                ui.label(answered_at[:10] if answered_at else "—") \
+                # ones is one history-write away from it either way.
+                # A row that IS answered but whose transition predates the
+                # audit trail (the old tracker's imports) reads "?" rather
+                # than "—": an empty cell beside an Absage pill says the
+                # application is still waiting, which is the one thing that
+                # column must never say.
+                ui.label(answered_at[:10] if answered_at else
+                         "?" if status in BEANTWORTET_STATUS else "—") \
                     .classes("cell")
                 ui.label(
                     "" if age is None

@@ -1926,8 +1926,8 @@ def add_email_log(con: sqlite3.Connection, values: dict) -> int:
             (direction, gmail_message_id, gmail_thread_id, from_addr, to_addr,
              subject, snippet, internal_date, draft_id, bewerbung_id,
              matched_by, classification, classified_by, needs_review,
-             body_text, job_id, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             body_text, job_id, matched_note, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             values["direction"],
@@ -1946,6 +1946,7 @@ def add_email_log(con: sqlite3.Connection, values: dict) -> int:
             int(values.get("needs_review", 0)),
             values.get("body_text", ""),
             values.get("job_id"),
+            values.get("matched_note", ""),
             _now(),
         ),
     )

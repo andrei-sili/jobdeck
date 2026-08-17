@@ -145,8 +145,9 @@ async def settings_page():
                 return ("Senden ✓ · Antworten lesen FEHLT — einmal "
                         "„Connect Gmail“ erteilt den Lese-Zugriff")
 
-            scope_label = ui.label(_scope_line()) \
-                .classes("text-sm text-gray-600")
+            scope_label = ui.label(
+                await run.io_bound(_scope_line)).classes(
+                    "text-sm text-gray-600")
 
             async def connect_gmail():
                 # Pre-check the common first-run case so the notification
@@ -168,7 +169,7 @@ async def settings_page():
                 await run.io_bound(_set_setting, "gmail_address", address)
                 gmail_label.set_text(f"Gmail connected as {address}"
                                      if address else "Gmail connected")
-                scope_label.set_text(_scope_line())
+                scope_label.set_text(await run.io_bound(_scope_line))
                 ui.notify("Gmail connected ✓", type="positive")
 
             async def disconnect_gmail():

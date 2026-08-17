@@ -88,6 +88,13 @@ def record_application(job_id: int, kanal: str,
     and offering one would restore a state that never existed.
     """
     with db.db() as con:
+        # BEGIN IMMEDIATE, because `apply_job` reads the duplicate gate and
+        # then writes: two callers interleaving between those two steps both
+        # pass a gate that is meant to admit exactly one, and a company ends
+        # up with two applications. That was theoretical while only a press
+        # could record — since replies are read, a background thread records
+        # too, and it runs precisely when he is working in the app.
+        con.execute("BEGIN IMMEDIATE")
         job = db.get_job(con, job_id)
         if job is None:
             return {"ok": False, "bewerbung_id": None, "company": "",
