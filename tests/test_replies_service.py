@@ -989,3 +989,26 @@ async def test_an_exact_address_still_beats_the_company_name(inbox, con):
     row = _inbound_rows(con)[0]
     assert (row["bewerbung_id"], row["matched_by"]) == (by_address, "address")
     assert row["bewerbung_id"] != by_name
+
+
+async def test_a_mail_with_no_body_is_still_read_from_its_subject(inbox, con):
+    """A body goes missing three ways — too large, a fetch failure, or a mail
+    that says it all in the header. The subject was thrown away with it, so
+    'Absage zu Ihrer Bewerbung' reached the review pile with no label at all,
+    which is as plain as German HR mail gets."""
+    bewerbung_id = _sent_application(con, email_addr="hr@firma-beispiel.de")
+    inbox.add("m-1", subject="Absage zu Ihrer Bewerbung", body="",
+              size=service.MAX_RAW_BYTES + 1)
+
+    await service.ingest_replies()
+
+    row = _inbound_rows(con)[0]
+    assert row["classification"] == "absage"
+    _message, add, _remove = inbox.label_calls[0]
+    assert "L_JobDeck/Absagen" in add
+    # …and it proposes: one line is thinner evidence than a letter, and the
+    # conditional screen has no sentence to work on.
+    assert row["needs_review"] == 1
+    assert db.get_bewerbung(con, bewerbung_id)["status"] == "Gesendet"
+    # the body was never fetched — the size gate ran first
+    assert inbox.raw_calls == []

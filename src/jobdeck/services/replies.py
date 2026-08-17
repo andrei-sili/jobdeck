@@ -452,12 +452,33 @@ def _company_named(job, from_addr: str, from_header: str) -> bool:
     return company in sender
 
 
+def _verdict_for(subject: str, body: str) -> replies.RuleVerdict | None:
+    """The rules' reading of a message, with the no-body case honest.
+
+    A body can be missing three ways: too large to fetch, a transport
+    failure, or a mail that says everything in its header. All three used to
+    throw the SUBJECT away as well, so such a message could only ever reach
+    the review pile unlabelled — "Absage zu Ihrer Bewerbung" included, which
+    is as plain as German HR mail gets.
+
+    It is read now, and it proposes: one line is thinner evidence than a
+    letter, and the conditional screen has no sentence to work on. An
+    out-of-office is exempt because its own marker IS the subject.
+    """
+    verdict = replies.classify(subject, body)
+    if (verdict is None or body
+            or verdict.classification == replies.CLASS_AUTO):
+        return verdict
+    return replies.RuleVerdict(verdict.classification, verdict.pattern,
+                               confident=False)
+
+
 # --------------------------------------------------------------------------
 # Replies to sent applications
 # --------------------------------------------------------------------------
 def _handle_reply(match: dict, meta: dict, from_addr: str, subject: str,
                   body: str, counters: dict) -> None:
-    verdict = replies.classify(subject, body) if body else None
+    verdict = _verdict_for(subject, body)
     classification = ""
     classified_by = ""
     needs_review = 1
@@ -581,7 +602,7 @@ def _handle_receipt(match: dict, meta: dict, from_addr: str, subject: str,
     # receipt — a fast rejection arrives from exactly the same ATS domain,
     # and filing it as "your application arrived" would state the opposite
     # of what the employer wrote.
-    verdict = replies.classify(subject, body) if body else None
+    verdict = _verdict_for(subject, body)
     said = verdict.classification if verdict is not None else ""
     row = {
         "direction": EMAIL_INBOUND,
