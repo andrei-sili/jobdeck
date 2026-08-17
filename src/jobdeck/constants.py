@@ -91,6 +91,11 @@ DEFAULT_DAILY_DRAFT_CAP = "10"
 EMAIL_OUTBOUND = "outbound"
 EMAIL_OUTBOUND_TEST = "outbound_test"
 EMAIL_INBOUND = "inbound"
+# An examined message the cascade matched to nothing. The row holds ONLY the
+# opaque Gmail id — without it a capped ingestion pass could never advance
+# past a backlog, and with only it no content of unrelated mail enters this
+# database.
+EMAIL_INBOUND_IGNORED = "inbound_ignored"
 
 # Reply classifications produced by the inbox pipeline. 'auto' is an
 # out-of-office / bulk auto-reply: kept in the ledger for honesty, but it is

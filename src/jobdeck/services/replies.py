@@ -1,0 +1,546 @@
+"""Reply ingestion: the connected inbox, read against the register.
+
+Every ten minutes: list what arrived, tie each message to an application
+(thread → exact address → receipt → domain), classify what the German rules
+can classify, write statuses through the one audited writer, mirror verdicts
+as Gmail labels, and put everything the machine could not settle on the
+review pile. Unmatched mail leaves ONE trace: a row holding nothing but the
+opaque Gmail id — without it the pass could never advance past a capped
+backlog, and with only it no content of anyone else's mail enters this
+database.
+
+The tiering rule (ROADMAP, 2026-08-05): a status is written automatically
+only when deterministic German rules matched on a thread- or exact-address-
+matched message. LLM verdicts, domain matches and everything ambiguous wait
+for his click. The receipt path — the only one that WRITES an application —
+additionally demands Gmail's own Authentication-Results verdict on the
+sender, because a From header is what a forger controls.
+"""
+
+import asyncio
+import datetime
+import logging
+
+from jobdeck import apply_channel, db, dedupe, gmail, replies
+from jobdeck.ai import llm
+from jobdeck.ai import replies as ai_replies
+from jobdeck.ai.drafting import resolve_refnr
+from jobdeck.constants import (
+    CLASSIFICATION_TO_STATUS,
+    EMAIL_INBOUND,
+    EMAIL_INBOUND_IGNORED,
+)
+from jobdeck.contact_resolve import registrable_domain
+from jobdeck.services import apply_record
+
+log = logging.getLogger(__name__)
+
+# Work bounds per pass. Sixty processed messages a tick matches the channel
+# resolver's cadence; the listing looks further ahead so a capped pass knows
+# it has not drained. First run looks back thirty days — his unrecorded
+# replies are days old, and set_status no-ops on everything already recorded.
+MAX_MESSAGES_PER_PASS = 60
+LIST_AHEAD = 500
+FIRST_RUN_LOOKBACK_DAYS = 30
+
+# A message whose raw form exceeds this is classified from its snippet only —
+# real HR mail is kilobytes, and one huge attachment must not stall the pass.
+MAX_RAW_BYTES = 5_000_000
+
+# The receipt window and the strip's "no receipt after three days" line are
+# ONE number on purpose: a receipt arriving at 60 hours must not fall between
+# a closed window and a not-yet-shown notice.
+RECEIPT_WINDOW_H = 72
+
+# Gmail-side mirror of the verdicts (approved 2026-07-15). 'Offen' carries
+# the receipt/confirmation family: the application is in and undecided.
+LABEL_PARENT = "JobDeck"
+LABELS = {
+    "absage": "JobDeck/Absagen",
+    "einladung": "JobDeck/Einladungen",
+    "eingang": "JobDeck/Offen",
+}
+
+HISTORY_KEY = "replies_history_id"
+LAST_POLL_KEY = "replies_last_poll_at"
+LAST_ERROR_KEY = "replies_last_error"
+AI_TOGGLE_KEY = "reply_ai_classify"
+
+# Skip-style single-flight (the liveness/apply_resolve pattern): the manual
+# button must learn "a pass is already running", not queue a second one.
+_lock = asyncio.Lock()
+
+
+def _now() -> str:
+    return datetime.datetime.now().isoformat(timespec="seconds")
+
+
+def _iso_from_ms(ms: int) -> str:
+    if not ms:
+        return ""
+    moment = datetime.datetime.fromtimestamp(ms / 1000.0)
+    return moment.isoformat(timespec="seconds")
+
+
+def _note(key: str, value: str) -> None:
+    with db.db() as con:
+        db.set_setting(con, key, value)
+
+
+async def ingest_replies() -> dict:
+    """Scheduler entry point; also behind a manual Settings button."""
+    if _lock.locked():
+        return {"skipped": True}
+    async with _lock:
+        return await asyncio.to_thread(_ingest)
+
+
+def _ingest() -> dict:
+    counters = {"seen": 0, "matched": 0, "auto_status": 0, "review": 0,
+                "receipts": 0, "ignored": 0, "errors": 0}
+    if not gmail.can_read():
+        _note(LAST_ERROR_KEY, "Gmail ohne Lese-Berechtigung — in den "
+                              "Einstellungen neu verbinden")
+        return {**counters, "error": "no read permission"}
+    try:
+        message_ids, checkpoint = _new_message_ids()
+    except gmail.GmailError as exc:
+        log.warning("reply ingestion: could not list the inbox: %s", exc)
+        _note(LAST_ERROR_KEY, str(exc))
+        return {**counters, "error": str(exc)}
+
+    with db.db() as con:
+        known = db.known_gmail_ids(con, message_ids)
+    fresh = [m for m in message_ids if m not in known]
+    drained = len(fresh) <= MAX_MESSAGES_PER_PASS
+    for message_id in fresh[:MAX_MESSAGES_PER_PASS]:
+        counters["seen"] += 1
+        try:
+            _process_message(message_id, counters)
+        except gmail.GmailError as exc:
+            # Transient per-message failure: log, count, and hold the
+            # checkpoint back so the next pass re-lists and retries it.
+            log.warning("reply ingestion: message %s failed: %s",
+                        message_id, exc)
+            counters["errors"] += 1
+            drained = False
+
+    with db.db() as con:
+        if drained and checkpoint:
+            db.set_setting(con, HISTORY_KEY, checkpoint)
+        db.set_setting(con, LAST_POLL_KEY, _now())
+        db.set_setting(con, LAST_ERROR_KEY, "")
+    log.info("reply ingestion: %s", counters)
+    return counters
+
+
+def _new_message_ids() -> tuple[list[str], str]:
+    """(candidate message ids, checkpoint to store once they are drained)."""
+    with db.db() as con:
+        stored = db.get_setting(con, HISTORY_KEY, "")
+    if stored:
+        try:
+            return gmail.history_added_messages(stored, LIST_AHEAD)
+        except gmail.GmailHistoryExpired:
+            log.info("reply ingestion: history checkpoint expired — "
+                     "re-baselining with a full sync")
+    # Full sync: the checkpoint is taken BEFORE listing, so anything arriving
+    # while this pass runs is covered by the next incremental read.
+    checkpoint = gmail.profile_history_id()
+    cutoff = datetime.datetime.now() - datetime.timedelta(
+        days=FIRST_RUN_LOOKBACK_DAYS)
+    query = f"-from:me after:{int(cutoff.timestamp())}"
+    return gmail.list_new_message_ids(query, LIST_AHEAD), checkpoint
+
+
+def _ignore(message_id: str, internal_iso: str) -> None:
+    with db.db() as con:
+        db.add_email_log(con, {
+            "direction": EMAIL_INBOUND_IGNORED,
+            "gmail_message_id": message_id,
+            "internal_date": internal_iso,
+        })
+
+
+def _process_message(message_id: str, counters: dict) -> None:
+    meta = gmail.get_message_metadata(message_id)
+    headers = meta["headers"]
+    from_addr = replies.from_address(headers.get("from", ""))
+    subject = headers.get("subject", "")
+    internal_iso = _iso_from_ms(meta["internal_date_ms"])
+
+    with db.db() as con:
+        own_address = db.get_setting(con, "gmail_address", "").strip().lower()
+    if not from_addr or (own_address and from_addr == own_address):
+        counters["ignored"] += 1
+        _ignore(message_id, internal_iso)
+        return
+
+    match = _match(meta, from_addr, subject)
+    if match is None:
+        counters["ignored"] += 1
+        _ignore(message_id, internal_iso)
+        return
+    counters["matched"] += 1
+
+    body = _body_for(message_id, meta)
+    if match["kind"] == "receipt":
+        _handle_receipt(match, meta, from_addr, subject, body, counters)
+    else:
+        _handle_reply(match, meta, from_addr, subject, body, counters)
+
+
+def _body_for(message_id: str, meta: dict) -> str:
+    """The readable text of a MATCHED message; '' degrades to snippet-only.
+
+    Bodies are fetched only here — after the cascade matched — so the mail
+    of everyone else never leaves Gmail. A fetch or parse failure costs this
+    row its body, never the pass: the rules then stay silent and the row
+    lands on the review pile with the snippet."""
+    if meta["size_estimate"] > MAX_RAW_BYTES:
+        log.info("reply ingestion: message %s too large (%d bytes) — "
+                 "classifying from the snippet", message_id,
+                 meta["size_estimate"])
+        return ""
+    try:
+        return replies.extract_text(gmail.get_message_raw(message_id))
+    except gmail.GmailError as exc:
+        log.warning("reply ingestion: could not fetch the body of %s: %s",
+                    message_id, exc)
+        return ""
+
+
+# --------------------------------------------------------------------------
+# Matching
+# --------------------------------------------------------------------------
+def _match(meta: dict, from_addr: str, subject: str) -> dict | None:
+    """Thread → exact address → receipt → domain; first hit wins.
+
+    The receipt arms run before the domain arm on purpose: an ATS
+    confirmation arrives from the vendor's domain, and a vendor domain must
+    never DOMAIN-match some unrelated application whose contact happens to
+    sit at the same registrable name."""
+    with db.db() as con:
+        bewerbung_id = db.find_bewerbung_by_thread(con, meta["thread_id"])
+        if bewerbung_id is not None:
+            return {"kind": "reply", "bewerbung_id": bewerbung_id,
+                    "matched_by": "thread"}
+        rows = db.bewerbungen_for_reply_match(con)
+        for row in rows:
+            if str(row["email"] or "").strip().lower() == from_addr:
+                return {"kind": "reply", "bewerbung_id": int(row["id"]),
+                        "matched_by": "address"}
+        receipt = _receipt_match(con, meta, from_addr, subject)
+        if receipt is not None:
+            return receipt
+        sender_domain = replies.matchable_domain(from_addr)
+        if sender_domain:
+            hits = {int(row["id"]) for row in rows
+                    if replies.matchable_domain(str(row["email"] or ""))
+                    == sender_domain}
+            if len(hits) == 1:
+                return {"kind": "reply", "bewerbung_id": hits.pop(),
+                        "matched_by": "domain"}
+    return None
+
+
+def _receipt_match(con, meta: dict, from_addr: str, subject: str) -> dict | None:
+    """An Eingangsbestätigung against the Läuft strip — 1-3 rows, never the
+    corpus. Strong evidence identifies ONE posting; anything ambiguous or
+    name-only becomes a proposal for his click."""
+    cutoff = (datetime.datetime.now()
+              - datetime.timedelta(hours=RECEIPT_WINDOW_H)
+              ).isoformat(timespec="seconds")
+    candidates = db.receipt_candidates(con, cutoff)
+    if not candidates:
+        return None
+    sender_domain = registrable_domain(from_addr.rpartition("@")[2])
+    # The body is not fetched yet at match time; strong textual evidence is
+    # judged on the subject plus Gmail's snippet, which carries the opening
+    # lines where ATS mail states the reference.
+    text_window = f"{subject}\n{meta['snippet']}"
+    strong: list[tuple[dict, str]] = []
+    weak: list[dict] = []
+    for job in candidates:
+        evidence = _receipt_evidence(job, sender_domain, text_window)
+        if evidence:
+            strong.append((dict(job), evidence))
+        elif _company_named(job, from_addr, meta["headers"].get("from", "")):
+            weak.append(dict(job))
+    if len(strong) == 1:
+        job, evidence = strong[0]
+        authenticated = replies.sender_authenticated(meta["headers"])
+        return {"kind": "receipt", "job": job, "strong": authenticated,
+                "evidence": evidence if authenticated
+                else f"{evidence} · Absender nicht verifiziert"}
+    if len(strong) > 1:
+        # Two forms at the same ATS inside the window: the evidence names a
+        # vendor, not a posting. Propose, never write.
+        return {"kind": "receipt", "job": dict(strong[0][0]), "strong": False,
+                "evidence": "mehrere laufende Formulare passen"}
+    if len(weak) == 1:
+        return {"kind": "receipt", "job": weak[0], "strong": False,
+                "evidence": "Firmenname"}
+    return None
+
+
+def _receipt_evidence(job, sender_domain: str, text: str) -> str:
+    refnr = resolve_refnr(job)
+    if replies.refnr_in_text(refnr, text, ""):
+        return f"Refnr {refnr}"
+    if sender_domain:
+        targets = set()
+        for url in (str(job["apply_url"] or ""), str(job["url"] or "")):
+            domain = registrable_domain(url)
+            if domain:
+                targets.add(domain)
+        contact_domain = registrable_domain(
+            str(job["contact_email"] or "").rpartition("@")[2])
+        if contact_domain:
+            targets.add(contact_domain)
+        if sender_domain in targets:
+            return f"Absender {sender_domain}"
+        vendor = str(job["ats_vendor"] or "")
+        if vendor:
+            sender_channel = apply_channel.classify(f"https://{sender_domain}/")
+            if (sender_channel.channel == apply_channel.CHANNEL_ATS
+                    and sender_channel.vendor == vendor):
+                return f"ATS {vendor}"
+    return ""
+
+
+def _company_named(job, from_addr: str, from_header: str) -> bool:
+    """Weak evidence: the posting's company named in the sender.
+
+    Conservative on purpose — company names collide and a newsletter is not
+    a receipt — and only ever yields a PROPOSAL."""
+    company = dedupe.fold(str(job["company"] or ""))
+    if len(company) < 4:
+        return False
+    sender = dedupe.fold(f"{replies.from_display_name(from_header)} "
+                         f"{from_addr}")
+    return company in sender
+
+
+# --------------------------------------------------------------------------
+# Replies to sent applications
+# --------------------------------------------------------------------------
+def _handle_reply(match: dict, meta: dict, from_addr: str, subject: str,
+                  body: str, counters: dict) -> None:
+    verdict = replies.classify(subject, body) if body else None
+    classification = ""
+    classified_by = ""
+    needs_review = 1
+    note = ""
+    if verdict is not None:
+        classification = verdict.classification
+        classified_by = "rules"
+        note = verdict.pattern
+        if classification == replies.CLASS_AUTO:
+            needs_review = 0  # a machine answer answers nothing — ledger only
+        elif match["matched_by"] in ("thread", "address"):
+            needs_review = 0
+    elif replies.is_auto_submitted(meta["headers"]):
+        classification = replies.CLASS_AUTO
+        classified_by = "rules"
+        note = "Auto-Submitted/Bulk-Header"
+        needs_review = 0
+    elif body and _ai_classify_enabled():
+        classification, note, _usage = _ai_classify(subject, body)
+        if classification:
+            classified_by = "llm"
+
+    with db.db() as con:
+        email_log_id = db.add_email_log(con, {
+            "direction": EMAIL_INBOUND,
+            "gmail_message_id": meta["id"],
+            "gmail_thread_id": meta["thread_id"],
+            "from_addr": from_addr,
+            "subject": subject,
+            "snippet": meta["snippet"][:120],
+            "internal_date": _iso_from_ms(meta["internal_date_ms"]),
+            "bewerbung_id": match["bewerbung_id"],
+            "matched_by": match["matched_by"],
+            "classification": classification,
+            "classified_by": classified_by,
+            "needs_review": needs_review,
+            "body_text": body,
+        })
+        status = CLASSIFICATION_TO_STATUS.get(classification)
+        if needs_review == 0 and classified_by == "rules" and status:
+            db.set_status(con, match["bewerbung_id"], status,
+                          source="reply_auto", email_log_id=email_log_id,
+                          note=note)
+            counters["auto_status"] += 1
+    if needs_review:
+        counters["review"] += 1
+    elif classification in LABELS:
+        _apply_label(meta["id"], classification)
+
+
+def _ai_classify_enabled() -> bool:
+    """The double gate, verbatim from contact_lookup: the master switch's
+    promise is that nothing is sent to the API while it is off."""
+    with db.db() as con:
+        return (db.ai_enabled(con)
+                and db.get_setting(con, AI_TOGGLE_KEY, "0") == "1")
+
+
+def _ai_classify(subject: str, body: str) -> tuple[str, str, object]:
+    try:
+        classification, begruendung, usage = ai_replies.classify_reply(
+            subject, body)
+    except llm.LLMNotConfigured:
+        return "", "", None
+    except llm.LLMError as exc:
+        if exc.usage is not None:  # the failed call still cost tokens
+            _record_usage(exc.usage)
+        log.warning("reply ingestion: LLM classification failed: %s", exc)
+        return "", "", None
+    _record_usage(usage)
+    return classification, begruendung, usage
+
+
+def _record_usage(usage) -> None:
+    with db.db() as con:
+        db.record_llm_usage(con, usage.input_tokens, usage.output_tokens,
+                            usage.cost_usd)
+
+
+# --------------------------------------------------------------------------
+# Receipts (Eingangsbestätigungen) against the Läuft strip
+# --------------------------------------------------------------------------
+def _handle_receipt(match: dict, meta: dict, from_addr: str, subject: str,
+                    body: str, counters: dict) -> None:
+    job = match["job"]
+    row = {
+        "direction": EMAIL_INBOUND,
+        "gmail_message_id": meta["id"],
+        "gmail_thread_id": meta["thread_id"],
+        "from_addr": from_addr,
+        "subject": subject,
+        "snippet": meta["snippet"][:120],
+        "internal_date": _iso_from_ms(meta["internal_date_ms"]),
+        "job_id": int(job["id"]),
+        "matched_by": "receipt",
+        "classification": "eingang",
+        "classified_by": "rules",
+    }
+    if not match["strong"]:
+        row["needs_review"] = 1
+        with db.db() as con:
+            db.add_email_log(con, row)
+        counters["review"] += 1
+        return
+
+    bewerbung_id = int(job["bewerbung_id"] or 0) or None
+    if bewerbung_id is None:
+        # The one automatic ledger write in this app, through the one
+        # recorder — the strip pressed by the receipt instead of by him.
+        outcome = apply_record.record_form_application(
+            int(job["id"]), source="eingang")
+        if not outcome["ok"]:
+            # The duplicate gate refused inside the write: the receipt
+            # becomes a review row instead of a ledger row.
+            row["needs_review"] = 1
+            with db.db() as con:
+                db.add_email_log(con, row)
+            counters["review"] += 1
+            return
+        bewerbung_id = outcome["bewerbung_id"]
+    row["bewerbung_id"] = bewerbung_id
+    with db.db() as con:
+        email_log_id = db.add_email_log(con, row)
+        db.set_status(con, bewerbung_id, "In Bearbeitung",
+                      source="reply_auto", email_log_id=email_log_id,
+                      note=f"Eingangsbestätigung ({match['evidence']}) · "
+                           f"Gmail {meta['id']}")
+    counters["receipts"] += 1
+    _apply_label(meta["id"], "eingang")
+
+
+# --------------------------------------------------------------------------
+# Labels — best effort, never the pass's problem
+# --------------------------------------------------------------------------
+def _apply_label(message_id: str, classification: str) -> None:
+    name = LABELS.get(classification)
+    if not name:
+        return
+    try:
+        resolved = gmail.ensure_labels([LABEL_PARENT, name])
+        gmail.add_label(message_id, resolved[name])
+    except (gmail.GmailError, KeyError) as exc:
+        log.warning("reply ingestion: could not label %s: %s",
+                    message_id, exc)
+
+
+# --------------------------------------------------------------------------
+# Review actions (the /antworten page's handlers, sync — call via io_bound)
+# --------------------------------------------------------------------------
+def resolve_review(email_log_id: int, classification: str) -> bool:
+    """His verdict on a review row: classify, apply the status, label.
+
+    source='reply_manual' — a human clicked, so the anti-downgrade rank
+    does not apply; his call always wins."""
+    if classification not in CLASSIFICATION_TO_STATUS:
+        return False
+    with db.db() as con:
+        row = db.get_email_log(con, email_log_id)
+        if row is None:
+            return False
+        db.classify_reply_row(con, email_log_id, classification,
+                              "reply_manual", 0)
+        if row["bewerbung_id"] is not None:
+            db.set_status(con, int(row["bewerbung_id"]),
+                          CLASSIFICATION_TO_STATUS[classification],
+                          source="reply_manual", email_log_id=email_log_id)
+        message_id = str(row["gmail_message_id"] or "")
+    if message_id:
+        _apply_label(message_id, classification)
+    return True
+
+
+def dismiss_review(email_log_id: int) -> None:
+    """'This mail does not belong to that application' — unlink and settle."""
+    with db.db() as con:
+        db.link_reply_bewerbung(con, email_log_id, None)
+        db.classify_reply_row(con, email_log_id, "", "", 0)
+
+
+def adopt_receipt(email_log_id: int) -> dict:
+    """One press on a weak receipt proposal: record the application."""
+    with db.db() as con:
+        row = db.get_email_log(con, email_log_id)
+    if row is None or row["job_id"] is None:
+        return {"ok": False}
+    outcome = apply_record.record_form_application(
+        int(row["job_id"]), source="eingang")
+    if not outcome["ok"]:
+        return outcome
+    with db.db() as con:
+        db.link_reply_bewerbung(con, email_log_id, outcome["bewerbung_id"])
+        db.classify_reply_row(con, email_log_id, "eingang", "reply_manual", 0)
+        db.set_status(con, outcome["bewerbung_id"], "In Bearbeitung",
+                      source="reply_manual", email_log_id=email_log_id)
+    message_id = str(row["gmail_message_id"] or "")
+    if message_id:
+        _apply_label(message_id, "eingang")
+    return outcome
+
+
+def undo_receipt(email_log_id: int) -> bool:
+    """Take an automatically recorded receipt back out — real work, not a
+    flag: the ledger row goes, the posting returns, and the mail returns to
+    the review pile where it can be re-adopted or dismissed.
+
+    previous_status is 'new' by construction: receipt candidates are strip
+    rows, and since v10 an opened form leaves `jobs.status` untouched."""
+    with db.db() as con:
+        row = db.get_email_log(con, email_log_id)
+    if row is None or row["job_id"] is None or row["bewerbung_id"] is None:
+        return False
+    apply_record.undo(int(row["job_id"]), int(row["bewerbung_id"]), "new")
+    with db.db() as con:
+        # apply_record.undo cleared email_log.bewerbung_id already
+        db.classify_reply_row(con, email_log_id, "eingang", "rules", 1)
+    return True
