@@ -123,7 +123,7 @@ async def antworten_page():
                              "kann hier nichts ankommen.").classes("jd-reason")
                     ui.button("Zu den Einstellungen",
                               on_click=lambda: ui.navigate.to(
-                                  EINSTELLUNGEN_PATH)).props("outline")
+                                  EINSTELLUNGEN_PATH)).props("outline no-caps")
                     return
                 if not view["can_read"]:
                     ui.label("Die Verbindung kann senden, aber noch nicht "
@@ -132,7 +132,7 @@ async def antworten_page():
                         .classes("jd-reason")
                     ui.button("Zu den Einstellungen",
                               on_click=lambda: ui.navigate.to(
-                                  EINSTELLUNGEN_PATH)).props("outline")
+                                  EINSTELLUNGEN_PATH)).props("outline no-caps")
                     return
                 last = clock(view["last_poll"])
                 ui.label("Alle 10 Minuten wird der Posteingang gelesen — "
@@ -193,7 +193,7 @@ async def antworten_page():
                         ui.button(
                             "Als Bewerbung eintragen",
                             on_click=lambda _=None, r=row["id"]: adopt(r)) \
-                            .props("unelevated")
+                            .props("unelevated no-caps")
                     else:
                         for value in ("absage", "einladung", "eingang",
                                       "sonstige"):
@@ -201,14 +201,14 @@ async def antworten_page():
                                 CLASS_LABELS[value],
                                 on_click=lambda _=None, r=row["id"],
                                 v=value: classify(r, v)) \
-                                .props("outline" if value != proposed
-                                       else "unelevated")
+                                .props(("outline" if value != proposed
+                                        else "unelevated") + " no-caps")
                     ui.button("Ganze Mail",
                               on_click=lambda _=None, r=dict(row):
-                              show_mail(r)).props("flat")
+                              show_mail(r)).props("flat no-caps")
                     ui.button("Keiner Bewerbung zuordnen",
                               on_click=lambda _=None, r=row["id"]:
-                              dismiss(r)).props("flat")
+                              dismiss(r)).props("flat no-caps")
 
         def _is_receipt_proposal(row: dict) -> bool:
             return (row.get("matched_by") == "receipt"
@@ -249,10 +249,10 @@ async def antworten_page():
                         and row.get("bewerbung_id") is not None):
                     ui.button("Rückgängig",
                               on_click=lambda _=None, r=row["id"]:
-                              undo(r)).props("flat dense")
+                              undo(r)).props("flat dense no-caps")
                 ui.button("Ganze Mail",
                           on_click=lambda _=None, r=dict(row): show_mail(r)) \
-                    .props("flat dense")
+                    .props("flat dense no-caps")
 
         # ------------------------------------------------------------------
         # The full mail, in a dialog — label-only, hostile text stays text
@@ -267,7 +267,7 @@ async def antworten_page():
                 ui.label(body or "(kein Text gespeichert)") \
                     .style("white-space: pre-wrap") \
                     .classes("text-sm")
-                ui.button("Schließen", on_click=dialog.close).props("flat")
+                ui.button("Schließen", on_click=dialog.close).props("flat no-caps")
             dialog.open()
 
         # ------------------------------------------------------------------
