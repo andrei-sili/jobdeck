@@ -616,3 +616,99 @@ def test_no_near_miss_writes_a_status_it_has_not_earned(subject, body):
     if verdict is not None and verdict.confident:
         assert verdict.classification in ("eingang", "einladung", "auto"), (
             f"{subject!r} confidently wrote {verdict.classification}")
+
+
+# --- the families the audit found entirely absent -----------------------------
+
+NEUE_ABSAGEN = [
+    ("die Stelle ist weg",
+     "Die von Ihnen angefragte Stelle wurde zwischenzeitlich anderweitig "
+     "besetzt."),
+    ("intern besetzt",
+     "Die Position wurde inzwischen intern besetzt."),
+    ("Vakanz zurückgezogen",
+     "Unser Kunde hat das Projekt gestoppt und die Vakanz zurückgezogen."),
+    ("Einstellungsstopp",
+     "Wir stellen zurzeit niemanden ein."),
+    ("nicht erfolgreich",
+     "Ihre Bewerbung war im Auswahlverfahren leider nicht erfolgreich."),
+    ("nicht überzeugt",
+     "Ihre Bewerbung hat uns leider nicht überzeugt."),
+    ("nicht ausgewählt",
+     "Sie wurden für diese Position leider nicht ausgewählt."),
+    ("nächste Runde",
+     "Ihre Bewerbung wurde nicht für die nächste Auswahlrunde ausgewählt."),
+    ("negativer Bescheid",
+     "Wir müssen Ihnen leider einen negativen Bescheid erteilen."),
+    ("nicht positiv bescheiden",
+     "Wir konnten Ihre Bewerbung leider nicht positiv bescheiden."),
+    ("keine positive Rückmeldung",
+     "Wir bedauern, Ihnen keine positive Rückmeldung geben zu können."),
+    ("abgelehnt im Betreff",
+     "Ihre Bewerbung wurde abgelehnt."),
+    ("anderweitig entschieden",
+     "Wir haben uns anderweitig entschieden."),
+    ("gegen die Bewerbung",
+     "Wir haben uns schweren Herzens gegen Ihre Bewerbung entschieden."),
+    ("jemand anderes",
+     "Wir haben uns für jemand anderen entschieden."),
+    ("interner Kandidat",
+     "Unser Mandant hat sich für einen internen Kandidaten entschieden."),
+    ("zugunsten eines anderen",
+     "Die Entscheidung ist zugunsten eines anderen Bewerbers gefallen."),
+    ("Wahl auf eine Mitbewerberin",
+     "Die Entscheidung ist am Ende auf eine Mitbewerberin gefallen."),
+    ("Verfahren fortsetzen",
+     "Wir setzen das Verfahren mit anderen Kandidaten fort."),
+    ("separables Verb",
+     "Wir sagen Ihnen daher hiermit ab."),
+    ("Berücksichtigung nicht möglich",
+     "Eine Berücksichtigung im laufenden Verfahren ist uns leider nicht "
+     "möglich."),
+    ("nicht weiter zu verfolgen",
+     "Wir haben uns entschieden, Ihre Bewerbung nicht weiter zu verfolgen."),
+    ("Einstellung kommt nicht in Betracht",
+     "Eine Einstellung kommt daher leider nicht in Betracht."),
+    ("nicht zu Ihren Gunsten",
+     "Die Auswahl ist leider nicht zu Ihren Gunsten ausgefallen."),
+    ("Anforderungsprofil, andere Wortstellung",
+     "Ihre Qualifikationen entsprechen nicht dem von uns gesuchten "
+     "Anforderungsprofil."),
+    ("Profil passt nicht",
+     "Leider passt Ihr Profil nicht zu den Anforderungen dieser Position."),
+    ("es hat nicht geklappt",
+     "Es hat diesmal leider nicht geklappt."),
+    ("keine Zusage",
+     "Wir können Ihnen leider keine Zusage geben."),
+    ("nicht auf Sie zurück",
+     "Für die ausgeschriebene Position kommen wir leider nicht auf Sie "
+     "zurück."),
+    ("dem Kunden nicht vorstellen",
+     "Wir konnten Sie unserem Mandanten leider nicht vorstellen."),
+    ("Unterlagen zurück",
+     "Anbei senden wir Ihnen Ihre Bewerbungsunterlagen zurück."),
+    ("alles Gute für Sie",
+     "Ihre Bewerbung war nicht erfolgreich. Trotzdem alles Gute für Sie."),
+]
+
+
+@pytest.mark.parametrize("name, body", NEUE_ABSAGEN)
+def test_the_missing_rejection_families_are_read_as_rejections(name, body):
+    """One case per family the audit found the rules could not see at all.
+    Without these the mail fell through to the polite opener and filed itself
+    as a receipt — the mechanism that put a mailbox of rejections under
+    JobDeck/Offen."""
+    verdict = replies.classify("Ihre Bewerbung", body)
+    assert verdict is not None, f"{name}: no verdict"
+    assert verdict.classification == "absage", f"{name}: {verdict}"
+
+
+def test_a_rejection_that_also_mentions_an_event_stays_a_rejection():
+    """The event screen must engage only where the application is never
+    named — an employer can perfectly well cancel a workshop and reject an
+    application in the same mail."""
+    verdict = replies.classify(
+        "Ihre Bewerbung",
+        "Unseren Workshop am Freitag müssen wir leider absagen. Zu Ihrer "
+        "Bewerbung: die Stelle wurde inzwischen intern besetzt.")
+    assert verdict is not None and verdict.classification == "absage"

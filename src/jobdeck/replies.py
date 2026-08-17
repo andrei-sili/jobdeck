@@ -49,11 +49,12 @@ _ABSAGE_PATTERNS = (
     r"(?:kandidat|bewerber|mitbewerber)\w*\s+entschieden",
     r"zugunsten (?:eines|einer|einem) (?:anderen|anderer)",
     r"anderen (?:kandidaten|bewerbern?|mitbewerbern?) (?:den vorzug|entschieden)",
-    r"mit (?:anderen|weiteren) (?:kandidat|bewerber)\w*\s+fort(?:zu)?(?:setzen|fahren)",
+    r"mit (?:anderen|weiteren) (?:kandidat|bewerber)\w*[^.!?]{0,25}"
+    r"\bfort(?:setzen|fahren|zusetzen|zufahren)?\b",
     # "Die Entscheidung ist auf eine Mitbewerberin gefallen" — the Art. 33 GG
     # formula. The (?!sie\b) guard is load-bearing: "Die Entscheidung ist auf
     # Sie gefallen" is the exact opposite.
-    r"(?:entscheidung|wahl) ist auf (?!sie\b)[^.!?]{0,60}gefallen",
+    r"(?:entscheidung|wahl) ist[^.!?]{0,20}auf (?!sie\b)[^.!?]{0,60}gefallen",
     r"für jemand ander\w+[^.!?]{0,30}entschieden",
     r"(?:uns )?anders entschieden",
     r"\banderweitig entschieden\b",
@@ -94,7 +95,7 @@ _ABSAGE_PATTERNS = (
     # --- not considered / not selected --------------------------------------
     r"nicht (?:weiter[- ]?)?berücksichtig",
     r"keine berücksichtigung",
-    r"\bberücksichtigung\b[^.!?]{0,30}\bnicht\b",
+    r"\bberücksichtigung\b[^.!?]{0,50}\bnicht\b",
     r"\b(?:sie wurden|sie sind|wir haben sie)\b[^.!?]{0,40}\bnicht\b"
     r"[^.!?]{0,25}\b(?:ausgewählt|ausgesucht|vorgesehen)\b",
     r"nicht für (?:die|den|das) (?:nächste[nr]?|weitere[nr]?|zweite[nr]?)\s+"
