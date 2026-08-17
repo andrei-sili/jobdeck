@@ -122,7 +122,10 @@ _ABSAGE_PATTERNS = (
 
     # --- nothing to offer ---------------------------------------------------
     r"keine (?:passende )?(?:stelle|position|vakanz) anbieten",
-    r"\bkeine[nr]?\b[^.!?]{0,40}"
+    # German puts the whole qualification between the negation and the
+    # noun: "keine Ihren Kenntnissen und Faehigkeiten entsprechende
+    # Position anbieten" is 47 characters wide.
+    r"\bkeine[nr]?\b[^.!?]{0,60}"
     r"\b(?:perspektive|möglichkeit|verwendung|tätigkeit|stelle|position|vakanz)\b"
     r"[^.!?]{0,40}\b(?:anbieten|bieten|in aussicht stellen|gefunden)\b",
     r"\b(?:einstellung|zusammenarbeit|beschäftigung|übernahme)\b[^.!?]{0,80}"
@@ -362,6 +365,38 @@ def _drop_event_cancellation(
     return hits
 
 
+# Where the employer stops writing and the quoted history begins. A reply
+# carries the whole conversation below it, and his OWN application is in
+# there — "Über ein kurzes Gespräch würde ich mich sehr freuen" is a sentence
+# HE wrote, and read as the employer's it filed a rank-4 Einladung onto a
+# mail that actually asked him to re-apply through a portal. Anything below
+# the first marker belongs to somebody else's turn.
+_QUOTE_START = re.compile(
+    r"^\s*(?:"
+    r"-{2,}\s*(?:ursprüngliche nachricht|original message|"
+    r"weitergeleitete nachricht|forwarded message)\s*-{2,}"
+    r"|_{5,}"
+    r"|>"
+    r"|(?:am|on)\s.{0,80}?\s(?:schrieb|wrote)\b"
+    r"|von:\s*\S"
+    r"|from:\s*\S"
+    r"|gesendet:\s*\S"
+    r")",
+    re.IGNORECASE | re.MULTILINE)
+
+
+def strip_quoted(text: str) -> str:
+    """Everything the sender wrote above the quoted conversation.
+
+    Returns '' when the sender wrote nothing of their own — a bare forward.
+    That is deliberate: no verdict at all is honest, and the review pile
+    exists for it. Guessing from the quote is how his own words became an
+    employer's invitation.
+    """
+    match = _QUOTE_START.search(text or "")
+    return (text[:match.start()] if match else text or "").strip()
+
+
 def classify(subject: str, body: str) -> RuleVerdict | None:
     """The rule layer's verdict, or None where honesty requires a human.
 
@@ -373,7 +408,7 @@ def classify(subject: str, body: str) -> RuleVerdict | None:
     subject = normalize_whitespace(subject or "").strip()
     if _AUTO_SUBJECT.search(subject):
         return RuleVerdict(CLASS_AUTO, "Betreff: automatische Antwort")
-    text = normalize_whitespace(f"{subject}\n\n{body}")
+    text = normalize_whitespace(f"{subject}\n\n{strip_quoted(body)}")
     # The wrap becomes a space, which can meet the space already there.
     text = _SPACE_RUN.sub(" ", _SOFT_WRAP.sub(" ", text))
     sentences = [s for s in _SENTENCE_SPLIT.split(text) if s.strip()]

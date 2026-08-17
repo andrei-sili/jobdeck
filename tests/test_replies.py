@@ -755,3 +755,71 @@ def test_the_company_key_survives_the_spellings_a_domain_forces():
     assert replies.company_key("Müller & Co. KG") == "mueller"
     assert replies.company_key("Groß Software GmbH") == "grosssoftware"
     assert replies.company_key("Beispiel Holding AG") == "beispiel"
+
+
+# --- his own words are not the employer's verdict -----------------------------
+
+REPLY_WITH_QUOTE = """Sehr geehrter Herr Beispiel,
+
+vielen Dank für Ihr Interesse. Wir haben Ihr Profil bewertet und sind leider
+zu dem Ergebnis gekommen, dass wir Ihnen im Moment keine Ihren Kenntnissen
+und Fähigkeiten entsprechende Position anbieten können.
+
+Mit freundlichen Grüßen
+
+-----Ursprüngliche Nachricht-----
+Von: Andrei <andrei@example.org>
+Gesendet: Montag, 9. Juni 2026 14:02
+An: karriere@firma-beispiel.de
+Betreff: Bewerbung als Softwareentwickler
+
+Sehr geehrte Damen und Herren,
+
+meine Bewerbungsunterlagen sende ich Ihnen im Anhang. Über ein kurzes
+Gespräch würde ich mich sehr freuen.
+
+Mit freundlichen Grüßen
+Andrei"""
+
+
+def test_the_quoted_application_is_not_read_as_the_employers_answer():
+    """A reply carries the whole conversation below it, and his own letter is
+    in there. Read as the employer's, "Über ein kurzes Gespräch würde ich
+    mich sehr freuen" filed a rank-4 Einladung — on his real mailbox, onto a
+    mail that actually asked him to re-apply through a portal."""
+    verdict = replies.classify("AW: Bewerbung als Softwareentwickler",
+                               REPLY_WITH_QUOTE)
+    assert verdict is not None and verdict.classification == "absage"
+
+
+@pytest.mark.parametrize("marker", [
+    "-----Ursprüngliche Nachricht-----",
+    "-----Original Message-----",
+    "--------- Weitergeleitete Nachricht ---------",
+    "________________________________",
+    "Von: Andrei <andrei@example.org>",
+    "Am 09.06.2026 um 14:02 schrieb Andrei:",
+    "On 9 Jun 2026, at 14:02, Andrei wrote:",
+    "> meine Bewerbungsunterlagen sende ich Ihnen im Anhang",
+])
+def test_every_quote_marker_ends_the_senders_turn(marker):
+    body = (f"Guten Tag,\n\nvielen Dank.\n\n{marker}\n"
+            "Über ein kurzes Gespräch würde ich mich sehr freuen.")
+    assert "Gespräch" not in replies.strip_quoted(body), marker
+
+
+def test_a_bare_forward_yields_nothing_rather_than_a_guess():
+    """When the sender wrote nothing of their own, no verdict is the honest
+    answer — the review pile exists for exactly this."""
+    body = ("-----Weitergeleitete Nachricht-----\n"
+            "Über ein kurzes Gespräch würde ich mich sehr freuen.")
+    assert replies.strip_quoted(body) == ""
+
+
+def test_the_employers_own_text_survives_the_strip():
+    """The cut must not eat the answer: everything above the first marker is
+    what the sender wrote this time."""
+    kept = replies.strip_quoted(
+        "Sehr geehrte Frau Muster,\n\nwir laden Sie ein.\n\n"
+        "Am 09.06.2026 um 14:02 schrieb Andrei:\n> Hallo")
+    assert "wir laden Sie ein." in kept and "Hallo" not in kept
