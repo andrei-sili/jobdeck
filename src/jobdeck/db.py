@@ -2216,6 +2216,20 @@ def bewerbungen_for_reply_match(con: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def bewerbungen_for_name_match(con: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every application, address or not — the company-name arm's candidates.
+
+    Deliberately separate from bewerbungen_for_reply_match: that one excludes
+    address-less rows because the arms it feeds compare addresses, and this
+    one exists precisely FOR those rows. A form application at a portal has
+    no address the employer will ever write from, so its company name is the
+    only thing a reply can be tied to."""
+    return con.execute(
+        "SELECT id, firma, status FROM bewerbungen "
+        " WHERE COALESCE(firma,'') <> '' ORDER BY id DESC"
+    ).fetchall()
+
+
 def bewerbung_has_inbound(con: sqlite3.Connection, bewerbung_id: int) -> bool:
     row = con.execute(
         "SELECT 1 FROM email_log WHERE bewerbung_id=? AND direction=? LIMIT 1",

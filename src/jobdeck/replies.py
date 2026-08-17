@@ -568,6 +568,58 @@ def matchable_domain(addr: str) -> str:
     return registrable
 
 
+_LEGAL_FORM = re.compile(
+    r"\b(?:gmbh|mbh|ag|kg|kgaa|ohg|ug|se|e\s?k|e\s?v|gbr|"
+    r"co|company|holding|group|gruppe|deutschland|international|"
+    r"and|und|the)\b", re.IGNORECASE)
+_NOT_ALNUM = re.compile(r"[^a-z0-9]+")
+# Below this, a prefix comparison is noise: "IT GmbH" would match "italia.de".
+_MIN_COMPANY_KEY = 6
+
+
+def company_key(name: str) -> str:
+    """A company name reduced to what survives into a domain.
+
+    Legal forms and punctuation go — 'Müller & Co. KG' and 'mueller-kg.de'
+    have to meet somewhere — and the umlauts are transliterated the way a
+    German registrar does it, because that is what the domain will spell.
+    """
+    lowered = (name or "").lower()
+    for umlaut, plain in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss")):
+        lowered = lowered.replace(umlaut, plain)
+    return _NOT_ALNUM.sub("", _LEGAL_FORM.sub(" ", lowered))
+
+
+def company_in_sender(firma: str, from_header: str, from_addr: str) -> bool:
+    """Whether the sender plausibly IS this company.
+
+    The weakest arm in the cascade by design, and the only one that reaches a
+    form application — those carry no address at all, so nothing else can
+    ever tie a reply to them. Measured against the applications whose true
+    address IS known: the company name is recognisable in the sender's domain
+    in 30 of 35. It therefore proposes and never writes: `matched_by` is not
+    in the tier that may set a status.
+
+    Freemail is refused through matchable_domain — half the small employers
+    in a mailbox write from gmx.de, and the domain says nothing about who
+    they are.
+    """
+    key = company_key(firma)
+    if len(key) < _MIN_COMPANY_KEY:
+        return False
+    domain = matchable_domain(from_addr)
+    if domain:
+        stem = company_key(domain.split(".")[0])
+        if stem and (key.startswith(stem[:_MIN_COMPANY_KEY])
+                     or stem.startswith(key[:_MIN_COMPANY_KEY])):
+            return True
+    # "Personalabteilung Beispiel GmbH <no-reply@ats-vendor.com>" — an ATS
+    # sends from its own domain and puts the employer in the display name.
+    display = from_header.rpartition("<")[0] or from_header
+    display_key = company_key(display)
+    return len(display_key) >= _MIN_COMPANY_KEY and key in display_key
+
+
 def refnr_in_text(refnr: str, subject: str, body: str) -> bool:
     """Whether a posting's reference number appears literally in the mail.
 

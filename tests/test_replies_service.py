@@ -922,3 +922,70 @@ async def test_an_invitation_says_so_in_gmail_even_when_it_needs_review(
     _message, add, remove = inbox.label_calls[0]
     assert set(add) == {"L_JobDeck/Einladungen", "L_JobDeck/Zu prüfen"}
     assert "L_JobDeck/Offen" in remove
+
+
+# --------------------------------------------------------------------------
+# the company-name arm: reaching a form application
+# --------------------------------------------------------------------------
+def _form_application(con, *, firma="Firma Beispiel GmbH",
+                      status="Gesendet") -> int:
+    """A portal application: no address, no thread — the shape 29 of his 55
+    open applications have, and the shape every other match arm is blind to."""
+    bewerbung_id = db.add_bewerbung(con, {
+        "firma": firma, "email": "", "kanal": "Online-Portal",
+        "status": status})
+    con.commit()
+    return bewerbung_id
+
+
+async def test_a_form_application_is_reachable_by_the_company_name(inbox, con):
+    bewerbung_id = _form_application(con)
+    inbox.add("m-1", body=ABSAGE_BODY)
+
+    outcome = await service.ingest_replies()
+
+    row = _inbound_rows(con)[0]
+    assert row["bewerbung_id"] == bewerbung_id
+    assert row["matched_by"] == "name"
+    # …and it PROPOSES. A name is a resemblance, not an identification, so it
+    # is not in the tier that may file a status.
+    assert row["needs_review"] == 1
+    assert outcome["auto_status"] == 0
+    assert db.get_bewerbung(con, bewerbung_id)["status"] == "Gesendet"
+
+
+async def test_two_applications_at_one_name_are_refused_not_guessed(inbox, con):
+    """Ambiguity is exactly where a guess costs more than the question."""
+    _form_application(con)
+    _form_application(con)
+    inbox.add("m-1", body=ABSAGE_BODY)
+
+    await service.ingest_replies()
+
+    assert _inbound_rows(con) == []
+
+
+async def test_the_name_arm_prefers_the_application_still_waiting(inbox, con):
+    settled = _form_application(con, status="Absage")
+    open_one = _form_application(con)
+    inbox.add("m-1", body=ABSAGE_BODY)
+
+    await service.ingest_replies()
+
+    row = _inbound_rows(con)[0]
+    assert row["bewerbung_id"] == open_one
+    assert row["bewerbung_id"] != settled
+
+
+async def test_an_exact_address_still_beats_the_company_name(inbox, con):
+    """The cascade order has to hold: a resemblance must never outrank an
+    address he actually wrote to."""
+    by_name = _form_application(con)
+    by_address = _sent_application(con, email_addr="hr@firma-beispiel.de")
+    inbox.add("m-1", body=ABSAGE_BODY)
+
+    await service.ingest_replies()
+
+    row = _inbound_rows(con)[0]
+    assert (row["bewerbung_id"], row["matched_by"]) == (by_address, "address")
+    assert row["bewerbung_id"] != by_name

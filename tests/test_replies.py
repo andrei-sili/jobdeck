@@ -712,3 +712,46 @@ def test_a_rejection_that_also_mentions_an_event_stays_a_rejection():
         "Unseren Workshop am Freitag müssen wir leider absagen. Zu Ihrer "
         "Bewerbung: die Stelle wurde inzwischen intern besetzt.")
     assert verdict is not None and verdict.classification == "absage"
+
+
+# --- the company-name arm: the only one a form application can be reached by --
+
+@pytest.mark.parametrize("firma, sender, expected", [
+    ("Firma Beispiel GmbH", "hr@firma-beispiel.de", True),
+    ("Müller & Co. KG", "bewerbung@mueller-co.de", True),
+    ("Beispiel Holding AG", "no-reply@beispiel.com", True),
+    # the ATS writes from its own domain and names the employer in the
+    # display part — the shape a portal application actually replies in
+    ("Firma Beispiel GmbH", "no-reply@ats-anbieter.com", False),
+    # Freemail says nothing about who the sender is — and the guard has to
+    # be real, not incidental: a company name that RESEMBLES the freemail
+    # host is what tells the two apart. Anyone can hold outlook.com mail.
+    ("Firma Beispiel GmbH", "chef@gmx.de", False),
+    ("Outlook Systeme GmbH", "chef@outlook.com", False),
+    ("Web Solutions GmbH", "kontakt@web.de", False),
+    # a different employer must never collide
+    ("Firma Beispiel GmbH", "hr@ganz-anders.de", False),
+    # too short to compare: "IT GmbH" would otherwise reach italia.de
+    ("IT GmbH", "kontakt@italia.de", False),
+])
+def test_the_company_name_arm_recognises_only_its_own_sender(
+        firma, sender, expected):
+    assert replies.company_in_sender(firma, f"HR <{sender}>", sender) is expected
+
+
+def test_the_display_name_carries_the_employer_when_the_domain_cannot():
+    """An ATS sends from ats-anbieter.com and puts the employer in front of
+    the angle bracket. Without this, every portal application's reply is
+    unreachable."""
+    assert replies.company_in_sender(
+        "Firma Beispiel GmbH",
+        "Personalabteilung Firma Beispiel GmbH <no-reply@ats-anbieter.com>",
+        "no-reply@ats-anbieter.com")
+
+
+def test_the_company_key_survives_the_spellings_a_domain_forces():
+    """A domain has no umlauts and no ampersands, so the key has to meet it
+    where a German registrar puts it."""
+    assert replies.company_key("Müller & Co. KG") == "mueller"
+    assert replies.company_key("Groß Software GmbH") == "grosssoftware"
+    assert replies.company_key("Beispiel Holding AG") == "beispiel"

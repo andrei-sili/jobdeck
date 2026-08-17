@@ -303,7 +303,42 @@ def _match(meta: dict, from_addr: str, subject: str) -> dict | None:
             if len(hits) == 1:
                 return {"kind": "reply", "bewerbung_id": hits.pop(),
                         "matched_by": "domain"}
+        named = _name_match(con, meta, from_addr)
+        if named is not None:
+            return named
     return None
+
+
+def _name_match(con, meta: dict, from_addr: str) -> dict | None:
+    """Last arm: does the sender look like a company he applied to?
+
+    This is the ONLY arm that reaches a form application. Those carry no
+    address — 29 of his 55 open applications — so every arm above is
+    structurally blind to them, and a reply to one was unmatchable by
+    construction rather than by accident.
+
+    It never writes a status: 'name' is not in the tier _handle_reply may
+    file automatically, so the strongest thing this can do is put the mail
+    in front of him with a company already suggested. Ambiguity is refused
+    outright — two applications answering to one name is exactly the case
+    where a guess would be worse than the question.
+    """
+    from_header = str(meta["headers"].get("from", ""))
+    rows = db.bewerbungen_for_name_match(con)
+    hits = [row for row in rows
+            if replies.company_in_sender(str(row["firma"] or ""),
+                                         from_header, from_addr)]
+    if not hits:
+        return None
+    # An employer writes about the application that is still open; a settled
+    # one is history. Same preference the address arm makes.
+    open_rows = [row for row in hits
+                 if str(row["status"] or "") in OFFENE_STATUS]
+    candidates = open_rows or hits
+    if len(candidates) != 1:
+        return None
+    return {"kind": "reply", "bewerbung_id": int(candidates[0]["id"]),
+            "matched_by": "name"}
 
 
 def _receipt_match(con, meta: dict, from_addr: str, subject: str) -> dict | None:
