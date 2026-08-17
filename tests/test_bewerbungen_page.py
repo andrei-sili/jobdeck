@@ -596,3 +596,22 @@ def test_deleting_an_application_gives_its_posting_back(con):
     job = db.get_job(con, job_id)
     assert job["status"] == "new"
     assert job["bewerbung_id"] is None
+
+
+# --------------------------------------------------------------------------
+# The Antwort column (Phase 3)
+# --------------------------------------------------------------------------
+async def test_the_register_shows_when_an_answer_first_arrived(user: User, con):
+    """The column derives from status_history — the recording moment for
+    imported rows, the ingested transition for read ones — so both kinds of
+    answer carry the same kind of date under one column head."""
+    answered = _app_row(con, firma="Antwortet GmbH")
+    db.set_status(con, answered, "Absage", source="reply_auto", force=False,
+                  note="test")
+    _app_row(con, firma="Schweigt GmbH", email="hr2@beispiel.example")
+    con.commit()
+    first_at = db.first_answer_dates(con)[answered][:10]
+
+    await user.open("/bewerbungen")
+    await user.should_see("Antwort")
+    await user.should_see(first_at)

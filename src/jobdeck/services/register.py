@@ -384,6 +384,10 @@ def facts() -> dict:
             "sources": [dict(row) for row in db.applications_by_source(con)],
             "follow_up_days": follow_up_setting(
                 db.get_setting(con, "follow_up_days", "")),
+            # When each application FIRST entered an answered status — from
+            # status_history, so a hand-recorded Absage and an ingested one
+            # carry the same kind of date under the same column head.
+            "answer_dates": db.first_answer_dates(con),
             **counts,
         }
 

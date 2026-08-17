@@ -459,15 +459,18 @@ async def bewerbungen_page():
                     # adjective, above cells reading "12 T" — it parsed as
                     # "still 12".
                     for column in ("Firma", "Gesendet", "Kanal", "Status",
-                                   "Wartet seit"):
+                                   "Antwort", "Wartet seit"):
                         ui.label(column)
                 if not rows:
                     ui.label("Keine Bewerbung passt zu dieser Suche.") \
                         .classes("jd-card-sub")
                 for app_row in rows:
-                    _register_row(app_row, ages.get(int(app_row["id"] or 0)))
+                    row_id = int(app_row["id"] or 0)
+                    _register_row(app_row, ages.get(row_id),
+                                  view["answer_dates"].get(row_id, ""))
 
-        def _register_row(app_row: dict, age: register.Waiting | None) -> None:
+        def _register_row(app_row: dict, age: register.Waiting | None,
+                          answered_at: str = "") -> None:
             row_id = int(app_row["id"])
             status = str(app_row.get("status") or "")
             element = ui.element("button").classes("jd-app") \
@@ -483,6 +486,12 @@ async def bewerbungen_page():
                 with ui.element("div"):
                     ui.label(status or "—").classes(
                         f"jd-pill {_pill_class(status)}")
+                # The day the register FIRST held an answer — the recording
+                # moment for imported rows, the mail's arrival for ingested
+                # ones is one history-write away from it either way. "—" is
+                # honest for a row still waiting.
+                ui.label(answered_at[:10] if answered_at else "—") \
+                    .classes("cell")
                 ui.label(
                     "" if age is None
                     else f"{age.days} T" if age.days is not None else "?"

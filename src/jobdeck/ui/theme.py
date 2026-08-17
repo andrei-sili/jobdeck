@@ -247,7 +247,8 @@ body { background: var(--paper); color: var(--ink); font-family: var(--jd-sans);
 .jd-wait .age.over { color: var(--warn); }
 
 /* One application of the register, as a row that opens. */
-.jd-app { display:grid; grid-template-columns:minmax(0,1fr) 6rem 7rem 8rem 5rem;
+.jd-app { display:grid;
+          grid-template-columns:minmax(0,1fr) 6rem 7rem 8rem 6rem 5rem;
           gap:0 12px; align-items:center; width:100%; text-align:left;
           border:0; border-bottom:1px solid var(--rule); background:transparent;
           padding:0; cursor:pointer; font:inherit; }
@@ -260,7 +261,8 @@ body { background: var(--paper); color: var(--ink); font-family: var(--jd-sans);
                 text-overflow:ellipsis; white-space:nowrap; }
 .jd-app .cell.right { text-align:right; }
 .jd-app .cell.over { color: var(--warn); }
-.jd-head { display:grid; grid-template-columns:minmax(0,1fr) 6rem 7rem 8rem 5rem;
+.jd-head { display:grid;
+           grid-template-columns:minmax(0,1fr) 6rem 7rem 8rem 6rem 5rem;
            gap:0 12px; width:100%; border-bottom:1px solid var(--rule-2);
            font:600 9.5px/1 var(--jd-sans); letter-spacing:.1em;
            text-transform:uppercase; color: var(--ink-4); padding-bottom:6px; }
