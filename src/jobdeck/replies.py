@@ -63,7 +63,11 @@ _EINLADUNG_PATTERNS = (
     r"terminvorschl[aä]g",
     r"gesprächstermin",
     r"(?:telefonisches|persönliches|erstes|kurzes) (?:gespräch|interview|telefonat)",
-    r"\binterview\b",
+    # "interview" only where German grammar puts it. A bare \binterview\b
+    # matched English mail these German rules were never meant to judge: a
+    # receipt reading "we'll be in touch about interviews" was proposed as
+    # an invitation on the first real read of his mailbox.
+    r"(?:zum|zu einem|für ein|das) interview",
     r"wann (?:hätten|haben) sie zeit",
 )
 

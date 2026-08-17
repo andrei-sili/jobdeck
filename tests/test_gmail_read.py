@@ -297,9 +297,24 @@ def test_ensure_labels_treats_409_as_already_exists(readable):
     assert listings["count"] == 2  # the 409 branch really ran the re-list
 
 
-def test_add_label_modifies_the_message(readable):
-    gmail.add_label("m-1", "Label_3")
-    assert readable.modified == [("m-1", {"addLabelIds": ["Label_3"]})]
+def test_set_labels_adds_and_removes_in_one_call(readable):
+    """One call, because a verdict that changes must take its old label with
+    it: a mail relabelled Einladung while still carrying Absagen is worse in
+    his inbox than one carrying nothing."""
+    gmail.set_labels("m-1", ["Label_3"], ["Label_4", "Label_5"])
+    assert readable.modified == [("m-1", {"addLabelIds": ["Label_3"],
+                                          "removeLabelIds": ["Label_4",
+                                                             "Label_5"]})]
+
+
+def test_set_labels_can_strip_every_label(readable):
+    gmail.set_labels("m-1", [], ["Label_4"])
+    assert readable.modified == [("m-1", {"removeLabelIds": ["Label_4"]})]
+
+
+def test_set_labels_with_nothing_to_do_makes_no_request(readable):
+    gmail.set_labels("m-1", [], [])
+    assert readable.modified == []
 
 
 def test_reading_requires_the_modify_scope(data_dir, monkeypatch):

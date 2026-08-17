@@ -381,3 +381,34 @@ def test_a_receipt_that_thanks_for_the_sending_is_still_a_receipt():
     verdict = replies.classify("Ihre Bewerbung", EINGANG_ZUSENDUNG)
     assert verdict is not None
     assert verdict.classification == "eingang"
+
+
+ENGLISH_RECEIPT = """Hi Andrei,
+
+Your application has landed. Thank you for considering a career with us!
+We appreciate the time you took. If your profile matches, our team will be
+in touch to arrange interviews.
+
+Best regards"""
+
+EINLADUNG_MIT_INTERVIEW = """Guten Tag Herr Beispiel,
+
+wir möchten Sie gerne zu einem Interview einladen. Passt Ihnen Dienstag?
+
+Mit freundlichen Grüßen"""
+
+
+def test_an_english_receipt_is_not_read_as_a_german_invitation():
+    """These rules judge German. A bare \\binterview\\b matched English mail
+    they were never meant to read: a receipt saying 'our team will be in
+    touch to arrange interviews' was proposed as an invitation on the first
+    real read of his mailbox."""
+    verdict = replies.classify("Back-End Engineer", ENGLISH_RECEIPT)
+    assert verdict is None or verdict.classification != "einladung"
+
+
+def test_a_german_invitation_saying_interview_still_counts():
+    """The narrowing must not cost the word where German grammar puts it."""
+    verdict = replies.classify("Ihre Bewerbung", EINLADUNG_MIT_INTERVIEW)
+    assert verdict is not None
+    assert verdict.classification == "einladung"

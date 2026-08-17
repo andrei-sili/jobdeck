@@ -580,8 +580,20 @@ def ensure_labels(names: list[str]) -> dict[str, str]:
     return resolved
 
 
-def add_label(message_id: str, label_id: str) -> None:
-    """Apply one label to one message (users.messages.modify)."""
+def set_labels(message_id: str, add: list[str], remove: list[str]) -> None:
+    """Make one message carry exactly the labels it should (messages.modify).
+
+    Add AND remove in one call, because a verdict that changes has to take
+    its old label with it: a mail relabelled Einladung while still carrying
+    Absagen is worse in his inbox than one carrying nothing, and Gmail's
+    own filters would see both."""
+    body: dict[str, list[str]] = {}
+    if add:
+        body["addLabelIds"] = add
+    if remove:
+        body["removeLabelIds"] = remove
+    if not body:
+        return
     _execute(_read_service().users().messages().modify(
-        userId="me", id=message_id, body={"addLabelIds": [label_id]},
+        userId="me", id=message_id, body=body,
     ))

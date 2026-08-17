@@ -54,13 +54,25 @@ MAX_RAW_BYTES = 5_000_000
 RECEIPT_WINDOW_H = 72
 
 # Gmail-side mirror of the verdicts (approved 2026-07-15). 'Offen' carries
-# the receipt/confirmation family: the application is in and undecided.
+# everything that leaves the application open and undecided — a receipt, and
+# an out-of-office, which answers nothing.
+#
+# 'Zu prüfen' is the one this list was missing, and its absence was the
+# defect he reported: the mails JobDeck could NOT settle were the only ones
+# with no label at all, so in Gmail — on his phone, where the labels are the
+# whole point — the messages that need him were invisible while the settled
+# ones were filed.
 LABEL_PARENT = "JobDeck"
+LABEL_REVIEW = "JobDeck/Zu prüfen"
 LABELS = {
     "absage": "JobDeck/Absagen",
     "einladung": "JobDeck/Einladungen",
     "eingang": "JobDeck/Offen",
+    "auto": "JobDeck/Offen",
 }
+# Every label this app owns. A message carries exactly one of them, so a
+# changed verdict must remove the others rather than accumulate.
+ALL_LABELS = sorted({*LABELS.values(), LABEL_REVIEW})
 
 # How a receipt reached the ledger. The distinction decides whether an undo
 # is even offered: only a row this app CREATED may be taken back out.
@@ -474,8 +486,9 @@ def _handle_reply(match: dict, meta: dict, from_addr: str, subject: str,
                                       classified_by, 1)
     if needs_review:
         counters["review"] += 1
-    elif classification in LABELS:
-        _apply_label(meta["id"], classification)
+    # Labelled either way: a mail waiting for him is the one he most needs
+    # to find in Gmail.
+    _apply_label(meta["id"], classification, bool(needs_review))
 
 
 def _ai_classify_enabled() -> bool:
@@ -541,16 +554,10 @@ def _handle_receipt(match: dict, meta: dict, from_addr: str, subject: str,
         # An answer, not a receipt. There is no application in the ledger to
         # carry it yet, so recording one AND filing its outcome is two
         # decisions at once — he makes them with one press.
-        row["needs_review"] = 1
-        with db.db() as con:
-            db.add_email_log(con, row)
-        counters["review"] += 1
+        _propose(row, counters, meta)
         return
     if not match["strong"]:
-        row["needs_review"] = 1
-        with db.db() as con:
-            db.add_email_log(con, row)
-        counters["review"] += 1
+        _propose(row, counters, meta)
         return
 
     bewerbung_id = int(job["bewerbung_id"] or 0) or None
@@ -568,10 +575,7 @@ def _handle_receipt(match: dict, meta: dict, from_addr: str, subject: str,
         if not outcome["ok"]:
             # The duplicate gate refused inside the write: the receipt
             # becomes a review row instead of a ledger row.
-            row["needs_review"] = 1
-            with db.db() as con:
-                db.add_email_log(con, row)
-            counters["review"] += 1
+            _propose(row, counters, meta)
             return
         bewerbung_id = outcome["bewerbung_id"]
     row["bewerbung_id"] = bewerbung_id
@@ -588,13 +592,40 @@ def _handle_receipt(match: dict, meta: dict, from_addr: str, subject: str,
 # --------------------------------------------------------------------------
 # Labels — best effort, never the pass's problem
 # --------------------------------------------------------------------------
-def _apply_label(message_id: str, classification: str) -> None:
-    name = LABELS.get(classification)
-    if not name:
+def _propose(row: dict, counters: dict, meta: dict) -> None:
+    """Park a receipt on the review pile — and mark it in Gmail as waiting.
+
+    One writer for the three paths that reach this, so a new one cannot
+    forget the label the way the first version forgot it everywhere."""
+    row["needs_review"] = 1
+    with db.db() as con:
+        db.add_email_log(con, row)
+    counters["review"] += 1
+    _apply_label(meta["id"], row.get("classification", ""), needs_review=True)
+
+
+def _apply_label(message_id: str, classification: str,
+                 needs_review: bool = False) -> None:
+    """Make the message carry exactly the one JobDeck label it should.
+
+    Every mail this app matched gets one — including the ones it could NOT
+    settle, which is the whole point: in Gmail those are the messages that
+    need him, and leaving them unlabelled meant his phone showed the filed
+    mail and hid the waiting mail. Whatever it carried before is removed, so
+    a corrected verdict cannot leave its old label behind."""
+    if not message_id:
         return
+    name = LABEL_REVIEW if needs_review else LABELS.get(classification)
+    if not name:
+        # Matched, but nothing to say about it (a dismissed row). Strip any
+        # label a previous verdict left rather than leaving a stale one.
+        name = ""
     try:
-        resolved = gmail.ensure_labels([LABEL_PARENT, name])
-        gmail.add_label(message_id, resolved[name])
+        wanted = [LABEL_PARENT, *ALL_LABELS]
+        resolved = gmail.ensure_labels(wanted)
+        keep = [resolved[name]] if name else []
+        drop = [resolved[other] for other in ALL_LABELS if other != name]
+        gmail.set_labels(message_id, keep, drop)
     except (gmail.GmailError, KeyError) as exc:
         log.warning("reply ingestion: could not label %s: %s",
                     message_id, exc)
@@ -622,15 +653,22 @@ def resolve_review(email_log_id: int, classification: str) -> bool:
                           source="reply_manual", email_log_id=email_log_id)
         message_id = str(row["gmail_message_id"] or "")
     if message_id:
-        _apply_label(message_id, classification)
+        _apply_label(message_id, classification, needs_review=False)
     return True
 
 
 def dismiss_review(email_log_id: int) -> None:
-    """'This mail does not belong to that application' — unlink and settle."""
+    """'This mail does not belong to that application' — unlink and settle.
+
+    The Gmail label goes with it: a mail he pushed aside must not keep
+    telling him from his phone that something is waiting."""
     with db.db() as con:
+        row = db.get_email_log(con, email_log_id)
         db.link_reply_bewerbung(con, email_log_id, None)
         db.classify_reply_row(con, email_log_id, "", "", 0)
+        message_id = str(row["gmail_message_id"] or "") if row else ""
+    if message_id:
+        _apply_label(message_id, "", needs_review=False)
 
 
 def adopt_receipt(email_log_id: int) -> dict:

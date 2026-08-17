@@ -68,6 +68,7 @@ class FakeInbox:
         self.mails: dict[str, dict] = {}
         self.order: list[str] = []
         self.labeled: list[tuple[str, str]] = []
+        self.label_calls: list[tuple] = []
         self.metadata_calls: list[str] = []
         self.raw_calls: list[str] = []
         self.history_error: Exception | None = None
@@ -126,9 +127,12 @@ def inbox(data_dir, monkeypatch):
     monkeypatch.setattr(gmail, "get_message_raw", fake_raw)
     monkeypatch.setattr(gmail, "ensure_labels",
                         lambda names: {n: f"L_{n}" for n in names})
-    monkeypatch.setattr(gmail, "add_label",
-                        lambda message_id, label_id:
-                        fake.labeled.append((message_id, label_id)))
+
+    def fake_set_labels(message_id, add, remove):
+        fake.labeled.append((message_id, add[0] if add else None))
+        fake.label_calls.append((message_id, tuple(add), tuple(sorted(remove))))
+
+    monkeypatch.setattr(gmail, "set_labels", fake_set_labels)
     return fake
 
 
@@ -240,7 +244,9 @@ async def test_a_domain_match_only_proposes(inbox, con):
     row = _inbound_rows(con)[0]
     assert (row["matched_by"], row["classification"], row["needs_review"]) \
         == ("domain", "absage", 1)
-    assert inbox.labeled == []
+    # …and it IS marked in Gmail — as waiting, not as a rejection. Leaving
+    # the unsettled mail unlabelled hid exactly the messages that need him.
+    assert inbox.labeled == [("m-1", "L_JobDeck/Zu prüfen")]
 
 
 async def test_an_llm_verdict_only_proposes_and_is_metered(
@@ -293,7 +299,10 @@ async def test_an_out_of_office_answers_nothing(inbox, con):
     assert db.get_bewerbung(con, bewerbung_id)["status"] == "Gesendet"
     row = _inbound_rows(con)[0]
     assert (row["classification"], row["needs_review"]) == ("auto", 0)
-    assert inbox.labeled == []
+    # An out-of-office answers nothing, so the application stays open —
+    # which is what "Offen" says. It is still labelled: every mail JobDeck
+    # matched carries exactly one JobDeck label.
+    assert inbox.labeled == [("m-1", "L_JobDeck/Offen")]
 
 
 async def test_bulk_headers_settle_what_the_rules_could_not(inbox, con):
@@ -779,3 +788,68 @@ async def test_the_employers_own_apply_domain_still_authorizes(inbox, con):
 
     assert outcome["receipts"] == 1
     assert db.get_job(con, job_id)["bewerbung_id"] is not None
+
+
+# --------------------------------------------------------------------------
+# Gmail labels: every matched mail carries exactly one
+# --------------------------------------------------------------------------
+async def test_a_waiting_mail_is_labelled_as_waiting(inbox, con):
+    """His report: 'not all messages are labelled'. The unsettled ones were
+    the only mails with NO label, so in Gmail — on his phone, where the
+    labels are the point — the messages needing him were invisible while
+    the filed ones were neatly sorted."""
+    _sent_application(con, email_addr="info@firma-beispiel.de")
+    inbox.add("m-1", body=ABSAGE_BODY,
+              from_header="Wer <jemand.anderes@firma-beispiel.de>")
+
+    await service.ingest_replies()
+
+    message, add, remove = inbox.label_calls[0]
+    assert add == ("L_JobDeck/Zu prüfen",)
+    assert "L_JobDeck/Absagen" in remove  # and nothing else clings on
+
+
+async def test_a_settled_verdict_takes_the_old_label_off(inbox, con):
+    """His second report: 'not all are correctly labelled'. A corrected
+    verdict used to add its new label and leave the wrong one in place, so
+    one mail could sit under both Absagen and Einladungen."""
+    bewerbung_id = _sent_application(con, thread="t-9")
+    inbox.add("m-1", thread="t-9", body=ABSAGE_BODY)
+    await service.ingest_replies()
+    row_id = _inbound_rows(con)[0]["id"]
+    inbox.label_calls.clear()
+
+    service.resolve_review(row_id, "einladung")
+
+    message, add, remove = inbox.label_calls[0]
+    assert add == ("L_JobDeck/Einladungen",)
+    assert "L_JobDeck/Absagen" in remove
+    assert db.get_bewerbung(con, bewerbung_id)["status"] == "Einladung"
+
+
+async def test_dismissing_a_mail_strips_its_label(inbox, con):
+    """A mail he pushed aside must stop telling him from his phone that
+    something is waiting."""
+    _sent_application(con, email_addr="info@firma-beispiel.de")
+    inbox.add("m-1", body=ABSAGE_BODY,
+              from_header="Wer <jemand.anderes@firma-beispiel.de>")
+    await service.ingest_replies()
+    row_id = _inbound_rows(con)[0]["id"]
+    inbox.label_calls.clear()
+
+    service.dismiss_review(row_id)
+
+    message, add, remove = inbox.label_calls[0]
+    assert add == ()
+    assert set(remove) == {f"L_{name}" for name in service.ALL_LABELS}
+
+
+async def test_unmatched_mail_is_never_labelled(inbox, con):
+    """The labels are about HIS applications. Mail that belongs to none of
+    them must not be touched in his mailbox at all."""
+    inbox.add("m-1", from_header="Fremde <x@anders-beispiel.de>",
+              subject="Newsletter", body="Hallo!")
+
+    await service.ingest_replies()
+
+    assert inbox.label_calls == []
