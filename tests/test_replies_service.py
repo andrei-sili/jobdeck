@@ -37,8 +37,14 @@ könnten Sie uns noch Ihr Abschlusszeugnis nachreichen?
 
 Mit freundlichen Grüßen"""
 
-AUTH_PASS = "mx.google.com; spf=pass smtp.mailfrom=firma-beispiel.de"
-AUTH_FAIL = "mx.google.com; spf=fail; dkim=fail"
+# DMARC is the only verdict that binds the authenticated identity to the
+# From domain — see test_replies.test_only_dmarc_vouches_for_the_from_domain.
+AUTH_PASS = ("mx.google.com; spf=pass smtp.mailfrom=firma-beispiel.de; "
+             "dmarc=pass header.from=firma-beispiel.de")
+# What an attacker sending from their OWN mailbox produces: their domain
+# authenticates fine, the forged From does not.
+AUTH_FAIL = ("mx.google.com; spf=pass smtp.mailfrom=angreifer.example; "
+             "dmarc=fail header.from=firma-beispiel.de")
 
 
 @pytest.fixture(autouse=True)
@@ -362,9 +368,10 @@ async def test_the_checkpoint_advances_only_when_drained(
 # --------------------------------------------------------------------------
 # receipts against the strip
 # --------------------------------------------------------------------------
-async def test_a_receipt_with_the_refnr_records_the_application(inbox, con):
-    job_id = _strip_job(con, refnr="10000-1177449Z")
-    inbox.add("m-1", from_header="ATS <no-reply@ats-beispiel.de>",
+async def test_a_receipt_from_the_postings_own_domain_records(inbox, con):
+    job_id = _strip_job(con, refnr="10000-1177449Z",
+                        apply_url="https://bewerbung.firma-beispiel.de/7")
+    inbox.add("m-1", from_header="Firma <karriere@firma-beispiel.de>",
               subject="Eingangsbestätigung Referenz 10000-1177449Z",
               body="Ihre Bewerbung ist eingegangen.")
 
@@ -378,16 +385,39 @@ async def test_a_receipt_with_the_refnr_records_the_application(inbox, con):
     assert bewerbung["kanal"] == "Online-Portal"
     row = _inbound_rows(con)[0]
     assert (row["matched_by"], row["job_id"], row["bewerbung_id"]) \
-        == ("receipt", job_id, job["bewerbung_id"])
+        == (service.MATCHED_RECEIPT, job_id, job["bewerbung_id"])
     assert inbox.labeled == [("m-1", "L_JobDeck/Offen")]
     history = db.list_status_history(con, job["bewerbung_id"])
-    assert history[0]["note"].startswith("Eingangsbestätigung (Refnr")
+    assert history[0]["note"].startswith("Eingangsbestätigung (Absender")
+
+
+async def test_a_reference_number_alone_cannot_authorize_a_ledger_row(
+        inbox, con):
+    """The Refnr is printed in the PUBLIC advert: anyone who read the
+    posting can quote it, and quoting it says nothing about who sent the
+    mail. It may identify which posting a mail is about; it may not
+    authorize a write. Reported by the security review with a working
+    exploit — a stranger's authenticated mailbox plus a public number was
+    enough to spend the one application slot at that company."""
+    job_id = _strip_job(con, refnr="10000-1177449Z")
+    inbox.add("m-1", from_header="Fremder <wer@voellig-anders.example>",
+              subject="Eingangsbestätigung Referenz 10000-1177449Z",
+              body="Ihre Bewerbung ist eingegangen.",
+              auth=("mx.google.com; spf=pass smtp.mailfrom=voellig-anders."
+                    "example; dmarc=pass header.from=voellig-anders.example"))
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 0
+    assert db.get_job(con, job_id)["bewerbung_id"] is None
+    row = _inbound_rows(con)[0]
+    assert (row["needs_review"], row["job_id"]) == (1, job_id)
 
 
 async def test_a_spoofed_receipt_only_proposes(inbox, con):
-    job_id = _strip_job(con, refnr="10000-1177449Z")
-    inbox.add("m-1", from_header="ATS <no-reply@ats-beispiel.de>",
-              subject="Eingangsbestätigung Referenz 10000-1177449Z",
+    job_id = _strip_job(con, apply_url="https://bewerbung.firma-beispiel.de/7")
+    inbox.add("m-1", from_header="Firma <karriere@firma-beispiel.de>",
+              subject="Eingangsbestätigung",
               body="Ihre Bewerbung ist eingegangen.", auth=AUTH_FAIL)
 
     outcome = await service.ingest_replies()
@@ -396,8 +426,6 @@ async def test_a_spoofed_receipt_only_proposes(inbox, con):
     assert db.get_job(con, job_id)["bewerbung_id"] is None
     row = _inbound_rows(con)[0]
     assert (row["needs_review"], row["job_id"]) == (1, job_id)
-    assert "nicht verifiziert" not in ""  # the evidence is for the UI; the
-    # load-bearing assertions are: no ledger row, review instead
 
 
 async def test_a_receipt_by_sender_domain_records(inbox, con):

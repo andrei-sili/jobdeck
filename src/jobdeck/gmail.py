@@ -460,6 +460,7 @@ def history_added_messages(
     ids: list[str] = []
     seen: set[str] = set()
     latest = ""
+    truncated = False
     page_token = None
     while True:
         try:
@@ -487,9 +488,17 @@ def history_added_messages(
                     seen.add(message_id)
                     ids.append(message_id)
         page_token = response.get("nextPageToken")
-        if not page_token or len(ids) >= max_results:
+        if len(ids) >= max_results:
+            # More history than this pass may carry. `historyId` is the
+            # MAILBOX's current position, not the point this listing
+            # reached, so storing it would step over everything past the
+            # bound — permanently, since nothing lists it again. An empty
+            # checkpoint says "not drained" and the caller keeps the old one.
+            truncated = bool(page_token) or len(ids) > max_results
             break
-    return ids[:max_results], latest
+        if not page_token:
+            break
+    return ids[:max_results], ("" if truncated else latest)
 
 
 def get_message_metadata(message_id: str) -> dict:

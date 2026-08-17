@@ -172,13 +172,33 @@ def test_auto_submitted_headers_are_recognized():
     assert not replies.is_auto_submitted({})
 
 
-def test_gmail_authentication_verdict_is_read_not_computed():
-    passing = {"authentication-results": "mx.google.com; spf=pass "
-                                         "smtp.mailfrom=firma.example"}
-    failing = {"authentication-results": "mx.google.com; spf=fail; dkim=fail"}
-    assert replies.sender_authenticated(passing)
-    assert not replies.sender_authenticated(failing)
+def test_only_dmarc_vouches_for_the_from_domain():
+    """SPF authenticates the ENVELOPE and DKIM authenticates whatever domain
+    signed; neither binds the From header a human reads, so anyone with a
+    mailbox passes both while writing any From they like. Only DMARC
+    requires an authenticated identity aligned with the From domain — which
+    is the whole claim this check is used to support."""
+    aligned = {"authentication-results":
+               "mx.google.com; dkim=pass header.i=@firma-beispiel.de; "
+               "spf=pass smtp.mailfrom=firma-beispiel.de; "
+               "dmarc=pass header.from=firma-beispiel.de"}
+    # the attacker's OWN domain passes SPF and DKIM for a forged From
+    attacker = {"authentication-results":
+                "mx.google.com; spf=pass smtp.mailfrom=angreifer.example; "
+                "dkim=pass header.i=@angreifer.example; "
+                "dmarc=fail header.from=firma-beispiel.de"}
+    assert replies.sender_authenticated(aligned)
+    assert not replies.sender_authenticated(attacker)
     assert not replies.sender_authenticated({})
+
+
+def test_only_the_line_gmail_stamped_is_trusted():
+    """A sender may include an Authentication-Results header of their own.
+    Gmail prepends its own and the metadata reader keeps the first, but the
+    check confirms the authserv-id rather than relying on that ordering."""
+    forged = {"authentication-results":
+              "evil.example; dmarc=pass header.from=firma-beispiel.de"}
+    assert not replies.sender_authenticated(forged)
 
 
 # --- MIME extraction ----------------------------------------------------------
@@ -271,3 +291,75 @@ def test_private_fixtures_replay():
         verdict = replies.classify("", body)
         got = verdict.classification if verdict is not None else "none"
         assert got == expected.strip(), path.name
+
+
+# --- what the review panel found: the screen must not decide alone ---------
+
+POLITE_EINLADUNG = """Sehr geehrter Herr Beispiel,
+
+vielen Dank für Ihre Bewerbung als Junior Python-Entwickler. Gerne würden
+wir Sie zu einem Vorstellungsgespräch einladen. Bitte teilen Sie uns mit,
+ob Ihnen der 25. August passt.
+
+Mit freundlichen Grüßen"""
+
+EINGANG_MIT_HYPOTHETISCHER_ABSAGE = """Guten Tag,
+
+wir bestätigen den Eingang Ihrer Bewerbung. Im Falle einer negativen
+Entscheidung erhalten Sie eine Absage per E-Mail.
+
+Ihr Recruiting-Team"""
+
+EINGANG_UND_ECHTE_ABSAGE = """Sehr geehrter Herr Beispiel,
+
+Ihre Bewerbung ist bei uns eingegangen. Wir müssen Ihnen mitteilen, dass
+wir Sie nicht weiter berücksichtigen können.
+
+Mit freundlichen Grüßen"""
+
+
+def test_a_polite_invitation_is_an_invitation_not_a_receipt():
+    """German business prose uses the Konjunktiv for politeness: 'Gerne
+    würden wir Sie einladen' is a real invitation. Screening it left the
+    thank-you opener as the only survivor, so the canonical invitation
+    filed itself as a receipt — confirmed by the review panel."""
+    verdict = replies.classify("Ihre Bewerbung", POLITE_EINLADUNG)
+    assert verdict is not None
+    assert verdict.classification == "einladung"
+    assert verdict.confident is True
+
+
+def test_a_receipt_naming_a_possible_rejection_is_still_a_receipt():
+    """'Im Falle einer negativen Entscheidung erhalten Sie eine Absage' is
+    boilerplate. Unscreened, it hit absage, and absage-beats-eingang then
+    closed a live application on the strength of its own confirmation."""
+    verdict = replies.classify("Eingangsbestätigung",
+                               EINGANG_MIT_HYPOTHETISCHER_ABSAGE)
+    assert verdict is not None
+    assert verdict.classification == "eingang"
+
+
+def test_a_rejection_that_also_confirms_receipt_is_only_a_proposal():
+    """Two competing families with a settled reading — but the same shape is
+    produced by a receipt that merely NAMES a rejection, and the rules
+    cannot tell them apart. So it is proposed, never filed."""
+    verdict = replies.classify("Ihre Bewerbung", EINGANG_UND_ECHTE_ABSAGE)
+    assert verdict is not None
+    assert verdict.classification == "absage"
+    assert verdict.confident is False
+
+
+def test_the_thank_you_opener_never_competes_with_a_verdict():
+    """Every German reply opens by thanking. Counting that as evidence made
+    every classic rejection look like two families disagreeing."""
+    verdict = replies.classify("Ihre Bewerbung", ABSAGE_KLASSISCH)
+    assert verdict.classification == "absage"
+    assert verdict.confident is True
+
+
+def test_the_opener_alone_still_says_the_application_arrived():
+    verdict = replies.classify(
+        "Ihre Bewerbung",
+        "Guten Tag,\n\nvielen Dank für Ihre Bewerbung. Wir melden uns.")
+    assert verdict is not None
+    assert verdict.classification == "eingang"

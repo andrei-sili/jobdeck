@@ -29,6 +29,7 @@ from jobdeck.constants import (
     CLASSIFICATION_TO_STATUS,
     EMAIL_INBOUND,
     EMAIL_INBOUND_IGNORED,
+    OFFENE_STATUS,
 )
 from jobdeck.contact_resolve import registrable_domain
 from jobdeck.services import apply_record
@@ -60,6 +61,11 @@ LABELS = {
     "einladung": "JobDeck/Einladungen",
     "eingang": "JobDeck/Offen",
 }
+
+# How a receipt reached the ledger. The distinction decides whether an undo
+# is even offered: only a row this app CREATED may be taken back out.
+MATCHED_RECEIPT = "receipt"
+MATCHED_ATTACHED = "receipt_known"
 
 HISTORY_KEY = "replies_history_id"
 LAST_POLL_KEY = "replies_last_poll_at"
@@ -103,7 +109,7 @@ def _ingest() -> dict:
                               "Einstellungen neu verbinden")
         return {**counters, "error": "no read permission"}
     try:
-        message_ids, checkpoint = _new_message_ids()
+        message_ids, checkpoint, from_history = _new_message_ids()
     except gmail.GmailError as exc:
         log.warning("reply ingestion: could not list the inbox: %s", exc)
         _note(LAST_ERROR_KEY, str(exc))
@@ -111,7 +117,15 @@ def _ingest() -> dict:
 
     with db.db() as con:
         known = db.known_gmail_ids(con, message_ids)
+    # OLDEST first. `messages.list` answers newest-first, and processing in
+    # that order lets an older mail be read after a newer one — which, with
+    # statuses, means an old invitation landing on top of a fresh rejection.
+    # History is already chronological; reversing a list that is not sorted
+    # by arrival is still the right order for the only thing that matters
+    # here, which is that a later mail is never overwritten by an earlier.
     fresh = [m for m in message_ids if m not in known]
+    if not from_history:
+        fresh.reverse()
     drained = len(fresh) <= MAX_MESSAGES_PER_PASS
     for message_id in fresh[:MAX_MESSAGES_PER_PASS]:
         counters["seen"] += 1
@@ -129,18 +143,32 @@ def _ingest() -> dict:
         if drained and checkpoint:
             db.set_setting(con, HISTORY_KEY, checkpoint)
         db.set_setting(con, LAST_POLL_KEY, _now())
-        db.set_setting(con, LAST_ERROR_KEY, "")
+        # A message that fails every pass holds the checkpoint back for ever,
+        # and clearing the banner unconditionally made that invisible: the
+        # screen read "reading, last at 14:32" while nothing advanced. The
+        # count is stated rather than the message id — the id names mail the
+        # register may know nothing about.
+        failures = counters["errors"]
+        db.set_setting(con, LAST_ERROR_KEY, "" if not failures else (
+            ("Eine Nachricht konnte nicht gelesen werden"
+             if failures == 1 else
+             f"{failures} Nachrichten konnten nicht gelesen werden")
+            + " — der nächste Lauf versucht es erneut"))
     log.info("reply ingestion: %s", counters)
     return counters
 
 
-def _new_message_ids() -> tuple[list[str], str]:
-    """(candidate message ids, checkpoint to store once they are drained)."""
+def _new_message_ids() -> tuple[list[str], str, bool]:
+    """(candidate ids, checkpoint to store once drained, came-from-history).
+
+    The third value says whether the ids arrived in arrival order: history
+    records are chronological, a search answers newest-first."""
     with db.db() as con:
         stored = db.get_setting(con, HISTORY_KEY, "")
     if stored:
         try:
-            return gmail.history_added_messages(stored, LIST_AHEAD)
+            ids, checkpoint = gmail.history_added_messages(stored, LIST_AHEAD)
+            return ids, checkpoint, True
         except gmail.GmailHistoryExpired:
             log.info("reply ingestion: history checkpoint expired — "
                      "re-baselining with a full sync")
@@ -150,7 +178,7 @@ def _new_message_ids() -> tuple[list[str], str]:
     cutoff = datetime.datetime.now() - datetime.timedelta(
         days=FIRST_RUN_LOOKBACK_DAYS)
     query = f"-from:me after:{int(cutoff.timestamp())}"
-    return gmail.list_new_message_ids(query, LIST_AHEAD), checkpoint
+    return gmail.list_new_message_ids(query, LIST_AHEAD), checkpoint, False
 
 
 def _ignore(message_id: str, internal_iso: str) -> None:
@@ -226,10 +254,19 @@ def _match(meta: dict, from_addr: str, subject: str) -> dict | None:
             return {"kind": "reply", "bewerbung_id": bewerbung_id,
                     "matched_by": "thread"}
         rows = db.bewerbungen_for_reply_match(con)
-        for row in rows:
-            if str(row["email"] or "").strip().lower() == from_addr:
-                return {"kind": "reply", "bewerbung_id": int(row["id"]),
-                        "matched_by": "address"}
+        by_address = [row for row in rows
+                      if str(row["email"] or "").strip().lower() == from_addr]
+        if by_address:
+            # One address can hold several applications over time (an
+            # agency, a large employer). Prefer the ones still waiting for
+            # an answer; if that is still not a single row, the mail names
+            # no application and he decides which.
+            open_rows = [row for row in by_address
+                         if str(row["status"] or "") in OFFENE_STATUS]
+            candidates = open_rows or by_address
+            return {"kind": "reply", "bewerbung_id": int(candidates[0]["id"]),
+                    "matched_by": "address",
+                    "ambiguous": len(candidates) > 1}
         receipt = _receipt_match(con, meta, from_addr, subject)
         if receipt is not None:
             return receipt
@@ -259,24 +296,29 @@ def _receipt_match(con, meta: dict, from_addr: str, subject: str) -> dict | None
     # judged on the subject plus Gmail's snippet, which carries the opening
     # lines where ATS mail states the reference.
     text_window = f"{subject}\n{meta['snippet']}"
-    strong: list[tuple[dict, str]] = []
+    identified: list[tuple[dict, str, bool]] = []
     weak: list[dict] = []
     for job in candidates:
-        evidence = _receipt_evidence(job, sender_domain, text_window)
+        evidence, authorizing = _receipt_evidence(job, sender_domain,
+                                                  text_window)
         if evidence:
-            strong.append((dict(job), evidence))
+            identified.append((dict(job), evidence, authorizing))
         elif _company_named(job, from_addr, meta["headers"].get("from", "")):
             weak.append(dict(job))
-    if len(strong) == 1:
-        job, evidence = strong[0]
+    if len(identified) == 1:
+        job, evidence, authorizing = identified[0]
         authenticated = replies.sender_authenticated(meta["headers"])
-        return {"kind": "receipt", "job": job, "strong": authenticated,
-                "evidence": evidence if authenticated
-                else f"{evidence} · Absender nicht verifiziert"}
-    if len(strong) > 1:
+        strong = authorizing and authenticated
+        if not authorizing:
+            evidence += " · Absender gehört nicht zur Anzeige"
+        elif not authenticated:
+            evidence += " · Absender nicht verifiziert"
+        return {"kind": "receipt", "job": job, "strong": strong,
+                "evidence": evidence}
+    if len(identified) > 1:
         # Two forms at the same ATS inside the window: the evidence names a
         # vendor, not a posting. Propose, never write.
-        return {"kind": "receipt", "job": dict(strong[0][0]), "strong": False,
+        return {"kind": "receipt", "job": identified[0][0], "strong": False,
                 "evidence": "mehrere laufende Formulare passen"}
     if len(weak) == 1:
         return {"kind": "receipt", "job": weak[0], "strong": False,
@@ -284,29 +326,44 @@ def _receipt_match(con, meta: dict, from_addr: str, subject: str) -> dict | None
     return None
 
 
-def _receipt_evidence(job, sender_domain: str, text: str) -> str:
+def _receipt_evidence(job, sender_domain: str, text: str) -> tuple[str, bool]:
+    """(what identified this posting, may it AUTHORIZE a ledger write).
+
+    Only the sender's own domain can authorize. A Referenznummer is printed
+    in the public advert, so anyone who read the posting can quote it — it
+    identifies which posting a mail is about, and says nothing about who
+    sent it. Refnr therefore corroborates an aligned sender and otherwise
+    yields a proposal for his click.
+
+    `jobs.url` is deliberately NOT a target: that is the board's own page
+    (arbeitnow.com, arbeitsagentur.de), so accepting it would let any mail
+    from a job board record an application at the employer.
+    """
     refnr = resolve_refnr(job)
-    if replies.refnr_in_text(refnr, text, ""):
-        return f"Refnr {refnr}"
+    by_refnr = replies.refnr_in_text(refnr, text, "")
     if sender_domain:
         targets = set()
-        for url in (str(job["apply_url"] or ""), str(job["url"] or "")):
-            domain = registrable_domain(url)
-            if domain:
-                targets.add(domain)
+        domain = registrable_domain(str(job["apply_url"] or ""))
+        if domain:
+            targets.add(domain)
         contact_domain = registrable_domain(
             str(job["contact_email"] or "").rpartition("@")[2])
         if contact_domain:
             targets.add(contact_domain)
         if sender_domain in targets:
-            return f"Absender {sender_domain}"
+            evidence = f"Absender {sender_domain}"
+            return (f"{evidence} · Refnr {refnr}" if by_refnr else evidence), True
         vendor = str(job["ats_vendor"] or "")
         if vendor:
             sender_channel = apply_channel.classify(f"https://{sender_domain}/")
             if (sender_channel.channel == apply_channel.CHANNEL_ATS
                     and sender_channel.vendor == vendor):
-                return f"ATS {vendor}"
-    return ""
+                evidence = f"ATS {vendor}"
+                return (f"{evidence} · Refnr {refnr}" if by_refnr
+                        else evidence), True
+    if by_refnr:
+        return f"Refnr {refnr}", False
+    return "", False
 
 
 def _company_named(job, from_addr: str, from_header: str) -> bool:
@@ -338,7 +395,18 @@ def _handle_reply(match: dict, meta: dict, from_addr: str, subject: str,
         note = verdict.pattern
         if classification == replies.CLASS_AUTO:
             needs_review = 0  # a machine answer answers nothing — ledger only
-        elif match["matched_by"] in ("thread", "address"):
+        elif (verdict.confident
+              and not match.get("ambiguous")
+              and match["matched_by"] in ("thread", "address")
+              and (match["matched_by"] == "thread"
+                   or replies.sender_authenticated(meta["headers"]))):
+            # Three conditions, each earned: the rules must not have leaned
+            # on the conditional screen (a gap there is a silent wrong
+            # status), the mail must be tied to the application by more than
+            # a domain, and — on the address arm — Gmail itself must vouch
+            # for the sender, because a From header is what a forger writes.
+            # A thread id is not forgeable: only mail Gmail itself threaded
+            # into a message this app sent carries one.
             needs_review = 0
     elif replies.is_auto_submitted(meta["headers"]):
         classification = replies.CLASS_AUTO
@@ -413,6 +481,13 @@ def _record_usage(usage) -> None:
 def _handle_receipt(match: dict, meta: dict, from_addr: str, subject: str,
                     body: str, counters: dict) -> None:
     job = match["job"]
+    # What the mail SAYS, not merely who sent it. Matching identifies which
+    # posting a mail belongs to; it is no evidence that the mail is a
+    # receipt — a fast rejection arrives from exactly the same ATS domain,
+    # and filing it as "your application arrived" would state the opposite
+    # of what the employer wrote.
+    verdict = replies.classify(subject, body) if body else None
+    said = verdict.classification if verdict is not None else ""
     row = {
         "direction": EMAIL_INBOUND,
         "gmail_message_id": meta["id"],
@@ -421,11 +496,21 @@ def _handle_receipt(match: dict, meta: dict, from_addr: str, subject: str,
         "subject": subject,
         "snippet": meta["snippet"][:120],
         "internal_date": _iso_from_ms(meta["internal_date_ms"]),
+        "body_text": body,
         "job_id": int(job["id"]),
-        "matched_by": "receipt",
-        "classification": "eingang",
+        "matched_by": MATCHED_RECEIPT,
+        "classification": said or "eingang",
         "classified_by": "rules",
     }
+    if said and said != "eingang":
+        # An answer, not a receipt. There is no application in the ledger to
+        # carry it yet, so recording one AND filing its outcome is two
+        # decisions at once — he makes them with one press.
+        row["needs_review"] = 1
+        with db.db() as con:
+            db.add_email_log(con, row)
+        counters["review"] += 1
+        return
     if not match["strong"]:
         row["needs_review"] = 1
         with db.db() as con:
@@ -434,6 +519,12 @@ def _handle_receipt(match: dict, meta: dict, from_addr: str, subject: str,
         return
 
     bewerbung_id = int(job["bewerbung_id"] or 0) or None
+    if bewerbung_id is not None:
+        # The healing arm: the application is already in the ledger — he
+        # pressed „Abgeschickt" himself, or a crash landed between the two
+        # writes. This mail only ATTACHES to it, so it must never offer an
+        # undo: taking it back would delete a row this app did not create.
+        row["matched_by"] = MATCHED_ATTACHED
     if bewerbung_id is None:
         # The one automatic ledger write in this app, through the one
         # recorder — the strip pressed by the receipt instead of by him.
@@ -529,15 +620,22 @@ def adopt_receipt(email_log_id: int) -> dict:
 
 
 def undo_receipt(email_log_id: int) -> bool:
-    """Take an automatically recorded receipt back out — real work, not a
-    flag: the ledger row goes, the posting returns, and the mail returns to
-    the review pile where it can be re-adopted or dismissed.
+    """Take a receipt-recorded application back out — real work, not a flag:
+    the ledger row goes, the posting returns, and the mail returns to the
+    review pile where it can be re-adopted or dismissed.
+
+    Refused unless THIS app created that ledger row (`matched_by` is the
+    receipt arm, not the attach arm). The healing arm attaches a receipt to
+    an application he recorded by hand, and undoing there would delete a row
+    the reader never wrote — the ledger is not the reader's to destroy.
 
     previous_status is 'new' by construction: receipt candidates are strip
     rows, and since v10 an opened form leaves `jobs.status` untouched."""
     with db.db() as con:
         row = db.get_email_log(con, email_log_id)
     if row is None or row["job_id"] is None or row["bewerbung_id"] is None:
+        return False
+    if str(row["matched_by"] or "") != MATCHED_RECEIPT:
         return False
     apply_record.undo(int(row["job_id"]), int(row["bewerbung_id"]), "new")
     with db.db() as con:

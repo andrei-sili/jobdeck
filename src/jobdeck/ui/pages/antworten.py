@@ -47,7 +47,8 @@ MATCHED_BY = {
     "thread": "über den Mail-Verlauf zugeordnet",
     "address": "über die Absenderadresse zugeordnet",
     "domain": "über die Absender-Domain zugeordnet",
-    "receipt": "Eingangsbestätigung zu einem Formular",
+    reply_service.MATCHED_RECEIPT: "Eingangsbestätigung zu einem Formular",
+    reply_service.MATCHED_ATTACHED: "Eingangsbestätigung zu einem Formular",
 }
 
 
@@ -211,7 +212,7 @@ async def antworten_page():
                               dismiss(r)).props("flat no-caps")
 
         def _is_receipt_proposal(row: dict) -> bool:
-            return (row.get("matched_by") == "receipt"
+            return (row.get("matched_by") == reply_service.MATCHED_RECEIPT
                     and row.get("job_id") is not None
                     and row.get("bewerbung_id") is None)
 
@@ -245,7 +246,10 @@ async def antworten_page():
                          == "reply_manual" else "automatisch") \
                     .classes("jd-card-sub")
                 ui.space()
-                if (row.get("matched_by") == "receipt"
+                # Only a row this app CREATED may be taken back out; a
+                # receipt attached to an application he recorded by hand
+                # offers no undo, because the ledger row is not ours.
+                if (row.get("matched_by") == reply_service.MATCHED_RECEIPT
                         and row.get("bewerbung_id") is not None):
                     ui.button("Rückgängig",
                               on_click=lambda _=None, r=row["id"]:

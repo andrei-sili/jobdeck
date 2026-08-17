@@ -255,7 +255,13 @@ def set_status(
     if old == new_status:
         return True
     automatic = source not in ("user", "reply_manual") and not force
-    if automatic and STATUS_RANK.get(new_status, 0) < STATUS_RANK.get(old, 0):
+    # `<=`, not `<`: Einladung and Absage share rank 4, so a strict
+    # comparison let an automatic writer swap one settled verdict for the
+    # other — and the reply reader drains a backlog, so an OLDER invitation
+    # read after a newer rejection would silently reopen a closed
+    # application. An automatic source may raise a status, never move it
+    # sideways; a lateral correction is his to make.
+    if automatic and STATUS_RANK.get(new_status, 0) <= STATUS_RANK.get(old, 0):
         return False
     con.execute("UPDATE bewerbungen SET status=? WHERE id=?", (new_status, bewerbung_id))
     add_status_history(con, bewerbung_id, old, new_status, source, email_log_id, note)

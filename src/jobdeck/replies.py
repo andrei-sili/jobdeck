@@ -67,14 +67,22 @@ _EINLADUNG_PATTERNS = (
     r"wann (?:hätten|haben) sie zeit",
 )
 
+# A statement that the application ARRIVED — real receipt evidence.
 _EINGANG_PATTERNS = (
     r"eingangsbestätigung",
     r"(?:bewerbung|unterlagen).{0,60}(?:eingegangen|erhalten|angekommen)",
     r"bestätigen.{0,15}den (?:eingang|erhalt)",
     r"(?:eingang|erhalt) (?:ihrer|deiner) (?:bewerbung|unterlagen)",
+    r"ihre bewerbung.{0,40}(?:prüfen|in bearbeitung|sichten)",
+)
+
+# The thank-you opener. EVERY German reply starts this way — a rejection, an
+# invitation and a receipt alike — so it may carry a verdict only when
+# nothing else did, and it must never compete with one. Treating it as
+# evidence made every classic rejection look like two families disagreeing.
+_COURTESY_PATTERNS = (
     r"danken? (?:ihnen |dir )?für (?:ihre|deine) bewerbung",
     r"vielen dank für (?:ihre|deine) bewerbung",
-    r"ihre bewerbung.{0,40}(?:prüfen|in bearbeitung|sichten)",
 )
 
 _FAMILIES = (
@@ -87,12 +95,20 @@ _COMPILED = tuple(
     (family, tuple(re.compile(p, re.IGNORECASE) for p in patterns))
     for family, patterns in _FAMILIES
 )
+_COURTESY = tuple(re.compile(p, re.IGNORECASE) for p in _COURTESY_PATTERNS)
 
-# A sentence carrying one of these is describing a possibility, not stating
-# an act — the boilerplate screen described in the module docstring.
+# A sentence headed by one of these describes a possibility, not an act.
+#
+# These are SUBORDINATING CONJUNCTIONS, not verb moods. The first version
+# also screened "würden"/"könnten", which is wrong twice over: German
+# business prose uses the Konjunktiv for politeness, so "Gerne würden wir
+# Sie zu einem Vorstellungsgespräch einladen" is a real invitation — and
+# screening it left the mail's thank-you opener as the only surviving hit,
+# so a genuine interview invitation filed itself as a receipt.
 _CONDITIONAL = re.compile(
-    r"\b(?:sollten?|falls|ggf\.?|gegebenenfalls|eventuell|"
-    r"im nächsten schritt|würden?|könnten?|möglicherweise)\b",
+    r"\b(?:sollten?|falls|sofern|soweit|andernfalls|ggf\.?|"
+    r"gegebenenfalls|eventuell|im nächsten schritt|möglicherweise)\b"
+    r"|\bim fall(?:e)?\b",
     re.IGNORECASE,
 )
 
@@ -116,46 +132,82 @@ _AUTO_SUBJECT = re.compile(
 
 @dataclass(frozen=True)
 class RuleVerdict:
-    """What the rules concluded, and the phrase that carried it."""
+    """What the rules concluded, the phrase that carried it, and whether the
+    conclusion is safe to act on without a human.
+
+    `confident` is False whenever the verdict only survived because the
+    conditional screen removed a competing family's hit, or because two
+    families had to be ranked against each other. Those verdicts are still
+    shown — as PROPOSALS. The distinction exists because the screen is a
+    heuristic over German prose and every gap in it is a silently wrong
+    status; making the verdict depend on it cost a click instead.
+
+    'eingang' is exempt: it says only "your application arrived", which is
+    what the form path already writes by hand, and it can be corrected by
+    any later answer. Only the verdicts that CLOSE a question — absage and
+    einladung — must stand without the screen's help.
+    """
 
     classification: str
     pattern: str
+    confident: bool = True
+
+
+def _hits(sentences: list[str], screened: bool) -> dict[str, str]:
+    """First matching phrase per family; `screened` skips conditional
+    sentences (the verdict) or keeps them (what the screen suppressed)."""
+    found: dict[str, str] = {}
+    for family, patterns in _COMPILED:
+        for sentence in sentences:
+            if screened and _CONDITIONAL.search(sentence):
+                continue
+            for pattern in patterns:
+                match = pattern.search(sentence)
+                if match:
+                    found.setdefault(family, match.group(0))
+                    break
+            if family in found:
+                break
+    return found
 
 
 def classify(subject: str, body: str) -> RuleVerdict | None:
     """The rule layer's verdict, or None where honesty requires a human.
 
-    Exactly-one-family, with every hit inside a conditional sentence
-    discarded first. A mail matching two families is a mail the rules do not
-    understand (an interview being cancelled, a receipt that genuinely
-    invites) — the wrong cheap answer there is a wrong STATUS, so there is
-    deliberately no tie-break beyond the conditional screen."""
+    Exactly one competing family wins. A mail matching two (an interview
+    being cancelled, a rejection that also confirms receipt) is one the
+    rules do not understand, and the wrong cheap answer there is a wrong
+    STATUS. The thank-you opener never competes — see _COURTESY_PATTERNS.
+    """
     if _AUTO_SUBJECT.search(subject or ""):
         return RuleVerdict(CLASS_AUTO, "Betreff: automatische Antwort")
     text = _SOFT_WRAP.sub(" ", f"{subject}\n\n{body}")
     sentences = [s for s in _SENTENCE_SPLIT.split(text) if s.strip()]
-    hits: dict[str, str] = {}
-    for family, patterns in _COMPILED:
-        for sentence in sentences:
-            if _CONDITIONAL.search(sentence):
-                continue
-            for pattern in patterns:
-                match = pattern.search(sentence)
-                if match:
-                    hits.setdefault(family, match.group(0))
-                    break
-            if family in hits:
-                break
-    if CLASS_ABSAGE in hits and CLASS_EINGANG in hits \
-            and CLASS_EINLADUNG not in hits:
-        # Every German rejection opens by thanking for the application — the
-        # receipt vocabulary is part of the rejection's own fixed form and
-        # must not be allowed to talk the verdict into "ambiguous".
-        del hits[CLASS_EINGANG]
-    if len(hits) != 1:
+    hits = _hits(sentences, screened=True)
+    if len(hits) == 1:
+        family, phrase = next(iter(hits.items()))
+        # Confident unless the screen is what removed the competition.
+        unscreened = _hits(sentences, screened=False)
+        confident = (family == CLASS_EINGANG
+                     or set(unscreened) == set(hits))
+        return RuleVerdict(family, phrase, confident)
+    if hits:
+        # More than one family. A rejection that also states receipt is the
+        # one pair with a settled reading, and it is still only a proposal:
+        # the same shape is produced by a receipt that merely NAMES a
+        # possible rejection, and the two are not distinguishable here.
+        if set(hits) == {CLASS_ABSAGE, CLASS_EINGANG}:
+            return RuleVerdict(CLASS_ABSAGE, hits[CLASS_ABSAGE],
+                               confident=False)
         return None
-    family, phrase = next(iter(hits.items()))
-    return RuleVerdict(family, phrase)
+    for pattern in _COURTESY:
+        for sentence in sentences:
+            match = pattern.search(sentence)
+            if match:
+                # Nothing but the polite opener: it arrived, and that is all
+                # this mail says.
+                return RuleVerdict(CLASS_EINGANG, match.group(0))
+    return None
 
 
 def is_auto_submitted(headers: dict[str, str]) -> bool:
@@ -180,15 +232,32 @@ def is_auto_submitted(headers: dict[str, str]) -> bool:
     return False
 
 
-def sender_authenticated(headers: dict[str, str]) -> bool:
-    """Whether Gmail's own Authentication-Results vouches for the sender.
+# Who must have stamped the verdict this app trusts. Gmail prepends its own
+# Authentication-Results line, and `get_message_metadata` keeps the FIRST
+# occurrence — but a sender can include a line of their own, so the
+# authserv-id is checked rather than merely assumed to be on top.
+_GMAIL_AUTHSERV = re.compile(r"^\s*(mx\.google\.com|google\.com)\s*;",
+                             re.IGNORECASE)
+_DMARC_PASS = re.compile(r"\bdmarc\s*=\s*pass\b", re.IGNORECASE)
 
-    Read, never computed: Gmail evaluated SPF/DKIM on receipt and stamped
-    the verdict topmost. The receipt path demands this before it is allowed
-    to WRITE an application — a From header is what a forger controls, and
-    this is what he cannot."""
-    verdict = headers.get("authentication-results", "").lower()
-    return "spf=pass" in verdict or "dkim=pass" in verdict
+
+def sender_authenticated(headers: dict[str, str]) -> bool:
+    """Whether Gmail's own Authentication-Results vouches for the FROM domain.
+
+    DMARC, not SPF or DKIM alone. That distinction is the whole value of the
+    check: SPF authenticates the envelope sender (`smtp.mailfrom`) and DKIM
+    authenticates whatever domain signed (`d=`), and NEITHER binds the From
+    header a human reads. Anyone with a mailbox of their own passes both for
+    their own domain while writing any From they like. DMARC is the verdict
+    that requires an authenticated identity ALIGNED with the From domain, so
+    it is the only one that supports "this really came from that employer".
+
+    Read, never computed — and only from the line Gmail itself stamped.
+    """
+    verdict = headers.get("authentication-results", "")
+    if not _GMAIL_AUTHSERV.match(verdict):
+        return False
+    return bool(_DMARC_PASS.search(verdict))
 
 
 def extract_text(raw: bytes) -> str:
