@@ -363,3 +363,21 @@ def test_the_opener_alone_still_says_the_application_arrived():
         "Guten Tag,\n\nvielen Dank für Ihre Bewerbung. Wir melden uns.")
     assert verdict is not None
     assert verdict.classification == "eingang"
+
+
+EINGANG_ZUSENDUNG = """Guten Tag Herr Beispiel,
+
+vielen Dank für die Zusendung Ihrer Bewerbungsunterlagen für die Position
+als Softwareentwickler. Wir melden uns, sobald die Sichtung abgeschlossen
+ist.
+
+Mit freundlichen Grüßen"""
+
+
+def test_a_receipt_that_thanks_for_the_sending_is_still_a_receipt():
+    """Two of the first five real receipts used this phrasing and none of
+    the earlier patterns reached it — it names the SENDING rather than the
+    arrival, so the mail read as 'no verdict'."""
+    verdict = replies.classify("Ihre Bewerbung", EINGANG_ZUSENDUNG)
+    assert verdict is not None
+    assert verdict.classification == "eingang"

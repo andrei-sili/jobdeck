@@ -74,6 +74,10 @@ _EINGANG_PATTERNS = (
     r"bestätigen.{0,15}den (?:eingang|erhalt)",
     r"(?:eingang|erhalt) (?:ihrer|deiner) (?:bewerbung|unterlagen)",
     r"ihre bewerbung.{0,40}(?:prüfen|in bearbeitung|sichten)",
+    # "danke für die Zusendung Ihrer Bewerbungsunterlagen" — the phrasing
+    # two of the first five real receipts used, and one none of the earlier
+    # patterns reached: it names the SENDING rather than the arrival.
+    r"zusendung (?:ihrer|deiner) bewerbungsunterlagen",
 )
 
 # The thank-you opener. EVERY German reply starts this way — a rejection, an
