@@ -195,13 +195,28 @@ def test_normalising_whitespace_does_not_defeat_the_conditional_screen():
     "persönlichen Gespräch einladen.",
     "Eine Einladung zu einem Vorstellungsgespräch können wir Ihnen leider "
     "nicht aussprechen.",
+    "Leider können wir Sie nicht einladen.",
 ])
-def test_a_rejection_dressed_as_an_invitation_only_proposes(body):
+def test_a_rejection_dressed_as_an_invitation_never_files_one(body):
     """German builds the rejection out of the invitation's own words, and no
     amount of invitation phrasing tells them apart. Filed confidently this
-    was the worst thing the rules could do: Einladung is rank 4, so it closes
-    the application AND blocks the true Absage arriving behind it."""
+    was the most expensive misfile the rules can produce: Einladung is rank
+    4, so it closes the application AND then, by the anti-downgrade rule,
+    refuses the true Absage arriving behind it.
+
+    The invariant is what matters, not which mechanism delivers it — naming
+    the phrase in the Absage family makes the mail two-family, and the
+    negation screen catches what no phrase names."""
     verdict = replies.classify("Ihre Bewerbung", body)
+    assert verdict is None or not (verdict.classification == "einladung"
+                                   and verdict.confident)
+
+
+def test_the_negation_screen_alone_demotes_an_unnamed_refusal():
+    """The screen has to stand on its own: this refusal matches no Absage
+    phrase, so nothing else can stop it filing as a confident invitation."""
+    verdict = replies.classify("Ihre Bewerbung",
+                               "Leider können wir Sie nicht einladen.")
     assert verdict is not None and verdict.classification == "einladung"
     assert not verdict.confident
 
@@ -225,8 +240,7 @@ def test_the_polite_opener_alone_never_writes_a_status():
     review row, so nothing ever asked about it again."""
     verdict = replies.classify(
         "Ihre Bewerbung",
-        "Vielen Dank für Ihre Bewerbung. Wir haben uns anderweitig "
-        "entschieden.")
+        "Vielen Dank für Ihre Bewerbung. Wir melden uns.")
     assert verdict is not None and verdict.classification == "eingang"
     assert not verdict.confident
     # …while a receipt that states the arrival keeps writing by itself.
@@ -538,3 +552,67 @@ def test_a_letter_without_a_salutation_is_left_whole():
     text = "Ihre Bewerbung ist eingegangen."
     assert replies.letter_body(text) == text
     assert replies.letter_body("") == ""
+
+
+# --- the false-Absage boundary ------------------------------------------------
+#
+# A wrong Absage is the expensive error in this system: it is rank 4, so it
+# CLOSES a live application, and it is silent — the row leaves the open
+# statuses so no follow-up fires, and the mail is filed rather than left
+# waiting. So the rejection family is allowed to grow only against a corpus
+# of mails that must never be one.
+
+NEAR_MISSES = [
+    ("Einladung", "Gerne laden wir Sie zu einem Vorstellungsgespräch ein. "
+                  "Passt Ihnen Dienstag um 11:30 Uhr?"),
+    ("Terminwahl", "Wir würden Sie gerne kennenlernen. Wann hätten Sie Zeit?"),
+    ("Ihr Termin", "Das Gespräch findet nicht in unserer Zentrale statt, "
+                   "sondern in der Niederlassung."),
+    ("Terminverschiebung", "Wir müssen den Termin am Freitag leider "
+                           "verschieben. Passt Ihnen Montag?"),
+    ("Eingangsbestätigung", "Ihre Bewerbung ist bei uns eingegangen. "
+                            "Die Stelle soll zum 01.10. besetzt werden."),
+    ("Eingang", "Wir bestätigen den Erhalt Ihrer Unterlagen. Die Stelle ist "
+                "zum nächsten Quartal neu zu besetzen."),
+    ("Ihre Bewerbung", "Vielen Dank für Ihre Bewerbung. Wir sprechen derzeit "
+                       "noch mit anderen Bewerbern und melden uns."),
+    ("Ihre Bewerbung", "Falls wir uns für einen anderen Bewerber entscheiden, "
+                       "erhalten Sie eine Nachricht."),
+    ("Ihre Bewerbung", "Sollten Sie nicht in die engere Auswahl kommen, "
+                       "melden wir uns dennoch."),
+    ("Rückfrage", "Könnten Sie uns noch Ihr Abschlusszeugnis nachreichen?"),
+    ("Unterlagen", "Bitte senden Sie uns den unterschriebenen "
+                   "Datenschutzhinweis zurück."),
+    ("Gehalt", "Ihre Gehaltsvorstellung haben wir notiert und besprechen sie "
+               "im Gespräch."),
+    ("Profil", "Ihr Profil entspricht genau dem Anforderungsprofil."),
+    ("Zusage", "Wir freuen uns, Ihnen die Stelle anbieten zu können. Die "
+               "Entscheidung ist auf Sie gefallen."),
+    ("Information", "Leider müssen wir unsere Karrieremesse am 12.09. "
+                    "absagen."),
+    ("Newsletter", "Neue Stellen in Ihrer Region. Jetzt bewerben!"),
+    ("Abwesenheit", "Ich bin bis zum 25.08. nicht im Hause."),
+    ("Vorstellung", "Die Stelle ist noch nicht besetzt und wir würden Sie "
+                    "unserem Kunden gerne vorstellen."),
+    ("Bewerberpool", "Damit Ihre Bewerbung im Auswahlverfahren berücksichtigt "
+                     "werden kann, fehlt uns noch Ihr Lebenslauf."),
+    ("Ihr Termin", "Sollte das Vorstellungsgespräch nicht stattfinden können, "
+                   "melden wir uns rechtzeitig."),
+]
+
+
+@pytest.mark.parametrize("subject, body", NEAR_MISSES)
+def test_no_near_miss_is_ever_read_as_a_rejection(subject, body):
+    verdict = replies.classify(subject, body)
+    assert verdict is None or verdict.classification != "absage", (
+        f"false Absage on {subject!r}: {verdict}")
+
+
+@pytest.mark.parametrize("subject, body", NEAR_MISSES)
+def test_no_near_miss_writes_a_status_it_has_not_earned(subject, body):
+    """Beyond the family: a near-miss may be read as something, but only a
+    receipt or a real invitation may do so CONFIDENTLY."""
+    verdict = replies.classify(subject, body)
+    if verdict is not None and verdict.confident:
+        assert verdict.classification in ("eingang", "einladung", "auto"), (
+            f"{subject!r} confidently wrote {verdict.classification}")

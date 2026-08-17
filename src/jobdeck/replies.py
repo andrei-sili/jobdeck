@@ -38,20 +38,119 @@ CLASS_AUTO = "auto"
 # real rejections and present in polite receipts ("leider dauert die Prüfung
 # derzeit länger"), so every pattern here names the ACT, not the mood.
 _ABSAGE_PATTERNS = (
+    # --- someone else got it ------------------------------------------------
+    # `für einen? anderen?` could never match the neuter or the gendered slash
+    # form, and hardcoded the modifier "anderen" — a rejection naming an
+    # INTERNAL candidate went straight past it.
+    r"für ein(?:e|en)?(?:/n)?\s+ander(?:e|es|en|er)(?:/n)?\s+"
+    r"(?:person|besetzung|kandidat|bewerber|mitbewerber|interessent)",
+    r"für eine andere (?:kandidatin|bewerberin)",
+    r"(?:sich|uns) für (?:einen|eine)[^.!?]{0,25}"
+    r"(?:kandidat|bewerber|mitbewerber)\w*\s+entschieden",
+    r"zugunsten (?:eines|einer|einem) (?:anderen|anderer)",
+    r"anderen (?:kandidaten|bewerbern?|mitbewerbern?) (?:den vorzug|entschieden)",
+    r"mit (?:anderen|weiteren) (?:kandidat|bewerber)\w*\s+fort(?:zu)?(?:setzen|fahren)",
+    # "Die Entscheidung ist auf eine Mitbewerberin gefallen" — the Art. 33 GG
+    # formula. The (?!sie\b) guard is load-bearing: "Die Entscheidung ist auf
+    # Sie gefallen" is the exact opposite.
+    r"(?:entscheidung|wahl) ist auf (?!sie\b)[^.!?]{0,60}gefallen",
+    r"für jemand ander\w+[^.!?]{0,30}entschieden",
+    r"(?:uns )?anders entschieden",
+    r"\banderweitig entschieden\b",
+    r"gegen (?:ihre|deine|die) bewerbung[^.!?]{0,40}entschieden",
+    r"gegen (?:sie|dich) entschieden",
+
+    # --- the post is gone ---------------------------------------------------
+    # An entirely missing family, and the highest-yield one in the audit. The
+    # negative lookaheads keep it off "die Stelle soll besetzt werden" and
+    # "die Stelle ist neu zu besetzen", which are receipts, not rejections.
+    r"\b(?:stelle|position|vakanz|ausschreibung|stellenausschreibung)\b"
+    r"(?:(?!\bnicht\b|\bsoll\b|\bwird\b)[^.!?]){0,70}"
+    r"\b(?:anderweitig|intern|extern|bereits|inzwischen|zwischenzeitlich|"
+    r"mittlerweile|schon|erfolgreich)\b(?:(?!\bnicht\b)[^.!?]){0,30}"
+    r"\b(?:besetzt|vergeben)\b",
+    r"\b(?:stelle|position|vakanz|ausschreibung|projekt|suche)\b[^.!?]{0,40}"
+    r"\b(?:zurückgezogen|gestoppt|storniert)\b",
+    r"\b(?:stellen wir|stellen)\b[^.!?]{0,30}\bniemanden\b[^.!?]{0,15}\bein\b",
+
+    # --- the plain no -------------------------------------------------------
     r"\babsagen?\b",
+    # The separable verb "\babsagen?\b" structurally cannot see.
+    r"sagen (?:wir )?(?:ihnen|dir) (?:hiermit|daher|deshalb|somit|leider)"
+    r"[^.!?]{0,20}\bab\b",
+    r"(?<!nicht )\babgelehnt\b",
+    r"\b(?:bewerbung|auswahlverfahren|bewerbungsverfahren)\b[^.!?]{0,60}"
+    r"nicht erfolgreich",
+    r"bewerbung[^.!?]{0,30}nicht erfolgreich",
+    r"\b(?:es|das) hat (?:diesmal |leider )*nicht (?:geklappt|gereicht)\b",
+    r"\bnegativ(?:en|es|e|er)?\s+"
+    r"(?:bescheid|rückmeldung|entscheidung|antwort|nachricht)\b",
+    r"keine?\s+positive[nrs]?\s+"
+    r"(?:rückmeldung|nachricht|antwort|entscheidung|zusage)",
+    r"nicht positiv (?:bescheid|bewert)",
+    r"\bkeine (?:zusage|zusagen)\b",
+    r"\b(?:ihrer|deiner) bewerbung\b[^.!?]{0,40}\bnicht\b[^.!?]{0,20}\bentsprechen\b",
+
+    # --- not considered / not selected --------------------------------------
     r"nicht (?:weiter[- ]?)?berücksichtig",
     r"keine berücksichtigung",
-    r"für einen? anderen? (?:kandidat|bewerber|mitbewerber)",
-    r"für eine andere (?:kandidatin|bewerberin)",
-    r"anderen (?:kandidaten|bewerbern?|mitbewerbern?) (?:den vorzug|entschieden)",
-    r"anforderungsprofil.{0,60}(?:besser|eher|mehr) entsproch",
+    r"\bberücksichtigung\b[^.!?]{0,30}\bnicht\b",
+    r"\b(?:sie wurden|sie sind|wir haben sie)\b[^.!?]{0,40}\bnicht\b"
+    r"[^.!?]{0,25}\b(?:ausgewählt|ausgesucht|vorgesehen)\b",
+    r"nicht für (?:die|den|das) (?:nächste[nr]?|weitere[nr]?|zweite[nr]?)\s+"
+    r"(?:auswahl)?\w*(?:runde|schritt|phase|stufe)",
     r"nicht in die engere (?:wahl|auswahl)",
-    r"leider mitteilen",
-    r"bedauern.{0,40}mitteilen",
-    r"nicht (?:weiter)?verfolgen",
+    r"\bnicht (?:weiter )?im (?:auswahl|bewerbungs)?verfahren\b",
+    # The infinitive "zu" the old `nicht (?:weiter)?verfolgen` could not span.
+    r"nicht\s+weiter\s*(?:zu\s+)?verfolg",
+    r"\bvon (?:einer|der) weiteren "
+    r"(?:verfolgung|bearbeitung|berücksichtigung|prüfung)\b",
+    r"nicht auf (?:sie|dich) zurück",
+
+    # --- the profile did not fit -------------------------------------------
+    r"anforderungsprofil.{0,60}(?:besser|eher|mehr) entsproch",
+    r"nicht (?:dem|ihrem|unserem|diesem|unseren) anforderungsprofil",
+    r"anforderungsprofil\b[^.!?]{0,30}nicht (?:vollständig )?(?:entspr|erfüll)",
+    r"(?:entspr\w+|passen|passt)[^.!?]{0,25}nicht[^.!?]{0,30}anforderungsprofil",
+    r"\bpass(?:t|en)\b[^.!?]{0,40}\bnicht\b[^.!?]{0,40}"
+    r"\b(?:anforderung|anforderungsprofil|profil|position|stelle)",
+    r"\b(?:bewerbung|unterlagen|profil|lebenslauf)\b[^.!?]{0,40}"
+    r"nicht (?:vollständig )?überzeug",
+    r"\bnicht zu ihren gunsten\b",
+    r"\bzu ihren ungunsten\b",
+
+    # --- nothing to offer ---------------------------------------------------
     r"keine (?:passende )?(?:stelle|position|vakanz) anbieten",
+    r"\bkeine[nr]?\b[^.!?]{0,40}"
+    r"\b(?:perspektive|möglichkeit|verwendung|tätigkeit|stelle|position|vakanz)\b"
+    r"[^.!?]{0,40}\b(?:anbieten|bieten|in aussicht stellen|gefunden)\b",
+    r"\b(?:einstellung|zusammenarbeit|beschäftigung|übernahme)\b[^.!?]{0,80}"
+    r"\bnicht\b[^.!?]{0,30}\b(?:in betracht|zustande|möglich|erfolgen)\b",
+    # The headhunter idiom. Adjacent on purpose: with a gap it bridged
+    # "die Stelle ist noch nicht besetzt und wir würden Sie gerne vorstellen".
+    r"\bnicht\s+(?:mehr\s+)?vor(?:zu)?(?:schlagen|stellen)\b",
+    r"\bkeine (?:möglichkeit|chance)\b[^.!?]{0,40}vor(?:zu)?(?:schlagen|stellen)",
+
+    # --- the refused invitation, in the rejection family --------------------
+    # These read as invitations to the einladung family; naming them here
+    # makes the mail two-family, so it yields no verdict and asks him.
+    r"nicht zu (?:einem|einer)\s+"
+    r"(?:vorstellungsgespräch|kennenlerngespräch|gespräch|interview|termin)",
+    r"einladung[^.!?]{0,60}nicht[^.!?]{0,20}"
+    r"(?:aussprechen|zusenden|schicken|anbieten)",
+    r"gegen (?:eine|die) einladung",
+
+    # --- the closing formulas ----------------------------------------------
+    r"leider mitteilen",
+    r"\bleider\b[^.!?]{0,40}\bmitteilen\b",
+    r"bedauern.{0,40}mitteilen",
     r"alles gute für (?:ihren|deinen|ihre|deine)",
+    r"\balles gute für sie\b",
     r"beruflich(?:en|e)?.{0,30}(?:werdegang|zukunft|weg).{0,30}alles gute",
+    r"\b(?:weiteren|beruflichen|persönlichen|künftigen)\s+"
+    r"(?:weg|werdegang|zukunft|lebensweg)\b[^.!?]{0,25}\balles gute\b",
+    r"\b(?:senden|schicken|reichen) wir ihnen\b[^.!?]{0,60}\bzurück\b",
+    r"\brücksendung (?:ihrer|der) (?:bewerbungs)?unterlagen\b",
 )
 
 _EINLADUNG_PATTERNS = (
@@ -119,6 +218,23 @@ _CONDITIONAL = re.compile(
     r"|\bim fall(?:e)?\b",
     re.IGNORECASE,
 )
+
+# "absagen" is two words wearing one spelling: the noun is a refusal, the
+# verb also means to call an event off. Narrowing the phrase itself was tried
+# and withdrawn — requiring the addressee ("Ihnen ... absagen") loses the
+# CANCELLED INTERVIEW, which then reads as an invitation, and that is far
+# worse than the case being fixed. So the phrase stays broad and the message
+# decides: an employer who names an event and never once names the
+# application is not writing about the application.
+_BARE_ABSAGEN = re.compile(r"absagen?", re.IGNORECASE)
+_EVENT = re.compile(
+    r"\b(?:messe|karrieremesse|jobmesse|veranstaltung|event|webinar|"
+    r"infoabend|infotag|vortrag|workshop|sprechstunde|konferenz|"
+    r"schulung|seminar)\b", re.IGNORECASE)
+_APPLICATION = re.compile(
+    r"\b(?:bewerbung|bewerbungen|bewerbungsunterlagen|unterlagen|stelle|"
+    r"stellen|position|vakanz|kandidat|bewerber|auswahlverfahren)\w*\b",
+    re.IGNORECASE)
 
 # A negation sharing a sentence with invitation vocabulary. German builds a
 # rejection out of the invitation's own words — "wir können Sie leider nicht
@@ -224,6 +340,27 @@ def _hits(sentences: list[str], screened: bool) -> dict[str, tuple[str, str]]:
     return found
 
 
+def _drop_event_cancellation(
+        hits: dict[str, tuple[str, str]],
+        text: str) -> dict[str, tuple[str, str]]:
+    """Withdraw a rejection resting ONLY on the bare verb, in a mail that
+    names an event and never names the application.
+
+    Deliberately narrow on both sides: it engages only when the whole
+    rejection case is the word "absagen" itself, and only when nothing in
+    the message refers to an application. A real rejection always names one
+    somewhere, and a cancelled INTERVIEW is not touched — no interview word
+    is an event word here, precisely so that mail keeps its verdict.
+    """
+    hit = hits.get(CLASS_ABSAGE)
+    if (hit is not None
+            and _BARE_ABSAGEN.fullmatch(hit[0])
+            and _EVENT.search(text)
+            and not _APPLICATION.search(text)):
+        return {k: v for k, v in hits.items() if k != CLASS_ABSAGE}
+    return hits
+
+
 def classify(subject: str, body: str) -> RuleVerdict | None:
     """The rule layer's verdict, or None where honesty requires a human.
 
@@ -239,7 +376,7 @@ def classify(subject: str, body: str) -> RuleVerdict | None:
     # The wrap becomes a space, which can meet the space already there.
     text = _SPACE_RUN.sub(" ", _SOFT_WRAP.sub(" ", text))
     sentences = [s for s in _SENTENCE_SPLIT.split(text) if s.strip()]
-    hits = _hits(sentences, screened=True)
+    hits = _drop_event_cancellation(_hits(sentences, screened=True), text)
     if len(hits) == 1:
         family, (phrase, sentence) = next(iter(hits.items()))
         # Confident unless the screen is what removed the competition.
