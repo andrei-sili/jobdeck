@@ -146,6 +146,50 @@ def test_a_cancelled_interview_is_ambiguous_not_einladung():
     assert replies.classify("Ihr Termin", ABSAGE_NACH_EINLADUNG) is None
 
 
+@pytest.mark.parametrize("gap, name", [
+    ("\u00a0", "NO-BREAK SPACE — Word and Outlook emit it around German "
+             "punctuation"),
+    ("  ", "double space — what HTML-to-text conversion leaves behind"),
+    ("\t", "tab"),
+    ("\u202f", "NARROW NO-BREAK SPACE"),
+    ("\r\n", "CRLF, which is what actually arrives on the wire"),
+])
+def test_an_exotic_space_between_two_words_still_matches(gap, name):
+    """Two thirds of the patterns contain a literal U+0020, so whatever a
+    mail client puts between the words instead used to delete the verdict
+    outright — the mail read as unclassifiable rather than as a rejection.
+    Every real message in the owner's mailbox carried one of these."""
+    verdict = replies.classify(
+        "Ihre Bewerbung",
+        f"Wir müssen Ihnen leider{gap}mitteilen, dass es nicht geklappt hat.")
+    assert verdict is not None, f"{name} killed the verdict"
+    assert verdict.classification == "absage"
+
+
+def test_a_soft_hyphen_inside_a_compound_still_matches():
+    """Justified HTML mail hyphenates long German compounds, and the
+    invitation family is built on exactly such a compound."""
+    verdict = replies.classify(
+        "Termin",
+        # the compound is the ONLY invitation evidence here: with
+        # "laden Sie ... ein" in the sentence the verdict arrives by a
+        # second route and the test cannot see the hyphen at all.
+        "Wir freuen uns auf das Vorstellungs\u00adgespräch am Dienstag.")
+    assert verdict is not None and verdict.classification == "einladung"
+
+
+def test_normalising_whitespace_does_not_defeat_the_conditional_screen():
+    """The screen is what stops a receipt naming a possible interview from
+    reading as one — normalisation must not flatten the paragraph structure
+    it depends on."""
+    verdict = replies.classify(
+        "Eingangsbestätigung",
+        "Vielen Dank für Ihre Bewerbung.\n\nSollten Ihre Unterlagen unserem "
+        "Profil entsprechen, laden wir Sie zu\u00a0einem Vorstellungsgespräch "
+        "ein.")
+    assert verdict is not None and verdict.classification == "eingang"
+
+
 def test_an_out_of_office_subject_overrides_every_family():
     verdict = replies.classify("Automatische Antwort: Ihre Bewerbung",
                                OOO_MIT_DELEGATION)

@@ -127,6 +127,37 @@ _CONDITIONAL = re.compile(
 _SOFT_WRAP = re.compile(r"(?<!\n)\n(?!\n)")
 _SENTENCE_SPLIT = re.compile(r"[.!?]+|\n{2,}")
 
+# Real mail does not use the space character these patterns are written with.
+# Two thirds of the phrases above contain a literal space, so anything a mail
+# client puts between two words instead of U+0020 silently deletes the whole
+# verdict: "leider mitteilen" matches, "leider mitteilen" matches nothing
+# at all, and the mail lands on the review pile looking unclassifiable. The
+# producers are ordinary — Word and Outlook emit NO-BREAK SPACE around
+# German punctuation, HTML-to-text conversion leaves double spaces and
+# zero-width characters, justified HTML mail inserts SOFT HYPHEN inside long
+# German compounds ("Vorstellungs­gespräch"), and CRLF arrives on the wire.
+# Every real message in the owner's mailbox carried at least one of these.
+# soft hyphen, ZWSP/ZWNJ/ZWJ, word joiner, BOM
+_ZERO_WIDTH = re.compile("[\\u00ad\\u200b-\\u200d\\u2060\\ufeff]")
+# tab, NBSP, ogham space, the en/em quad family, narrow NBSP, ideographic
+_HORIZONTAL_SPACE = re.compile(
+    "[\\t\\u00a0\\u1680\\u2000-\\u200a\\u202f\\u205f\\u3000]")
+_SPACE_RUN = re.compile(r" {2,}")
+
+
+def normalize_whitespace(text: str) -> str:
+    """Reduce a mail's whitespace to what the patterns are written against.
+
+    Zero-width characters are DELETED (they sit inside words); every other
+    exotic space becomes U+0020 (they sit between them). Paragraph breaks
+    survive, because the sentence split and the conditional screen are what
+    keep a receipt's "Sollten wir Sie einladen" from reading as an invitation.
+    """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = _ZERO_WIDTH.sub("", text)
+    text = _HORIZONTAL_SPACE.sub(" ", text)
+    return _SPACE_RUN.sub(" ", text)
+
 # Subject prefixes a mail system stamps on an absence answer. These override
 # the families: an out-of-office body may well contain "Vorstellungsgespräch"
 # in its delegation note, and it still answers nothing.
@@ -187,9 +218,12 @@ def classify(subject: str, body: str) -> RuleVerdict | None:
     rules do not understand, and the wrong cheap answer there is a wrong
     STATUS. The thank-you opener never competes — see _COURTESY_PATTERNS.
     """
-    if _AUTO_SUBJECT.search(subject or ""):
+    subject = normalize_whitespace(subject or "").strip()
+    if _AUTO_SUBJECT.search(subject):
         return RuleVerdict(CLASS_AUTO, "Betreff: automatische Antwort")
-    text = _SOFT_WRAP.sub(" ", f"{subject}\n\n{body}")
+    text = normalize_whitespace(f"{subject}\n\n{body}")
+    # The wrap becomes a space, which can meet the space already there.
+    text = _SPACE_RUN.sub(" ", _SOFT_WRAP.sub(" ", text))
     sentences = [s for s in _SENTENCE_SPLIT.split(text) if s.strip()]
     hits = _hits(sentences, screened=True)
     if len(hits) == 1:
