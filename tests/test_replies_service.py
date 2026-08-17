@@ -530,3 +530,102 @@ def test_adopt_and_undo_a_receipt_roundtrip(inbox, con):
     row = db.get_email_log(con, row_id)
     assert (row["needs_review"], row["bewerbung_id"]) == (1, None)
     assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 0
+
+
+# --------------------------------------------------------------------------
+# the confidence gate at service level
+# --------------------------------------------------------------------------
+async def test_a_verdict_that_leaned_on_the_screen_never_files_itself(
+        inbox, con):
+    """The rules read this as a rejection, but only by ranking two families
+    against each other — and the identical shape is produced by a receipt
+    that merely NAMES a possible rejection. A thread match is not enough:
+    an unconfident verdict is a proposal wherever it came from."""
+    bewerbung_id = _sent_application(con, thread="t-9")
+    inbox.add("m-1", thread="t-9", body=(
+        "Sehr geehrter Herr Beispiel,\n\nIhre Bewerbung ist bei uns "
+        "eingegangen. Wir müssen Ihnen mitteilen, dass wir Sie nicht weiter "
+        "berücksichtigen können.\n\nMit freundlichen Grüßen"))
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["auto_status"] == 0
+    assert outcome["review"] == 1
+    assert db.get_bewerbung(con, bewerbung_id)["status"] == "Gesendet"
+    row = _inbound_rows(con)[0]
+    assert (row["classification"], row["needs_review"]) == ("absage", 1)
+
+
+async def test_an_unauthenticated_sender_cannot_file_a_status_by_address(
+        inbox, con):
+    """The address arm matches on the From header, which is what a forger
+    writes. Without Gmail's own DMARC verdict the rules may propose, never
+    file. (A thread match needs no such check — an attacker cannot forge
+    the threadId Gmail assigns to a message this app sent.)"""
+    bewerbung_id = _sent_application(con, email_addr="hr@firma-beispiel.de")
+    inbox.add("m-1", body=ABSAGE_BODY, auth=AUTH_FAIL)
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["auto_status"] == 0
+    assert db.get_bewerbung(con, bewerbung_id)["status"] == "Gesendet"
+    assert _inbound_rows(con)[0]["needs_review"] == 1
+
+
+async def test_a_receipt_attached_to_a_hand_recorded_application_offers_no_undo(
+        inbox, con):
+    """The healing arm attaches a receipt to an application HE recorded.
+    Undoing there would delete a ledger row this app never wrote."""
+    job_id = _strip_job(con, apply_url="https://bewerbung.firma-beispiel.de/7")
+    bewerbung_id = _sent_application(con)
+    db.set_job_status(con, job_id, "applied", bewerbung_id=bewerbung_id)
+    con.commit()
+    inbox.add("m-1", from_header="Firma <karriere@firma-beispiel.de>",
+              subject="Eingangsbestätigung",
+              body="Ihre Bewerbung ist eingegangen.")
+
+    await service.ingest_replies()
+
+    row = _inbound_rows(con)[0]
+    assert row["matched_by"] == service.MATCHED_ATTACHED
+    assert service.undo_receipt(row["id"]) is False
+    # the application he recorded is still there
+    assert db.get_bewerbung(con, bewerbung_id) is not None
+    assert db.get_job(con, job_id)["bewerbung_id"] == bewerbung_id
+
+
+async def test_the_backlog_is_read_oldest_first(inbox, con):
+    """A search answers newest-first. Reading in that order let an OLDER
+    mail be processed after a newer one, so the earlier word became the
+    last one written."""
+    bewerbung_id = _sent_application(con, thread="t-9")
+    # the inbox lists newest first: the receipt is the OLDER mail
+    inbox.add("m-neu", thread="t-9", body=ABSAGE_BODY)
+    inbox.add("m-alt", thread="t-9",
+              body="Guten Tag,\n\nIhre Bewerbung ist bei uns eingegangen.")
+
+    await service.ingest_replies()
+
+    assert [row["gmail_message_id"] for row in _inbound_rows(con)] \
+        == ["m-alt", "m-neu"]
+    # read in arrival order the receipt lands first and the rejection last
+    assert db.get_bewerbung(con, bewerbung_id)["status"] == "Absage"
+
+
+async def test_a_refused_automatic_write_asks_him_instead_of_going_quiet(
+        inbox, con):
+    """Two settled verdicts in one backlog: the second cannot be applied
+    automatically (no automatic source moves a verdict sideways), and
+    leaving it filed would put 'Absage · automatisch' in the ledger beside
+    an application reading Einladung."""
+    bewerbung_id = _sent_application(con, thread="t-9")
+    inbox.add("m-2", thread="t-9", body=ABSAGE_BODY)
+    inbox.add("m-1", thread="t-9", body=EINLADUNG_BODY)
+
+    await service.ingest_replies()
+
+    assert db.get_bewerbung(con, bewerbung_id)["status"] == "Einladung"
+    rows = {row["gmail_message_id"]: row for row in _inbound_rows(con)}
+    assert rows["m-1"]["needs_review"] == 0
+    assert rows["m-2"]["needs_review"] == 1  # the rejection waits for him
+    assert rows["m-2"]["classification"] == "absage"

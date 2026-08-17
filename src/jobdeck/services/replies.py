@@ -436,10 +436,19 @@ def _handle_reply(match: dict, meta: dict, from_addr: str, subject: str,
         })
         status = CLASSIFICATION_TO_STATUS.get(classification)
         if needs_review == 0 and classified_by == "rules" and status:
-            db.set_status(con, match["bewerbung_id"], status,
-                          source="reply_auto", email_log_id=email_log_id,
-                          note=note)
-            counters["auto_status"] += 1
+            if db.set_status(con, match["bewerbung_id"], status,
+                             source="reply_auto", email_log_id=email_log_id,
+                             note=note):
+                counters["auto_status"] += 1
+            else:
+                # The anti-downgrade rank refused it: the application is
+                # already settled, and no automatic source may move a
+                # settled verdict sideways. Left filed, this row would sit
+                # in the ledger reading "Absage · automatisch" beside an
+                # application that says Einladung. It is HIS to reconcile.
+                needs_review = 1
+                db.classify_reply_row(con, email_log_id, classification,
+                                      classified_by, 1)
     if needs_review:
         counters["review"] += 1
     elif classification in LABELS:

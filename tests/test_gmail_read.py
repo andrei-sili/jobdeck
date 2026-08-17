@@ -310,3 +310,29 @@ def test_reading_requires_the_modify_scope(data_dir, monkeypatch):
                         lambda creds: pytest.fail("service built without scope"))
     with pytest.raises(gmail.GmailNotConnected):
         gmail.profile_history_id()
+
+
+def test_a_truncated_history_listing_refuses_to_hand_back_a_checkpoint(readable):
+    """`historyId` is the MAILBOX's current position, not the point this
+    listing reached. Storing it after a bounded read would step over every
+    message past the bound — permanently, since nothing lists them again."""
+    readable.history_pages = [
+        {"historyId": "h-900", "nextPageToken": "1",
+         "history": [{"messagesAdded": [{"message": {"id": f"m-{i}"}}]}
+                     for i in range(3)]},
+        {"historyId": "h-900",
+         "history": [{"messagesAdded": [{"message": {"id": f"m-{i}"}}]}
+                     for i in range(3, 6)]},
+    ]
+    ids, checkpoint = gmail.history_added_messages("h-1", 2)
+    assert ids == ["m-0", "m-1"]
+    assert checkpoint == ""  # not drained — the caller keeps the old one
+
+
+def test_a_complete_history_listing_does_hand_back_its_checkpoint(readable):
+    readable.history_pages = [{
+        "historyId": "h-900",
+        "history": [{"messagesAdded": [{"message": {"id": "m-0"}}]}],
+    }]
+    ids, checkpoint = gmail.history_added_messages("h-1", 50)
+    assert (ids, checkpoint) == (["m-0"], "h-900")
