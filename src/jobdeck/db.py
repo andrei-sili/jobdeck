@@ -2178,12 +2178,19 @@ def find_bewerbung_by_thread(con: sqlite3.Connection, thread_id: str) -> int | N
     match a reply to an application."""
     if not thread_id:
         return None
+    # Any logged message of this thread that names an application anchors
+    # it — outbound OR a receipt already read into the same thread. Only
+    # outbound rows were consulted at first, which left every FORM
+    # application unreachable: it sent nothing, so its thread's only anchor
+    # is the inbound receipt. Half his applications go out that way, and
+    # their eventual rejection was being dropped as unmatched.
+    # `bewerbung_id IS NOT NULL` is what keeps rehearsal traffic out: a test
+    # send never records one.
     row = con.execute(
         "SELECT bewerbung_id FROM email_log "
-        " WHERE gmail_thread_id=? AND direction LIKE ? "
-        "   AND bewerbung_id IS NOT NULL "
+        " WHERE gmail_thread_id=? AND bewerbung_id IS NOT NULL "
         " ORDER BY id DESC LIMIT 1",
-        (thread_id, f"{EMAIL_OUTBOUND}%"),
+        (thread_id,),
     ).fetchone()
     if row is not None:
         return int(row[0])

@@ -178,3 +178,39 @@ def test_the_loader_reads_its_signature_first():
     call = first_statement.value
     assert isinstance(call, ast.Call)
     assert getattr(call.func, "id", "") == "_signature"
+
+
+async def test_an_automatically_filed_row_can_be_corrected(user: User, con):
+    """The card promises 'ein Klick korrigiert sie'. Without a control on
+    the settled rows that promise was false for exactly the rows it is
+    about — the ones the rules filed by themselves."""
+    bewerbung_id = _application(con)
+    row_id = _inbound(con, "m-1", bewerbung_id=bewerbung_id, needs_review=0,
+                      classification="absage", classified_by="rules")
+    db.set_status(con, bewerbung_id, "Absage", source="reply_auto")
+    con.commit()
+
+    await user.open("/antworten")
+    await user.should_see("automatisch")
+    user.find("Korrigieren").click()
+    await user.should_see("Wie war diese Antwort gemeint?")
+    user.find("Einladung").click()
+    # waits for the row to be REDRAWN — 'Eingeordnet' is the section title
+    # and is on screen either way, so asserting on it would race the handler
+    await user.should_see("bestätigt")
+
+    row = db.get_email_log(con, row_id)
+    assert (row["classification"], row["classified_by"]) \
+        == ("einladung", "reply_manual")
+    # his verdict outranks the reader's — equal rank does not block a human
+    assert db.get_bewerbung(con, bewerbung_id)["status"] == "Einladung"
+
+
+async def test_a_receipt_attached_to_his_own_record_offers_no_undo(
+        user: User, con):
+    bewerbung_id = _application(con)
+    _inbound(con, "m-1", bewerbung_id=bewerbung_id, needs_review=0,
+             classification="eingang", classified_by="rules",
+             matched_by="receipt_known")
+    await user.open("/antworten")
+    await user.should_not_see("Rückgängig")

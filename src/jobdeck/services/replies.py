@@ -613,6 +613,22 @@ def adopt_receipt(email_log_id: int) -> dict:
         row = db.get_email_log(con, email_log_id)
     if row is None or row["job_id"] is None:
         return {"ok": False}
+    with db.db() as con:
+        job = db.get_job(con, int(row["job_id"]))
+    if job is not None and job["bewerbung_id"] is not None:
+        # It was recorded meanwhile — by him, or by an earlier pass. Record
+        # it again and `apply_job` marks the posting a DUPLICATE of its own
+        # application; attach instead, which is what the press meant.
+        bewerbung_id = int(job["bewerbung_id"])
+        with db.db() as con:
+            db.link_reply_bewerbung(con, email_log_id, bewerbung_id)
+            db.classify_reply_row(con, email_log_id, "eingang",
+                                  "reply_manual", 0)
+            db.set_status(con, bewerbung_id, "In Bearbeitung",
+                          source="reply_manual", email_log_id=email_log_id)
+        return {"ok": True, "bewerbung_id": bewerbung_id,
+                "company": str(job["company"] or ""), "duplicate": None,
+                "undo": False}
     outcome = apply_record.record_form_application(
         int(row["job_id"]), source="eingang")
     if not outcome["ok"]:

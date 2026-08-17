@@ -629,3 +629,52 @@ async def test_a_refused_automatic_write_asks_him_instead_of_going_quiet(
     assert rows["m-1"]["needs_review"] == 0
     assert rows["m-2"]["needs_review"] == 1  # the rejection waits for him
     assert rows["m-2"]["classification"] == "absage"
+
+
+async def test_a_form_applications_later_answer_finds_its_application(
+        inbox, con):
+    """A form application sends nothing, so its thread's only anchor is the
+    receipt already read into it. Consulting outbound rows alone left every
+    later answer — the real Absage or Einladung — unmatched and dropped;
+    roughly half his applications go out that way."""
+    job_id = _strip_job(con)
+    bewerbung_id = db.add_bewerbung(con, {"firma": "Firma Beispiel GmbH",
+                                          "email": "", "kanal": "Online-Portal",
+                                          "status": "Gesendet"})
+    db.set_job_status(con, job_id, "applied", bewerbung_id=bewerbung_id)
+    db.add_email_log(con, {"direction": "inbound", "gmail_message_id": "m-0",
+                           "gmail_thread_id": "t-form",
+                           "bewerbung_id": bewerbung_id,
+                           "matched_by": service.MATCHED_RECEIPT,
+                           "classification": "eingang"})
+    con.commit()
+    inbox.add("m-1", thread="t-form", body=ABSAGE_BODY)
+
+    await service.ingest_replies()
+
+    assert db.get_bewerbung(con, bewerbung_id)["status"] == "Absage"
+    row = [r for r in _inbound_rows(con) if r["gmail_message_id"] == "m-1"][0]
+    assert (row["matched_by"], row["bewerbung_id"]) == ("thread", bewerbung_id)
+
+
+async def test_adopting_a_receipt_for_an_already_recorded_job_attaches(
+        inbox, con):
+    """Recording twice makes `apply_job` mark the posting a DUPLICATE of its
+    own application. The press means 'this mail belongs to that
+    application', so it attaches."""
+    job_id = _strip_job(con)
+    bewerbung_id = _sent_application(con)
+    db.set_job_status(con, job_id, "applied", bewerbung_id=bewerbung_id)
+    row_id = db.add_email_log(con, {
+        "direction": "inbound", "gmail_message_id": "m-r", "job_id": job_id,
+        "matched_by": service.MATCHED_RECEIPT, "classification": "eingang",
+        "needs_review": 1})
+    con.commit()
+
+    outcome = service.adopt_receipt(row_id)
+
+    assert outcome["ok"] is True
+    job = db.get_job(con, job_id)
+    assert (job["status"], job["bewerbung_id"]) == ("applied", bewerbung_id)
+    assert db.get_email_log(con, row_id)["bewerbung_id"] == bewerbung_id
+    assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 1

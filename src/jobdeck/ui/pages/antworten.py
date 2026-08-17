@@ -146,11 +146,12 @@ async def antworten_page():
                 # What is automatic, stated out loud: the tiering decision
                 # (ROADMAP 2026-08-05) supersedes the mockup's blanket
                 # "Nichts ändert den Status ohne dich".
-                ui.label("Eindeutige Absagen, Einladungen und "
-                         "Eingangsbestätigungen trägt JobDeck selbst ein — "
-                         "jede Zeile unten zeigt das, und ein Klick "
-                         "korrigiert sie. Alles Unklare wartet hier auf "
-                         "dich.").classes("jd-card-sub")
+                ui.label("Eindeutige Absagen und Einladungen im Mail-Verlauf "
+                         "einer Bewerbung trägt JobDeck selbst ein, ebenso "
+                         "Eingangsbestätigungen aus der Domain der Anzeige. "
+                         "Jede Zeile unten sagt, ob sie automatisch kam, und "
+                         "ein Klick korrigiert sie. Alles andere wartet hier "
+                         "auf dich.").classes("jd-card-sub")
                 if not view["ai_on"]:
                     ui.label("Unklare Antworten bleiben unklar: die "
                              "KI-Einordnung ist aus (Einstellungen → AI).") \
@@ -254,9 +255,38 @@ async def antworten_page():
                     ui.button("Rückgängig",
                               on_click=lambda _=None, r=row["id"]:
                               undo(r)).props("flat dense no-caps")
+                elif row.get("bewerbung_id") is not None:
+                    # The card above promises "ein Klick korrigiert sie".
+                    # Without this the promise was false for every row the
+                    # rules filed by themselves — the only ones it is about.
+                    ui.button("Korrigieren",
+                              on_click=lambda _=None, r=dict(row):
+                              correct(r)).props("flat dense no-caps")
                 ui.button("Ganze Mail",
                           on_click=lambda _=None, r=dict(row): show_mail(r)) \
                     .props("flat dense no-caps")
+
+        def correct(row: dict) -> None:
+            """Re-classify a settled row. His verdict outranks the reader's:
+            `resolve_review` writes with source 'reply_manual', which the
+            anti-downgrade rank does not apply to."""
+            current = row.get("classification") or ""
+            with overlay, ui.dialog() as dialog, ui.card():
+                ui.label("Wie war diese Antwort gemeint?") \
+                    .classes("font-medium")
+                ui.label(_sender_line(row)).classes("jd-card-sub")
+                with ui.row().classes("items-center gap-2 flex-wrap"):
+                    for value in ("absage", "einladung", "eingang",
+                                  "sonstige"):
+                        async def pick(_=None, v=value):
+                            dialog.close()
+                            await classify(row["id"], v)
+                        ui.button(CLASS_LABELS[value], on_click=pick) \
+                            .props(("unelevated" if value == current
+                                    else "outline") + " no-caps")
+                ui.button("Abbrechen", on_click=dialog.close) \
+                    .props("flat no-caps")
+            dialog.open()
 
         # ------------------------------------------------------------------
         # The full mail, in a dialog — label-only, hostile text stays text
