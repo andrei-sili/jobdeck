@@ -80,6 +80,7 @@ def _load() -> dict:
                 con, reply_service.AI_TOGGLE_KEY, "0") == "1"),
             "connected": gmail.is_connected(),
             "can_read": gmail.can_read(),
+            "skipped": db.count_skipped_messages(con),
         }
 
 
@@ -156,6 +157,63 @@ async def antworten_page():
                     ui.label("Unklare Antworten bleiben unklar: die "
                              "KI-Einordnung ist aus (Einstellungen → AI).") \
                         .classes("jd-card-sub")
+                # A message no application could be found for leaves only its
+                # opaque id, and that id is what keeps the next run from
+                # reading it — so an improvement to the rules reaches only
+                # mail that has not arrived yet. This is how it reaches the
+                # rest.
+                if view["skipped"]:
+                    ui.label(register.plural(
+                        view["skipped"],
+                        "Nachricht wurde keiner Bewerbung zugeordnet und "
+                        "wird nicht erneut gelesen",
+                        "Nachrichten wurden keiner Bewerbung zugeordnet und "
+                        "werden nicht erneut gelesen")).classes("jd-card-sub")
+                    ui.button("Alle Nachrichten neu prüfen",
+                              on_click=lambda _=None, n=view["skipped"]: rescan_dialog(n)) \
+                        .props("outline no-caps")
+
+        # ------------------------------------------------------------------
+        # Re-arming the reader
+        # ------------------------------------------------------------------
+        def rescan_dialog(skipped: int) -> None:
+            """Ask before re-arming: the next runs will read messages that
+            were already judged once, and the window is a real choice — a
+            year back reaches mail from before JobDeck could read at all."""
+            with overlay, ui.dialog() as dialog, ui.card():
+                ui.label("Alle Nachrichten neu prüfen").classes("font-medium")
+                ui.label(register.plural(
+                    skipped,
+                    "Nachricht wird wieder als ungelesen behandelt und beim "
+                    "nächsten Lauf erneut beurteilt.",
+                    "Nachrichten werden wieder als ungelesen behandelt und "
+                    "beim nächsten Lauf erneut beurteilt.")) \
+                    .classes("jd-card-sub")
+                ui.label("Bereits zugeordnete Antworten bleiben, wie sie "
+                         "sind — sie können nicht doppelt eingetragen "
+                         "werden.").classes("jd-card-sub")
+                days = ui.number("Wie weit zurück? (Tage)", value=90,
+                                 min=1, max=3650, precision=0) \
+                    .classes("w-full")
+                with ui.row().classes("items-center gap-2"):
+                    async def go(_=None):
+                        chosen = int(days.value or 90)
+                        dialog.close()
+                        overlay.clear()
+                        result = await run.io_bound(
+                            reply_service.rescan, chosen)
+                        say(register.plural(
+                            result["forgotten"],
+                            "1 Nachricht wird neu gelesen",
+                            f"{result['forgotten']} Nachrichten werden neu "
+                            "gelesen") + f" · {result['lookback_days']} Tage "
+                            "zurück. Der nächste Lauf beginnt damit.")
+                        await refresh()
+                    ui.button("Neu prüfen", on_click=go) \
+                        .props("unelevated no-caps")
+                    ui.button("Abbrechen", on_click=dialog.close) \
+                        .props("flat no-caps")
+            dialog.open()
 
         # ------------------------------------------------------------------
         # Zu prüfen

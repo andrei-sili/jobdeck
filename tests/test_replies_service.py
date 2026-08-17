@@ -1012,3 +1012,78 @@ async def test_a_mail_with_no_body_is_still_read_from_its_subject(inbox, con):
     assert db.get_bewerbung(con, bewerbung_id)["status"] == "Gesendet"
     # the body was never fetched — the size gate ran first
     assert inbox.raw_calls == []
+
+
+# --------------------------------------------------------------------------
+# rescan: making an improvement retroactive
+# --------------------------------------------------------------------------
+async def test_a_skipped_message_is_read_again_after_a_rescan(inbox, con):
+    """A message no application could be found for leaves only its opaque id,
+    and that id is what stops the next pass reading it. So every improvement
+    to the matching or the German rules reached only mail that had not
+    arrived yet — the rescan is what makes one retroactive."""
+    inbox.add("m-1", body=ABSAGE_BODY)
+    await service.ingest_replies()
+    assert _inbound_rows(con) == []          # nothing to match it to, yet
+
+    # he records the application afterwards, then re-arms the reader
+    bewerbung_id = _sent_application(con, email_addr="hr@firma-beispiel.de")
+    result = service.rescan()
+    assert result["forgotten"] == 1
+
+    await service.ingest_replies()
+
+    row = _inbound_rows(con)[0]
+    assert row["bewerbung_id"] == bewerbung_id
+    assert row["classification"] == "absage"
+
+
+async def test_a_rescan_never_files_a_matched_message_twice(inbox, con):
+    """Only the skipped ids are dropped. A message already tied to an
+    application keeps its row, so the duplicate gate still refuses it."""
+    _sent_application(con, email_addr="hr@firma-beispiel.de")
+    inbox.add("m-1", body=ABSAGE_BODY)
+    await service.ingest_replies()
+    assert len(_inbound_rows(con)) == 1
+
+    service.rescan()
+    await service.ingest_replies()
+
+    assert len(_inbound_rows(con)) == 1
+    bewerbung_id = _inbound_rows(con)[0]["bewerbung_id"]
+    absagen = [h for h in db.list_status_history(con, bewerbung_id)
+               if h["new_status"] == "Absage"]
+    assert len(absagen) == 1, "the rejection was filed twice"
+
+
+async def test_the_rescan_widens_the_window_the_next_full_sync_uses(inbox, con):
+    captured = {}
+
+    def fake_list(query, max_results):
+        captured["query"] = query
+        return []
+
+    import jobdeck.gmail as gmail_mod
+    original = gmail_mod.list_new_message_ids
+    gmail_mod.list_new_message_ids = fake_list
+    try:
+        service.rescan(lookback_days=365)
+        await service.ingest_replies()
+    finally:
+        gmail_mod.list_new_message_ids = original
+
+    assert db.get_setting(con, service.LOOKBACK_KEY, "") == "365"
+    # a year back, not the thirty days a first run defaults to
+    import datetime
+    after = int(captured["query"].split("after:")[1])
+    days = (datetime.datetime.now()
+            - datetime.datetime.fromtimestamp(after)).days
+    assert 364 <= days <= 366
+
+
+def test_an_unparseable_lookback_falls_back_instead_of_crashing(data_dir, con):
+    """A settings page is reachable; a crashed scheduler job is not."""
+    with db.db() as write:
+        db.set_setting(write, service.LOOKBACK_KEY, "sehr lange")
+    with db.db() as read:
+        assert service._lookback_days(read) == service.FIRST_RUN_LOOKBACK_DAYS

@@ -214,3 +214,27 @@ async def test_a_receipt_attached_to_his_own_record_offers_no_undo(
              matched_by="receipt_known")
     await user.open("/antworten")
     await user.should_not_see("Rückgängig")
+
+
+async def test_the_page_offers_to_re_read_what_it_skipped(
+        user: User, data_dir, con, monkeypatch):
+    """A skipped message is invisible by design — only its opaque id is
+    kept. The page has to say how many there are, or the one honest limit of
+    the whole feature is undiscoverable from inside it."""
+    config.TOKEN_PATH.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(gmail, "can_read", lambda: True)
+    with db.db() as write:
+        for n in range(3):
+            db.add_email_log(write, {"direction": "inbound_ignored",
+                                     "gmail_message_id": f"skip-{n}"})
+    await user.open("/antworten")
+    await user.should_see("3 Nachrichten wurden keiner Bewerbung zugeordnet")
+    await user.should_see("Alle Nachrichten neu prüfen")
+
+
+async def test_the_page_stays_quiet_when_nothing_was_skipped(
+        user: User, data_dir, con, monkeypatch):
+    config.TOKEN_PATH.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(gmail, "can_read", lambda: True)
+    await user.open("/antworten")
+    await user.should_not_see("Alle Nachrichten neu prüfen")

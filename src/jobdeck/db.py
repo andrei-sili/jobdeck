@@ -19,6 +19,7 @@ from jobdeck.constants import (
     DEFAULT_DAILY_DRAFT_CAP,
     DRAFT_STATUS,
     EMAIL_INBOUND,
+    EMAIL_INBOUND_IGNORED,
     EMAIL_OUTBOUND,
     EMAIL_OUTBOUND_TEST,
     FORM_OPENED_UNKNOWN,
@@ -2214,6 +2215,33 @@ def bewerbungen_for_reply_match(con: sqlite3.Connection) -> list[sqlite3.Row]:
         "SELECT id, email, firma, status, gesendet_am FROM bewerbungen "
         " WHERE COALESCE(email,'') <> '' ORDER BY id DESC"
     ).fetchall()
+
+
+def count_skipped_messages(con: sqlite3.Connection) -> int:
+    """How many messages were read once, matched nothing, and are now closed
+    to every future pass. The number the rescan control exists to answer."""
+    row = con.execute(
+        "SELECT COUNT(*) FROM email_log WHERE direction=?",
+        (EMAIL_INBOUND_IGNORED,),
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def forget_ignored_messages(con: sqlite3.Connection) -> int:
+    """Drop the opaque ids of messages no application could be found for.
+
+    Those rows exist so a bounded pass can advance past a backlog without
+    reading the same message for ever — which also means a message skipped
+    once is skipped for good, and every later improvement to the matching or
+    the German rules reaches only mail that has not arrived yet. Forgetting
+    them is what makes an improvement retroactive: the next pass sees them as
+    new again.
+
+    Only the ignored rows. A message already tied to an application keeps its
+    row, so re-listing cannot file it twice."""
+    cur = con.execute("DELETE FROM email_log WHERE direction=?",
+                      (EMAIL_INBOUND_IGNORED,))
+    return cur.rowcount
 
 
 def bewerbungen_for_name_match(con: sqlite3.Connection) -> list[sqlite3.Row]:

@@ -87,6 +87,10 @@ HISTORY_KEY = "replies_history_id"
 LAST_POLL_KEY = "replies_last_poll_at"
 LAST_ERROR_KEY = "replies_last_error"
 AI_TOGGLE_KEY = "reply_ai_classify"
+# How far a full sync reaches back. A setting rather than the constant
+# because widening it is the only way to reach mail that arrived before
+# JobDeck could read the mailbox at all.
+LOOKBACK_KEY = "reply_lookback_days"
 
 # Skip-style single-flight (the liveness/apply_resolve pattern): the manual
 # button must learn "a pass is already running", not queue a second one.
@@ -179,6 +183,47 @@ def _ingest() -> dict:
     return counters
 
 
+def _lookback_days(con) -> int:
+    """The full-sync window, in days, from the setting.
+
+    Guarded: a stored value can be anything a text field accepted, and an
+    unparseable one must not take the reader down — a settings page is
+    reachable, a crashed scheduler job is not."""
+    raw = db.get_setting(con, LOOKBACK_KEY, "")
+    try:
+        days = int(float(raw))
+    except (TypeError, ValueError):
+        return FIRST_RUN_LOOKBACK_DAYS
+    return min(max(days, 1), 3650)
+
+
+def rescan(lookback_days: int | None = None) -> dict:
+    """Re-arm the reader so it examines the mail it once skipped.
+
+    A message no application could be found for leaves only its opaque id,
+    and that id is what stops the next pass reading it again — so a skipped
+    message stays skipped, and every later improvement to the matching or the
+    German rules reaches only mail that has not arrived yet. This drops those
+    ids and clears the incremental checkpoint, so the next passes do a full
+    sync over the lookback window and judge them afresh.
+
+    Messages already tied to an application are untouched: their rows stay,
+    so the duplicate gate still refuses to file them twice. Nothing is read
+    or written here — the passes that follow do the work, at their own bounded
+    rate.
+    """
+    with db.db() as con:
+        if lookback_days is not None:
+            db.set_setting(con, LOOKBACK_KEY, str(max(int(lookback_days), 1)))
+        forgotten = db.forget_ignored_messages(con)
+        db.set_setting(con, HISTORY_KEY, "")
+        db.set_setting(con, LAST_ERROR_KEY, "")
+        days = _lookback_days(con)
+    log.info("reply ingestion: re-armed — %d skipped message(s) forgotten, "
+             "lookback %d days", forgotten, days)
+    return {"forgotten": forgotten, "lookback_days": days}
+
+
 def _new_message_ids() -> tuple[list[str], str, bool]:
     """(candidate ids, checkpoint to store once drained, came-from-history).
 
@@ -196,8 +241,9 @@ def _new_message_ids() -> tuple[list[str], str, bool]:
     # Full sync: the checkpoint is taken BEFORE listing, so anything arriving
     # while this pass runs is covered by the next incremental read.
     checkpoint = gmail.profile_history_id()
-    cutoff = datetime.datetime.now() - datetime.timedelta(
-        days=FIRST_RUN_LOOKBACK_DAYS)
+    with db.db() as con:
+        days = _lookback_days(con)
+    cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
     query = f"-from:me after:{int(cutoff.timestamp())}"
     return gmail.list_new_message_ids(query, LIST_AHEAD), checkpoint, False
 
