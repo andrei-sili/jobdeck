@@ -512,7 +512,13 @@ async def test_a_company_named_receipt_only_proposes(inbox, con):
 # --------------------------------------------------------------------------
 # review actions
 # --------------------------------------------------------------------------
-def test_his_verdict_always_wins(inbox, con):
+def test_a_verdict_files_the_mail_without_reopening_a_closed_application(
+        inbox, con):
+    """Measured on his real shelf: 23 of 42 waiting mails hang off closed
+    applications and 8 propose 'Eingang', so one ordinary press would have
+    reopened what he closed himself. The mail is still read — leaving it on
+    the shelf would ask the same question again tomorrow — but the register
+    is left alone and the screen is told what it kept."""
     bewerbung_id = _sent_application(con)
     db.set_status(con, bewerbung_id, "Einladung", source="user")
     row_id = db.add_email_log(con, {
@@ -520,13 +526,57 @@ def test_his_verdict_always_wins(inbox, con):
         "bewerbung_id": bewerbung_id, "needs_review": 1})
     con.commit()
 
-    assert service.resolve_review(row_id, "sonstige") is True
+    outcome = service.resolve_review(row_id, "sonstige")
 
-    # rank 3 under rank 4: an automatic source would have been refused
-    assert db.get_bewerbung(con, bewerbung_id)["status"] == "Antwort erhalten"
+    assert outcome["ok"] is True
+    assert outcome["status_written"] is False
+    assert (outcome["kept"], outcome["would_be"]) \
+        == ("Einladung", "Antwort erhalten")
+    assert db.get_bewerbung(con, bewerbung_id)["status"] == "Einladung"
+    # ... and the mail itself is settled, off the shelf, labelled
     row = db.get_email_log(con, row_id)
     assert (row["classification"], row["classified_by"], row["needs_review"]) \
         == ("sonstige", "reply_manual", 0)
+
+
+def test_the_second_explicit_press_does_change_the_status(inbox, con):
+    """"Stand trotzdem ändern" — his hand, stated twice. Without this the
+    guard would be a wall rather than a speed limit, and a genuinely wrong
+    Absage could never be talked back."""
+    bewerbung_id = _sent_application(con)
+    db.set_status(con, bewerbung_id, "Absage", source="user")
+    row_id = db.add_email_log(con, {
+        "direction": "inbound", "gmail_message_id": "m-r",
+        "bewerbung_id": bewerbung_id, "needs_review": 1})
+    con.commit()
+
+    outcome = service.resolve_review(row_id, "eingang", force_status=True)
+
+    assert (outcome["ok"], outcome["status_written"]) == (True, True)
+    assert db.get_bewerbung(con, bewerbung_id)["status"] == "In Bearbeitung"
+    # the audit trail says a human did it
+    history = con.execute(
+        "SELECT source, new_status FROM status_history "
+        "WHERE bewerbung_id=? ORDER BY id DESC LIMIT 1",
+        (bewerbung_id,)).fetchone()
+    assert (history[0], history[1]) == ("reply_manual", "In Bearbeitung")
+
+
+def test_a_verdict_that_raises_the_status_still_writes_it_on_one_press(
+        inbox, con):
+    """34 of his 42 waiting mails raise a status, and they must feel exactly
+    as they did — the guard is about going backwards, not about slowing the
+    ordinary press down."""
+    bewerbung_id = _sent_application(con)
+    row_id = db.add_email_log(con, {
+        "direction": "inbound", "gmail_message_id": "m-r",
+        "bewerbung_id": bewerbung_id, "needs_review": 1})
+    con.commit()
+
+    outcome = service.resolve_review(row_id, "absage")
+
+    assert (outcome["ok"], outcome["status_written"]) == (True, True)
+    assert db.get_bewerbung(con, bewerbung_id)["status"] == "Absage"
 
 
 def test_dismiss_unlinks_and_settles(inbox, con):
@@ -715,6 +765,36 @@ async def test_adopting_a_receipt_for_an_already_recorded_job_attaches(
     assert (job["status"], job["bewerbung_id"]) == ("applied", bewerbung_id)
     assert db.get_email_log(con, row_id)["bewerbung_id"] == bewerbung_id
     assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 1
+    # The row must now say it ATTACHED, not that this app created the
+    # ledger row — `undo_receipt` reads exactly this to decide whether an
+    # undo may delete a `bewerbungen` row.
+    assert db.get_email_log(con, row_id)["matched_by"] == service.MATCHED_ATTACHED
+
+
+async def test_adopting_onto_a_hand_recorded_application_cannot_be_undone(
+        inbox, con):
+    """The window the ingestion arm's guard does not cover.
+
+    A receipt whose posting had no application yet is stored as
+    MATCHED_RECEIPT and waits on the review pile. He then records the
+    application HIMSELF. The press now attaches rather than records — and
+    if the row keeps saying MATCHED_RECEIPT, `undo_receipt` accepts and
+    `apply_record.undo` deletes the ledger row he wrote by hand."""
+    job_id = _strip_job(con)
+    row_id = db.add_email_log(con, {
+        "direction": "inbound", "gmail_message_id": "m-r", "job_id": job_id,
+        "matched_by": service.MATCHED_RECEIPT, "classification": "eingang",
+        "needs_review": 1})
+    # he records it himself, after the mail was already shelved
+    bewerbung_id = _sent_application(con)
+    db.set_job_status(con, job_id, "applied", bewerbung_id=bewerbung_id)
+    con.commit()
+
+    assert service.adopt_receipt(row_id)["ok"] is True
+
+    assert service.undo_receipt(row_id) is False
+    assert db.get_bewerbung(con, bewerbung_id) is not None
+    assert db.get_job(con, job_id)["bewerbung_id"] == bewerbung_id
 
 
 async def test_a_job_boards_own_newsletter_cannot_confirm_an_application(
@@ -866,7 +946,9 @@ async def test_a_settled_verdict_takes_the_old_label_off(inbox, con):
     row_id = _inbound_rows(con)[0]["id"]
     inbox.label_calls.clear()
 
-    service.resolve_review(row_id, "einladung")
+    # Absage and Einladung share rank 4, so this is the deliberate sideways
+    # correction — the second, explicit press.
+    service.resolve_review(row_id, "einladung", force_status=True)
 
     message, add, remove = inbox.label_calls[0]
     assert add == ("L_JobDeck/Einladungen",)
@@ -889,6 +971,73 @@ async def test_dismissing_a_mail_strips_its_label(inbox, con):
     message, add, remove = inbox.label_calls[0]
     assert add == ()
     assert set(remove) == {f"L_{name}" for name in service.ALL_LABELS}
+
+
+async def test_sonstiges_leaves_a_label_behind_rather_than_none(inbox, con):
+    """'Sonstiges' is one of the four verdict buttons, and it had no entry in
+    LABELS — so pressing it stripped every JobDeck label and applied none.
+    In Gmail the mail then looked exactly like mail JobDeck never read, and
+    on the correction path a mail correctly filed under Absagen came out
+    bare."""
+    bewerbung_id = _sent_application(con, thread="t-9")
+    inbox.add("m-1", thread="t-9", body=ABSAGE_BODY)
+    await service.ingest_replies()
+    row_id = _inbound_rows(con)[0]["id"]
+    inbox.label_calls.clear()
+
+    assert service.resolve_review(row_id, "sonstige")["ok"] is True
+
+    message, add, remove = inbox.label_calls[0]
+    # The label says what happened to the APPLICATION, and 'sonstige' leaves
+    # it open — the same thing 'Offen' already means for a receipt.
+    assert add == ("L_JobDeck/Offen",)
+    assert "L_JobDeck/Absagen" in remove
+    # The two axes are independent: the mail is labelled for what it is even
+    # though the guard kept the closed status (rank 3 under rank 4).
+    assert db.get_bewerbung(con, bewerbung_id)["status"] == "Absage"
+
+
+async def test_adopting_a_receipt_labels_the_mail(inbox, con):
+    """Both adoption paths write the register, so both must leave Gmail
+    telling the truth. The attach path labelled nothing, so 'Zu prüfen'
+    stayed on a mail that was no longer waiting for anything."""
+    job_id = _strip_job(con)
+    row_id = db.add_email_log(con, {
+        "direction": "inbound", "gmail_message_id": "m-r", "job_id": job_id,
+        "matched_by": service.MATCHED_RECEIPT, "classification": "eingang",
+        "needs_review": 1})
+    bewerbung_id = _sent_application(con)
+    db.set_job_status(con, job_id, "applied", bewerbung_id=bewerbung_id)
+    con.commit()
+    inbox.label_calls.clear()
+
+    assert service.adopt_receipt(row_id)["ok"] is True
+
+    message, add, remove = inbox.label_calls[0]
+    assert (message, add) == ("m-r", ("L_JobDeck/Offen",))
+    assert "L_JobDeck/Zu prüfen" in remove
+
+
+async def test_undoing_a_receipt_puts_the_waiting_label_back(inbox, con):
+    """The undo really returns the mail to the review pile, so Gmail has to
+    say so again — otherwise his phone shows a settled mail while the app
+    shows one waiting for him."""
+    job_id = _strip_job(con)
+    row_id = db.add_email_log(con, {
+        "direction": "inbound", "gmail_message_id": "m-r", "job_id": job_id,
+        "matched_by": service.MATCHED_RECEIPT, "classification": "eingang",
+        "needs_review": 1})
+    con.commit()
+    assert service.adopt_receipt(row_id)["ok"] is True
+    inbox.label_calls.clear()
+
+    assert service.undo_receipt(row_id) is True
+
+    message, add, remove = inbox.label_calls[0]
+    assert (message, add) == ("m-r", ("L_JobDeck/Offen",
+                                      "L_JobDeck/Zu prüfen"))
+    assert db.get_email_log(con, row_id)["needs_review"] == 1
+    assert db.get_job(con, job_id)["bewerbung_id"] is None
 
 
 async def test_unmatched_mail_is_never_labelled(inbox, con):
@@ -1087,3 +1236,44 @@ def test_an_unparseable_lookback_falls_back_instead_of_crashing(data_dir, con):
         db.set_setting(write, service.LOOKBACK_KEY, "sehr lange")
     with db.db() as read:
         assert service._lookback_days(read) == service.FIRST_RUN_LOOKBACK_DAYS
+
+
+def test_adopting_a_receipt_cannot_reopen_a_closed_application(inbox, con):
+    """Found by the review panel: "Als Bewerbung eintragen" wrote
+    'In Bearbeitung' unconditionally with source='reply_manual', which the
+    anti-downgrade rank exempts — so the one button the verdict guard does not
+    cover was a way around it, on the very screen that states the rule."""
+    job_id = _strip_job(con)
+    row_id = db.add_email_log(con, {
+        "direction": "inbound", "gmail_message_id": "m-r", "job_id": job_id,
+        "matched_by": service.MATCHED_RECEIPT, "classification": "eingang",
+        "needs_review": 1})
+    bewerbung_id = _sent_application(con)
+    db.set_status(con, bewerbung_id, "Absage", source="user")
+    db.set_job_status(con, job_id, "applied", bewerbung_id=bewerbung_id)
+    con.commit()
+
+    assert service.adopt_receipt(row_id)["ok"] is True
+
+    # the mail is attached and settled ...
+    row = db.get_email_log(con, row_id)
+    assert (row["bewerbung_id"], row["needs_review"]) == (bewerbung_id, 0)
+    # ... and the closed application stands
+    assert db.get_bewerbung(con, bewerbung_id)["status"] == "Absage"
+
+
+def test_adopting_a_receipt_still_raises_an_open_application(inbox, con):
+    """The guard is about going backwards; the ordinary case must be
+    untouched."""
+    job_id = _strip_job(con)
+    row_id = db.add_email_log(con, {
+        "direction": "inbound", "gmail_message_id": "m-r", "job_id": job_id,
+        "matched_by": service.MATCHED_RECEIPT, "classification": "eingang",
+        "needs_review": 1})
+    bewerbung_id = _sent_application(con)
+    db.set_job_status(con, job_id, "applied", bewerbung_id=bewerbung_id)
+    con.commit()
+
+    assert service.adopt_receipt(row_id)["ok"] is True
+
+    assert db.get_bewerbung(con, bewerbung_id)["status"] == "In Bearbeitung"

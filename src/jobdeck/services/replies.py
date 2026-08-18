@@ -30,6 +30,7 @@ from jobdeck.constants import (
     EMAIL_INBOUND,
     EMAIL_INBOUND_IGNORED,
     OFFENE_STATUS,
+    STATUS_RANK,
 )
 from jobdeck.contact_resolve import registrable_domain
 from jobdeck.services import apply_record
@@ -73,6 +74,11 @@ LABELS = {
     "einladung": "JobDeck/Einladungen",
     "eingang": "JobDeck/Offen",
     "auto": "JobDeck/Offen",
+    # A label says what happened to the APPLICATION, not what kind of mail
+    # arrived — and 'sonstige' leaves it open, exactly as a receipt does.
+    # Without an entry here the verdict stripped every JobDeck label and
+    # applied none, so the mail came out looking unread.
+    "sonstige": "JobDeck/Offen",
 }
 # Every label this app owns; a message carries the ones that are true of it
 # and none of the others, so a changed verdict cannot accumulate.
@@ -755,27 +761,55 @@ def _apply_label(message_id: str, classification: str,
 # --------------------------------------------------------------------------
 # Review actions (the /antworten page's handlers, sync — call via io_bound)
 # --------------------------------------------------------------------------
-def resolve_review(email_log_id: int, classification: str) -> bool:
-    """His verdict on a review row: classify, apply the status, label.
+def resolve_review(email_log_id: int, classification: str,
+                   force_status: bool = False) -> dict:
+    """His verdict on a review row: classify, label, and apply the status —
+    unless applying it would take the application BACKWARDS.
 
-    source='reply_manual' — a human clicked, so the anti-downgrade rank
-    does not apply; his call always wins."""
+    Measured on his real shelf: 23 of 42 waiting mails hang off applications
+    already standing at 'Absage', 8 of them proposing 'Eingang'. Because this
+    writes with source='reply_manual' — exempt from the anti-downgrade rank so
+    that his correction can win — one ordinary press would silently reopen an
+    application he closed himself.
+
+    So the FIRST press files the mail and keeps the status, and the screen
+    offers a second, explicit press (`force_status=True`) that writes it. The
+    rule is the one `set_status` already applies to automatic sources: a press
+    may RAISE a status, never lower it or move it sideways. A verdict that
+    raises — 34 of his 42 — behaves exactly as before.
+
+    Returns what happened, so the screen can say it: `status_written` False
+    with `kept` and `would_be` set means the mail is filed and the register
+    was left alone."""
     if classification not in CLASSIFICATION_TO_STATUS:
-        return False
+        return {"ok": False, "status_written": False}
+    wanted = CLASSIFICATION_TO_STATUS[classification]
     with db.db() as con:
         row = db.get_email_log(con, email_log_id)
         if row is None:
-            return False
+            return {"ok": False, "status_written": False}
+        # The mail is read either way: what it IS does not depend on whether
+        # the register may move. Leaving it on the shelf would ask him the
+        # same question again tomorrow.
         db.classify_reply_row(con, email_log_id, classification,
                               "reply_manual", 0)
-        if row["bewerbung_id"] is not None:
-            db.set_status(con, int(row["bewerbung_id"]),
-                          CLASSIFICATION_TO_STATUS[classification],
-                          source="reply_manual", email_log_id=email_log_id)
         message_id = str(row["gmail_message_id"] or "")
+        result = {"ok": True, "status_written": False, "kept": "",
+                  "would_be": wanted}
+        if row["bewerbung_id"] is not None:
+            bewerbung = db.get_bewerbung(con, int(row["bewerbung_id"]))
+            current = str(bewerbung["status"] or "") if bewerbung else ""
+            if (not force_status and current != wanted
+                    and STATUS_RANK.get(wanted, 0)
+                    <= STATUS_RANK.get(current, 0)):
+                result["kept"] = current
+            else:
+                result["status_written"] = db.set_status(
+                    con, int(row["bewerbung_id"]), wanted,
+                    source="reply_manual", email_log_id=email_log_id)
     if message_id:
         _apply_label(message_id, classification, needs_review=False)
-    return True
+    return result
 
 
 def dismiss_review(email_log_id: int) -> None:
@@ -792,6 +826,42 @@ def dismiss_review(email_log_id: int) -> None:
         _apply_label(message_id, "", needs_review=False)
 
 
+def reopen_review(email_log_id: int) -> bool:
+    """Put a dismissed mail back on the shelf.
+
+    `dismiss_review` keeps the row — it only unlinks and settles it — so the
+    press was a one-way door with no schema reason to be one. The mail carries
+    its waiting label again, because it really is waiting again."""
+    with db.db() as con:
+        row = db.get_email_log(con, email_log_id)
+        if row is None or str(row["direction"]) != EMAIL_INBOUND:
+            return False
+        db.reopen_reply_review(con, email_log_id)
+        message_id = str(row["gmail_message_id"] or "")
+        classification = str(row["classification"] or "")
+    if message_id:
+        _apply_label(message_id, classification, needs_review=True)
+    return True
+
+
+def dismiss_many(email_log_ids: list[int]) -> int:
+    """File a whole view of waiting mail WITHOUT writing a single status.
+
+    The one bulk gesture on the screen, and deliberately not a bulk verdict:
+    `resolve_review` writes with source='reply_manual', which the
+    anti-downgrade rank exempts, so "confirm all twelve" would be twelve
+    unguarded status writes in one press. This one only says "these mails
+    need nothing from me", which is exactly true of mail arriving for an
+    application that is already closed."""
+    for email_log_id in email_log_ids:
+        # No defensive cast: the ids come from the rows this page just drew,
+        # so a bad one is a bug and has to be seen rather than counted as a
+        # filed mail. `dismiss_review` is a no-op on an id that is already
+        # gone, which is the only race worth surviving here.
+        dismiss_review(email_log_id)
+    return len(email_log_ids)
+
+
 def adopt_receipt(email_log_id: int) -> dict:
     """One press on a weak receipt proposal: record the application."""
     with db.db() as con:
@@ -806,11 +876,24 @@ def adopt_receipt(email_log_id: int) -> dict:
         # application; attach instead, which is what the press meant.
         bewerbung_id = int(job["bewerbung_id"])
         with db.db() as con:
+            bewerbung = db.get_bewerbung(con, bewerbung_id)
+            current = str(bewerbung["status"] or "") if bewerbung else ""
             db.link_reply_bewerbung(con, email_log_id, bewerbung_id)
+            # The same restatement the ingestion arm makes when it finds the
+            # application already there. Without it the row keeps claiming
+            # this app created the ledger row, `undo_receipt` accepts, and
+            # the undo deletes an application HE recorded by hand.
+            db.set_reply_matched_by(con, email_log_id, MATCHED_ATTACHED)
             db.classify_reply_row(con, email_log_id, "eingang",
                                   "reply_manual", 0)
-            db.set_status(con, bewerbung_id, "In Bearbeitung",
-                          source="reply_manual", email_log_id=email_log_id)
+            # The same rule the verdict buttons follow: a receipt is rank 2
+            # and may RAISE a status, never reopen one he has already closed.
+            # Without this, "Als Bewerbung eintragen" was a way around the
+            # guard on the very screen that states it.
+            if STATUS_RANK.get("In Bearbeitung", 0) > STATUS_RANK.get(current, 0):
+                db.set_status(con, bewerbung_id, "In Bearbeitung",
+                              source="reply_manual", email_log_id=email_log_id)
+        _apply_label(str(row["gmail_message_id"] or ""), "eingang")
         return {"ok": True, "bewerbung_id": bewerbung_id,
                 "company": str(job["company"] or ""), "duplicate": None,
                 "undo": False}
@@ -851,4 +934,9 @@ def undo_receipt(email_log_id: int) -> bool:
     with db.db() as con:
         # apply_record.undo cleared email_log.bewerbung_id already
         db.classify_reply_row(con, email_log_id, "eingang", "rules", 1)
+    # The mail really is waiting again, so Gmail has to say so again —
+    # otherwise his phone shows a settled mail while the shelf shows one
+    # asking for him.
+    _apply_label(str(row["gmail_message_id"] or ""), "eingang",
+                 needs_review=True)
     return True
