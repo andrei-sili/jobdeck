@@ -793,8 +793,8 @@ async def antworten_page():
                 say(f"Eingeordnet als {word} — der Stand der Bewerbung ist "
                     f"nachgezogen.", type="positive")
             elif outcome["kept"]:
-                say(f"Eingeordnet als {word} — der Stand bleibt "
-                    f"{outcome['kept']}.", type="positive")
+                say(f"Eingeordnet als {word} — der Stand der Bewerbung ist "
+                    f"nachgezogen.", type="positive")
             else:
                 say(f"Eingeordnet als {word}.", type="positive")
             await refresh(force=True)
@@ -1038,10 +1038,14 @@ async def antworten_page():
                     state["selected"] = order[0] if order else ""
                 if state["selected"]:
                     read_here.add(state["selected"])
-                # Consumed, so it cannot land a LATER unrelated redraw on a
-                # stale index. Cleared only here: clearing it on every refresh
-                # lost it to the watcher's tick, which lands in the middle of
-                # the write it is meant to survive.
+            # Belongs to HIS action, so HIS redraw ends it — whether or not the
+            # Vorgang survived. Cleared on every refresh it is lost to the
+            # watcher tick that lands mid-write, and the cursor jumps to the
+            # top; never cleared it outlives its action, because a Vorgang
+            # holding several mails survives a verdict on one of them, and it
+            # then steers some later, unrelated redraw onto an index that means
+            # nothing any more.
+            if force:
                 state["prefer_index"] = None
 
             # NOT keyed on the selection: moving the cursor rewrites two rows'

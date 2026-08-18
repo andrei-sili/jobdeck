@@ -55,13 +55,14 @@ def _application(con, firma="Beispiel GmbH") -> int:
 
 def _inbound(con, message_id, *, bewerbung_id=None, needs_review=1,
              classification="", classified_by="", subject="Ihre Bewerbung",
-             body="", matched_by="thread") -> int:
+             body="", matched_by="thread", when="14:00") -> int:
     row_id = db.add_email_log(con, {
         "direction": "inbound", "gmail_message_id": message_id,
         "bewerbung_id": bewerbung_id, "needs_review": needs_review,
         "classification": classification, "classified_by": classified_by,
         "subject": subject, "body_text": body, "snippet": body[:100],
-        "matched_by": matched_by, "internal_date": "2026-08-16T14:00:00"})
+        "matched_by": matched_by,
+        "internal_date": f"2026-08-16T{when}:00"})
     con.commit()
     return row_id
 
@@ -890,3 +891,26 @@ async def test_the_ledger_says_when_it_is_showing_only_the_newest(
     await _open_view(user, "eingeordnet")
 
     await user.should_see(f"die neuesten {antworten.LEDGER_LIMIT}")
+
+
+def test_the_place_marker_is_cleared_by_his_own_redraw_and_only_by_it():
+    """Found by the review panel, and it cuts both ways — which is why this is
+    pinned structurally rather than driven: neither failure is visible on
+    screen at the moment it happens.
+
+    Cleared on EVERY refresh, the marker is lost to the watcher tick that
+    lands in the middle of the write it exists to survive, and the cursor
+    jumps to the top. Never cleared, it outlives its action — a Vorgang
+    holding several mails survives a verdict on one of them — and then steers
+    some later, unrelated redraw onto an index that means nothing any more.
+
+    So: his own redraw (`force`) ends it, and a tick leaves it alone."""
+    source = pathlib.Path(antworten.__file__).read_text(encoding="utf-8")
+    clears = [line for line in source.splitlines()
+              if 'state["prefer_index"] = None' in line]
+    assert len(clears) == 1, clears
+    index = source.splitlines().index(clears[0])
+    guard = source.splitlines()[index - 1]
+    assert guard.strip() == "if force:", (
+        "the marker must be cleared by HIS redraw and only by it, "
+        f"found: {guard.strip()!r}")
