@@ -645,6 +645,7 @@ async def antworten_page():
                             CLASS_LABELS[value],
                             on_click=lambda _=None, r=lead["id"], v=value:
                                 classify(r, v)) \
+                            .mark(f"verdict-{value}") \
                             .props(("unelevated" if value == proposal
                                     else "outline") + " no-caps")
                         reason = verdict_reason(group, value)
@@ -658,6 +659,7 @@ async def antworten_page():
                                 "Stand trotzdem ändern",
                                 on_click=lambda _=None, r=lead["id"], v=value:
                                     classify(r, v, force_status=True)) \
+                                .mark(f"force-{value}") \
                                 .props("flat dense no-caps")
 
         def _render_siblings(group: dict) -> None:
@@ -793,8 +795,8 @@ async def antworten_page():
                 say(f"Eingeordnet als {word} — der Stand der Bewerbung ist "
                     f"nachgezogen.", type="positive")
             elif outcome["kept"]:
-                say(f"Eingeordnet als {word} — der Stand der Bewerbung ist "
-                    f"nachgezogen.", type="positive")
+                say(f"Eingeordnet als {word} — der Stand bleibt "
+                    f"{outcome['kept']}.", type="positive")
             else:
                 say(f"Eingeordnet als {word}.", type="positive")
             await refresh(force=True)

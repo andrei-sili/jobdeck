@@ -914,3 +914,39 @@ def test_the_place_marker_is_cleared_by_his_own_redraw_and_only_by_it():
     assert guard.strip() == "if force:", (
         "the marker must be cleared by HIS redraw and only by it, "
         f"found: {guard.strip()!r}")
+
+
+async def test_the_message_says_which_of_the_two_things_happened(
+        user: User, con):
+    """The guard's whole point is that the screen tells the truth about the
+    register. A verdict that KEPT a status while saying "der Stand ist
+    nachgezogen" would be the exact lie this slice exists to remove — and it
+    is invisible, because the toast is gone a second later."""
+    bewerbung_id = _application(con)
+    db.set_status(con, bewerbung_id, "Absage", source="user")
+    _inbound(con, "m-1", bewerbung_id=bewerbung_id,
+             classification="eingang", classified_by="rules")
+    con.commit()
+
+    await user.open("/antworten")
+    await _open_view(user, "alle")
+    await user.should_see("1 Vorgang wartet")
+    user.find(marker="verdict-eingang").click()
+
+    await user.should_see("der Stand bleibt Absage")
+    assert db.get_bewerbung(con, bewerbung_id)["status"] == "Absage"
+
+
+async def test_a_verdict_that_did_move_the_register_says_that_instead(
+        user: User, con):
+    bewerbung_id = _application(con)
+    _inbound(con, "m-1", bewerbung_id=bewerbung_id,
+             classification="absage", classified_by="rules")
+    con.commit()
+
+    await user.open("/antworten")
+    await user.should_see("1 Vorgang wartet")
+    user.find(marker="verdict-absage").click()
+
+    await user.should_see("der Stand der Bewerbung ist nachgezogen")
+    assert db.get_bewerbung(con, bewerbung_id)["status"] == "Absage"
