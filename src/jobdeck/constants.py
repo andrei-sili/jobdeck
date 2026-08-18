@@ -8,13 +8,18 @@ existing application history keeps its meaning.
 KANAL_OPTIONS = ["E-Mail", "Online-Portal", "Post", "Initiativ", "Sonstiges"]
 
 # Application statuses (German, as stored in the DB since the legacy app)
+# The status the app writes when an application was never answered. Named here
+# with the rest of the vocabulary so the rule, the register and the screens all
+# spell it the same way.
+STATUS_NO_ANSWER = "Keine Antwort"
+
 STATUS_OPTIONS = [
     "Gesendet",
     "In Bearbeitung",
     "Antwort erhalten",
     "Einladung",
     "Absage",
-    "Keine Antwort",
+    STATUS_NO_ANSWER,
     "Zurückgezogen",
 ]
 
@@ -44,7 +49,7 @@ STATUS_RANK = {
     "Gesendet": 1,
     "In Bearbeitung": 2,
     "Antwort erhalten": 3,
-    "Keine Antwort": 3,
+    STATUS_NO_ANSWER: 3,
     "Einladung": 4,
     "Absage": 4,
     "Zurückgezogen": 4,

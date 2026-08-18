@@ -1884,7 +1884,14 @@ def draft_with_job(con: sqlite3.Connection, job_id: int) -> sqlite3.Row | None:
 # unanswered as it was — nobody has decided anything — but it does prove
 # someone is there, so it restarts the clock. Any OTHER inbound verdict means
 # a human engaged, and such a row must never be closed as unanswered.
-SILENT_CLASSIFICATIONS = ("eingang", "auto", "")
+#
+# The empty verdict is deliberately NOT here. An inbound mail the classifier
+# could not place means "an employer wrote and we do not know what they said",
+# which is the opposite of knowing nobody answered — so it blocks the close
+# and waits for him. Measured when this was written: 8 such mails exist, 7 of
+# them linked, all on applications already closed, so the guard changes
+# nothing today and is purely prospective.
+SILENT_CLASSIFICATIONS = ("eingang", "auto")
 
 # The clock runs from the last thing that happened, not from the application:
 # an employer who confirmed receipt on the 6th has been silent since the 6th.

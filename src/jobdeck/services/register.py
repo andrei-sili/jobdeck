@@ -25,6 +25,7 @@ from jobdeck.constants import (
     BEANTWORTET_STATUS,
     DEFAULT_FOLLOW_UP_DAYS,
     OFFENE_STATUS,
+    STATUS_NO_ANSWER,
 )
 from jobdeck.dates import MONATE_DE
 
@@ -163,13 +164,24 @@ def ledger(view: dict) -> list[Step]:
     # one, and a posting can be repointed or a row edited until the pair drifts.
     # Never print a negative remainder — say nothing rather than something false.
     imported = max(0, total - view["applied"])
-    return [
+    # An application closed for silence is in neither of the two lines below —
+    # nobody answered it, and it is no longer waiting. Without its own line the
+    # register's parts stop adding up to its total, on the one screen whose
+    # whole value is that its numbers are honest.
+    unanswered = sum(1 for a in apps if _status(a) == STATUS_NO_ANSWER)
+    steps = [
         Step("register", "im Register", total, 1.0 if total else 0.0,
              f"{view['applied']} über JobDeck · {imported} von Hand oder aus "
              f"der alten Liste" if imported else ""),
         Step("offen", "noch ohne Antwort", open_rows, _share(open_rows, total)),
         Step("beantwortet", "beantwortet", answered, _share(answered, total)),
     ]
+    if unanswered:
+        steps.append(
+            Step("ohne_antwort", "ohne Antwort geschlossen", unanswered,
+                 _share(unanswered, total),
+                 "niemand hat abgesagt — es kam nur nie eine Antwort"))
+    return steps
 
 
 def _status(app: dict) -> str:

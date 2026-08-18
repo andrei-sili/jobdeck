@@ -7,12 +7,28 @@ does not move when it fires.
 """
 
 import datetime
+import sqlite3
 
 import pytest
 
-from jobdeck import db
-from jobdeck.constants import BEANTWORTET_STATUS, OFFENE_STATUS, STATUS_RANK
+from jobdeck import db, gmail
+from jobdeck.constants import (
+    BEANTWORTET_STATUS,
+    OFFENE_STATUS,
+    STATUS_NO_ANSWER,
+    STATUS_RANK,
+)
 from jobdeck.services import silence
+
+
+@pytest.fixture(autouse=True)
+def _mailbox_is_read(monkeypatch, data_dir, con):
+    """Most tests are about WHO gets closed, which presupposes that replies
+    are being read at all. The pass refuses to run otherwise — that guard has
+    its own tests below."""
+    monkeypatch.setattr(gmail, "can_read", lambda: True)
+    db.set_setting(con, "replies_history_id", "12345")
+    con.commit()
 
 
 def _days_ago(n: int) -> str:
@@ -172,7 +188,7 @@ def test_zero_switches_the_rule_off(data_dir, con):
 
     report = silence._close_silent()
 
-    assert report["off"] is True
+    assert report["blocked"] == silence.BLOCKED_OFF
     assert db.get_bewerbung(con, bid)["status"] == "Gesendet"
 
 
@@ -238,3 +254,115 @@ def test_silence_reads_as_a_closed_question_on_the_register():
 
     assert _pill_class(silence.STATUS_NO_ANSWER) == ""
     assert _pill_class("Gesendet") == "warn"
+
+
+# --- the guard that makes silence mean silence -----------------------------
+
+def test_nothing_closes_while_replies_are_not_being_read(
+    data_dir, con, monkeypatch
+):
+    """The rule infers silence from the ABSENCE of inbound mail, and a
+    disconnected Gmail looks exactly the same. Without this, the first pass
+    after a revoked token would close every open application at once."""
+    monkeypatch.setattr(gmail, "can_read", lambda: False)
+    bid = _application(con, days=900)
+    con.commit()
+
+    report = silence._close_silent()
+
+    assert report["blocked"] == silence.BLOCKED_UNREAD
+    assert report["closed"] == []
+    assert db.get_bewerbung(con, bid)["status"] == "Gesendet"
+
+
+def test_nothing_closes_before_ingestion_has_ever_run(data_dir, con):
+    """The read scope alone is not evidence: a brand-new connection with no
+    pass behind it has no inbound rows for the same reason a broken one has
+    none."""
+    db.set_setting(con, "replies_history_id", "")
+    bid = _application(con, days=900)
+    con.commit()
+
+    report = silence._close_silent()
+
+    assert report["blocked"] == silence.BLOCKED_UNREAD
+    assert db.get_bewerbung(con, bid)["status"] == "Gesendet"
+
+
+def test_an_unclassifiable_reply_blocks_the_close(data_dir, con):
+    """An inbound the classifier could not place means "an employer wrote and
+    we do not know what they said" — the opposite of knowing nobody did."""
+    bid = _application(con, days=900)
+    _inbound(con, bid, "", days=800)
+    con.commit()
+
+    silence._close_silent()
+
+    assert db.get_bewerbung(con, bid)["status"] == "Gesendet"
+
+
+# --- one bad row must not cost the others ----------------------------------
+
+def test_a_row_that_raises_does_not_throw_away_the_closes_before_it(
+    data_dir, con, monkeypatch
+):
+    first = _application(con, firma="Alpha GmbH", days=900)
+    _application(con, firma="Beta GmbH", days=890)
+    con.commit()
+
+    real = db.set_status
+    calls = {"n": 0}
+
+    def exploding(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise sqlite3.OperationalError("boom")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(db, "set_status", exploding)
+    report = silence._close_silent()
+
+    assert report["closed"] == ["Alpha GmbH"]
+    assert report["failed"] == ["Beta GmbH"]
+    # the first close is committed, not rolled back with the failure
+    assert db.get_bewerbung(con, first)["status"] == STATUS_NO_ANSWER
+
+
+def test_an_application_without_a_company_name_does_not_break_the_pass(
+    data_dir, con
+):
+    """`bewerbungen.firma` is nullable in the legacy table, and the name only
+    ever reaches a log line."""
+    cur = con.execute(
+        "INSERT INTO bewerbungen (gesendet_am, firma, kanal, status, created_at)"
+        " VALUES (?, NULL, 'E-Mail', 'Gesendet', ?)",
+        (_days_ago(900), _stamp(900)))
+    con.commit()
+
+    report = silence._close_silent()
+
+    assert report["failed"] == []
+    assert db.get_bewerbung(con, cur.lastrowid)["status"] == STATUS_NO_ANSWER
+
+
+# --- the register accounts for every row -----------------------------------
+
+def test_the_register_accounts_for_the_rows_it_closed(data_dir, con):
+    """42 open + 27 answered out of 84 leaves 15 rows in no line at all, on
+    the one screen whose whole value is that its numbers are honest."""
+    from jobdeck.services import register
+
+    view = {"apps": [{"status": "Gesendet"}, {"status": "Absage"},
+                     {"status": STATUS_NO_ANSWER}], "applied": 3}
+    steps = {s.key: s.count for s in register.ledger(view)}
+
+    assert steps["ohne_antwort"] == 1
+    assert steps["offen"] + steps["beantwortet"] + steps["ohne_antwort"] \
+        == steps["register"]
+
+
+def test_the_register_says_nothing_when_nothing_was_closed(data_dir, con):
+    from jobdeck.services import register
+
+    view = {"apps": [{"status": "Gesendet"}], "applied": 1}
+    assert "ohne_antwort" not in {s.key for s in register.ledger(view)}

@@ -28,9 +28,11 @@ def _get_settings():
             "stale_age_days": freshness.stale_age_setting(
                 db.get_setting(con, "stale_age_days", "")),
             "daily_send_cap": db.get_setting(con, "daily_send_cap", "15"),
-            "silence_closes_after_days": int(db.get_setting(
-                con, silence.SETTING_DAYS,
-                str(DEFAULT_SILENCE_CLOSES_DAYS)) or 0),
+            # Parsed by the rule's own parser, not a bare int(): a
+            # hand-edited or non-numeric value must show the window that will
+            # actually be used instead of raising out of the page that is the
+            # only place to fix it.
+            "silence_closes_after_days": silence.configured_days(con),
             "daily_draft_cap": db.daily_draft_cap(con),
             "drafts_today": db.count_drafts_today(con),
             "ai_enabled": db.ai_enabled(con),
