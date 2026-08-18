@@ -747,27 +747,6 @@ async def test_adopting_onto_a_hand_recorded_application_cannot_be_undone(
     assert db.get_job(con, job_id)["bewerbung_id"] == bewerbung_id
 
 
-async def test_adopting_a_receipt_labels_the_mail(inbox, con):
-    """Both adoption paths write the register, so both must leave Gmail
-    telling the truth. The attach path labelled nothing, so 'Zu prüfen'
-    stayed on a mail that was no longer waiting for anything."""
-    job_id = _strip_job(con)
-    row_id = db.add_email_log(con, {
-        "direction": "inbound", "gmail_message_id": "m-r", "job_id": job_id,
-        "matched_by": service.MATCHED_RECEIPT, "classification": "eingang",
-        "needs_review": 1})
-    bewerbung_id = _sent_application(con)
-    db.set_job_status(con, job_id, "applied", bewerbung_id=bewerbung_id)
-    con.commit()
-    inbox.label_calls.clear()
-
-    assert service.adopt_receipt(row_id)["ok"] is True
-
-    message, add, remove = inbox.label_calls[0]
-    assert (message, add) == ("m-r", ("L_JobDeck/Offen",))
-    assert "L_JobDeck/Zu prüfen" in remove
-
-
 async def test_a_job_boards_own_newsletter_cannot_confirm_an_application(
         inbox, con):
     """Found on the first real read of his mailbox: a Jooble job newsletter
@@ -940,6 +919,71 @@ async def test_dismissing_a_mail_strips_its_label(inbox, con):
     message, add, remove = inbox.label_calls[0]
     assert add == ()
     assert set(remove) == {f"L_{name}" for name in service.ALL_LABELS}
+
+
+async def test_sonstiges_leaves_a_label_behind_rather_than_none(inbox, con):
+    """'Sonstiges' is one of the four verdict buttons, and it had no entry in
+    LABELS — so pressing it stripped every JobDeck label and applied none.
+    In Gmail the mail then looked exactly like mail JobDeck never read, and
+    on the correction path a mail correctly filed under Absagen came out
+    bare."""
+    bewerbung_id = _sent_application(con, thread="t-9")
+    inbox.add("m-1", thread="t-9", body=ABSAGE_BODY)
+    await service.ingest_replies()
+    row_id = _inbound_rows(con)[0]["id"]
+    inbox.label_calls.clear()
+
+    assert service.resolve_review(row_id, "sonstige") is True
+
+    message, add, remove = inbox.label_calls[0]
+    # The label says what happened to the APPLICATION, and 'sonstige' leaves
+    # it open — the same thing 'Offen' already means for a receipt.
+    assert add == ("L_JobDeck/Offen",)
+    assert "L_JobDeck/Absagen" in remove
+    assert db.get_bewerbung(con, bewerbung_id)["status"] == "Antwort erhalten"
+
+
+async def test_adopting_a_receipt_labels_the_mail(inbox, con):
+    """Both adoption paths write the register, so both must leave Gmail
+    telling the truth. The attach path labelled nothing, so 'Zu prüfen'
+    stayed on a mail that was no longer waiting for anything."""
+    job_id = _strip_job(con)
+    row_id = db.add_email_log(con, {
+        "direction": "inbound", "gmail_message_id": "m-r", "job_id": job_id,
+        "matched_by": service.MATCHED_RECEIPT, "classification": "eingang",
+        "needs_review": 1})
+    bewerbung_id = _sent_application(con)
+    db.set_job_status(con, job_id, "applied", bewerbung_id=bewerbung_id)
+    con.commit()
+    inbox.label_calls.clear()
+
+    assert service.adopt_receipt(row_id)["ok"] is True
+
+    message, add, remove = inbox.label_calls[0]
+    assert (message, add) == ("m-r", ("L_JobDeck/Offen",))
+    assert "L_JobDeck/Zu prüfen" in remove
+
+
+async def test_undoing_a_receipt_puts_the_waiting_label_back(inbox, con):
+    """The undo really returns the mail to the review pile, so Gmail has to
+    say so again — otherwise his phone shows a settled mail while the app
+    shows one waiting for him."""
+    job_id = _strip_job(con)
+    row_id = db.add_email_log(con, {
+        "direction": "inbound", "gmail_message_id": "m-r", "job_id": job_id,
+        "matched_by": service.MATCHED_RECEIPT, "classification": "eingang",
+        "needs_review": 1})
+    con.commit()
+    assert service.adopt_receipt(row_id)["ok"] is True
+    inbox.label_calls.clear()
+
+    assert service.undo_receipt(row_id) is True
+
+    message, add, remove = inbox.label_calls[0]
+    assert (message, add) == ("m-r", ("L_JobDeck/Offen",
+                                      "L_JobDeck/Zu prüfen"))
+    assert db.get_email_log(con, row_id)["needs_review"] == 1
+    assert db.get_job(con, job_id)["bewerbung_id"] is None
 
 
 async def test_unmatched_mail_is_never_labelled(inbox, con):

@@ -73,6 +73,11 @@ LABELS = {
     "einladung": "JobDeck/Einladungen",
     "eingang": "JobDeck/Offen",
     "auto": "JobDeck/Offen",
+    # A label says what happened to the APPLICATION, not what kind of mail
+    # arrived — and 'sonstige' leaves it open, exactly as a receipt does.
+    # Without an entry here the verdict stripped every JobDeck label and
+    # applied none, so the mail came out looking unread.
+    "sonstige": "JobDeck/Offen",
 }
 # Every label this app owns; a message carries the ones that are true of it
 # and none of the others, so a changed verdict cannot accumulate.
@@ -857,4 +862,9 @@ def undo_receipt(email_log_id: int) -> bool:
     with db.db() as con:
         # apply_record.undo cleared email_log.bewerbung_id already
         db.classify_reply_row(con, email_log_id, "eingang", "rules", 1)
+    # The mail really is waiting again, so Gmail has to say so again —
+    # otherwise his phone shows a settled mail while the shelf shows one
+    # asking for him.
+    _apply_label(str(row["gmail_message_id"] or ""), "eingang",
+                 needs_review=True)
     return True
