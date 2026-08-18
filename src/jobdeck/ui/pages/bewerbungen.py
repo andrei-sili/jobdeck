@@ -54,6 +54,10 @@ _PILL = {
     "Einladung": "ok",
     "Antwort erhalten": "ok",
     "Absage": "",
+    # Nobody refused this one and nobody answered it either. It is a closed
+    # question, so it reads as calm as a rejection — never as a bad outcome,
+    # and never as something still waiting for him.
+    "Keine Antwort": "",
     "Zurückgezogen": "",
 }
 

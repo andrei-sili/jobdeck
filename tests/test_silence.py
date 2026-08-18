@@ -229,3 +229,12 @@ def test_the_response_rate_does_not_move_when_silence_closes(data_dir, con):
 
     assert rate() == before == 1
     assert db.get_bewerbung(con, answered)["status"] == "Absage"
+
+
+def test_silence_reads_as_a_closed_question_on_the_register():
+    """Not amber: amber on this screen means "still waiting for an answer",
+    which is the one thing this status has settled."""
+    from jobdeck.ui.pages.bewerbungen import _pill_class
+
+    assert _pill_class(silence.STATUS_NO_ANSWER) == ""
+    assert _pill_class("Gesendet") == "warn"
