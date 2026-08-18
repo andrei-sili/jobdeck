@@ -853,14 +853,13 @@ def dismiss_many(email_log_ids: list[int]) -> int:
     unguarded status writes in one press. This one only says "these mails
     need nothing from me", which is exactly true of mail arriving for an
     application that is already closed."""
-    filed = 0
     for email_log_id in email_log_ids:
-        try:
-            dismiss_review(int(email_log_id))
-        except (ValueError, TypeError):
-            continue
-        filed += 1
-    return filed
+        # No defensive cast: the ids come from the rows this page just drew,
+        # so a bad one is a bug and has to be seen rather than counted as a
+        # filed mail. `dismiss_review` is a no-op on an id that is already
+        # gone, which is the only race worth surviving here.
+        dismiss_review(email_log_id)
+    return len(email_log_ids)
 
 
 def adopt_receipt(email_log_id: int) -> dict:
