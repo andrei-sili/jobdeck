@@ -368,7 +368,12 @@ async def antworten_page():
                                   "sonstige"):
                         async def pick(_=None, v=value):
                             dialog.close()
-                            await classify(row["id"], v)
+                            # Correcting is the deliberate path: he opened a
+                            # dialog on a row that is already filed and chose.
+                            # The shelf's "never go backwards on one press"
+                            # guard is about a FIRST press on a proposal — here
+                            # it would turn "ein Klick korrigiert sie" into two.
+                            await classify(row["id"], v, force_status=True)
                         ui.button(CLASS_LABELS[value], on_click=pick) \
                             .props(("unelevated" if value == current
                                     else "outline") + " no-caps")
@@ -396,13 +401,19 @@ async def antworten_page():
         # ------------------------------------------------------------------
         # Actions
         # ------------------------------------------------------------------
-        async def classify(row_id: int, classification: str) -> None:
-            ok = await run.io_bound(
-                reply_service.resolve_review, row_id, classification)
-            if ok:
+        async def classify(row_id: int, classification: str,
+                           force_status: bool = False) -> None:
+            outcome = await run.io_bound(
+                reply_service.resolve_review, row_id, classification,
+                force_status)
+            if outcome["ok"]:
                 say(f"Eingeordnet als "
                     f"{CLASS_LABELS.get(classification, classification)} — "
-                    f"der Status der Bewerbung ist nachgezogen.",
+                    f"der Status der Bewerbung ist nachgezogen."
+                    if outcome["status_written"] else
+                    f"Eingeordnet als "
+                    f"{CLASS_LABELS.get(classification, classification)} — "
+                    f"der Stand bleibt {outcome['kept']}.",
                     type="positive")
             else:
                 say("Diese Zeile gibt es nicht mehr.", type="warning")

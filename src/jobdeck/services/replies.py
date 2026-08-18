@@ -30,6 +30,7 @@ from jobdeck.constants import (
     EMAIL_INBOUND,
     EMAIL_INBOUND_IGNORED,
     OFFENE_STATUS,
+    STATUS_RANK,
 )
 from jobdeck.contact_resolve import registrable_domain
 from jobdeck.services import apply_record
@@ -760,27 +761,55 @@ def _apply_label(message_id: str, classification: str,
 # --------------------------------------------------------------------------
 # Review actions (the /antworten page's handlers, sync — call via io_bound)
 # --------------------------------------------------------------------------
-def resolve_review(email_log_id: int, classification: str) -> bool:
-    """His verdict on a review row: classify, apply the status, label.
+def resolve_review(email_log_id: int, classification: str,
+                   force_status: bool = False) -> dict:
+    """His verdict on a review row: classify, label, and apply the status —
+    unless applying it would take the application BACKWARDS.
 
-    source='reply_manual' — a human clicked, so the anti-downgrade rank
-    does not apply; his call always wins."""
+    Measured on his real shelf: 23 of 42 waiting mails hang off applications
+    already standing at 'Absage', 8 of them proposing 'Eingang'. Because this
+    writes with source='reply_manual' — exempt from the anti-downgrade rank so
+    that his correction can win — one ordinary press would silently reopen an
+    application he closed himself.
+
+    So the FIRST press files the mail and keeps the status, and the screen
+    offers a second, explicit press (`force_status=True`) that writes it. The
+    rule is the one `set_status` already applies to automatic sources: a press
+    may RAISE a status, never lower it or move it sideways. A verdict that
+    raises — 34 of his 42 — behaves exactly as before.
+
+    Returns what happened, so the screen can say it: `status_written` False
+    with `kept` and `would_be` set means the mail is filed and the register
+    was left alone."""
     if classification not in CLASSIFICATION_TO_STATUS:
-        return False
+        return {"ok": False, "status_written": False}
+    wanted = CLASSIFICATION_TO_STATUS[classification]
     with db.db() as con:
         row = db.get_email_log(con, email_log_id)
         if row is None:
-            return False
+            return {"ok": False, "status_written": False}
+        # The mail is read either way: what it IS does not depend on whether
+        # the register may move. Leaving it on the shelf would ask him the
+        # same question again tomorrow.
         db.classify_reply_row(con, email_log_id, classification,
                               "reply_manual", 0)
-        if row["bewerbung_id"] is not None:
-            db.set_status(con, int(row["bewerbung_id"]),
-                          CLASSIFICATION_TO_STATUS[classification],
-                          source="reply_manual", email_log_id=email_log_id)
         message_id = str(row["gmail_message_id"] or "")
+        result = {"ok": True, "status_written": False, "kept": "",
+                  "would_be": wanted}
+        if row["bewerbung_id"] is not None:
+            bewerbung = db.get_bewerbung(con, int(row["bewerbung_id"]))
+            current = str(bewerbung["status"] or "") if bewerbung else ""
+            if (not force_status and current != wanted
+                    and STATUS_RANK.get(wanted, 0)
+                    <= STATUS_RANK.get(current, 0)):
+                result["kept"] = current
+            else:
+                result["status_written"] = db.set_status(
+                    con, int(row["bewerbung_id"]), wanted,
+                    source="reply_manual", email_log_id=email_log_id)
     if message_id:
         _apply_label(message_id, classification, needs_review=False)
-    return True
+    return result
 
 
 def dismiss_review(email_log_id: int) -> None:
