@@ -11,6 +11,7 @@ import ast
 import asyncio
 import pathlib
 import sys
+import time
 
 import pytest
 from nicegui import ui
@@ -628,7 +629,7 @@ async def test_the_closed_view_files_its_whole_pile_and_writes_no_status(
     user.find("Alle ablegen").click()
     await user.should_see("Kein Stand wird geändert")
     user.find("Ablegen", kind=ui.button).click()
-    await user.should_see("kein Stand wurde geändert")
+    await user.should_see("3 Mails abgelegt — kein Stand wurde geändert")
 
     for row_id in rows:
         assert db.get_email_log(con, row_id)["needs_review"] == 0
@@ -700,3 +701,94 @@ def test_moving_the_cursor_is_not_part_of_the_lists_redraw_signature():
     assignment = source[source.index("            list_state = ("):]
     assignment = assignment[:assignment.index("\n            strip = (")]
     assert 'state["selected"]' not in assignment, assignment
+
+
+async def test_an_invitation_is_marked_not_just_ranked_first(user: User, con):
+    """His report on the first real read: the invitation WAS classified
+    correctly and still sat in the pile looking like a receipt. Ranking it
+    first is not enough — drawn like everything else it reads like everything
+    else, in the list AND in the panel where he decides."""
+    other = _application(con, firma="Andere AG")
+    _inbound(con, "m-old", bewerbung_id=other, subject="Eingang",
+             classification="eingang", classified_by="rules")
+    invited = _application(con, firma="Wichtig GmbH")
+    _inbound(con, "m-new", bewerbung_id=invited, subject="Vorstellungsgespräch",
+             classification="einladung", classified_by="rules")
+
+    await user.open("/antworten")
+
+    await user.should_see("2 Vorgänge warten")
+    # first in the list ...
+    assert _option_rows(user)[0]._props.get("aria-selected") == "true"
+    # ... and said out loud, in both places
+    marked = [e for e in user.find(marker=None).elements
+              if "jd-urgent" in (e._classes or [])]
+    assert len(marked) >= 2, "the invitation is ranked but not marked"
+
+
+async def test_the_cursor_lands_where_he_acted_not_back_at_the_top(
+        user: User, con):
+    """Found by the review panel, and it is the defect that would have cost
+    him the most: after each verdict the cursor jumped back to the first row,
+    so clearing 42 Vorgänge meant walking down the list again after every
+    single one — O(n²) keystrokes on the screen built to stop exactly that.
+    Stellen carries `prefer_index` for the same reason."""
+    for index in range(4):
+        _inbound(con, f"m-{index}",
+                 bewerbung_id=_application(con, firma=f"Firma {index}"),
+                 subject=f"Betreff {index}")
+    con.commit()
+    await user.open("/antworten")
+    await user.should_see("4 Vorgänge warten")
+
+    await antworten_key(user, "j")
+    await antworten_key(user, "j")
+    third = _option_rows(user)[2]
+    assert third._props.get("aria-selected") == "true"
+    subject_below = _option_rows(user)[3].default_slot.children[1] \
+        .default_slot.children[1].text
+
+    await antworten_key(user, "x")
+
+    await user.should_see("3 Vorgänge warten")
+    rows = _option_rows(user)
+    selected = [r for r in rows if r._props.get("aria-selected") == "true"]
+    assert len(selected) == 1
+    assert rows.index(selected[0]) == 2, \
+        "the cursor jumped away from where he acted"
+    # and it is the row that TOOK the place, not some other one
+    assert selected[0].default_slot.children[1].default_slot.children[1].text \
+        == subject_below
+
+
+async def test_a_second_keystroke_mid_write_cannot_file_the_same_mail_twice(
+        user: User, con, monkeypatch):
+    """Found by the review panel. A verdict is a write in a worker thread, and
+    the row does not leave the list until it lands — so a second keystroke in
+    that window reads the SAME selection, files the same mail again, and the
+    row below it is silently skipped. On a 42-item sitting that is exactly the
+    tempo he will type at."""
+    from jobdeck.services import replies as service
+    for index in range(3):
+        _inbound(con, f"m-{index}",
+                 bewerbung_id=_application(con, firma=f"Firma {index}"))
+    con.commit()
+    await user.open("/antworten")
+    await user.should_see("3 Vorgänge warten")
+
+    real, seen = service.dismiss_review, []
+
+    def slow(email_log_id):
+        seen.append(email_log_id)
+        time.sleep(0.35)
+        return real(email_log_id)
+
+    monkeypatch.setattr(service, "dismiss_review", slow)
+
+    first = asyncio.create_task(antworten_key(user, "x"))
+    await asyncio.sleep(0.05)
+    await antworten_key(user, "x")
+    await first
+
+    assert len(seen) == 1, f"the same mail was filed {len(seen)} times: {seen}"
+    assert len(db.pending_review_replies(con)) == 2

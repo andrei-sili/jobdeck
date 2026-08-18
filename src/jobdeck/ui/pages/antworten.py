@@ -320,7 +320,8 @@ def _mail_fingerprint(row: dict) -> tuple:
 async def antworten_page():
     async with frame("Antworten", current="antworten", padded=False):
         refresh_gen = {"n": 0}
-        state = {"view": DEFAULT_VIEW, "selected": "", "search": ""}
+        state = {"view": DEFAULT_VIEW, "selected": "", "search": "",
+                 "prefer_index": None}
         shown: dict[str, dict] = {}
         order: list[str] = []
         drawn: dict = {"list": None, "reader": None, "strip": None}
@@ -453,10 +454,10 @@ async def antworten_page():
                             reply_service.rescan, chosen)
                         say(register.plural(
                             result["forgotten"],
-                            "1 Nachricht wird neu gelesen",
-                            f"{result['forgotten']} Nachrichten werden neu "
-                            "gelesen") + f" · {result['lookback_days']} Tage "
-                            "zurück. Der nächste Lauf beginnt damit.")
+                            "Nachricht wird neu gelesen",
+                            "Nachrichten werden neu gelesen")
+                            + f" · {result['lookback_days']} Tage zurück. "
+                            "Der nächste Lauf beginnt damit.")
                         await refresh(force=True)
                     ui.button("Neu prüfen", on_click=go) \
                         .props("unelevated no-caps")
@@ -511,6 +512,13 @@ async def antworten_page():
             with row:
                 ui.element("span").classes("jd-gutter")
                 with ui.element("div").classes("jd-row-body"):
+                    if group["invitation"]:
+                        # It is the one thing here with a date and a person
+                        # waiting for an answer. Ranked first is not enough —
+                        # drawn like everything else it read like everything
+                        # else, which is what he reported the first time.
+                        ui.label("Einladung — hier wartet jemand auf deine "
+                                 "Antwort").classes("jd-urgent")
                     with ui.row().classes("items-center gap-2 no-wrap w-full"):
                         ui.label(group["firma"]).classes("jd-firma")
                         proposal = str(group["lead"].get("classification") or "")
@@ -563,6 +571,9 @@ async def antworten_page():
                     ui.button("✕ keiner Bewerbung zuordnen",
                               on_click=lambda _=None, r=lead["id"]:
                                   dismiss(r)).props("flat dense no-caps")
+                if group["invitation"]:
+                    ui.label("Hier wartet jemand auf deine Antwort.") \
+                        .classes("jd-urgent mb-2")
                 for text, kind in reader_notes(group):
                     ui.label(text).classes(f"jd-note {kind} mb-2")
                 _render_facts(group)
@@ -760,6 +771,7 @@ async def antworten_page():
         # ------------------------------------------------------------------
         async def classify(row_id: int, classification: str,
                            force_status: bool = False) -> None:
+            _hold_place()
             outcome = await run.io_bound(
                 reply_service.resolve_review, row_id, classification,
                 force_status)
@@ -777,6 +789,7 @@ async def antworten_page():
             await refresh(force=True)
 
         async def adopt(row_id: int) -> None:
+            _hold_place()
             outcome = await run.io_bound(reply_service.adopt_receipt, row_id)
             if outcome.get("ok"):
                 say("Bewerbung eingetragen — sie steht jetzt im Register.",
@@ -789,6 +802,7 @@ async def antworten_page():
             await refresh(force=True)
 
         async def dismiss(row_id: int) -> None:
+            _hold_place()
             await run.io_bound(reply_service.dismiss_review, row_id)
             say("Abgelegt — keiner Bewerbung zugeordnet.")
             await refresh(force=True)
@@ -815,8 +829,8 @@ async def antworten_page():
             confirm would be a dozen unguarded status writes in one press."""
             overlay.clear()
             filed = await run.io_bound(reply_service.dismiss_many, ids)
-            say(f"{filed} Mails abgelegt — kein Stand wurde geändert.",
-                type="positive")
+            say(register.plural(filed, "Mail abgelegt", "Mails abgelegt")
+                + " — kein Stand wurde geändert.", type="positive")
             await refresh(force=True)
 
         def confirm_file_closed(groups: list[dict]) -> None:
@@ -825,10 +839,10 @@ async def antworten_page():
                 ui.label("Alle ablegen").classes("font-medium")
                 ui.label(register.plural(
                     len(ids),
-                    "1 Mail zu einer bereits abgeschlossenen Bewerbung wird "
+                    "Mail zu einer bereits abgeschlossenen Bewerbung wird "
                     "abgelegt.",
-                    f"{len(ids)} Mails zu bereits abgeschlossenen "
-                    "Bewerbungen werden abgelegt.")).classes("jd-card-sub")
+                    "Mails zu bereits abgeschlossenen Bewerbungen werden "
+                    "abgelegt.")).classes("jd-card-sub")
                 ui.label("Kein Stand wird geändert, nichts wird gelöscht — "
                          "die Mails stehen danach unter „Eingeordnet“ und "
                          "können einzeln zurückgeholt werden.") \
@@ -875,6 +889,32 @@ async def antworten_page():
             index = order.index(state["selected"])
             select(order[max(0, min(len(order) - 1, index + step))])
 
+        acting = {"busy": False}
+
+        async def _once(make) -> None:
+            """One keyboard action at a time.
+
+            A verdict is a write in a worker thread; a second keystroke landing
+            while it is in flight reads the SAME selection — the row has not
+            left the list yet — and files the same mail twice while the row
+            below it is silently skipped. j and k stay free: moving is cheap
+            and reversible."""
+            # A THUNK, not a coroutine: building the coroutine at the call
+            # site and then refusing it here leaves it never awaited.
+            if acting["busy"]:
+                return
+            acting["busy"] = True
+            try:
+                await make()
+            finally:
+                acting["busy"] = False
+
+        def _hold_place() -> None:
+            """Remember where in the list he acted, so the Vorgang that takes
+            that place is the one he lands on."""
+            state["prefer_index"] = (order.index(state["selected"])
+                                     if state["selected"] in order else None)
+
         async def on_key(event) -> None:
             # Held keys repeat ~30 times a second: without this, holding ⏎
             # would file a dozen verdicts on a dozen applications.
@@ -899,7 +939,7 @@ async def antworten_page():
                 return
             lead = group["lead"]
             if key == "x":
-                await dismiss(lead["id"])
+                await _once(lambda: dismiss(lead["id"]))
             elif key == "Enter":
                 # Only the machine's own proposal, and only where it may be
                 # written on one press: a keystroke must never be the thing
@@ -907,7 +947,7 @@ async def antworten_page():
                 proposal = str(lead.get("classification") or "")
                 if (proposal in CLASSIFICATION_TO_STATUS
                         and not is_receipt_proposal(lead)):
-                    await classify(lead["id"], proposal)
+                    await _once(lambda: classify(lead["id"], proposal))
 
         # ------------------------------------------------------------------
         # loading and drawing
@@ -925,12 +965,11 @@ async def antworten_page():
             closed = [g for g in view["groups"] if g["closed"]]
             if state["view"] == "eingeordnet":
                 count_label.set_text(register.plural(
-                    len(view["settled"]), "1 Antwort eingeordnet",
-                    f"{len(view['settled'])} Antworten eingeordnet"))
+                    len(view["settled"]), "Antwort eingeordnet",
+                    "Antworten eingeordnet"))
             else:
                 count_label.set_text(register.plural(
-                    len(groups), "1 Vorgang wartet",
-                    f"{len(groups)} Vorgänge warten"))
+                    len(groups), "Vorgang wartet", "Vorgänge warten"))
             state_label.set_text(strip_state(view))
             bulk_host.clear()
             with bulk_host:
@@ -942,10 +981,10 @@ async def antworten_page():
                 elif state["view"] == "offen" and closed:
                     ui.label(register.plural(
                         len(closed),
-                        "1 Vorgang zu einer abgeschlossenen Bewerbung "
+                        "Vorgang zu einer abgeschlossenen Bewerbung "
                         "ausgeblendet",
-                        f"{len(closed)} Vorgänge zu abgeschlossenen "
-                        "Bewerbungen ausgeblendet")).classes("jd-meta")
+                        "Vorgänge zu abgeschlossenen Bewerbungen "
+                        "ausgeblendet")).classes("jd-meta")
 
         async def refresh(force: bool = False) -> None:
             # Last request wins: a click's refresh and the watcher's tick can
@@ -964,9 +1003,23 @@ async def antworten_page():
             order.clear()
             order.extend(g["key"] for g in groups)
             if state["selected"] not in shown:
-                state["selected"] = order[0] if order else ""
+                # He acted on it, so it is MEANT to be gone: the Vorgang that
+                # took its place is next. Landing back at the top made a
+                # 42-item sitting cost O(n²) keystrokes — the very thing this
+                # screen exists to stop, and the same defect Stellen's
+                # `prefer_index` was added for.
+                index = state["prefer_index"]
+                if index is not None and order:
+                    state["selected"] = order[min(index, len(order) - 1)]
+                else:
+                    state["selected"] = order[0] if order else ""
                 if state["selected"]:
                     read_here.add(state["selected"])
+                # Consumed, so it cannot land a LATER unrelated redraw on a
+                # stale index. Cleared only here: clearing it on every refresh
+                # lost it to the watcher's tick, which lands in the middle of
+                # the write it is meant to survive.
+                state["prefer_index"] = None
 
             # NOT keyed on the selection: moving the cursor rewrites two rows'
             # props in place, and putting `selected` here made the watcher's
