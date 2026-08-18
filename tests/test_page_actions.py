@@ -12,6 +12,7 @@ from nicegui import ui
 from nicegui.testing import User
 
 from jobdeck import db
+from jobdeck.services import silence
 
 pytest_plugins = ["nicegui.testing.user_plugin"]
 
@@ -228,6 +229,38 @@ async def test_the_age_threshold_he_types_is_the_one_that_gets_saved(
     await asyncio.sleep(0.3)
 
     assert db.get_setting(con, "stale_age_days", "") == "21"
+
+
+async def test_the_silence_window_he_types_reaches_the_rule_that_closes(
+        user: User, con, data_dir):
+    """The rule writes a status with nobody watching, so the number he sets
+    must be the number it uses — not merely a field that saves somewhere."""
+    await user.open("/settings")
+    field = next(e for e in user.client.elements.values()
+                 if isinstance(e, ui.number)
+                 and "ohne Antwort" in (e.props.get("label") or ""))
+    field.set_value(30)
+    await asyncio.sleep(0.1)
+
+    user.find(marker="save-tunables").click()
+    await asyncio.sleep(0.3)
+
+    assert silence.configured_days(con) == 30
+
+
+async def test_zero_in_the_field_switches_the_rule_off(
+        user: User, con, data_dir):
+    await user.open("/settings")
+    field = next(e for e in user.client.elements.values()
+                 if isinstance(e, ui.number)
+                 and "ohne Antwort" in (e.props.get("label") or ""))
+    field.set_value(0)
+    await asyncio.sleep(0.1)
+
+    user.find(marker="save-tunables").click()
+    await asyncio.sleep(0.3)
+
+    assert silence.configured_days(con) == silence.OFF
 
 
 # ---------------------------------------------------------------------------
