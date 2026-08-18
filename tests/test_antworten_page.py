@@ -722,8 +722,11 @@ async def test_an_invitation_is_marked_not_just_ranked_first(user: User, con):
     assert _option_rows(user)[0]._props.get("aria-selected") == "true"
     # ... and said out loud, in both places
     marked = [e for e in user.find(marker=None).elements
-              if "jd-urgent" in (e._classes or [])]
+              if "jd-urgent-note" in (e._classes or [])]
     assert len(marked) >= 2, "the invitation is ranked but not marked"
+    # ... and not shouted: a 45-character German sentence in small caps is
+    # unreadable, and the project already had to un-shout its buttons once
+    assert all("jd-urgent" not in (e._classes or []) for e in marked)
 
 
 async def test_the_cursor_lands_where_he_acted_not_back_at_the_top(
@@ -792,3 +795,98 @@ async def test_a_second_keystroke_mid_write_cannot_file_the_same_mail_twice(
 
     assert len(seen) == 1, f"the same mail was filed {len(seen)} times: {seen}"
     assert len(db.pending_review_replies(con)) == 2
+
+
+async def test_alle_ablegen_files_what_the_list_shows_not_more(user: User, con):
+    """Found by the review panel. The button was keyed on every closed
+    Vorgang rather than on the filtered list, so with a search active "Alle
+    ablegen" filed mail he could not see — and "Alle" meant something other
+    than everything on screen, which is the one thing a bulk gesture may
+    never do."""
+    keep = _application(con, firma="Unsichtbar GmbH")
+    db.set_status(con, keep, "Absage", source="user")
+    keep_row = _inbound(con, "m-keep", bewerbung_id=keep)
+    hit = _application(con, firma="Gesucht AG")
+    db.set_status(con, hit, "Absage", source="user")
+    hit_row = _inbound(con, "m-hit", bewerbung_id=hit)
+    con.commit()
+
+    await user.open("/antworten")
+    await _open_view(user, "abgeschlossen")
+    await user.should_see("2 Vorgänge warten")
+    user.find(kind=ui.input).type("Gesucht")
+    await asyncio.sleep(0.6)
+    await user.should_see("1 Vorgang wartet")
+
+    user.find("Alle ablegen").click()
+    await user.should_see("Kein Stand wird geändert")
+    user.find("Ablegen", kind=ui.button).click()
+    # the message AFTER the write — "abgelegt" alone also matches the dialog
+    await user.should_see("kein Stand wurde geändert")
+
+    assert db.get_email_log(con, hit_row)["needs_review"] == 0
+    assert db.get_email_log(con, keep_row)["needs_review"] == 1, \
+        "a Vorgang the search had hidden was filed anyway"
+
+
+async def test_what_files_itself_is_readable_while_he_triages(user: User, con):
+    """The old page carried this sentence permanently. Moving it into the
+    empty state alone would have meant the one screen that never shows it is
+    the one he actually works on — and "what gets written without me" is not
+    something the buttons' own consequences can say."""
+    _inbound(con, "m-1", bewerbung_id=_application(con))
+    con.commit()
+
+    await user.open("/antworten")
+
+    await user.should_see("1 Vorgang wartet")
+    await user.should_see("trägt JobDeck selbst ein")
+
+
+async def test_the_settled_view_does_not_claim_nothing_was_read(
+        user: User, con):
+    """The list pane carried the view's empty text — "Noch keine Antwort
+    gelesen" — beside a panel listing the answers it had just read."""
+    _inbound(con, "m-1", bewerbung_id=_application(con), needs_review=0,
+             classification="absage", classified_by="rules")
+    con.commit()
+
+    await user.open("/antworten")
+    await _open_view(user, "eingeordnet")
+
+    await user.should_see("1 Antwort ist eingeordnet")
+    assert not [e for e in user.find(marker=None).elements
+                if "Noch keine Antwort gelesen" in str(getattr(e, "text", ""))]
+
+
+async def test_the_page_and_the_rail_can_be_reconciled(user: User, con):
+    """The rail counts MAILS ("N zu prüfen"), the page counts Vorgänge. With
+    only one of the two figures on screen the two disagree out loud and
+    neither explains why — 42 in the rail against 17 on the page, on his real
+    corpus."""
+    shared = _application(con, firma="Viele Mails GmbH")
+    _inbound(con, "m-1", bewerbung_id=shared, subject="Erste")
+    _inbound(con, "m-2", bewerbung_id=shared, subject="Zweite")
+    _inbound(con, "m-3", bewerbung_id=_application(con, firma="Eine AG"))
+    con.commit()
+
+    await user.open("/antworten")
+
+    await user.should_see("2 Vorgänge warten · 3 Mails insgesamt")
+
+
+async def test_the_ledger_says_when_it_is_showing_only_the_newest(
+        user: User, con):
+    """It lists LEDGER_LIMIT rows. A ledger that quietly ends is worse than a
+    short one that says so."""
+    for index in range(antworten.LEDGER_LIMIT + 2):
+        _inbound(con, f"m-{index}",
+                 bewerbung_id=_application(con, firma=f"F{index}"),
+                 needs_review=0, classification="absage",
+                 classified_by="rules")
+    con.commit()
+
+    await user.open("/antworten")
+    await _open_view(user, "eingeordnet")
+
+    await user.should_see(f"die neuesten {antworten.LEDGER_LIMIT}")

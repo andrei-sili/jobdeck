@@ -877,6 +877,8 @@ def adopt_receipt(email_log_id: int) -> dict:
         # application; attach instead, which is what the press meant.
         bewerbung_id = int(job["bewerbung_id"])
         with db.db() as con:
+            bewerbung = db.get_bewerbung(con, bewerbung_id)
+            current = str(bewerbung["status"] or "") if bewerbung else ""
             db.link_reply_bewerbung(con, email_log_id, bewerbung_id)
             # The same restatement the ingestion arm makes when it finds the
             # application already there. Without it the row keeps claiming
@@ -885,8 +887,13 @@ def adopt_receipt(email_log_id: int) -> dict:
             db.set_reply_matched_by(con, email_log_id, MATCHED_ATTACHED)
             db.classify_reply_row(con, email_log_id, "eingang",
                                   "reply_manual", 0)
-            db.set_status(con, bewerbung_id, "In Bearbeitung",
-                          source="reply_manual", email_log_id=email_log_id)
+            # The same rule the verdict buttons follow: a receipt is rank 2
+            # and may RAISE a status, never reopen one he has already closed.
+            # Without this, "Als Bewerbung eintragen" was a way around the
+            # guard on the very screen that states it.
+            if STATUS_RANK.get("In Bearbeitung", 0) > STATUS_RANK.get(current, 0):
+                db.set_status(con, bewerbung_id, "In Bearbeitung",
+                              source="reply_manual", email_log_id=email_log_id)
         _apply_label(str(row["gmail_message_id"] or ""), "eingang")
         return {"ok": True, "bewerbung_id": bewerbung_id,
                 "company": str(job["company"] or ""), "duplicate": None,

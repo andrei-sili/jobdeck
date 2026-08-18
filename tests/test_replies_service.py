@@ -1236,3 +1236,44 @@ def test_an_unparseable_lookback_falls_back_instead_of_crashing(data_dir, con):
         db.set_setting(write, service.LOOKBACK_KEY, "sehr lange")
     with db.db() as read:
         assert service._lookback_days(read) == service.FIRST_RUN_LOOKBACK_DAYS
+
+
+def test_adopting_a_receipt_cannot_reopen_a_closed_application(inbox, con):
+    """Found by the review panel: "Als Bewerbung eintragen" wrote
+    'In Bearbeitung' unconditionally with source='reply_manual', which the
+    anti-downgrade rank exempts — so the one button the verdict guard does not
+    cover was a way around it, on the very screen that states the rule."""
+    job_id = _strip_job(con)
+    row_id = db.add_email_log(con, {
+        "direction": "inbound", "gmail_message_id": "m-r", "job_id": job_id,
+        "matched_by": service.MATCHED_RECEIPT, "classification": "eingang",
+        "needs_review": 1})
+    bewerbung_id = _sent_application(con)
+    db.set_status(con, bewerbung_id, "Absage", source="user")
+    db.set_job_status(con, job_id, "applied", bewerbung_id=bewerbung_id)
+    con.commit()
+
+    assert service.adopt_receipt(row_id)["ok"] is True
+
+    # the mail is attached and settled ...
+    row = db.get_email_log(con, row_id)
+    assert (row["bewerbung_id"], row["needs_review"]) == (bewerbung_id, 0)
+    # ... and the closed application stands
+    assert db.get_bewerbung(con, bewerbung_id)["status"] == "Absage"
+
+
+def test_adopting_a_receipt_still_raises_an_open_application(inbox, con):
+    """The guard is about going backwards; the ordinary case must be
+    untouched."""
+    job_id = _strip_job(con)
+    row_id = db.add_email_log(con, {
+        "direction": "inbound", "gmail_message_id": "m-r", "job_id": job_id,
+        "matched_by": service.MATCHED_RECEIPT, "classification": "eingang",
+        "needs_review": 1})
+    bewerbung_id = _sent_application(con)
+    db.set_job_status(con, job_id, "applied", bewerbung_id=bewerbung_id)
+    con.commit()
+
+    assert service.adopt_receipt(row_id)["ok"] is True
+
+    assert db.get_bewerbung(con, bewerbung_id)["status"] == "In Bearbeitung"

@@ -86,7 +86,8 @@ VIEWS = (
     View("abgeschlossen", "Abgeschlossene Bewerbungen",
          "Keine offenen Mails zu abgeschlossenen Bewerbungen."),
     View("alle", "Alle zu prüfen", "Nichts wartet auf dein Urteil."),
-    View("eingeordnet", "Eingeordnet", "Noch keine Antwort gelesen."),
+    View("eingeordnet", "Eingeordnet",
+         "Die eingeordneten Antworten stehen rechts."),
 )
 DEFAULT_VIEW = "offen"
 _VIEW_KEYS = {view.key for view in VIEWS}
@@ -518,7 +519,7 @@ async def antworten_page():
                         # drawn like everything else it read like everything
                         # else, which is what he reported the first time.
                         ui.label("Einladung — hier wartet jemand auf deine "
-                                 "Antwort").classes("jd-urgent")
+                                 "Antwort").classes("jd-urgent-note")
                     with ui.row().classes("items-center gap-2 no-wrap w-full"):
                         ui.label(group["firma"]).classes("jd-firma")
                         proposal = str(group["lead"].get("classification") or "")
@@ -573,7 +574,7 @@ async def antworten_page():
                                   dismiss(r)).props("flat dense no-caps")
                 if group["invitation"]:
                     ui.label("Hier wartet jemand auf deine Antwort.") \
-                        .classes("jd-urgent mb-2")
+                        .classes("jd-urgent-note mb-2")
                 for text, kind in reader_notes(group):
                     ui.label(text).classes(f"jd-note {kind} mb-2")
                 _render_facts(group)
@@ -599,6 +600,12 @@ async def antworten_page():
                         ui.label(why).classes("text-sm mt-1")
                 _render_verdicts(group)
                 _render_siblings(group)
+                # The old page carried this sentence permanently, above the
+                # work. Here it sits under it — still on the screen he decides
+                # from, because "what gets written without me" is not a thing
+                # the buttons' own consequences can say.
+                with ui.column().classes("mt-8 max-w-prose"):
+                    _automation_note()
 
         def _render_facts(group: dict) -> None:
             lead = group["lead"]
@@ -682,9 +689,13 @@ async def antworten_page():
                     ui.label("Noch keine Antwort gelesen.") \
                         .classes("jd-meta mt-2")
                     return
-                ui.label(register.plural(
-                    len(settled), "Antwort ist eingeordnet",
-                    "Antworten sind eingeordnet")).classes("jd-meta mt-2")
+                line = register.plural(len(settled), "Antwort ist eingeordnet",
+                                       "Antworten sind eingeordnet")
+                if len(settled) >= LEDGER_LIMIT:
+                    # It shows the newest N. Saying so is the difference
+                    # between a ledger and a ledger that quietly ends.
+                    line += f" — die neuesten {LEDGER_LIMIT}"
+                ui.label(line).classes("jd-meta mt-2")
                 with ui.column().classes("mt-3 max-w-prose"):
                     _automation_note()
                 for row in settled:
@@ -968,14 +979,26 @@ async def antworten_page():
                     len(view["settled"]), "Antwort eingeordnet",
                     "Antworten eingeordnet"))
             else:
-                count_label.set_text(register.plural(
-                    len(groups), "Vorgang wartet", "Vorgänge warten"))
+                # The rail counts MAILS ("42 zu prüfen") and this counts
+                # Vorgänge, so without the second figure the two screens
+                # disagree out loud and neither says why.
+                mails = sum(g["count"] for g in view["groups"])
+                line = register.plural(len(groups), "Vorgang wartet",
+                                       "Vorgänge warten")
+                if mails != len(groups):
+                    line += " · " + register.plural(
+                        mails, "Mail insgesamt", "Mails insgesamt")
+                count_label.set_text(line)
             state_label.set_text(strip_state(view))
             bulk_host.clear()
             with bulk_host:
-                if state["view"] == "abgeschlossen" and closed:
+                if state["view"] == "abgeschlossen" and groups:
+                    # `groups`, not every closed Vorgang: the button files what
+                    # the list SHOWS. Keyed on the unfiltered set it filed a
+                    # search's worth of mail he could not see, and "Alle" would
+                    # have meant something different from everything on screen.
                     ui.button("Alle ablegen",
-                              on_click=lambda _=None, g=list(closed):
+                              on_click=lambda _=None, g=list(groups):
                                   confirm_file_closed(g)) \
                         .props("flat dense no-caps")
                 elif state["view"] == "offen" and closed:

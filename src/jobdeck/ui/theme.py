@@ -279,6 +279,10 @@ body { background: var(--paper); color: var(--ink); font-family: var(--jd-sans);
                        background: var(--accent-soft); border-radius:3px; }
 .jd-urgent { font:600 11px/1.4 var(--jd-sans); letter-spacing:.04em;
              color: var(--accent-deep); text-transform:uppercase; }
+/* The same voice, for a whole SENTENCE rather than a label: 45 characters of
+   German in small caps is a shout, and the point of the line is that it be
+   read. */
+.jd-urgent-note { font:600 12.5px/1.4 var(--jd-sans); color: var(--accent-deep); }
 
 /* One row of the register: a permission, and how often a letter used it. */
 .jd-claim { display:grid; grid-template-columns:1fr auto auto; gap:0 12px;
