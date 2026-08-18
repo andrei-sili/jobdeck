@@ -715,6 +715,57 @@ async def test_adopting_a_receipt_for_an_already_recorded_job_attaches(
     assert (job["status"], job["bewerbung_id"]) == ("applied", bewerbung_id)
     assert db.get_email_log(con, row_id)["bewerbung_id"] == bewerbung_id
     assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 1
+    # The row must now say it ATTACHED, not that this app created the
+    # ledger row — `undo_receipt` reads exactly this to decide whether an
+    # undo may delete a `bewerbungen` row.
+    assert db.get_email_log(con, row_id)["matched_by"] == service.MATCHED_ATTACHED
+
+
+async def test_adopting_onto_a_hand_recorded_application_cannot_be_undone(
+        inbox, con):
+    """The window the ingestion arm's guard does not cover.
+
+    A receipt whose posting had no application yet is stored as
+    MATCHED_RECEIPT and waits on the review pile. He then records the
+    application HIMSELF. The press now attaches rather than records — and
+    if the row keeps saying MATCHED_RECEIPT, `undo_receipt` accepts and
+    `apply_record.undo` deletes the ledger row he wrote by hand."""
+    job_id = _strip_job(con)
+    row_id = db.add_email_log(con, {
+        "direction": "inbound", "gmail_message_id": "m-r", "job_id": job_id,
+        "matched_by": service.MATCHED_RECEIPT, "classification": "eingang",
+        "needs_review": 1})
+    # he records it himself, after the mail was already shelved
+    bewerbung_id = _sent_application(con)
+    db.set_job_status(con, job_id, "applied", bewerbung_id=bewerbung_id)
+    con.commit()
+
+    assert service.adopt_receipt(row_id)["ok"] is True
+
+    assert service.undo_receipt(row_id) is False
+    assert db.get_bewerbung(con, bewerbung_id) is not None
+    assert db.get_job(con, job_id)["bewerbung_id"] == bewerbung_id
+
+
+async def test_adopting_a_receipt_labels_the_mail(inbox, con):
+    """Both adoption paths write the register, so both must leave Gmail
+    telling the truth. The attach path labelled nothing, so 'Zu prüfen'
+    stayed on a mail that was no longer waiting for anything."""
+    job_id = _strip_job(con)
+    row_id = db.add_email_log(con, {
+        "direction": "inbound", "gmail_message_id": "m-r", "job_id": job_id,
+        "matched_by": service.MATCHED_RECEIPT, "classification": "eingang",
+        "needs_review": 1})
+    bewerbung_id = _sent_application(con)
+    db.set_job_status(con, job_id, "applied", bewerbung_id=bewerbung_id)
+    con.commit()
+    inbox.label_calls.clear()
+
+    assert service.adopt_receipt(row_id)["ok"] is True
+
+    message, add, remove = inbox.label_calls[0]
+    assert (message, add) == ("m-r", ("L_JobDeck/Offen",))
+    assert "L_JobDeck/Zu prüfen" in remove
 
 
 async def test_a_job_boards_own_newsletter_cannot_confirm_an_application(

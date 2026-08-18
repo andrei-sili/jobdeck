@@ -807,10 +807,16 @@ def adopt_receipt(email_log_id: int) -> dict:
         bewerbung_id = int(job["bewerbung_id"])
         with db.db() as con:
             db.link_reply_bewerbung(con, email_log_id, bewerbung_id)
+            # The same restatement the ingestion arm makes when it finds the
+            # application already there. Without it the row keeps claiming
+            # this app created the ledger row, `undo_receipt` accepts, and
+            # the undo deletes an application HE recorded by hand.
+            db.set_reply_matched_by(con, email_log_id, MATCHED_ATTACHED)
             db.classify_reply_row(con, email_log_id, "eingang",
                                   "reply_manual", 0)
             db.set_status(con, bewerbung_id, "In Bearbeitung",
                           source="reply_manual", email_log_id=email_log_id)
+        _apply_label(str(row["gmail_message_id"] or ""), "eingang")
         return {"ok": True, "bewerbung_id": bewerbung_id,
                 "company": str(job["company"] or ""), "duplicate": None,
                 "undo": False}

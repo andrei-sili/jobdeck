@@ -2346,6 +2346,21 @@ def link_reply_bewerbung(
     )
 
 
+def set_reply_matched_by(
+    con: sqlite3.Connection, email_log_id: int, matched_by: str
+) -> None:
+    """Restate HOW an inbound row reached its application.
+
+    Written after the fact by the one path that can change the answer:
+    adopting a receipt onto an application that appeared meanwhile attaches
+    rather than records, and `matched_by` is what decides whether an undo may
+    later delete a ledger row."""
+    con.execute(
+        "UPDATE email_log SET matched_by=? WHERE id=?",
+        (matched_by, email_log_id),
+    )
+
+
 def reopen_reply_review(con: sqlite3.Connection, email_log_id: int) -> None:
     """Put a row back on the review pile — the receipt undo path."""
     con.execute(
