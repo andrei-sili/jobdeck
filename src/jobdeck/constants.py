@@ -14,22 +14,37 @@ STATUS_OPTIONS = [
     "Antwort erhalten",
     "Einladung",
     "Absage",
+    "Keine Antwort",
     "Zurückgezogen",
 ]
 
 # Statuses that mean "still waiting for an answer" (follow-up reminders)
 OFFENE_STATUS = {"Gesendet", "In Bearbeitung"}
 
-# Statuses that mean the company replied (response-rate metric)
+# Statuses that mean the company replied (response-rate metric).
+#
+# "Keine Antwort" is deliberately NOT here. It is written by the app when an
+# application has been silent too long, and counting it as a reply would turn
+# the response rate into a lie that grows with every application: measured on
+# the real register, folding silence into "Absage" moved it from 32% to 50%
+# without a single employer having answered.
 BEANTWORTET_STATUS = {"Antwort erhalten", "Einladung", "Absage"}
 
 # Rank used to prevent automatic status downgrades: a late confirmation
 # e-mail must never overwrite an already-recorded invitation or rejection.
+#
+# "Keine Antwort" sits at 3 for two reasons that pull in opposite directions:
+# it must be writable over both open statuses (an application in
+# "In Bearbeitung" that then goes quiet has to close too), and it must still
+# lose to a real verdict — an invitation or a rejection arriving on day 65
+# overwrites it by itself, because "nobody answered" is a weaker claim than
+# anything an employer actually said.
 STATUS_RANK = {
     "": 0,
     "Gesendet": 1,
     "In Bearbeitung": 2,
     "Antwort erhalten": 3,
+    "Keine Antwort": 3,
     "Einladung": 4,
     "Absage": 4,
     "Zurückgezogen": 4,
@@ -70,6 +85,14 @@ DRAFT_DELIVERED = ("sent", "filed")
 # claiming it matched the other, and the only test compared it to itself — so
 # one could move while the other went on saying 14 about the same rows.
 DEFAULT_FOLLOW_UP_DAYS = 14
+
+# After how many days of silence an application closes itself as
+# "Keine Antwort" when he has never said. Chosen with Andrei 2026-08-18 and
+# measured on the real register: at 60 days fifteen applications close, all of
+# them the June batch, and forty-two stay open. Stated here for the same
+# reason as the follow-up window — the closer and the settings screen that
+# tunes it must not each carry their own number.
+DEFAULT_SILENCE_CLOSES_DAYS = 60
 
 # How many messages may leave in a day when he has never said. Stated once, in
 # the layer both the send gate and the screens that draw the budget can see: a

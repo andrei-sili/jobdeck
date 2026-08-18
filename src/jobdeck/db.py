@@ -24,6 +24,7 @@ from jobdeck.constants import (
     EMAIL_OUTBOUND_TEST,
     FORM_OPENED_UNKNOWN,
     LIVENESS_GONE,
+    OFFENE_STATUS,
     STATUS_RANK,
 )
 from jobdeck.dedupe import find_duplicate_bewerbung, norm
@@ -1877,6 +1878,55 @@ def draft_with_job(con: sqlite3.Connection, job_id: int) -> sqlite3.Row | None:
         _DRAFT_WITH_JOB_COLUMNS + " WHERE d.job_id=? ORDER BY d.id DESC LIMIT 1",
         (job_id,),
     ).fetchone()
+
+
+# A receipt or an out-of-office answer leaves an application exactly as
+# unanswered as it was — nobody has decided anything — but it does prove
+# someone is there, so it restarts the clock. Any OTHER inbound verdict means
+# a human engaged, and such a row must never be closed as unanswered.
+SILENT_CLASSIFICATIONS = ("eingang", "auto", "")
+
+# The clock runs from the last thing that happened, not from the application:
+# an employer who confirmed receipt on the 6th has been silent since the 6th.
+_SILENT_APPLICATIONS_SQL = """
+SELECT b.id, b.firma, b.status, b.gesendet_am, b.kanal,
+       COALESCE(
+           (SELECT MAX(e.internal_date) FROM email_log e
+             WHERE e.bewerbung_id = b.id AND e.direction = 'inbound'),
+           b.gesendet_am
+       ) AS last_contact
+  FROM bewerbungen b
+ WHERE b.status IN ({open_status})
+   AND b.gesendet_am IS NOT NULL AND b.gesendet_am <> ''
+   AND NOT EXISTS (
+        SELECT 1 FROM email_log e
+         WHERE e.bewerbung_id = b.id AND e.direction = 'inbound'
+           AND e.classification NOT IN ({silent})
+       )
+   AND julianday(?) - julianday(COALESCE(
+           (SELECT MAX(e.internal_date) FROM email_log e
+             WHERE e.bewerbung_id = b.id AND e.direction = 'inbound'),
+           b.gesendet_am)) >= ?
+ ORDER BY last_contact ASC
+"""
+
+
+def silent_applications(con: sqlite3.Connection, days: int) -> list[sqlite3.Row]:
+    """Open applications nobody has really answered for at least `days`.
+
+    Every channel counts: an application sent through a form has no address
+    to be answered at, which makes its silence more final rather than less.
+    An application that drew any real verdict is excluded outright — closing
+    one of those as unanswered would contradict what the employer said.
+    """
+    open_status = ",".join("?" * len(OFFENE_STATUS))
+    silent = ",".join("?" * len(SILENT_CLASSIFICATIONS))
+    sql = _SILENT_APPLICATIONS_SQL.format(open_status=open_status, silent=silent)
+    return con.execute(
+        sql,
+        (*sorted(OFFENE_STATUS), *SILENT_CLASSIFICATIONS,
+         _now(), int(days)),
+    ).fetchall()
 
 
 def send_mode(con: sqlite3.Connection) -> dict:
