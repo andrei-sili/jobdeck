@@ -16,8 +16,9 @@ def _fresh_scheduler():
 
 def test_every_background_job_is_registered_once_and_single_flight():
     jobs = {job.id: job for job in scheduler.create_scheduler().get_jobs()}
-    assert sorted(jobs) == ["auto_send", "check_liveness", "ingest_replies",
-                            "poll_profiles", "resolve_channels", "score_jobs"]
+    assert sorted(jobs) == ["auto_send", "check_liveness", "close_silent",
+                            "ingest_replies", "poll_profiles",
+                            "resolve_channels", "score_jobs"]
     for job in jobs.values():
         # a slow run must never stack up behind itself
         assert job.coalesce is True
@@ -71,3 +72,15 @@ def test_the_reply_pass_starts_inside_this_session():
     delay = job.next_run_time - datetime.datetime.now(job.next_run_time.tzinfo)
     assert datetime.timedelta(0) < delay < datetime.timedelta(minutes=5)
     assert job.trigger.interval == datetime.timedelta(minutes=10)
+
+
+def test_silence_closes_after_the_reply_pass_has_had_its_chance():
+    """A reply sitting unread must get to restart the clock before anything
+    is closed for not having arrived."""
+    jobs = {j.id: j for j in scheduler.create_scheduler().get_jobs()}
+    closing = jobs["close_silent"].next_run_time
+    reading = jobs["ingest_replies"].next_run_time
+    assert closing > reading
+    # twice a day: silence is measured in days, so a row closes on the day it
+    # is due whether or not he happens to run the app in the morning
+    assert jobs["close_silent"].trigger.interval == datetime.timedelta(hours=12)
