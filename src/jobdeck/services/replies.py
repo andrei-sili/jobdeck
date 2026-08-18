@@ -826,6 +826,43 @@ def dismiss_review(email_log_id: int) -> None:
         _apply_label(message_id, "", needs_review=False)
 
 
+def reopen_review(email_log_id: int) -> bool:
+    """Put a dismissed mail back on the shelf.
+
+    `dismiss_review` keeps the row — it only unlinks and settles it — so the
+    press was a one-way door with no schema reason to be one. The mail carries
+    its waiting label again, because it really is waiting again."""
+    with db.db() as con:
+        row = db.get_email_log(con, email_log_id)
+        if row is None or str(row["direction"]) != EMAIL_INBOUND:
+            return False
+        db.reopen_reply_review(con, email_log_id)
+        message_id = str(row["gmail_message_id"] or "")
+        classification = str(row["classification"] or "")
+    if message_id:
+        _apply_label(message_id, classification, needs_review=True)
+    return True
+
+
+def dismiss_many(email_log_ids: list[int]) -> int:
+    """File a whole view of waiting mail WITHOUT writing a single status.
+
+    The one bulk gesture on the screen, and deliberately not a bulk verdict:
+    `resolve_review` writes with source='reply_manual', which the
+    anti-downgrade rank exempts, so "confirm all twelve" would be twelve
+    unguarded status writes in one press. This one only says "these mails
+    need nothing from me", which is exactly true of mail arriving for an
+    application that is already closed."""
+    filed = 0
+    for email_log_id in email_log_ids:
+        try:
+            dismiss_review(int(email_log_id))
+        except (ValueError, TypeError):
+            continue
+        filed += 1
+    return filed
+
+
 def adopt_receipt(email_log_id: int) -> dict:
     """One press on a weak receipt proposal: record the application."""
     with db.db() as con:
