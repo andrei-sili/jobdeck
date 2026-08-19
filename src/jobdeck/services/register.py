@@ -195,6 +195,23 @@ def _sent_on(app: dict) -> datetime.date | None:
         return None
 
 
+def _silent_since(app: dict) -> datetime.date | None:
+    """The date the closing rule counts from — the last contact, not the send.
+
+    `last_contact` is carried by `db.list_bewerbungen` so this screen and
+    `db.silent_applications` cannot disagree about the same application. It
+    falls back to the send date when a caller builds a row by hand, which is
+    also what the SQL does when no inbound mail exists.
+    """
+    raw = str(app.get("last_contact") or "").strip()
+    if raw:
+        try:
+            return datetime.date.fromisoformat(raw[:10])
+        except ValueError:
+            pass
+    return _sent_on(app)
+
+
 def rhythm(apps: list[dict], today: datetime.date,
            days: int = RHYTHM_DAYS) -> list[Day]:
     """One column per day, oldest first — the pauses are the point.
@@ -243,13 +260,18 @@ def silence(apps: list[dict], follow_up_days: int,
     place with `days=None` rather than being dropped or dated to today —
     imported rows exist with no date at all, and inventing one for them would
     sort them among applications sent this morning.
+
+    Counted from the LAST CONTACT, exactly as the closing rule counts it. A
+    receipt does not answer anything but it does prove someone is there, and a
+    screen that counted from the send date instead printed "69 T" beside a
+    threshold of 60 on a row the rule would not close.
     """
     waiting = []
     for app in apps:
         if _status(app) not in OFFENE_STATUS:
             continue
-        sent = _sent_on(app)
-        days = (today - sent).days if sent is not None else None
+        since = _silent_since(app)
+        days = (today - since).days if since is not None else None
         waiting.append(Waiting(
             bewerbung_id=int(app.get("id") or 0),
             firma=str(app.get("firma") or ""),

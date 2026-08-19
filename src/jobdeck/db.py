@@ -138,8 +138,12 @@ def bootstrap() -> str | None:
 # Applications (legacy `bewerbungen` table)
 # --------------------------------------------------------------------------
 def list_bewerbungen(con: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every application, carrying the same `last_contact` the closing rule
+    uses — so the screen cannot report one silence and the rule act on another.
+    """
     return con.execute(
-        "SELECT * FROM bewerbungen ORDER BY gesendet_am DESC, id DESC"
+        f"SELECT b.*, {LAST_CONTACT_SQL} AS last_contact FROM bewerbungen b"
+        " ORDER BY b.gesendet_am DESC, b.id DESC"
     ).fetchall()
 
 
@@ -1893,15 +1897,22 @@ def draft_with_job(con: sqlite3.Connection, job_id: int) -> sqlite3.Row | None:
 # nothing today and is purely prospective.
 SILENT_CLASSIFICATIONS = ("eingang", "auto")
 
+# Since when an application has been silent — the ONE definition of it.
+#
 # The clock runs from the last thing that happened, not from the application:
 # an employer who confirmed receipt on the 6th has been silent since the 6th.
+# Stated once because the rule and the screen that reports it must not drift:
+# they already had, and on the real register thirteen of fifty-seven open rows
+# printed a number the rule did not use — one of them 69 days beside a
+# threshold of 60, and still open, with nothing on the page explaining why.
+LAST_CONTACT_SQL = """COALESCE(
+    (SELECT MAX(e.internal_date) FROM email_log e
+      WHERE e.bewerbung_id = b.id AND e.direction = 'inbound'),
+    b.gesendet_am)"""
+
 _SILENT_APPLICATIONS_SQL = """
 SELECT b.id, b.firma, b.status, b.gesendet_am, b.kanal,
-       COALESCE(
-           (SELECT MAX(e.internal_date) FROM email_log e
-             WHERE e.bewerbung_id = b.id AND e.direction = 'inbound'),
-           b.gesendet_am
-       ) AS last_contact
+       {last_contact} AS last_contact
   FROM bewerbungen b
  WHERE b.status IN ({open_status})
    AND b.gesendet_am IS NOT NULL AND b.gesendet_am <> ''
@@ -1910,10 +1921,7 @@ SELECT b.id, b.firma, b.status, b.gesendet_am, b.kanal,
          WHERE e.bewerbung_id = b.id AND e.direction = 'inbound'
            AND e.classification NOT IN ({silent})
        )
-   AND julianday(?) - julianday(COALESCE(
-           (SELECT MAX(e.internal_date) FROM email_log e
-             WHERE e.bewerbung_id = b.id AND e.direction = 'inbound'),
-           b.gesendet_am)) >= ?
+   AND julianday(?) - julianday({last_contact}) >= ?
  ORDER BY last_contact ASC
 """
 
@@ -1928,7 +1936,8 @@ def silent_applications(con: sqlite3.Connection, days: int) -> list[sqlite3.Row]
     """
     open_status = ",".join("?" * len(OFFENE_STATUS))
     silent = ",".join("?" * len(SILENT_CLASSIFICATIONS))
-    sql = _SILENT_APPLICATIONS_SQL.format(open_status=open_status, silent=silent)
+    sql = _SILENT_APPLICATIONS_SQL.format(
+        open_status=open_status, silent=silent, last_contact=LAST_CONTACT_SQL)
     return con.execute(
         sql,
         (*sorted(OFFENE_STATUS), *SILENT_CLASSIFICATIONS,

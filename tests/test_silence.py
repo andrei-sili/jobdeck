@@ -366,3 +366,43 @@ def test_the_register_says_nothing_when_nothing_was_closed(data_dir, con):
 
     view = {"apps": [{"status": "Gesendet"}], "applied": 1}
     assert "ohne_antwort" not in {s.key for s in register.ledger(view)}
+
+
+# --- one clock, not two ----------------------------------------------------
+
+def test_the_screen_counts_silence_the_way_the_rule_counts_it(data_dir, con):
+    """Measured on the real register before this was fixed: thirteen of
+    fifty-seven open rows printed a number the rule did not use — one of them
+    69 days beside a threshold of 60, and still open, with nothing on the page
+    explaining why."""
+    import datetime
+
+    from jobdeck.services import register
+
+    bid = _application(con, days=90)
+    _inbound(con, bid, "eingang", days=20)
+    con.commit()
+
+    apps = [dict(r) for r in db.list_bewerbungen(con)]
+    waiting = register.silence(apps, 60, datetime.date.today())
+
+    # the screen says 20 days, because that is when the employer last spoke
+    assert [w.days for w in waiting] == [20]
+    assert waiting[0].overdue is False
+    # ...and the rule agrees: it does not close it at 60
+    assert db.silent_applications(con, 60) == []
+
+
+def test_the_screen_still_dates_a_row_nobody_ever_wrote_back_to(data_dir, con):
+    import datetime
+
+    from jobdeck.services import register
+
+    _application(con, days=90)
+    con.commit()
+
+    apps = [dict(r) for r in db.list_bewerbungen(con)]
+    waiting = register.silence(apps, 60, datetime.date.today())
+
+    assert [w.days for w in waiting] == [90]
+    assert waiting[0].overdue is True
