@@ -17,6 +17,7 @@ from jobdeck.services import (
     polling,
     replies,
     scoring,
+    silence,
 )
 
 log = logging.getLogger(__name__)
@@ -103,6 +104,22 @@ def create_scheduler() -> AsyncIOScheduler:
         next_run_time=(datetime.datetime.now(TIMEZONE)
                        + datetime.timedelta(seconds=150)),
         id="ingest_replies",
+        coalesce=True,
+        max_instances=1,
+    )
+    scheduler.add_job(
+        silence.close_silent,
+        "interval",
+        hours=12,
+        # Silence is measured in days, so the cadence only has to be well
+        # under one — twice a day means a row closes on the day it is due
+        # whether or not he happens to run the app in the morning. It runs
+        # AFTER the reply pass has had its first go (150 s): a reply sitting
+        # unread in the mailbox must get its chance to restart the clock
+        # before anything is closed for not having arrived.
+        next_run_time=(datetime.datetime.now(TIMEZONE)
+                       + datetime.timedelta(seconds=210)),
+        id="close_silent",
         coalesce=True,
         max_instances=1,
     )

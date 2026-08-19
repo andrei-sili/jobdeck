@@ -12,6 +12,7 @@ from nicegui import ui
 from nicegui.testing import User
 
 from jobdeck import db
+from jobdeck.services import silence
 
 pytest_plugins = ["nicegui.testing.user_plugin"]
 
@@ -228,6 +229,70 @@ async def test_the_age_threshold_he_types_is_the_one_that_gets_saved(
     await asyncio.sleep(0.3)
 
     assert db.get_setting(con, "stale_age_days", "") == "21"
+
+
+async def test_the_silence_window_he_types_reaches_the_rule_that_closes(
+        user: User, con, data_dir):
+    """The rule writes a status with nobody watching, so the number he sets
+    must be the number it uses — not merely a field that saves somewhere."""
+    await user.open("/settings")
+    field = next(e for e in user.client.elements.values()
+                 if isinstance(e, ui.number)
+                 and "ohne Antwort" in (e.props.get("label") or ""))
+    field.set_value(30)
+    await asyncio.sleep(0.1)
+
+    user.find(marker="save-tunables").click()
+    await asyncio.sleep(0.3)
+
+    assert silence.configured_days(con) == 30
+
+
+async def test_zero_in_the_field_switches_the_rule_off(
+        user: User, con, data_dir):
+    await user.open("/settings")
+    field = next(e for e in user.client.elements.values()
+                 if isinstance(e, ui.number)
+                 and "ohne Antwort" in (e.props.get("label") or ""))
+    field.set_value(0)
+    await asyncio.sleep(0.1)
+
+    user.find(marker="save-tunables").click()
+    await asyncio.sleep(0.3)
+
+    assert silence.configured_days(con) == silence.OFF
+
+
+async def test_einstellungen_shows_the_window_he_already_set(
+        user: User, con, data_dir):
+    """Both other tests only WRITE. With the read side unpinned, the field
+    could show the default while his own value sat in the database — he sets
+    30, reopens the page, sees 60, presses Save, and has silently reset his
+    own window."""
+    db.set_setting(con, silence.SETTING_DAYS, "30")
+    con.commit()
+
+    await user.open("/settings")
+    field = next(e for e in user.client.elements.values()
+                 if isinstance(e, ui.number)
+                 and "ohne Antwort" in (e.props.get("label") or ""))
+
+    assert field.value == 30
+
+
+async def test_einstellungen_survives_a_window_it_cannot_parse(
+        user: User, con, data_dir):
+    """The page used to read the setting with a bare int(), so a hand-edited
+    value raised out of the only screen that could fix it."""
+    db.set_setting(con, silence.SETTING_DAYS, "bald")
+    con.commit()
+
+    await user.open("/settings")
+    field = next(e for e in user.client.elements.values()
+                 if isinstance(e, ui.number)
+                 and "ohne Antwort" in (e.props.get("label") or ""))
+
+    assert field.value == 60
 
 
 # ---------------------------------------------------------------------------

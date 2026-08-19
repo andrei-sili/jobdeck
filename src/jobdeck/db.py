@@ -24,6 +24,7 @@ from jobdeck.constants import (
     EMAIL_OUTBOUND_TEST,
     FORM_OPENED_UNKNOWN,
     LIVENESS_GONE,
+    OFFENE_STATUS,
     STATUS_RANK,
 )
 from jobdeck.dedupe import find_duplicate_bewerbung, norm
@@ -137,8 +138,12 @@ def bootstrap() -> str | None:
 # Applications (legacy `bewerbungen` table)
 # --------------------------------------------------------------------------
 def list_bewerbungen(con: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every application, carrying the same `last_contact` the closing rule
+    uses — so the screen cannot report one silence and the rule act on another.
+    """
     return con.execute(
-        "SELECT * FROM bewerbungen ORDER BY gesendet_am DESC, id DESC"
+        f"SELECT b.*, {LAST_CONTACT_SQL} AS last_contact FROM bewerbungen b"
+        " ORDER BY b.gesendet_am DESC, b.id DESC"
     ).fetchall()
 
 
@@ -1877,6 +1882,83 @@ def draft_with_job(con: sqlite3.Connection, job_id: int) -> sqlite3.Row | None:
         _DRAFT_WITH_JOB_COLUMNS + " WHERE d.job_id=? ORDER BY d.id DESC LIMIT 1",
         (job_id,),
     ).fetchone()
+
+
+# A receipt or an out-of-office answer leaves an application exactly as
+# unanswered as it was — nobody has decided anything — but it does prove
+# someone is there, so it restarts the clock. Any OTHER inbound verdict means
+# a human engaged, and such a row must never be closed as unanswered.
+#
+# The empty verdict is deliberately NOT here. An inbound mail the classifier
+# could not place means "an employer wrote and we do not know what they said",
+# which is the opposite of knowing nobody answered — so it blocks the close
+# and waits for him. Measured when this was written: 8 such mails exist, 7 of
+# them linked, all on applications already closed, so the guard changes
+# nothing today and is purely prospective.
+SILENT_CLASSIFICATIONS = ("eingang", "auto")
+
+# What may restart the silence clock: a receipt, and nothing else.
+#
+# A receipt acknowledges HIS application — somebody's system has it, so the
+# waiting genuinely starts again from there. An out-of-office does not: it
+# says the reader is away, not that the application was seen, and he asked for
+# a rule about not having been answered.
+#
+# Keeping 'auto' out of here also closes a hole the review panel confirmed:
+# `replies.is_auto_submitted` files ANY message carrying List-Unsubscribe or
+# Precedence: bulk under 'auto', so an employer newsletter matched to an
+# application by name or domain would have reset the clock every month and the
+# row would never have closed — the exact row the rule exists for. The headers
+# that would tell a newsletter from an out-of-office are not stored, so the
+# distinction cannot be made after ingestion; not restarting on either is the
+# reading that needs no header.
+CLOCK_RESTARTING_CLASSIFICATIONS = ("eingang",)
+
+# Since when an application has been silent — the ONE definition of it.
+#
+# Stated once because the rule and the three screens that report it must not
+# drift: they already had, and on the real register thirteen of fifty-seven
+# open rows printed a number the rule did not use — one of them 69 days beside
+# a threshold of 60, and still open, with nothing on the page explaining why.
+LAST_CONTACT_SQL = """COALESCE(
+    (SELECT MAX(e.internal_date) FROM email_log e
+      WHERE e.bewerbung_id = b.id AND e.direction = 'inbound'
+        AND e.classification = 'eingang'),
+    b.gesendet_am)"""
+
+_SILENT_APPLICATIONS_SQL = """
+SELECT b.id, b.firma, b.status, b.gesendet_am, b.kanal,
+       {last_contact} AS last_contact
+  FROM bewerbungen b
+ WHERE b.status IN ({open_status})
+   AND b.gesendet_am IS NOT NULL AND b.gesendet_am <> ''
+   AND NOT EXISTS (
+        SELECT 1 FROM email_log e
+         WHERE e.bewerbung_id = b.id AND e.direction = 'inbound'
+           AND e.classification NOT IN ({silent})
+       )
+   AND julianday(?) - julianday({last_contact}) >= ?
+ ORDER BY last_contact ASC
+"""
+
+
+def silent_applications(con: sqlite3.Connection, days: int) -> list[sqlite3.Row]:
+    """Open applications nobody has really answered for at least `days`.
+
+    Every channel counts: an application sent through a form has no address
+    to be answered at, which makes its silence more final rather than less.
+    An application that drew any real verdict is excluded outright — closing
+    one of those as unanswered would contradict what the employer said.
+    """
+    open_status = ",".join("?" * len(OFFENE_STATUS))
+    silent = ",".join("?" * len(SILENT_CLASSIFICATIONS))
+    sql = _SILENT_APPLICATIONS_SQL.format(
+        open_status=open_status, silent=silent, last_contact=LAST_CONTACT_SQL)
+    return con.execute(
+        sql,
+        (*sorted(OFFENE_STATUS), *SILENT_CLASSIFICATIONS,
+         _now(), int(days)),
+    ).fetchall()
 
 
 def send_mode(con: sqlite3.Connection) -> dict:

@@ -5,6 +5,7 @@ import asyncio
 from nicegui import run, ui
 
 from jobdeck import apply_form, backup, config, db, freshness, gmail
+from jobdeck.constants import DEFAULT_SILENCE_CLOSES_DAYS
 from jobdeck.services import (
     apply_resolve,
     liveness,
@@ -12,6 +13,7 @@ from jobdeck.services import (
     polling,
     preparing,
     scoring,
+    silence,
 )
 from jobdeck.services import replies as replies_service
 from jobdeck.ui import live
@@ -26,6 +28,11 @@ def _get_settings():
             "stale_age_days": freshness.stale_age_setting(
                 db.get_setting(con, "stale_age_days", "")),
             "daily_send_cap": db.get_setting(con, "daily_send_cap", "15"),
+            # Parsed by the rule's own parser, not a bare int(): a
+            # hand-edited or non-numeric value must show the window that will
+            # actually be used instead of raising out of the page that is the
+            # only place to fix it.
+            "silence_closes_after_days": silence.configured_days(con),
             "daily_draft_cap": db.daily_draft_cap(con),
             "drafts_today": db.count_drafts_today(con),
             "ai_enabled": db.ai_enabled(con),
@@ -215,6 +222,16 @@ async def settings_page():
                 "Older postings leave the working list for the „Alte Anzeigen“ "
                 "pile — counted under the list, one click away, never deleted."
             ).classes("text-xs text-gray-500")
+            silence_days = ui.number(
+                "Bewerbung ohne Antwort schließen nach (Tagen)",
+                value=settings["silence_closes_after_days"],
+                min=0, max=365).classes("w-64")
+            ui.label(
+                "Danach trägt JobDeck „Keine Antwort“ ein — kein „Absage“, "
+                "denn abgesagt hat niemand: die Antwortquote zählt sie nicht "
+                "mit. Meldet sich die Firma doch noch, überschreibt ihre "
+                "Antwort den Eintrag von selbst. 0 schaltet die Regel ab."
+            ).classes("text-xs text-gray-500")
 
             async def save():
                 await run.io_bound(_set_setting, "follow_up_days",
@@ -228,6 +245,11 @@ async def settings_page():
                 await run.io_bound(
                     _set_setting, "stale_age_days",
                     str(freshness.stale_age_setting(stale_age.value)))
+                await run.io_bound(
+                    _set_setting, silence.SETTING_DAYS,
+                    str(max(0, int(silence_days.value
+                                   if silence_days.value is not None
+                                   else DEFAULT_SILENCE_CLOSES_DAYS))))
                 ui.notify("Saved", type="positive")
 
             ui.button("Save", on_click=save).mark("save-tunables")

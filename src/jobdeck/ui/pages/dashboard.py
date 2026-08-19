@@ -4,7 +4,7 @@ from nicegui import run, ui
 
 from jobdeck import constants, db
 from jobdeck.constants import BEANTWORTET_STATUS, OFFENE_STATUS, STATUS_OPTIONS
-from jobdeck.dates import days_since, iso_to_de
+from jobdeck.dates import days_since, iso_to_de, silence_anchor
 from jobdeck.ui import live
 from jobdeck.ui.layout import frame
 
@@ -55,7 +55,7 @@ def _render(view: dict) -> None:
     due = [
         a for a in apps
         if (a.get("status") or "") in OFFENE_STATUS
-        and (days_since(a.get("gesendet_am") or "") or 0) >= threshold
+        and (days_since(silence_anchor(a)) or 0) >= threshold
     ]
     with ui.card().classes("w-full"):
         ui.label(f"⏰ Follow-up due ({len(due)} open for more than {threshold} days)") \

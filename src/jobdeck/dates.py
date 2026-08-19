@@ -160,3 +160,17 @@ def days_since(iso_str: str) -> int | None:
         return (datetime.date.today() - d).days
     except (ValueError, AttributeError):
         return None
+
+
+def silence_anchor(app: dict) -> str:
+    """The date an application's silence is counted from.
+
+    The last contact when there was one, the send date otherwise — the same
+    thing `db.LAST_CONTACT_SQL` computes, which is what `db.list_bewerbungen`
+    hands every consumer as `last_contact`. It lives here because three
+    screens report this quantity and the rule acts on it: the register panel,
+    the rail's "still" count and the dashboard's follow-up list. Two of them
+    were still counting from the send date after the first attempt to unify
+    it, which is exactly how a number and the rule beneath it drift apart.
+    """
+    return str(app.get("last_contact") or app.get("gesendet_am") or "").strip()

@@ -18,7 +18,7 @@ from nicegui import run, ui
 
 from jobdeck import config, constants, db, freshness, gmail
 from jobdeck.constants import BEANTWORTET_STATUS, OFFENE_STATUS
-from jobdeck.dates import days_since
+from jobdeck.dates import days_since, silence_anchor
 from jobdeck.services import liveness
 from jobdeck.ui import live
 
@@ -218,7 +218,7 @@ def _application_counts(apps: list[dict], follow_up_days: int) -> tuple[int, int
     silent = sum(
         1 for a in apps
         if (a.get("status") or "") in OFFENE_STATUS
-        and (days_since(a.get("gesendet_am") or "") or 0) >= follow_up_days
+        and (days_since(silence_anchor(a)) or 0) >= follow_up_days
     )
     return len(apps), answered, silent
 

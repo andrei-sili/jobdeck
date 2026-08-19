@@ -25,8 +25,9 @@ from jobdeck.constants import (
     BEANTWORTET_STATUS,
     DEFAULT_FOLLOW_UP_DAYS,
     OFFENE_STATUS,
+    STATUS_NO_ANSWER,
 )
-from jobdeck.dates import MONATE_DE
+from jobdeck.dates import MONATE_DE, silence_anchor
 
 # How far back the rhythm strip reaches. Sixty days is what makes a pause
 # legible as a pause: his own register holds a 37-day gap between two bursts,
@@ -163,13 +164,24 @@ def ledger(view: dict) -> list[Step]:
     # one, and a posting can be repointed or a row edited until the pair drifts.
     # Never print a negative remainder — say nothing rather than something false.
     imported = max(0, total - view["applied"])
-    return [
+    # An application closed for silence is in neither of the two lines below —
+    # nobody answered it, and it is no longer waiting. Without its own line the
+    # register's parts stop adding up to its total, on the one screen whose
+    # whole value is that its numbers are honest.
+    unanswered = sum(1 for a in apps if _status(a) == STATUS_NO_ANSWER)
+    steps = [
         Step("register", "im Register", total, 1.0 if total else 0.0,
              f"{view['applied']} über JobDeck · {imported} von Hand oder aus "
              f"der alten Liste" if imported else ""),
         Step("offen", "noch ohne Antwort", open_rows, _share(open_rows, total)),
         Step("beantwortet", "beantwortet", answered, _share(answered, total)),
     ]
+    if unanswered:
+        steps.append(
+            Step("ohne_antwort", "ohne Antwort geschlossen", unanswered,
+                 _share(unanswered, total),
+                 "niemand hat abgesagt — es kam nur nie eine Antwort"))
+    return steps
 
 
 def _status(app: dict) -> str:
@@ -181,6 +193,23 @@ def _sent_on(app: dict) -> datetime.date | None:
         return datetime.date.fromisoformat(str(app.get("gesendet_am") or "").strip())
     except ValueError:
         return None
+
+
+def _silent_since(app: dict) -> datetime.date | None:
+    """The date the closing rule counts from — the last contact, not the send.
+
+    `last_contact` is carried by `db.list_bewerbungen` so this screen and
+    `db.silent_applications` cannot disagree about the same application. It
+    falls back to the send date when a caller builds a row by hand, which is
+    also what the SQL does when no inbound mail exists.
+    """
+    raw = silence_anchor(app)
+    if raw:
+        try:
+            return datetime.date.fromisoformat(raw[:10])
+        except ValueError:
+            pass
+    return _sent_on(app)
 
 
 def rhythm(apps: list[dict], today: datetime.date,
@@ -231,13 +260,18 @@ def silence(apps: list[dict], follow_up_days: int,
     place with `days=None` rather than being dropped or dated to today —
     imported rows exist with no date at all, and inventing one for them would
     sort them among applications sent this morning.
+
+    Counted from the LAST CONTACT, exactly as the closing rule counts it. A
+    receipt does not answer anything but it does prove someone is there, and a
+    screen that counted from the send date instead printed "69 T" beside a
+    threshold of 60 on a row the rule would not close.
     """
     waiting = []
     for app in apps:
         if _status(app) not in OFFENE_STATUS:
             continue
-        sent = _sent_on(app)
-        days = (today - sent).days if sent is not None else None
+        since = _silent_since(app)
+        days = (today - since).days if since is not None else None
         waiting.append(Waiting(
             bewerbung_id=int(app.get("id") or 0),
             firma=str(app.get("firma") or ""),
