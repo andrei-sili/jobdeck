@@ -406,3 +406,62 @@ def test_the_screen_still_dates_a_row_nobody_ever_wrote_back_to(data_dir, con):
 
     assert [w.days for w in waiting] == [90]
     assert waiting[0].overdue is True
+
+
+# --- the arms nothing was watching ----------------------------------------
+
+def test_the_window_closes_on_the_day_it_is_reached_and_not_before(
+    data_dir, con
+):
+    """Day 59 stays, day 60 goes.
+
+    Note for anyone mutating this: `>=` against `>` is EQUIVALENT here, not a
+    gap in the test. `gesendet_am` is a date (midnight) and the comparison is
+    against a moment, so the difference is never exactly the threshold — it
+    was 60.4966 when this was written. The property worth holding is the day
+    the row flips, and that is what this asserts.
+    """
+    early = _application(con, firma="Neunundfünfzig GmbH", days=59)
+    due = _application(con, firma="Sechzig GmbH", days=60)
+    con.commit()
+
+    closed = {r["id"] for r in db.silent_applications(con, 60)}
+
+    assert closed == {due}
+    assert early not in closed
+
+
+def test_the_clock_takes_the_NEWEST_contact_not_the_oldest(data_dir, con):
+    """MAX against MIN: with two receipts, the oldest would make the row look
+    long silent and close it while an employer wrote last week."""
+    bid = _application(con, days=200)
+    _inbound(con, bid, "eingang", days=190)
+    _inbound(con, bid, "eingang", days=5)
+    con.commit()
+
+    assert db.silent_applications(con, 60) == []
+    row = db.silent_applications(con, 4)[0]
+    assert row["last_contact"][:10] == _stamp(5)[:10]
+
+
+def test_the_longest_silence_is_offered_first(data_dir, con):
+    """The pass writes statuses in this order and the log names them in it —
+    a register drained oldest-first is the one he can reason about."""
+    _application(con, firma="Zwei Monate GmbH", days=65)
+    _application(con, firma="Ein Jahr GmbH", days=365)
+    _application(con, firma="Drei Monate GmbH", days=95)
+    con.commit()
+
+    assert [r["firma"] for r in db.silent_applications(con, 60)] == [
+        "Ein Jahr GmbH", "Drei Monate GmbH", "Zwei Monate GmbH"]
+
+
+def test_the_channel_is_not_part_of_the_decision(data_dir, con):
+    """The parametrised channel test above passes three values through one
+    code path; this states the property that makes that acceptable."""
+    import jobdeck.db as db_mod
+
+    # `kanal` is SELECTed (callers report it) but must not be part of the
+    # decision, which is everything from WHERE onwards.
+    where = db_mod._SILENT_APPLICATIONS_SQL.split("WHERE", 1)[1]
+    assert "kanal" not in where
