@@ -1518,6 +1518,45 @@ def set_contact_email(
     resolve_email_channels(con, job_id)
 
 
+# What a person can type in from a posting they are looking at. `firma` is
+# deliberately absent: the company name is the dedupe key the send gate reads,
+# and letting it be edited here would let one posting quietly become a
+# different company's.
+CONTACT_FIELDS = ("contact_email", "ansprechpartner", "contact_strasse",
+                  "contact_plz_ort", "contact_phone")
+
+CONTACT_SOURCE_USER = "user"
+
+
+def set_contact_details(con: sqlite3.Connection, job_id: int,
+                        values: dict, source: str = CONTACT_SOURCE_USER) -> None:
+    """Record contact details a human read off the posting itself.
+
+    The Arbeitsagentur puts an employer's address behind a CAPTCHA, so for a
+    large part of the corpus the only reader who can ever see it is him —
+    on a real corpus this is a large minority of the open BA postings, many
+    of them well scored. Without this the letter greets
+    "Sehr geehrte Damen und Herren", the recipient block stays blank and the
+    send path has nobody to send to, on postings that are e-mail applications
+    in every respect except that the app could not be told so.
+
+    Only the keys present in `values` are written, so correcting one field
+    never blanks the others. Writing an address also settles the channel (see
+    `set_contact_email`): a posting stops being a form job the moment there is
+    somewhere to write to.
+    """
+    updates = {k: str(values[k]).strip() for k in CONTACT_FIELDS if k in values}
+    if not updates:
+        return
+    assignments = ", ".join(f"{column}=?" for column in updates)
+    con.execute(
+        f"UPDATE jobs SET {assignments}, contact_source=? WHERE id=?",
+        (*updates.values(), source, job_id),
+    )
+    if "contact_email" in updates:
+        resolve_email_channels(con, job_id)
+
+
 # Statuses whose channel is still worth deciding. A posting already applied to,
 # skipped or filed as a duplicate is finished business — rewriting how one
 # would have applied to it changes nothing and would only rewrite history.
