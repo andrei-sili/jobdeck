@@ -263,6 +263,38 @@ async def test_zero_in_the_field_switches_the_rule_off(
     assert silence.configured_days(con) == silence.OFF
 
 
+async def test_einstellungen_shows_the_window_he_already_set(
+        user: User, con, data_dir):
+    """Both other tests only WRITE. With the read side unpinned, the field
+    could show the default while his own value sat in the database — he sets
+    30, reopens the page, sees 60, presses Save, and has silently reset his
+    own window."""
+    db.set_setting(con, silence.SETTING_DAYS, "30")
+    con.commit()
+
+    await user.open("/settings")
+    field = next(e for e in user.client.elements.values()
+                 if isinstance(e, ui.number)
+                 and "ohne Antwort" in (e.props.get("label") or ""))
+
+    assert field.value == 30
+
+
+async def test_einstellungen_survives_a_window_it_cannot_parse(
+        user: User, con, data_dir):
+    """The page used to read the setting with a bare int(), so a hand-edited
+    value raised out of the only screen that could fix it."""
+    db.set_setting(con, silence.SETTING_DAYS, "bald")
+    con.commit()
+
+    await user.open("/settings")
+    field = next(e for e in user.client.elements.values()
+                 if isinstance(e, ui.number)
+                 and "ohne Antwort" in (e.props.get("label") or ""))
+
+    assert field.value == 60
+
+
 # ---------------------------------------------------------------------------
 # The warning that stands between him and a refused send
 # ---------------------------------------------------------------------------

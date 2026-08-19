@@ -144,15 +144,46 @@ def test_a_receipt_restarts_the_clock(data_dir, con):
 
 
 def test_an_out_of_office_answer_does_not_save_it(data_dir, con):
-    """A machine answering is not somebody answering — but it does prove
-    someone is there, so it restarts the clock like any other contact."""
+    """A machine answering is not somebody answering — the row still closes.
+
+    The inbound sits at day 80 of a 90-day application, so it is past the
+    window on either clock: this pins only that 'auto' does not EXEMPT a row.
+    Which clock ran is the next test's job — the two were conflated here, and
+    the conflation made both halves unfalsifiable."""
     bid = _application(con, days=90)
     _inbound(con, bid, "auto", days=80)
     con.commit()
 
     silence._close_silent()
 
-    assert db.get_bewerbung(con, bid)["status"] == "Keine Antwort"
+    assert db.get_bewerbung(con, bid)["status"] == STATUS_NO_ANSWER
+
+
+def test_an_out_of_office_answer_does_not_restart_the_clock(data_dir, con):
+    """Only a receipt restarts it. An out-of-office says the reader is away,
+    not that the application was seen — and `auto` is the same bucket
+    `replies.is_auto_submitted` files any List-Unsubscribe mailing under, so
+    letting it restart the clock would keep a row at a newsletter-sending
+    employer open for ever."""
+    bid = _application(con, days=900)
+    _inbound(con, bid, "auto", days=10)
+    con.commit()
+
+    silence._close_silent()
+
+    assert db.get_bewerbung(con, bid)["status"] == STATUS_NO_ANSWER
+
+
+def test_only_a_receipt_restarts_the_clock(data_dir, con):
+    """The pair to the test above, on the same dates: a receipt inside the
+    window keeps the row open where an out-of-office does not."""
+    bid = _application(con, days=900)
+    _inbound(con, bid, "eingang", days=10)
+    con.commit()
+
+    silence._close_silent()
+
+    assert db.get_bewerbung(con, bid)["status"] == "Gesendet"
 
 
 @pytest.mark.parametrize("classification", ["einladung", "absage", "sonstige"])
@@ -465,3 +496,42 @@ def test_the_channel_is_not_part_of_the_decision(data_dir, con):
     # decision, which is everything from WHERE onwards.
     where = db_mod._SILENT_APPLICATIONS_SQL.split("WHERE", 1)[1]
     assert "kanal" not in where
+
+
+# --- the entry point the scheduler actually calls --------------------------
+
+async def test_the_scheduled_coroutine_really_runs_the_pass(data_dir, con):
+    """Every other test calls the private `_close_silent`. This one drives the
+    public coroutine the scheduler is wired to — rewriting it as `return {}`
+    left the whole suite green."""
+    bid = _application(con, days=900)
+    con.commit()
+
+    report = await silence.close_silent()
+
+    assert report["closed"] == ["Beispiel GmbH"]
+    assert db.get_bewerbung(con, bid)["status"] == STATUS_NO_ANSWER
+
+
+async def test_the_pass_does_not_block_the_event_loop(data_dir, con):
+    """It must go through a worker thread: the scheduler shares the loop with
+    the UI, and this pass opens a database connection and writes."""
+    import asyncio
+    import threading
+
+    seen = {}
+    real = silence._close_silent
+
+    def note():
+        seen["thread"] = threading.current_thread()
+        return real()
+
+    loop_thread = threading.current_thread()
+    silence._close_silent = note
+    try:
+        await silence.close_silent()
+    finally:
+        silence._close_silent = real
+
+    assert seen["thread"] is not loop_thread
+    assert asyncio.get_running_loop() is not None

@@ -27,7 +27,7 @@ from jobdeck.constants import (
     OFFENE_STATUS,
     STATUS_NO_ANSWER,
 )
-from jobdeck.dates import MONATE_DE
+from jobdeck.dates import MONATE_DE, silence_anchor
 
 # How far back the rhythm strip reaches. Sixty days is what makes a pause
 # legible as a pause: his own register holds a 37-day gap between two bursts,
@@ -203,7 +203,7 @@ def _silent_since(app: dict) -> datetime.date | None:
     falls back to the send date when a caller builds a row by hand, which is
     also what the SQL does when no inbound mail exists.
     """
-    raw = str(app.get("last_contact") or "").strip()
+    raw = silence_anchor(app)
     if raw:
         try:
             return datetime.date.fromisoformat(raw[:10])

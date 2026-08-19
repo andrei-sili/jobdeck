@@ -1897,17 +1897,33 @@ def draft_with_job(con: sqlite3.Connection, job_id: int) -> sqlite3.Row | None:
 # nothing today and is purely prospective.
 SILENT_CLASSIFICATIONS = ("eingang", "auto")
 
+# What may restart the silence clock: a receipt, and nothing else.
+#
+# A receipt acknowledges HIS application — somebody's system has it, so the
+# waiting genuinely starts again from there. An out-of-office does not: it
+# says the reader is away, not that the application was seen, and he asked for
+# a rule about not having been answered.
+#
+# Keeping 'auto' out of here also closes a hole the review panel confirmed:
+# `replies.is_auto_submitted` files ANY message carrying List-Unsubscribe or
+# Precedence: bulk under 'auto', so an employer newsletter matched to an
+# application by name or domain would have reset the clock every month and the
+# row would never have closed — the exact row the rule exists for. The headers
+# that would tell a newsletter from an out-of-office are not stored, so the
+# distinction cannot be made after ingestion; not restarting on either is the
+# reading that needs no header.
+CLOCK_RESTARTING_CLASSIFICATIONS = ("eingang",)
+
 # Since when an application has been silent — the ONE definition of it.
 #
-# The clock runs from the last thing that happened, not from the application:
-# an employer who confirmed receipt on the 6th has been silent since the 6th.
-# Stated once because the rule and the screen that reports it must not drift:
-# they already had, and on the real register thirteen of fifty-seven open rows
-# printed a number the rule did not use — one of them 69 days beside a
-# threshold of 60, and still open, with nothing on the page explaining why.
+# Stated once because the rule and the three screens that report it must not
+# drift: they already had, and on the real register thirteen of fifty-seven
+# open rows printed a number the rule did not use — one of them 69 days beside
+# a threshold of 60, and still open, with nothing on the page explaining why.
 LAST_CONTACT_SQL = """COALESCE(
     (SELECT MAX(e.internal_date) FROM email_log e
-      WHERE e.bewerbung_id = b.id AND e.direction = 'inbound'),
+      WHERE e.bewerbung_id = b.id AND e.direction = 'inbound'
+        AND e.classification = 'eingang'),
     b.gesendet_am)"""
 
 _SILENT_APPLICATIONS_SQL = """
