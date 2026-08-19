@@ -697,6 +697,34 @@ def _set_contact_email(job_id: int, email: str):
         db.set_contact_email(con, job_id, email, "web_lookup")
 
 
+# What the "Kontaktdaten" dialog offers, in the order a German letter head
+# reads them. The label is what he sees; the key is the column.
+CONTACT_LABELS = (
+    ("contact_email", "Bewerbungs-E-Mail"),
+    ("ansprechpartner", "Ansprechpartner (z. B. Herr Dirk Muster)"),
+    ("contact_strasse", "Straße und Hausnummer"),
+    ("contact_plz_ort", "PLZ und Ort"),
+    ("contact_phone", "Telefon (optional)"),
+)
+
+
+def _contact_values(job_id: int) -> dict:
+    """The stored contact fields, read fresh when the dialog opens.
+
+    Read here rather than taken from the row on screen: the dialog is also the
+    correction path, and a row drawn minutes ago would quietly offer him a
+    stale address to re-save over a newer one."""
+    with db.db() as con:
+        row = db.get_job(con, job_id)
+    return {key: (row[key] if row is not None else "") or ""
+            for key, _ in CONTACT_LABELS}
+
+
+def _save_contact_values(job_id: int, values: dict):
+    with db.db() as con:
+        db.set_contact_details(con, job_id, values)
+
+
 def _apply_line(job: dict) -> str:
     """Human one-liner for the resolved apply channel; '' when not yet resolved."""
     channel, vendor = job["apply_channel"] or "", job["ats_vendor"] or ""
@@ -885,6 +913,9 @@ def _row_fingerprint(job: dict) -> tuple:
         # redrawn: he presses the button, the write lands, and the pane goes on
         # offering the press he already made until he clicks another row.
         "form_opened_at", "upload_path", "mappe_kind", "draft_room",
+        # The contact fields decide the button's own label and the channel
+        # line beside it, so a save he just made has to move this tuple.
+        "ansprechpartner", "contact_strasse", "contact_plz_ort",
     ))
     # The probe stamp is drawn only inside the offline warning, and the daily
     # liveness pass re-stamps hundreds of rows in a couple of minutes. Counting
@@ -1393,6 +1424,21 @@ async def jobs_page():
                         ui.button("Kontakt-E-Mail suchen",
                                   on_click=lambda j=job: find_email(j)) \
                             .props("flat dense no-caps")
+                    if job["status"] == "new":
+                        # Also the correction path, so it stays offered once an
+                        # address exists: the one the lookup found can be the
+                        # wrong inbox, and only he can see what the posting
+                        # actually says.
+                        # NOT "eintragen": that verb belongs to the apply
+                        # steps, and a test sweeps every button carrying it
+                        # into the set that must go dead at a company already
+                        # applied to. Recording an address is harmless there.
+                        ui.button("Kontaktdaten hinterlegen"
+                                  if not job["contact_email"]
+                                  else "Kontaktdaten",
+                                  on_click=lambda j=job: enter_contact(j)) \
+                            .props("flat dense no-caps") \
+                            .mark("enter-contact")
                 for text, kind in reader_notes(job, already):
                     ui.label(text).classes(f"jd-note {kind} mb-2")
                 _render_facts(job)
@@ -1968,6 +2014,46 @@ async def jobs_page():
                         ui.button("Übernehmen", icon="check",
                                   on_click=adopt).props("color=positive no-caps")
                     ui.button("Schließen", on_click=dialog.close) \
+                        .props("flat no-caps")
+            dialog.open()
+
+        async def enter_contact(job: dict):
+            """Type in what the posting only shows a human.
+
+            The Arbeitsagentur hides an employer's address behind a CAPTCHA
+            this app must never solve, so on those postings he is the only
+            reader who can ever see it. Writing an address here also settles
+            the channel: the posting stops being a form job and the ordinary
+            e-mail path opens."""
+            # Cleared BEFORE the wait, never after: clearing afterwards
+            # destroys a dialog opened meanwhile, and an awaited one then
+            # never resolves. Same rule as find_email above.
+            overlay.clear()
+            stored = await run.io_bound(_contact_values, job["id"])
+            with overlay, ui.dialog() as dialog, \
+                    ui.card().classes("w-[460px] max-w-full"):
+                ui.label("Kontaktdaten hinterlegen").classes("font-bold")
+                ui.label(job["company"]).classes("text-sm text-gray-600")
+                fields = {}
+                for key, label in CONTACT_LABELS:
+                    fields[key] = ui.input(label, value=stored[key]) \
+                        .classes("w-full").props("dense")
+                ui.label("Die E-Mail macht aus der Anzeige eine Bewerbung per "
+                         "E-Mail. Ansprechpartner und Adresse stehen im "
+                         "Briefkopf und in der Anrede.") \
+                    .classes("text-xs text-gray-500")
+
+                async def save() -> None:
+                    values = {k: f.value or "" for k, f in fields.items()}
+                    dialog.close()
+                    await run.io_bound(_save_contact_values, job["id"], values)
+                    say("Kontaktdaten gespeichert", type="positive")
+                    await refresh(force=True)
+
+                with ui.row().classes("w-full justify-end gap-2"):
+                    ui.button("Speichern", icon="check", on_click=save) \
+                        .props("color=positive no-caps").mark("save-contact")
+                    ui.button("Abbrechen", on_click=dialog.close) \
                         .props("flat no-caps")
             dialog.open()
 

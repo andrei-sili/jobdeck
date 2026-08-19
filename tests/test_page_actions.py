@@ -347,3 +347,85 @@ async def test_the_send_confirmation_repeats_the_duplicate_warning(
     assert any("Diese Bewerbung abschicken?" in (t or "") for t in shown)
     assert any("bereits beworben" in (t or "") for t in shown), \
         "the last screen before the press does not repeat the warning"
+
+
+# ---------------------------------------------------------------------------
+# Contact details the posting only shows a human
+# ---------------------------------------------------------------------------
+async def test_a_posting_without_an_address_offers_somewhere_to_type_one(
+        user: User, con, data_dir):
+    """The Arbeitsagentur hides an employer's address behind a CAPTCHA this
+    app must never solve, so on those postings he is the only reader who can
+    see it, and a large minority of BA postings are in exactly that state."""
+    _posting(con, company="Beispiel Technik GmbH")
+
+    await user.open("/")
+    await user.should_see(marker="enter-contact")
+
+
+async def test_what_he_types_reaches_the_posting_and_opens_the_e_mail_path(
+        user: User, con, data_dir):
+    job_id = _posting(con, company="Beispiel Technik GmbH", apply_channel="board_apply")
+
+    await user.open("/")
+    user.find(marker="enter-contact").click()
+    await asyncio.sleep(0.1)
+
+    fields = {(e.props.get("label") or ""): e
+              for e in user.client.elements.values() if isinstance(e, ui.input)}
+    def field(fragment):
+        return next(e for label, e in fields.items() if fragment in label)
+
+    field("Bewerbungs-E-Mail").set_value("info@example.de")
+    field("Ansprechpartner").set_value("Herr Dirk Muster")
+    field("Straße").set_value("Musterstr. 19")
+    field("PLZ").set_value("12345 Beispielstadt")
+    await asyncio.sleep(0.1)
+
+    user.find(marker="save-contact").click()
+    await asyncio.sleep(0.3)
+
+    row = con.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+    assert row["contact_email"] == "info@example.de"
+    assert row["ansprechpartner"] == "Herr Dirk Muster"
+    assert row["contact_strasse"] == "Musterstr. 19"
+    assert row["contact_plz_ort"] == "12345 Beispielstadt"
+    # the whole point: it is an e-mail application now
+    assert row["apply_channel"] == "direct_email"
+    assert row["contact_source"] == "user"
+
+
+async def test_the_dialog_shows_what_is_already_stored(
+        user: User, con, data_dir):
+    """It is the correction path too: the address the web lookup adopted can
+    be the wrong inbox, and a dialog that opened empty would invite him to
+    blank the rest."""
+    job_id = _posting(con, company="Beispiel Technik GmbH")
+    db.set_contact_details(con, job_id, {
+        "contact_email": "alt@example.de", "ansprechpartner": "Frau Muster"})
+    con.commit()
+
+    await user.open("/")
+    user.find(marker="enter-contact").click()
+    await asyncio.sleep(0.1)
+
+    values = {(e.props.get("label") or ""): e.value
+              for e in user.client.elements.values() if isinstance(e, ui.input)}
+    assert any(v == "alt@example.de" for v in values.values())
+    assert any(v == "Frau Muster" for v in values.values())
+
+
+async def test_the_reading_pane_notices_the_save(user: User, con, data_dir):
+    """Anything the pane STATES has to be in its redraw signature, or he
+    presses, the write lands, and the pane goes on offering the old label."""
+    from jobdeck.ui.pages.jobs import _row_fingerprint
+
+    job_id = _posting(con, company="Beispiel Technik GmbH")
+    before = _row_fingerprint(dict(con.execute(
+        "SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()))
+    db.set_contact_details(con, job_id, {"ansprechpartner": "Herr Dirk Muster"})
+    con.commit()
+    after = _row_fingerprint(dict(con.execute(
+        "SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()))
+
+    assert before != after
