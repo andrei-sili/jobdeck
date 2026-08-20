@@ -1857,3 +1857,24 @@ def test_the_press_never_records_an_application_by_itself():
         assert forbidden not in mentioned, (
             f"start_application names {forbidden} — nothing may write an "
             f"application on a timer or a guess")
+
+
+def test_the_page_records_the_very_signature_the_watcher_compares(con, data_dir):
+    """The list-screen equivalent of "signature FIRST": the loader used to hand
+    the watcher a bare `data_signature` while `_signature()` compared that PLUS
+    every watched setting. A 38-tuple recorded against a 46-tuple is never
+    equal, so every tick counted as a change and the screen rebuilt itself on a
+    timer for the life of the page — defeating the one property ui/live.py
+    exists to provide, and it had been so since the first setting was watched.
+    """
+    _company_job(con, "a", "Firma", 80)
+    con.commit()
+
+    recorded = jobs._load_jobs("neu", 0)["signature"]
+
+    assert recorded == jobs._signature()
+    # …and it really does carry the settings, so a change to one is seen
+    from jobdeck import db
+    db.set_setting(con, jobs.MIN_SCORE_SETTING, "60")
+    con.commit()
+    assert jobs._signature() != recorded

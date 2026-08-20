@@ -239,3 +239,93 @@ def test_an_unknown_filter_word_is_refused_rather_than_ignored(con):
     """Falling through would SHOW a pile the caller asked to hide."""
     with pytest.raises(ValueError, match="hidden"):
         db.list_jobs(con, status="new", hidden="vielleicht")
+
+
+def test_releasing_the_newest_hidden_company_is_a_change(con):
+    """The pair the undo bar actually produces, and the one a bare rowid
+    cannot see: a rowid table without AUTOINCREMENT reuses the number freed by
+    a DELETE, so hide A, release A, hide B all land on rowid 1 — and the list
+    would stay pruned of the company he just released."""
+    _job(con, "Alpha GmbH", external="a")
+    _job(con, "Beta GmbH", external="b")
+    key = db.hide_company(con, "Alpha GmbH")
+    before = db.data_signature(con)
+
+    db.unhide_company(con, key)
+    db.hide_company(con, "Beta GmbH")
+
+    assert db.count_hidden_companies(con) == 1, "same count, on purpose"
+    assert db.data_signature(con) != before
+
+
+def test_a_company_with_nothing_open_still_lists_what_it_hides(con):
+    """`list_hidden_companies` counts every advert of the company, not only
+    the ones on 'new' — the view exists to undo a decision, and a company
+    whose adverts are all applied to or set aside is still hidden."""
+    job_id = _job(con, "Alt GmbH")
+    db.set_job_status(con, job_id, "applied")
+    con.commit()
+    db.hide_company(con, "Alt GmbH")
+
+    assert db.list_hidden_companies(con)[0]["hidden_jobs"] == 1
+
+
+# ------------------------------------------------ what it must also reach
+
+
+def test_a_hidden_company_never_costs_him_a_paid_draft(con, data_dir):
+    """Hiding is read-time, and the prepare batch is a WRITE path that spends
+    about nine cents a letter. Without the arm it would go on writing them for
+    a company he will never apply to."""
+    keep = _job(con, "Andere GmbH", external="a", score=90)
+    _job(con, "Zeitarbeit GmbH", external="b", score=95)
+    con.execute("UPDATE jobs SET published_on=date('now'), contact_email='x@y.de'")
+    con.commit()
+
+    db.hide_company(con, "Zeitarbeit GmbH")
+
+    picked = db.jobs_to_prepare(con, limit=10, max_age_days=45, min_score=50)
+    assert [r["id"] for r in picked] == [keep]
+
+
+def test_a_hidden_company_never_costs_him_a_scoring_call(con, data_dir):
+    """Scoring is haiku, about half a cent an advert, and a staffing agency
+    posts continuously. The backlog is counted the way the batch selects, or
+    the Puls pulses for ever over adverts nothing will score."""
+    keep = _job(con, "Andere GmbH", external="a", score=None)
+    _job(con, "Zeitarbeit GmbH", external="b", score=None)
+    con.commit()
+    assert db.count_unscored_jobs(con) == 2
+
+    db.hide_company(con, "Zeitarbeit GmbH")
+
+    assert [r["id"] for r in db.list_unscored_jobs(con)] == [keep]
+    assert db.count_unscored_jobs(con) == 1
+
+
+def test_the_price_named_in_the_undo_bar_is_the_real_one(con):
+    """It used to be read out of a 1000-row page of `list_jobs` ordered by
+    DATE and filtered in Python — a cap applied to his 1080 open postings, so
+    the "best" was the best of whatever the cap happened to keep."""
+    for n in range(3):
+        _job(con, "Zeitarbeit GmbH", external=f"z{n}", score=40 + n * 10)
+    _job(con, "Andere GmbH", external="x", score=99)
+
+    cost = db.company_cost(con, "Zeitarbeit GmbH")
+
+    assert cost == {"jobs": 3, "best": 60}
+    assert db.company_cost(con, "") == {"jobs": 0, "best": 0}
+    assert db.company_cost(con, "Gibt Es Nicht GmbH") == {"jobs": 0, "best": 0}
+
+
+def test_the_app_can_tell_whether_a_company_is_already_hidden(con):
+    """Pressing `x` inside the pile must not announce a hide that did not
+    happen — nor offer an undo that would REVEAL the company."""
+    _job(con, "Zeitarbeit GmbH")
+
+    assert db.is_company_hidden(con, "Zeitarbeit GmbH") is False
+    db.hide_company(con, "Zeitarbeit GmbH")
+    assert db.is_company_hidden(con, "Zeitarbeit GmbH") is True
+    # …through the same key, so a spelling variant answers the same
+    assert db.is_company_hidden(con, "zeitarbeit  gmbh") is True
+    assert db.is_company_hidden(con, "") is False

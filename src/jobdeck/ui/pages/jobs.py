@@ -77,13 +77,25 @@ class View:
     status: str | None   # None: whatever he did with it, this view still holds it
     filters: dict
     empty: str
+    # Whether his score floor applies here. TRUE for the working list only.
+    #
+    # Every other view exists to show what was set ASIDE — a pile the working
+    # list hides, or a decision of his own — and a floor there hides things
+    # from the very place he goes to find them. Worse, the door's number is
+    # counted without the floor, so the count and its destination would be
+    # computed under different rules: a door reading "4 älter als 45 Tage"
+    # opening a list of one, and "1 bei ausgeblendeten Firmen" opening a view
+    # that says "Keine Firma ausgeblendet" with no way back on it.
+    floors: bool = False
 
 
 VIEWS = (
     View("neu", "Neu", "new", {**_WORKING, "opened": "exclude"},
-         "Nichts Neues — du hast alles gesehen, was in der Arbeitsliste steht."),
+         "Nichts Neues — du hast alles gesehen, was in der Arbeitsliste steht.",
+         floors=True),
     View("offen", "Alle offen", "new", _WORKING,
-         "Die Arbeitsliste ist leer. Ein Suchprofil füllt sie wieder."),
+         "Die Arbeitsliste ist leer. Ein Suchprofil füllt sie wieder.",
+         floors=True),
     View("vorgemerkt", "Vorgemerkt", None, {**_EVERYTHING, "bookmarked": "only"},
          "Nichts vorgemerkt. Mit „s“ legst du eine Anzeige hier ab."),
     View("in_arbeit", "In Arbeit", None, {**_EVERYTHING, "in_progress": "only"},
@@ -107,7 +119,11 @@ VIEWS = (
     # view — and it is the only one that asks for hidden companies, so the
     # word "everything" everywhere else keeps meaning "everything you have not
     # put out of sight".
-    View("ausgeblendet", "Ausgeblendete Firmen", "new",
+    # No status: a company he hid may hold nothing on 'new' — an old advert he
+    # applied to, a duplicate, one he had already put away — and then the view
+    # that exists to undo the decision would be empty and there would be no way
+    # back at all.
+    View("ausgeblendet", "Ausgeblendete Firmen", None,
          {**_EVERYTHING, "hidden": "only"},
          "Keine Firma ausgeblendet. Mit „x“ legst du eine hier ab."),
 )
@@ -129,6 +145,9 @@ SORT_SETTING = "stellen_sort"
 
 DEFAULT_VIEW = VIEWS[0].key
 _BY_KEY = {view.key: view for view in VIEWS}
+# The one view a count has to be taken THROUGH rather than beside: its door is
+# its only entrance, so the number and the destination must be one query.
+_HIDDEN_VIEW = _BY_KEY["ausgeblendet"]
 
 
 def view_for(key: str) -> View:
@@ -512,7 +531,7 @@ def _load_jobs(view_key: str, page: int, search: str = "",
         # a FRESH signature — and the watcher would then record that signature
         # as "what the page is showing" and never rebuild. This order can only
         # fail the safe way: one rebuild nobody needed.
-        signature = db.data_signature(con)
+        signature = signature_of(con)
         stale_age_days = freshness.stale_age_setting(
             db.get_setting(con, "stale_age_days", ""))
         # Whether a letter may still be written today. Read once and carried on
@@ -522,12 +541,11 @@ def _load_jobs(view_key: str, page: int, search: str = "",
         draft_room = db.count_drafts_today(con) < db.daily_draft_cap(con)
         filters = {**view.filters, "stale_age_days": stale_age_days,
                    "search": search, "keep_ids": keep_ids,
-                   # Never in a pile view. "Passt nicht" IS the score-0 pile
-                   # and "Ausgeblendete Firmen" is the hidden one — a floor or
-                   # an exclusion applied there would empty the very view he
-                   # opened to look at what was set aside.
-                   "min_score": 0 if view.filters.get("mismatches") == "only"
-                                else min_score,
+                   # Only where the view says the floor belongs — the working
+                   # list. Everywhere else it would hide things from the place
+                   # he opened to find them, and the door's count is computed
+                   # without it, so the two would disagree by construction.
+                   "min_score": min_score if view.floors else 0,
                    "hidden": view.filters.get("hidden", "exclude"),
                    "sort": sort}
         total = db.count_job_groups(con, view.status, **filters)
@@ -575,9 +593,14 @@ def _load_jobs(view_key: str, page: int, search: str = "",
                 # unit as the list it labels: the difference between this view
                 # and the same view with the read postings put back.
                 "read": (read_total - total) if read_total is not None else 0,
-                "hidden": db.count_job_groups(
-                    con, view.status,
-                    **{**filters, "hidden": "only", "min_score": 0}),
+                # Counted the way its DESTINATION is filtered, not the way
+                # the current view is: the door opens "Ausgeblendete Firmen",
+                # which includes every pile and every status. Inheriting this
+                # view's arms made it read 0 for exactly the company he had
+                # just read and hidden — and that view is in no dropdown, so
+                # the door is its only entrance.
+                "hidden": db.count_jobs(con, _HIDDEN_VIEW.status,
+                                        **_HIDDEN_VIEW.filters),
             },
             "poll": polling.last_poll(con),
             "search": search,
@@ -726,16 +749,18 @@ def _hide_company(company: str) -> dict:
     The figures come back with it because the undo bar has to NAME the price:
     "26 Anzeigen, die beste mit Bewertung 74" is a decision, "ausgeblendet" is
     a guess. Counted before the write, so they describe what was on screen.
+
+    `already` matters: pressing `x` on a company that is already hidden must
+    not announce a hide that did not happen — and must never offer an undo
+    that would REVEAL it, which is what an unconditional bar did inside the
+    "Ausgeblendete Firmen" view.
     """
     with db.db() as con:
-        rows = db.list_jobs(con, status="new", limit=1000,
-                            search="", hidden="include")
-        key = norm(company or "")
-        mine = [r for r in rows if norm(r["company"] or "") == key]
-        best = max((r["effective_score"] or 0) for r in mine) if mine else 0
-        stored = db.hide_company(con, company)
-    return {"ok": bool(stored), "key": stored, "company": company,
-            "jobs": len(mine), "best": best}
+        already = db.is_company_hidden(con, company)
+        cost = db.company_cost(con, company)
+        stored = "" if already else db.hide_company(con, company)
+    return {"ok": bool(stored), "already": already, "key": stored,
+            "company": company, **cost}
 
 
 def _unhide_company(company_key: str) -> None:
@@ -782,11 +807,25 @@ def _store_filter(key: str, value: str) -> None:
         db.set_setting(con, key, value)
 
 
+def signature_of(con) -> tuple:
+    """Everything this page states, as one comparable tuple.
+
+    ONE definition, and `_load_jobs` hands back exactly this. It used to hand
+    back the bare `data_signature` while the watcher compared that PLUS the
+    watched settings — a 38-tuple recorded against a 46-tuple compared, never
+    equal, so every tick counted as a change and the screen rebuilt itself on
+    a timer for the life of the page. That is precisely the property
+    `ui/live.py` exists to provide, and it had been defeated since the moment
+    the first setting was watched.
+    """
+    return (*db.data_signature(con),
+            *(db.get_setting(con, key, "") for key in _WATCHED_SETTINGS))
+
+
 def _signature() -> tuple:
     """One cheap read of everything this page's rows can say (see ui/live.py)."""
     with db.db() as con:
-        return (*db.data_signature(con),
-                *(db.get_setting(con, key, "") for key in _WATCHED_SETTINGS))
+        return signature_of(con)
 
 
 def _set_status(job_id: int, status: str):
@@ -2176,6 +2215,13 @@ async def jobs_page():
             job = shown.get(job_id)
             if job is None or job["status"] != "new":
                 return
+            # First, before any branch and before any await. Consecutive
+            # presses would otherwise stack undo bars with only the top one
+            # reachable — and a clear placed after an await destroys a dialog
+            # opened while it was pending, so anything parked on that dialog
+            # never wakes. The branches below are exclusive, but the rule that
+            # pins this cannot know that and is right not to guess.
+            overlay.clear()
             if job["form_opened_at"]:
                 # Defence in depth: `revive` is the way out of a started
                 # application because it ASKS whether one went out. Reaching
@@ -2184,9 +2230,21 @@ async def jobs_page():
                 return
             _hold_place(job_id)
             result = await run.io_bound(_hide_company, job["company"] or "")
+            if result["already"]:
+                # He is standing in the pile looking at what he hid. Saying
+                # "ausgeblendet" again would be a lie, and the Rückgängig
+                # beside it would REVEAL the company rather than take it back.
+                say(f"{result['company']} ist schon ausgeblendet — „↩ Firma "
+                    f"wieder anzeigen“ holt sie zurück.", multi_line=True)
+                return
             if not result["ok"]:
+                # No company on the posting: a blank field is missing
+                # information, not an employer, so there is nothing to hide but
+                # this row — and the screen has to say which of the two it did.
                 await run.io_bound(_set_status, job_id, "skipped")
                 await refresh(force=True)
+                say("Diese Anzeige nennt keine Firma — nur sie wurde weggelegt.",
+                    multi_line=True)
                 return
             await refresh(force=True)
             with overlay:

@@ -193,8 +193,14 @@ CREATE TABLE IF NOT EXISTS claims (
 -- `company` keeps the spelling that was on screen when he pressed, because the
 -- key is normalised and unreadable — the "Ausgeblendete Firmen" view has to
 -- show him a name he recognises.
+-- `id` exists only so the signature has something that never repeats.
+-- AUTOINCREMENT, deliberately: without it SQLite assigns max(rowid)+1 over the
+-- rows PRESENT, so releasing the newest hidden company and hiding another
+-- lands on the same number — the exact pair the undo bar produces, and the
+-- screen would stay pruned.
 CREATE TABLE IF NOT EXISTS hidden_companies (
-    company_key TEXT PRIMARY KEY,
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_key TEXT NOT NULL UNIQUE,
     company     TEXT NOT NULL,
     hidden_at   TEXT NOT NULL,
     source      TEXT NOT NULL DEFAULT 'user'
