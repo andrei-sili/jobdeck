@@ -452,3 +452,69 @@ async def test_the_control_drops_the_pile_again_once_he_leaves_it(
     control = _marked(user, "view-select")[0]
     assert control.value == "offen"
     assert "passt_nicht" not in control.options
+
+
+# ---------------------------------------------------- the filters keep their place
+
+
+async def test_the_floor_is_where_he_left_it(user: User, con, data_dir):
+    """He sets it once and works under it for an evening. Resetting it every
+    time he opens the screen would make him set it again every time."""
+    _job(con, "a", "Alpha GmbH", 80)
+    _job(con, "b", "Beta GmbH", 20)
+    await user.open("/")
+    _marked(user, "score-select")[0].set_value(0)
+    await asyncio.sleep(0.3)
+    assert _row_companies(user) == ["Alpha GmbH", "Beta GmbH"]
+
+    await user.open("/")           # …a fresh visit
+
+    assert _marked(user, "score-select")[0].value == 0
+    assert _row_companies(user) == ["Alpha GmbH", "Beta GmbH"]
+
+
+async def test_the_order_is_where_he_left_it(user: User, con, data_dir):
+    _job(con, "a", "Alt GmbH", 90, days_old=20)
+    _job(con, "b", "Neu GmbH", 60, days_old=1)
+    await user.open("/")
+    _marked(user, "sort-select")[0].set_value("score")
+    await asyncio.sleep(0.3)
+
+    await user.open("/")
+
+    assert _marked(user, "sort-select")[0].value == "score"
+    assert _row_companies(user) == ["Alt GmbH", "Neu GmbH"]
+
+
+@pytest.mark.parametrize("stored,expected", [
+    ("", jobs.DEFAULT_MIN_SCORE), ("kaputt", jobs.DEFAULT_MIN_SCORE),
+    ("inf", jobs.DEFAULT_MIN_SCORE), ("1e999", jobs.DEFAULT_MIN_SCORE),
+    ("55", jobs.DEFAULT_MIN_SCORE),          # not one of the offered values
+    ("60", 60), ("0", 0),
+])
+def test_an_unusable_stored_floor_never_takes_the_page_down(stored, expected):
+    """It is a row in a table he can edit and it is read while a page is being
+    BUILT — the shape that once took down the inbox along with the settings
+    page that could have fixed it. `int(float("inf"))` raises OverflowError,
+    which is past the ValueError guard."""
+    assert jobs.stored_min_score(stored) == expected
+
+
+@pytest.mark.parametrize("stored", ["", "kaputt", None, "id"])
+def test_an_unusable_stored_order_falls_back(stored):
+    assert jobs.stored_sort(stored) == db.DEFAULT_LIST_ORDER
+
+
+async def test_the_control_and_the_list_start_out_agreeing(user: User, con,
+                                                           data_dir):
+    """Read before the controls are drawn, so the select cannot show 40 over a
+    list built at 60."""
+    db.set_setting(con, jobs.MIN_SCORE_SETTING, "60")
+    con.commit()
+    _job(con, "a", "Stark GmbH", 80)
+    _job(con, "b", "Mittel GmbH", 45)
+
+    await user.open("/")
+
+    assert _marked(user, "score-select")[0].value == 60
+    assert _row_companies(user) == ["Stark GmbH"]

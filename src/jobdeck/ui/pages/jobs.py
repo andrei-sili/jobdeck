@@ -121,6 +121,12 @@ DEFAULT_MIN_SCORE = 40
 
 SORT_LABELS = {"date": "Neueste zuerst", "score": "Beste Treffer zuerst"}
 
+# Kept between visits. He sets the floor once and works under it for an
+# evening; resetting it every time he opens the screen would make him set it
+# again every time, which is the shape of a control nobody uses twice.
+MIN_SCORE_SETTING = "stellen_min_score"
+SORT_SETTING = "stellen_sort"
+
 DEFAULT_VIEW = VIEWS[0].key
 _BY_KEY = {view.key: view for view in VIEWS}
 
@@ -670,6 +676,9 @@ def _range_line(page: int, total: int, shown: int) -> str:
 # raised the limit in Einstellungen, and after midnight, until he reloads.
 _WATCHED_SETTINGS = ("daily_draft_cap", "drafts_written_count",
                      "drafts_written_date",
+                     # The two filter controls: they decide which rows the list
+                     # holds, so a second tab changing one has to reach here.
+                     MIN_SCORE_SETTING, SORT_SETTING,
                      # The search line states these, and none of them is a row
                      # any table signature can see.
                      polling.LAST_POLL_AT, polling.LAST_POLL_REPORT,
@@ -742,6 +751,35 @@ def _hidden_companies() -> list[dict]:
 def _poll_report() -> dict:
     with db.db() as con:
         return polling.last_poll(con)
+
+
+def stored_min_score(raw: str) -> int:
+    """The stored floor, screened. Anything that is not one of the offered
+    values falls back to the default rather than raising: this is a row in a
+    table he can edit, and it is read while a page is being BUILT."""
+    try:
+        value = int(float(str(raw).strip()))
+    except (TypeError, ValueError, OverflowError):
+        return DEFAULT_MIN_SCORE
+    return value if value in SCORE_FLOORS else DEFAULT_MIN_SCORE
+
+
+def stored_sort(raw: str) -> str:
+    return raw if raw in SORT_LABELS else db.DEFAULT_LIST_ORDER
+
+
+def _read_filters() -> dict:
+    with db.db() as con:
+        return {
+            "min_score": stored_min_score(
+                db.get_setting(con, MIN_SCORE_SETTING, "")),
+            "sort": stored_sort(db.get_setting(con, SORT_SETTING, "")),
+        }
+
+
+def _store_filter(key: str, value: str) -> None:
+    with db.db() as con:
+        db.set_setting(con, key, value)
 
 
 def _signature() -> tuple:
@@ -1121,14 +1159,15 @@ def legacy_cockpit_page(job_id: int):
 @ui.page(STELLEN_PATH)
 async def jobs_page():
     async with frame("Stellen", current="stellen", padded=False):
+        # The two filter controls open where he left them. Read BEFORE the
+        # page draws its controls, so the select and the list can never start
+        # out saying different things.
+        stored = await run.io_bound(_read_filters)
+        if stored is None:
+            return                      # the page is going away
         state = {"view": DEFAULT_VIEW, "page": 0, "search": "",
                  "selected": None, "prefer_index": None,
-                 # His two filter controls. Held on the page rather than in
-                 # app_settings: they are how he is looking right now, not a
-                 # preference, and a stored one would silently outlive the
-                 # evening that made sense of it.
-                 "min_score": DEFAULT_MIN_SCORE,
-                 "sort": db.DEFAULT_LIST_ORDER}
+                 "min_score": stored["min_score"], "sort": stored["sort"]}
         # What is on screen right now, so a tick that changes nothing this page
         # shows can draw nothing at all.
         drawn: dict = {}
@@ -1215,13 +1254,13 @@ async def jobs_page():
                         ).mark("view-select").props("dense outlined") \
                             .classes("min-w-36")
                         ui.select(
-                            SCORE_FLOORS, value=DEFAULT_MIN_SCORE,
+                            SCORE_FLOORS, value=state["min_score"],
                             label="Ab Bewertung",
                             on_change=lambda e: set_min_score(e.value),
                         ).mark("score-select").props("dense outlined") \
                             .classes("min-w-32")
                         ui.select(
-                            SORT_LABELS, value=db.DEFAULT_LIST_ORDER,
+                            SORT_LABELS, value=state["sort"],
                             label="Sortierung",
                             on_change=lambda e: set_sort(e.value),
                         ).mark("sort-select").props("dense outlined") \
@@ -1804,15 +1843,18 @@ async def jobs_page():
         async def set_min_score(value) -> None:
             """The floor under the list. Three quarters of what he scrolls is
             noise the machine has already graded as weak."""
-            state["min_score"] = _whole(value)
+            state["min_score"] = stored_min_score(value)
             state["page"] = 0    # a shorter list: page 3 of it means nothing
             state["selected"] = None
+            await run.io_bound(_store_filter, MIN_SCORE_SETTING,
+                               str(state["min_score"]))
             await refresh(force=True)
 
         async def set_sort(value) -> None:
-            state["sort"] = value or db.DEFAULT_LIST_ORDER
+            state["sort"] = stored_sort(value)
             state["page"] = 0
             state["selected"] = None
+            await run.io_bound(_store_filter, SORT_SETTING, state["sort"])
             await refresh(force=True)
 
         async def search_now() -> None:
