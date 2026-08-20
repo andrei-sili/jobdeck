@@ -21,6 +21,7 @@ from jobdeck.services import (
     drafting,
     liveness,
     mappe,
+    polling,
     preparing,
 )
 from jobdeck.services.replies import RECEIPT_WINDOW_H
@@ -58,9 +59,12 @@ DESCRIPTION_LIMIT = 40_000
 # what it does with each pile. A screen that computed its filters in the handler
 # is a screen whose printed total can disagree with its own rows.
 _WORKING = {"mismatches": "exclude", "gone": "exclude", "applied": "exclude",
-            "old": "exclude"}
+            "old": "exclude", "hidden": "exclude"}
+# "Everything" still means everything he has not put out of sight: a hidden
+# company is his standing decision, not a property of the posting, so only the
+# view that exists to review those decisions asks for them.
 _EVERYTHING = {"mismatches": "include", "gone": "include", "applied": "include",
-               "old": "include"}
+               "old": "include", "hidden": "exclude"}
 
 
 @dataclass(frozen=True)
@@ -99,6 +103,16 @@ VIEWS = (
     View("doppelt", "Doppelt", "duplicate", _EVERYTHING,
          "Keine Anzeige wurde als Doppelte einer Bewerbung erkannt."),
 )
+# What the floor control offers. 40 is the default because it is where the
+# measurement puts the cut: his working list holds 300 postings and 222 of them
+# score under 40, so this takes it to 78 — while 60 would take it to 52 and a
+# list that loses 83 % of its rows on the first evening invites a third
+# rejection. He can reach 60 with one press, and it stays where he leaves it.
+SCORE_FLOORS = {0: "Alle", 40: "ab 40", 60: "ab 60", 70: "ab 70"}
+DEFAULT_MIN_SCORE = 40
+
+SORT_LABELS = {"date": "Neueste zuerst", "score": "Beste Treffer zuerst"}
+
 DEFAULT_VIEW = VIEWS[0].key
 _BY_KEY = {view.key: view for view in VIEWS}
 
@@ -411,7 +425,8 @@ def _salary_short(job: dict) -> str:
 
 
 def _load_jobs(view_key: str, page: int, search: str = "",
-               keep_ids: tuple[int, ...] = ()) -> dict:
+               keep_ids: tuple[int, ...] = (), min_score: int = 0,
+               sort: str = db.DEFAULT_LIST_ORDER) -> dict:
     """One page of a named view, with everything needed to describe it.
 
     A row stands for a COMPANY — its best-ranked posting, with the others
@@ -441,7 +456,15 @@ def _load_jobs(view_key: str, page: int, search: str = "",
         # is the defect this project keeps pinning.
         draft_room = db.count_drafts_today(con) < db.daily_draft_cap(con)
         filters = {**view.filters, "stale_age_days": stale_age_days,
-                   "search": search, "keep_ids": keep_ids}
+                   "search": search, "keep_ids": keep_ids,
+                   # Never in a pile view. "Passt nicht" IS the score-0 pile
+                   # and "Ausgeblendete Firmen" is the hidden one — a floor or
+                   # an exclusion applied there would empty the very view he
+                   # opened to look at what was set aside.
+                   "min_score": 0 if view.filters.get("mismatches") == "only"
+                                else min_score,
+                   "hidden": view.filters.get("hidden", "exclude"),
+                   "sort": sort}
         total = db.count_job_groups(con, view.status, **filters)
         read_total = None
         if view.filters.get("opened") == "exclude":
@@ -481,7 +504,11 @@ def _load_jobs(view_key: str, page: int, search: str = "",
                 # unit as the list it labels: the difference between this view
                 # and the same view with the read postings put back.
                 "read": (read_total - total) if read_total is not None else 0,
+                "hidden": db.count_job_groups(
+                    con, view.status,
+                    **{**filters, "hidden": "only", "min_score": 0}),
             },
+            "poll": polling.last_poll(con),
             "search": search,
             "stale_age_days": stale_age_days,
             "total": total,
@@ -576,7 +603,51 @@ def _range_line(page: int, total: int, shown: int) -> str:
 # Without this the button keeps saying "Tageslimit aufgebraucht" after he has
 # raised the limit in Einstellungen, and after midnight, until he reloads.
 _WATCHED_SETTINGS = ("daily_draft_cap", "drafts_written_count",
-                     "drafts_written_date")
+                     "drafts_written_date",
+                     # The search line states these, and none of them is a row
+                     # any table signature can see.
+                     polling.LAST_POLL_AT, polling.LAST_POLL_REPORT,
+                     polling.LAST_POLL_SOURCE)
+
+
+def _whole(value) -> int:
+    """A control's value as a whole number, 0 for anything that is not one."""
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def poll_line(report: dict, now: datetime.datetime | None = None) -> str:
+    """What the last search found, as the one sentence above the list.
+
+    The first word answers "cind?" — whether it was him or the schedule — which
+    is half of what he was asking. Written as a pure function of the report so
+    what the screen claims can be pinned without a browser.
+
+    An empty report says the engine has never run rather than printing zeros:
+    "0 neue Anzeigen" is a result, and no search is not a result.
+    """
+    if not report.get("at"):
+        return "Noch nie gesucht."
+    who = ("Von dir gestartet" if report.get("by") == "user"
+           else "Automatisch gesucht")
+    parts = [f"{report['new']} neue Anzeigen" if report["new"] != 1
+             else "1 neue Anzeige"]
+    if report.get("known"):
+        parts.append(f"{report['known']} schon bekannt")
+    if report.get("duplicate"):
+        # The check he asked for by name — "la căutare, programul verifică
+        # DB-ul ca să nu aducă iar firme la care a trimis". It has always
+        # happened at ingestion; it has never been said out loud.
+        parts.append(f"{report['duplicate']} bei Firmen, bei denen du dich "
+                     f"schon beworben hast")
+    return f"{who} {rail.clock(report['at'])} — " + " · ".join(parts)
+
+
+def _poll_report() -> dict:
+    with db.db() as con:
+        return polling.last_poll(con)
 
 
 def _signature() -> tuple:
@@ -957,7 +1028,13 @@ def legacy_cockpit_page(job_id: int):
 async def jobs_page():
     async with frame("Stellen", current="stellen", padded=False):
         state = {"view": DEFAULT_VIEW, "page": 0, "search": "",
-                 "selected": None, "prefer_index": None}
+                 "selected": None, "prefer_index": None,
+                 # His two filter controls. Held on the page rather than in
+                 # app_settings: they are how he is looking right now, not a
+                 # preference, and a stored one would silently outlive the
+                 # evening that made sense of it.
+                 "min_score": DEFAULT_MIN_SCORE,
+                 "sort": db.DEFAULT_LIST_ORDER}
         # What is on screen right now, so a tick that changes nothing this page
         # shows can draw nothing at all.
         drawn: dict = {}
@@ -1017,7 +1094,14 @@ async def jobs_page():
                         .classes("jd-meta")
             with ui.element("div").classes("jd-panes"):
                 with ui.element("div").classes("jd-list"):
-                    with ui.row().classes("items-center gap-2 p-2 border-b"):
+                    with ui.row().classes("items-center gap-3 px-2 pt-2 w-full"):
+                        search_button = ui.button(
+                            "Jetzt suchen", icon="search",
+                            on_click=lambda: search_now()) \
+                            .props("flat dense").mark("poll-now")
+                        poll_label = ui.label("").classes("jd-meta") \
+                            .mark("poll-line")
+                    with ui.row().classes("items-center gap-2 p-2"):
                         # `debounce` is Quasar's own: without it every
                         # keystroke resets the page, drops the selection and
                         # awaits a full reload — three windowed CTEs, four pile
@@ -1034,7 +1118,19 @@ async def jobs_page():
                             label="Ansicht",
                             on_change=lambda e: set_view(e.value),
                         ).mark("view-select").props("dense outlined") \
-                            .classes("min-w-40")
+                            .classes("min-w-36")
+                        ui.select(
+                            SCORE_FLOORS, value=DEFAULT_MIN_SCORE,
+                            label="Ab Bewertung",
+                            on_change=lambda e: set_min_score(e.value),
+                        ).mark("score-select").props("dense outlined") \
+                            .classes("min-w-32")
+                        ui.select(
+                            SORT_LABELS, value=db.DEFAULT_LIST_ORDER,
+                            label="Sortierung",
+                            on_change=lambda e: set_sort(e.value),
+                        ).mark("sort-select").props("dense outlined") \
+                            .classes("min-w-36")
                     # A sibling of the rows and ABOVE the scroll container, so
                     # an application under way is on screen in every view, at
                     # every page, under any search. `.jd-list` is a flex
@@ -1061,10 +1157,11 @@ async def jobs_page():
             gen = refresh_gen["n"]
             view = await run.io_bound(
                 _load_jobs, state["view"], state["page"], state["search"],
-                tuple(read_here))
+                tuple(read_here), state["min_score"], state["sort"])
             if gen != refresh_gen["n"] or view is None:
                 return  # superseded, or the page is going away
             state["page"] = view["page"]   # the loader clamped it to what exists
+            poll_label.set_text(poll_line(view["poll"]))
             live_view.mark(view["signature"])
             fresh = {row["id"]: row for row in view["rows"]}
             new_order = [row["id"] for row in view["rows"]]
@@ -1569,6 +1666,44 @@ async def jobs_page():
             state["search"] = value
             state["page"] = 0
             state["selected"] = None
+            await refresh(force=True)
+
+        async def set_min_score(value) -> None:
+            """The floor under the list. Three quarters of what he scrolls is
+            noise the machine has already graded as weak."""
+            state["min_score"] = _whole(value)
+            state["page"] = 0    # a shorter list: page 3 of it means nothing
+            state["selected"] = None
+            await refresh(force=True)
+
+        async def set_sort(value) -> None:
+            state["sort"] = value or db.DEFAULT_LIST_ORDER
+            state["page"] = 0
+            state["selected"] = None
+            await refresh(force=True)
+
+        async def search_now() -> None:
+            """Look for postings, now, from the screen he is looking at.
+
+            The function is the one Einstellungen used to call in English. It
+            is a coroutine and is awaited directly — `run.io_bound` would hand
+            a worker thread an un-awaited coroutine, and the arity rule that
+            catches the shape cannot see a mistake this asks for.
+            """
+            if polling.running():
+                say("Es läuft schon eine Suche.", type="warning")
+                return
+            search_button.disable()
+            search_button.set_text("Sucht …")
+            try:
+                await polling.poll_all_profiles(force=True)
+            except Exception as exc:        # a source can refuse at any moment
+                log.exception("manual poll failed")
+                say(f"Die Suche ist gescheitert: {exc}", type="warning",
+                    multi_line=True)
+            finally:
+                search_button.set_text("Jetzt suchen")
+                search_button.enable()
             await refresh(force=True)
 
         async def ask_before_committing(step: Step, job: dict) -> bool:

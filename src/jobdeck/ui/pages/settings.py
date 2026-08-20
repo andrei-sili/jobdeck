@@ -10,7 +10,6 @@ from jobdeck.services import (
     apply_resolve,
     liveness,
     mappe,
-    polling,
     preparing,
     scoring,
     silence,
@@ -629,11 +628,6 @@ async def settings_page():
                               type="warning" if warning else "positive",
                               multi_line=True)
 
-                async def poll_now():
-                    ui.notify("Polling all active profiles…")
-                    counters = await polling.poll_all_profiles(force=True)
-                    ui.notify(f"Done: {counters['new']} new jobs", type="positive")
-
                 async def score_now():
                     if not await run.io_bound(_ai_enabled):
                         ui.notify("AI is disabled — flip the switch in the AI "
@@ -706,8 +700,6 @@ async def settings_page():
                           on_click=resolve_channels_now).props("outline")
                 ui.button("Check postings still online", icon="wifi_tethering",
                           on_click=check_liveness_now).props("outline")
-                ui.button("Poll all profiles now", icon="refresh", on_click=poll_now) \
-                    .props("outline")
                 ui.button("Score new jobs now", icon="grade", on_click=score_now) \
                     .props("outline")
                 ui.button("Read replies now", icon="mark_email_read",
