@@ -170,6 +170,9 @@ body { background: var(--paper); color: var(--ink); font-family: var(--jd-sans);
 .jd-pulse-dot { width:6px; height:6px; border-radius:50%; background: var(--accent);
                 flex:none; }
 .jd-pulse-dot.idle { background: var(--rule-2); }
+/* A source that answered with an error, or none configured at all: the amber
+   the Unterlagen rubric used to carry, moved here with the profiles. */
+.jd-pulse-dot.warn { background: var(--warn); }
 .jd-pulse-dot.run { animation: jd-pulse 1.4s ease-in-out infinite; }
 @keyframes jd-pulse { 0%,100%{opacity:1} 50%{opacity:.25} }
 @media (prefers-reduced-motion: reduce) { .jd-pulse-dot.run { animation: none; } }

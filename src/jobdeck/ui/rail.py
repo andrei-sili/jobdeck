@@ -63,7 +63,13 @@ class Rubric:
 
 @dataclass(frozen=True)
 class Pulse:
-    """One line of the engine's heartbeat. `state` is 'run', 'ok' or 'idle'."""
+    """One line of the engine's heartbeat.
+
+    `state` is 'run', 'ok', 'idle' or 'warn'. 'warn' exists because the
+    profiles moved here from the Unterlagen rubric and brought their amber
+    with them: a source that answers with an error is the one thing on this
+    line that needs a colour, and without it a board that has stopped
+    answering reads exactly like a healthy one."""
 
     label: str
     detail: str
@@ -409,7 +415,8 @@ def pulse(view: dict, now: datetime.datetime) -> list[Pulse]:
               (f"{errors} Profil ohne Antwort" if errors == 1 else
                f"{errors} Profile ohne Antwort") if errors else
               _clock(last_polled, now) or "noch nie",
-              "idle" if not active else _beat(last_polled, now)),
+              "warn" if (errors or not active)
+              else _beat(last_polled, now)),
         # The animated dot means "something ran just now". A BACKLOG is not
         # evidence of a worker: with AI spend switched off — his own default —
         # a queue of twelve pulsed forever while nothing was ever going to

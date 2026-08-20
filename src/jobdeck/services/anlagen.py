@@ -262,6 +262,17 @@ def _free_name(folder: pathlib.Path, number: int, stem: str) -> str:
     raise AnlagenError("Zu viele Dateien mit diesem Namen im Ordner.")
 
 
+def reader_needs_password(exc: Exception) -> bool:
+    """Whether pypdf refused because the file is locked, not because it is torn.
+
+    The two need different sentences: one is re-saved without the password,
+    the other is scanned again. pypdf's exception type is matched by NAME so
+    an import that moves between versions cannot silently turn every locked
+    file into "not a readable PDF".
+    """
+    return "NotDecrypted" in type(exc).__name__ or "password" in str(exc).lower()
+
+
 def oversize_message(size: int) -> str:
     """The refusal for a file that is too big, or '' when it fits.
 
@@ -293,19 +304,25 @@ def _validate_pdf(data: bytes, filename: str) -> None:
     too_big = oversize_message(len(data))
     if too_big:
         raise AnlagenError(too_big)
+    # `is_encrypted` is NOT the question, and answering it was both too strict
+    # and untrue: an OWNER password only restricts editing — pypdf opens such a
+    # file, and the real merge staples it (checked against `pdf.merge_pdfs`).
+    # Scanning software sets one routinely. What actually locks a document is a
+    # USER password, and the only honest test for that is trying to read it.
     try:
         reader = PdfReader(io.BytesIO(data))
-        # Asked BEFORE the pages: reading a page of an encrypted file raises,
-        # and the generic "not a readable PDF" would send him looking for a
-        # corrupt scan when the file is merely protected.
         if reader.is_encrypted:
-            raise AnlagenError(
-                "Das PDF ist passwortgeschützt — es ließe sich nicht "
-                "zusammenheften. Bitte ohne Schutz speichern.")
+            try:
+                reader.decrypt("")
+            except Exception:  # noqa: S110 — the read below is the real test
+                pass
         pages = len(reader.pages)
-    except AnlagenError:
-        raise
     except Exception as exc:  # pypdf raises its own family on a torn file
+        if reader_needs_password(exc):
+            raise AnlagenError(
+                "Das PDF verlangt ein Passwort zum Öffnen — so ließe es sich "
+                "nicht zusammenheften. Bitte ohne Passwort speichern."
+            ) from exc
         raise AnlagenError(f"Kein lesbares PDF: {exc}") from exc
     if pages < 1:
         raise AnlagenError("Das PDF hat keine Seiten.")

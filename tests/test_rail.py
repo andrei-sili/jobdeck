@@ -290,7 +290,19 @@ def test_no_active_profile_at_all_is_stated_rather_than_read_as_quiet():
     """Nothing will ever arrive, and "zuletzt gesucht 17:58" would look
     exactly like a healthy app."""
     beat = rail.pulse(_view(profiles=(0, "2026-08-12T17:58:00", 0)), NOW)[0]
-    assert (beat.state, beat.detail) == ("idle", "kein aktives Profil")
+    assert (beat.state, beat.detail) == ("warn", "kein aktives Profil")
+
+
+def test_a_source_that_stopped_answering_keeps_its_colour():
+    """The amber used to hang on the Unterlagen rubric. Moving the profiles to
+    the Puls must not drop it — a board that has stopped answering would then
+    read exactly like a healthy one, and discovery is the top of the funnel."""
+    quiet = rail.pulse(_view(profiles=(2, "2026-08-12T14:38:00", 0)), NOW)[0]
+    broken = rail.pulse(_view(profiles=(2, "2026-08-12T14:38:00", 1)), NOW)[0]
+
+    assert quiet.state == "ok"          # ran a while ago, answered fine
+    assert broken.state == "warn"
+    assert broken.detail == "1 Profil ohne Antwort"
 
 
 def test_the_scoring_backlog_is_stated_without_claiming_a_worker():

@@ -18,12 +18,14 @@ from jobdeck import pdf
 from jobdeck.services import anlagen
 
 
-def _pdf_bytes(pages: int = 1, *, password: str = "") -> bytes:
+def _pdf_bytes(pages: int = 1, *, password: str = "",
+               owner_password: str = "") -> bytes:
     writer = PdfWriter()
     for _ in range(pages):
         writer.add_blank_page(width=200, height=200)
-    if password:
-        writer.encrypt(password)
+    if password or owner_password:
+        writer.encrypt(user_password=password,
+                       owner_password=owner_password or None)
     buffer = io.BytesIO()
     writer.write(buffer)
     return buffer.getvalue()
@@ -107,15 +109,63 @@ def test_a_torn_pdf_is_refused_at_the_door(tmp_path):
     assert list(folder.iterdir()) == []
 
 
-def test_a_password_protected_pdf_says_so_rather_than_calling_it_broken(tmp_path):
-    """Protected and corrupt need different answers: one is re-saved without
-    the protection, the other is scanned again."""
+def test_a_pdf_that_needs_a_password_to_open_says_so(tmp_path):
+    """Locked and corrupt need different answers: one is re-saved without the
+    password, the other is scanned again."""
     folder = _folder(tmp_path)
 
-    with pytest.raises(anlagen.AnlagenError, match="passwortgeschützt"):
+    with pytest.raises(anlagen.AnlagenError, match="verlangt ein Passwort"):
         anlagen.store(folder, "Zeugnis.pdf", _pdf_bytes(password="geheim"))
 
     assert list(folder.iterdir()) == []
+
+
+def test_a_certificate_that_merely_forbids_editing_is_accepted(tmp_path):
+    """An OWNER password restricts editing, not reading — scanning software
+    sets one routinely, and `pdf.merge_pdfs` staples such a file without
+    complaint. Refusing it turned a working certificate away, and said it
+    could not be merged, which was not true."""
+    folder = _folder(tmp_path)
+    protected = _pdf_bytes(pages=2, owner_password="geheim")
+
+    stored = anlagen.store(folder, "Zeugnis.pdf", protected)
+
+    assert stored.name == "01_Zeugnis.pdf"
+    # …and the real merge really does take it
+    merged = tmp_path / "mappe.pdf"
+    pdf.merge_pdfs([stored], merged)
+    assert pdf.page_count(merged) == 2
+
+
+@pytest.mark.parametrize("size,refused", [
+    (anlagen.MAX_UPLOAD_BYTES - 1, False),
+    (anlagen.MAX_UPLOAD_BYTES, False),
+    (anlagen.MAX_UPLOAD_BYTES + 1, True),
+])
+def test_the_size_limit_is_stated_where_it_is_enforced(size, refused):
+    """The screen asks this before pulling a file into memory and the service
+    asks it again after — one sentence, so a limit can never be described
+    differently from the way it is applied."""
+    message = anlagen.oversize_message(size)
+    assert bool(message) is refused
+    if refused:
+        assert str(anlagen.MAX_UPLOAD_BYTES // 1024 // 1024) in message
+
+
+@pytest.mark.parametrize("stem,expected", [
+    ("01_Zeugnis", (1, "Zeugnis")),
+    ("7 Zeugnis", (7, "Zeugnis")),
+    ("1-Zeugnis", (1, "Zeugnis")),
+    ("2026_Zeugnis", (None, "2026_Zeugnis")),   # a year, not an order marker
+    ("123Zeugnis", (None, "123Zeugnis")),
+    ("Zeugnis", (None, "Zeugnis")),
+    ("01_", (None, "01_")),
+])
+def test_a_number_is_only_an_order_marker_when_a_separator_follows(stem, expected):
+    """Without the separator requirement "2026_Zeugnis" reads as number 202 of
+    something called "6_Zeugnis", and the renumbering then rewrites a file name
+    that was never an order marker at all."""
+    assert anlagen.split_prefix(stem) == expected
 
 
 def test_an_oversized_file_is_refused_with_its_size(tmp_path):

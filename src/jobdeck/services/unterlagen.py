@@ -455,6 +455,12 @@ def rail_fingerprint(con) -> tuple:
     settings = mappe.build_settings(con)
     template = settings["template_path"].strip()
     return (
+        # The PATHS themselves, not only what is at them: a folder just
+        # created and still empty fingerprints identically to no folder at
+        # all, so pressing "Ordner anlegen und verwenden" would leave the
+        # spine reading "kein Ordner für Anlagen" for the life of the page.
+        settings["anlagen_dir"],
+        template,
         _folder_fingerprint(settings["anlagen_dir"]),
         _file_fingerprint(config.user_path(template)),
         _file_fingerprint(specimen_path()),

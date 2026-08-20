@@ -240,7 +240,7 @@ async def unterlagen_page():
         # refresh past the last file. With Quasar's `batch`, the whole
         # selection arrives as a single POST and `on_multi_upload` is the only
         # handler there is: stores in order, redraws once, says one sentence.
-        batch: dict = {"active": False}
+        batch: dict = {"active": False, "moving": False}
 
         def _busy() -> bool:
             return live.dialog_open() or batch["active"]
@@ -296,8 +296,13 @@ async def unterlagen_page():
             if done:
                 landed = ("„" + done[0] + "“ liegt" if len(done) == 1
                           else f"{len(done)} Anlagen liegen")
-                say(f"{landed} jetzt in der Mappe — für Seitenzahlen und "
-                    f"Gewicht einmal „Neu bauen“.",
+                # The page numbers are already right — the letter's own length
+                # is remembered and every part is re-placed on this redraw. The
+                # one figure that has gone stale is the WEIGHT, which is what
+                # the budget lines are read for, and the panel's own note three
+                # lines away says exactly that.
+                say(f"{landed} jetzt in der Mappe — für Größe und Budget "
+                    f"einmal „Neu bauen“.",
                     type="positive", multi_line=True)
             await refresh()
 
@@ -309,11 +314,26 @@ async def unterlagen_page():
                 f"pro Anlage.", type="warning", multi_line=True)
 
         async def move_anlage(name: str, delta: int) -> None:
-            folder = _folder().get("path") or ""
-            result = await run.io_bound(_move_anlage, folder, name, delta)
-            if not result["ok"]:
-                say(result["error"], type="warning", multi_line=True)
-            await refresh()
+            """Move one Anlage, and refuse to start a second move meanwhile.
+
+            The arrows RENAME, so between the press and the redraw the name in
+            the next button's closure is already stale — and after a swap that
+            name belongs to a DIFFERENT document. A second press inside that
+            window would move the wrong certificate, quietly and correctly as
+            far as the code is concerned. He nudges twice; the gate makes the
+            second press wait for the first to be on screen.
+            """
+            if batch["moving"]:
+                return
+            batch["moving"] = True
+            try:
+                folder = _folder().get("path") or ""
+                result = await run.io_bound(_move_anlage, folder, name, delta)
+                if not result["ok"]:
+                    say(result["error"], type="warning", multi_line=True)
+                await refresh()
+            finally:
+                batch["moving"] = False
 
         async def remove_anlage(part) -> None:
             """Take an Anlage out of the Mappe — the file survives.
