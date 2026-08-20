@@ -285,13 +285,34 @@ def test_a_move_between_two_files_of_the_same_name_loses_neither(tmp_path):
 
 
 def test_a_move_at_the_end_changes_nothing(tmp_path):
-    folder = _folder(tmp_path, "01_A.pdf", "02_B.pdf")
-    before = sorted(p.name for p in folder.iterdir())
+    """Three files, not two: with two, dropping the bounds check happens to be
+    a no-op (`insert(-1)` on a one-element list lands at 0), so the guard could
+    be deleted with the suite green. With three, `insert(-1)` rotates."""
+    folder = _folder(tmp_path, "01_A.pdf", "02_B.pdf", "03_C.pdf")
+    before = [e.name for e in anlagen.listing(folder)]
 
-    anlagen.move(folder, "02_B.pdf", 1)
+    anlagen.move(folder, "03_C.pdf", 1)
     anlagen.move(folder, "01_A.pdf", -1)
 
-    assert sorted(p.name for p in folder.iterdir()) == before
+    assert [e.name for e in anlagen.listing(folder)] == before
+
+
+def test_a_stale_staging_file_never_silently_becomes_the_upload(tmp_path,
+                                                                monkeypatch):
+    """Recovery clears these before an upload ever sees one, so this is the
+    concurrent case: two tabs storing the same name at the same instant. The
+    exclusive create is what makes the second fail cleanly instead of writing
+    into the first one's bytes."""
+    folder = _folder(tmp_path)
+    monkeypatch.setattr(anlagen, "recover", lambda _f: [])
+    (folder / f"01_Zeugnis.pdf{anlagen._UPLOAD_SUFFIX}").write_bytes(b"in flight")
+
+    with pytest.raises(anlagen.AnlagenError, match="schon hochgeladen"):
+        anlagen.store(folder, "Zeugnis.pdf", _pdf_bytes())
+
+    # the other transfer's bytes are untouched
+    assert (folder / f"01_Zeugnis.pdf{anlagen._UPLOAD_SUFFIX}").read_bytes() \
+        == b"in flight"
 
 
 def test_a_move_never_loses_a_document(tmp_path):

@@ -824,6 +824,49 @@ def test_adopting_repairs_a_folder_that_was_moved_away(con, data_dir):
         assert db.get_setting(fresh, "anlagen_dir", "") == str(gone)
 
 
+async def test_the_up_arrow_moves_a_document_towards_the_front(
+        user: User, con, data_dir):
+    """"Nach vorn" with an inverted delta renames on disk and puts a course
+    certificate ahead of the Prüfungszeugnis in what an employer opens. The
+    direction is one character and no test held it."""
+    folder = data_dir / "anlagen"
+    folder.mkdir()
+    _blank_pdf(folder / "01_Zeugnis.pdf")
+    _blank_pdf(folder / "02_Zertifikat.pdf")
+    db.set_setting(con, "anlagen_dir", str(folder))
+    _posting(con)
+    con.commit()
+
+    await user.open("/unterlagen")
+    user.find(marker="anlage-up-1").click()
+    await user.should_see("01_Zertifikat")
+
+    assert sorted(p.name for p in folder.glob("*.pdf")) == [
+        "01_Zertifikat.pdf", "02_Zeugnis.pdf"]
+
+
+async def test_the_first_press_of_all_creates_the_folder_and_uses_it(
+        user: User, con, data_dir):
+    """The one press the whole rubric exists to provide, for somebody who has
+    never opened Einstellungen."""
+    _posting(con)
+    con.commit()
+
+    await user.open("/unterlagen")
+    await user.should_see("Noch kein Ordner für deine Anlagen")
+    user.find("Ordner anlegen und verwenden").click()
+    await user.should_see("Ordner angelegt")
+
+    assert (data_dir / "Anlagen").is_dir()
+    with db.db() as fresh:
+        assert db.get_setting(fresh, "anlagen_dir", "") == \
+            str(data_dir / "Anlagen")
+    # …and the screen has become the one that can take a document
+    await user.should_see("Deine Anlagen liegen in")
+    assert [el for el in user.client.elements.values()
+            if isinstance(el, ui.upload)]
+
+
 # --------------------------------------------------------------------------
 # The drop zone, driven. The slice's headline path had no execution coverage
 # at all: a NiceGUI rename, or an early return, would leave the suite green
