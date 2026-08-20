@@ -208,26 +208,31 @@ def hidden_parts(view: View, counts: dict, stale_age_days: int,
     # read "1 Anzeigen sind offline" — the kind of German that makes a reader
     # distrust the number beside it, and this project has shipped it before.
     for arm, count_key, pile, hidden, one, many in (
-        ("mismatches", "mismatches", "passt_nicht", "{n} passen nicht",
+        ("mismatches", "mismatches", "passt_nicht",
+         ("passt nicht", "passen nicht"),
          "Anzeige verletzt eine harte Anforderung",
          "Anzeigen verletzen eine harte Anforderung"),
-        ("gone", "dead", "offline", "{n} offline",
+        ("gone", "dead", "offline", ("offline", "offline"),
          "Anzeige ist offline", "Anzeigen sind offline"),
         ("applied", "applied_firm", "firma_kontaktiert",
-         "{n} bei schon beworbenen Firmen",
+         ("bei einer schon beworbenen Firma", "bei schon beworbenen Firmen"),
          "Stelle bei einer Firma, bei der du dich schon beworben hast",
          "Stellen bei Firmen, bei denen du dich schon beworben hast"),
-        ("old", "old", "alt", f"{{n}} älter als {stale_age_days} Tage",
+        ("old", "old", "alt",
+         (f"älter als {stale_age_days} Tage", f"älter als {stale_age_days} Tage"),
          f"Anzeige älter als {stale_age_days} Tage",
          f"Anzeigen älter als {stale_age_days} Tage"),
-        ("hidden", "hidden", "ausgeblendet", "{n} bei ausgeblendeten Firmen",
+        ("hidden", "hidden", "ausgeblendet",
+         ("bei einer ausgeblendeten Firma", "bei ausgeblendeten Firmen"),
          "Anzeige bei einer ausgeblendeten Firma",
          "Anzeigen bei ausgeblendeten Firmen"),
     ):
         count = counts.get(count_key, 0)
         if view.filters.get(arm) == "exclude" and count:
-            parts.append({"text": hidden.format(n=count), "view": pile})
-        elif view.filters.get(arm) == "only":
+            parts.append({"text": plural(count, *hidden), "view": pile})
+        elif view.filters.get(arm) == "only" and count:
+            # `plural` answers '' for zero, and an empty part draws a blank
+            # label with a dangling "·" beside it.
             parts.append({"text": plural(count, one, many), "view": None})
     return parts
 
@@ -730,6 +735,7 @@ def poll_line(report: dict, now: datetime.datetime | None = None) -> str:
         return "Noch nie gesucht."
     who = ("Von dir gestartet" if report.get("by") == "user"
            else "Automatisch gesucht")
+    when = rail.clock_at(report["at"], now) if now else rail.clock(report["at"])
     parts = [f"{report['new']} neue Anzeigen" if report["new"] != 1
              else "1 neue Anzeige"]
     if report.get("known"):
@@ -740,7 +746,7 @@ def poll_line(report: dict, now: datetime.datetime | None = None) -> str:
         # happened at ingestion; it has never been said out loud.
         parts.append(f"{report['duplicate']} bei Firmen, bei denen du dich "
                      f"schon beworben hast")
-    return f"{who} {rail.clock(report['at'])} — " + " · ".join(parts)
+    return f"{who} {when} — " + " · ".join(parts)
 
 
 def _hide_company(company: str) -> dict:
@@ -1292,7 +1298,7 @@ async def jobs_page():
                             on_change=lambda e: set_view(e.value),
                         ).mark("view-select").props("dense outlined") \
                             .classes("min-w-36")
-                        ui.select(
+                        score_select = ui.select(
                             SCORE_FLOORS, value=state["min_score"],
                             label="Ab Bewertung",
                             on_change=lambda e: set_min_score(e.value),
@@ -1341,6 +1347,14 @@ async def jobs_page():
             # are the same place.
             view_select.set_options(_view_options(view["view"].key),
                                     value=view["view"].key)
+            # A control that silently does nothing teaches him it is broken.
+            # The floor belongs to the working list; every pile shows what was
+            # set aside, and hiding things there is the opposite of the point.
+            score_select.set_enabled(view["view"].floors)
+            score_select.props(
+                remove="hint" if view["view"].floors else "",
+                add="" if view["view"].floors
+                    else 'hint="gilt nur für die Arbeitsliste"')
             poll_label.set_text(poll_line(view["poll"]))
             live_view.mark(view["signature"])
             fresh = {row["id"]: row for row in view["rows"]}
@@ -1864,10 +1878,16 @@ async def jobs_page():
         async def set_view(value: str) -> None:
             """Move to another named view.
 
-            One assignment and one refresh: nothing here writes another control,
-            so no handler can be echoed back into this one — which is what made
-            the two pile switches rebuild the page forever."""
-            state["view"] = value or DEFAULT_VIEW
+            The refresh WRITES this control now — it has to carry whichever
+            view a pile door opened — and NiceGUI dispatches a server-side
+            value write as a background task, so that write lands back here.
+            A no-op returns immediately; without it every redraw would load
+            the list a second time, which is the echo that once made two pile
+            switches rebuild the page forever."""
+            wanted = value or DEFAULT_VIEW
+            if wanted == state["view"]:
+                return
+            state["view"] = wanted
             state["page"] = 0  # a different list: page 3 of it means nothing
             state["selected"] = None
             read_here.clear()   # coming back to Neu is when it should have emptied

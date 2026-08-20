@@ -104,6 +104,12 @@ def _clock(iso: str, now: datetime.datetime) -> str:
     return parsed.strftime("%d.%m.")
 
 
+def clock_at(iso: str, now: datetime.datetime) -> str:
+    """`clock` for a caller that has a clock to pass in — so what it renders
+    can be pinned without the test being true only on the day it was written."""
+    return _clock(iso, now)
+
+
 def clock(iso: str) -> str:
     """`_clock` for a screen that has no clock of its own to pass in.
 
@@ -137,9 +143,13 @@ def facts() -> dict:
         signature = _signature(con)
         stale_age = freshness.stale_age_setting(
             db.get_setting(con, "stale_age_days", ""))
+        # The same arms the Stellen screen's working list uses, INCLUDING the
+        # hidden one — the spine states how much work is waiting, and counting
+        # companies he has put out of sight would contradict the list it links
+        # to.
         working = {"mismatches": "exclude", "gone": "exclude",
                    "applied": "exclude", "old": "exclude",
-                   "stale_age_days": stale_age}
+                   "hidden": "exclude", "stale_age_days": stale_age}
         return {
             "signature": signature,
             "profiles": db.poll_progress(con),
@@ -147,7 +157,8 @@ def facts() -> dict:
             "last_scored": db.get_setting(con, "llm_last_call_at", ""),
             "liveness": db.liveness_progress(con, liveness.probeable_sources()),
             "jobs_total": db.count_jobs(con),
-            "companies_total": db.count_job_groups(con, "new"),
+            "companies_total": db.count_job_groups(con, "new",
+                                                   hidden="exclude"),
             "working": db.count_job_groups(con, "new", **working),
             "unread": db.count_job_groups(con, "new", opened="exclude", **working),
             "bookmarked": db.count_bookmarked_jobs(con),
