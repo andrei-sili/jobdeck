@@ -68,17 +68,23 @@ body { background: var(--paper); color: var(--ink); font-family: var(--jd-sans);
 
 /* ---- a screen that owns the viewport: a list and what it opens ------- */
 .jd-screen { height: 100vh; display: grid; grid-template-rows: auto 1fr; min-height: 0; }
-.jd-strip { display:flex; align-items:center; gap:12px; padding:10px 16px;
-            border-bottom:1px solid var(--rule); background: var(--surface-2); }
+/* "designul cu linii nu-mi place" — so the head is separated from the list by
+   TONE and space, not by a rule. The palette already carries three surfaces;
+   they were being used underneath a line that did the work instead. */
+.jd-strip { display:flex; align-items:center; gap:12px; padding:12px 16px 10px;
+            background: var(--paper); }
 .jd-strip-title { font:400 16px/1 var(--jd-serif); }
 .jd-panes { display:grid; grid-template-columns: 400px 1fr; min-height:0; }
-.jd-list { border-right:1px solid var(--rule); display:flex; flex-direction:column;
+.jd-list { display:flex; flex-direction:column;
            min-height:0; background: var(--surface-2); }
 .jd-rows { overflow-y:auto; min-height:0; flex:1; }
 .jd-reader { display:flex; flex-direction:column; min-height:0; background: var(--surface);
              overflow-y:auto; }
 
-.jd-row { display:grid; grid-template-columns:4px 1fr; border-bottom:1px solid var(--rule);
+/* The one line that stays, and it is deliberate: fifty rows with nothing
+   between them is a wall, not a list. It is drawn in the page tone rather than
+   the rule tone, so it separates without ruling. */
+.jd-row { display:grid; grid-template-columns:4px 1fr; border-bottom:1px solid var(--paper);
           cursor:pointer; background: var(--surface-2); width:100%; text-align:left;
           border-top:0; border-left:0; border-right:0; padding:0; }
 .jd-row .jd-gutter { background:transparent; }
@@ -97,11 +103,11 @@ body { background: var(--paper); color: var(--ink); font-family: var(--jd-sans);
 .jd-meta { font:400 11px/1.5 var(--jd-mono); color: var(--ink-3);
            overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .jd-siblings { padding:5px 12px 7px 16px; background: var(--surface-2);
-               border-bottom:1px solid var(--rule); font:400 11px/1.4 var(--jd-mono);
+               border-bottom:1px solid var(--paper); font:400 11px/1.4 var(--jd-mono);
                color: var(--ink-3); }
 
 .jd-ad { max-width:72ch; font-size:14px; line-height:1.65; }
-.jd-why { margin-top:24px; max-width:72ch; border:1px solid var(--rule); border-radius:8px;
+.jd-why { margin-top:24px; max-width:72ch; background: var(--surface-2); border-radius:8px;
           padding:12px 15px; background: var(--surface-2); }
 .jd-note { border-left:2px solid var(--rule-2); padding:5px 0 5px 10px;
            font-size:12.5px; color: var(--ink-2); }
