@@ -617,3 +617,87 @@ def test_the_line_reads_the_clock_it_was_given(report, when, expected):
     they were written — and the line would silently change wording overnight
     with nothing pinning either form."""
     assert jobs.poll_line(report, when).startswith(expected)
+
+
+async def test_the_undo_bar_puts_itself_away_and_only_once(user: User, con,
+                                                           data_dir):
+    """Two things end this bar and either can come first: the ten seconds
+    running out, and him pressing. Deleting an already-deleted element raises,
+    and inside a timer callback that is one log line — the failure would be
+    invisible and the next press would find a page carrying a dead timer."""
+    _job(con, "a", "Zeitarbeit GmbH", 80)
+    await user.open("/")
+    user.find(marker="job-x").click()
+    await user.should_see("ausgeblendet")
+
+    with user.client:
+        timer = next(el for el in user.client.elements.values()
+                     if isinstance(el, ui.timer) and el.interval == 10.0)
+        bar = next(el for el in user.client.elements.values()
+                   if "jd-undo" in getattr(el, "_classes", []))
+    await timer.callback()          # the ten seconds
+    assert bar.is_deleted
+    await timer.callback()          # …and again, as a stray tick would
+    assert bar.is_deleted
+
+
+async def test_a_second_search_press_while_one_runs_is_refused(
+        user: User, con, data_dir, monkeypatch):
+    """A press landing on the scheduled pass sends every query twice, to an
+    API this project already uses on sufferance."""
+    db.add_profile(con, {
+        "name": "Python", "keywords": "python", "location": "", "radius_km": 0,
+        "remote": 0, "sources": '["stub"]', "active": 1, "interval_minutes": 60,
+    })
+    con.commit()
+    monkeypatch.setattr(polling, "running", lambda: True)
+
+    await user.open("/")
+    user.find(marker="poll-now").click()
+
+    await user.should_see("Es läuft schon eine Suche")
+
+
+async def test_the_search_button_says_it_is_working_and_comes_back(
+        user: User, con, data_dir, monkeypatch):
+    """A button that stays pressable during a minute of polling invites the
+    second press the lock then has to refuse."""
+    db.add_profile(con, {
+        "name": "Python", "keywords": "python", "location": "", "radius_km": 0,
+        "remote": 0, "sources": '["stub"]', "active": 1, "interval_minutes": 60,
+    })
+    con.commit()
+    seen = []
+
+    async def slow(profile):
+        button = _marked(user, "poll-now")[0]
+        seen.append((button.enabled, button.text))
+        return {"new": 0, "duplicate": 0, "known": 0}
+
+    monkeypatch.setattr(polling, "poll_profile", slow)
+    await user.open("/")
+    user.find(marker="poll-now").click()
+    await user.should_see("Von dir gestartet")
+
+    assert seen == [(False, "Sucht …")]
+    button = _marked(user, "poll-now")[0]
+    assert (button.enabled, button.text) == (True, "Jetzt suchen")
+
+
+def test_the_search_receipt_is_in_what_the_page_watches():
+    """The line states three settings and no table signature can see one, so
+    an automatic pass finishing while he reads would leave the line claiming
+    his own search from an hour ago."""
+    for key in (polling.LAST_POLL_AT, polling.LAST_POLL_REPORT,
+                polling.LAST_POLL_SOURCE):
+        assert key in jobs._WATCHED_SETTINGS
+
+
+def test_hiding_sticks_outside_the_working_list_too():
+    """`_EVERYTHING` is the word every pile view is built from. If its hidden
+    arm ever said "include", `x` would stop meaning anything the moment he
+    left the working list."""
+    for view in jobs.VIEWS:
+        expected = "only" if view.key == "ausgeblendet" else "exclude"
+        assert view.filters.get("hidden") == expected, \
+            f"{view.key} would show companies he has hidden"
