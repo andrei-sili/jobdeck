@@ -11,7 +11,7 @@ import sqlite3
 
 from jobdeck import constants, dates
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 # Legacy table, exactly as the previous tracker created it.
 BEWERBUNGEN_SQL = """
@@ -178,6 +178,26 @@ CREATE TABLE IF NOT EXISTS claims (
     sort_order INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+);
+
+-- Companies he never wants to see again (schema v13). Keyed by jd_norm of the
+-- company name — the SAME normalisation the grouping and the duplicate gate
+-- use, so a spelling variant cannot slip past the one he excluded.
+--
+-- Not a column on `jobs`, deliberately. A column would have to be written for
+-- every posting that exists AND every posting that arrives, which is a
+-- backfill plus an invariant to maintain at each insert; the filter is
+-- evaluated at read time, so hiding a company reaches postings discovered
+-- next week without anything remembering to write to them.
+--
+-- `company` keeps the spelling that was on screen when he pressed, because the
+-- key is normalised and unreadable — the "Ausgeblendete Firmen" view has to
+-- show him a name he recognises.
+CREATE TABLE IF NOT EXISTS hidden_companies (
+    company_key TEXT PRIMARY KEY,
+    company     TEXT NOT NULL,
+    hidden_at   TEXT NOT NULL,
+    source      TEXT NOT NULL DEFAULT 'user'
 );
 """
 
