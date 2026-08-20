@@ -1193,6 +1193,10 @@ def list_unscored_jobs(
     extra = f" AND id NOT IN ({','.join('?' * len(excluded))})" if excluded else ""
     return con.execute(
         "SELECT * FROM jobs WHERE status='new' AND match_score IS NULL"
+        # A company he has hidden is one he will not apply to, and scoring is
+        # a paid call: the batch would go on spending haiku on every advert a
+        # nineteen-branch staffing agency posts, for ever.
+        f" AND NOT {HIDDEN_FIRM_SQL}"
         + extra + " ORDER BY id LIMIT ?",
         (*excluded, limit),
     ).fetchall()
@@ -1408,6 +1412,7 @@ def jobs_to_prepare(
                  SELECT 1 FROM drafts d
                   WHERE d.job_id = j.id AND d.status IN ({placeholders}))
            AND NOT ({APPLIED_FIRM_SQL.replace("jobs.", "j.")})
+           AND NOT ({HIDDEN_FIRM_SQL.replace("jobs.", "j.")})
          ORDER BY effective_score DESC, j.published_on DESC, j.id DESC
          LIMIT ?
         """,
@@ -1708,9 +1713,13 @@ def count_active_profiles(con: sqlite3.Connection) -> int:
 
 
 def count_unscored_jobs(con: sqlite3.Connection) -> int:
-    """New postings still waiting for a match score — the scoring backlog."""
+    """New postings still waiting for a match score — the scoring backlog.
+
+    Counted the way the batch SELECTS them, or the Puls would pulse for ever
+    over adverts nothing is going to score."""
     return con.execute(
         "SELECT COUNT(*) FROM jobs WHERE status='new' AND match_score IS NULL"
+        f" AND NOT {HIDDEN_FIRM_SQL}"
     ).fetchone()[0]
 
 
@@ -1811,12 +1820,14 @@ SELECT COUNT(*), MAX(id), TOTAL(needs_review),
 # is not a write to `jobs` — so without this term the list he just pruned would
 # keep showing the company until something unrelated happened to change.
 #
-# MAX(rowid), not MAX(hidden_at): the timestamp has one-second resolution, so
-# hiding a company and taking it back inside the same second compares EQUAL to
-# never having touched it, and the screen would still be missing the rows.
-# rowid only ever goes up.
+# MAX(id), not MAX(hidden_at) and not MAX(rowid). The timestamp has one-second
+# resolution, so hiding a company and taking it back inside the same second
+# would compare EQUAL to never having touched it. A bare rowid is no better: a
+# rowid table without AUTOINCREMENT assigns max(rowid)+1 over the rows PRESENT,
+# so releasing the NEWEST hidden company and hiding another lands on the same
+# number — and that pair is exactly what the undo bar produces.
 _HIDDEN_SIGNATURE_SQL = (
-    "SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM hidden_companies"
+    "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM hidden_companies"
 )
 
 
@@ -1873,13 +1884,41 @@ def list_hidden_companies(con: sqlite3.Connection) -> list[sqlite3.Row]:
     return con.execute(
         "SELECT h.*, ("
         "  SELECT COUNT(*) FROM jobs j"
-        "  WHERE j.status='new' AND jd_norm(j.company)=h.company_key"
+        "  WHERE jd_norm(j.company)=h.company_key"
         ") AS hidden_jobs "
-        "FROM hidden_companies h ORDER BY h.rowid DESC").fetchall()
+        "FROM hidden_companies h ORDER BY h.id DESC").fetchall()
 
 
 def count_hidden_companies(con: sqlite3.Connection) -> int:
     return con.execute("SELECT COUNT(*) FROM hidden_companies").fetchone()[0]
+
+
+def is_company_hidden(con: sqlite3.Connection, company: str) -> bool:
+    key = norm(company or "")
+    if not key:
+        return False
+    return con.execute(
+        "SELECT 1 FROM hidden_companies WHERE company_key=?",
+        (key,)).fetchone() is not None
+
+
+def company_cost(con: sqlite3.Connection, company: str) -> dict:
+    """How many open adverts this employer holds, and the best score among
+    them — what the undo bar has to NAME so hiding is a decision.
+
+    One aggregate over the table. It used to page 1000 rows out of `list_jobs`
+    and filter them in Python, which on his corpus is a CAP (1080 open
+    postings) applied to a list ordered by DATE — so the "best" it reported
+    was the best of whatever the cap happened to keep.
+    """
+    key = norm(company or "")
+    if not key:
+        return {"jobs": 0, "best": 0}
+    row = con.execute(
+        f"SELECT COUNT(*), COALESCE(MAX({freshness.effective_score_sql()}), 0)"
+        " FROM jobs WHERE status='new' AND jd_norm(company)=?",
+        (key,)).fetchone()
+    return {"jobs": row[0], "best": row[1]}
 
 
 def job_signature(con: sqlite3.Connection, job_id: int) -> tuple | None:
