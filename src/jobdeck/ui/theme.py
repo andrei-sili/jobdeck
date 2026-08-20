@@ -198,6 +198,14 @@ body { background: var(--paper); color: var(--ink); font-family: var(--jd-sans);
                text-align:right; }
 .jd-partmeta.warn { color: var(--warn); }
 .jd-total { font:500 13px/1.6 var(--jd-mono); font-variant-numeric: tabular-nums; }
+/* A pile count is a door. It reads as prose in the line it sits in — the same
+   size and colour as the words beside it — and only underlines on hover, so
+   the row of them is a sentence rather than a row of buttons. */
+.jd-piles { flex-wrap:wrap; row-gap:0; }
+.jd-pile-door { min-height:0 !important; padding:0 2px !important;
+                font:400 11.5px/1.6 var(--jd-sans) !important;
+                color: var(--ink-3) !important; }
+.jd-pile-door:hover { text-decoration:underline; color: var(--ink-2) !important; }
 /* The actions column: present on every row so the grid keeps its shape, but
    only ever filled for a row that is a file on disk. Reserved rather than
    collapsed, so the page does not reflow as the last Anlage is removed. */

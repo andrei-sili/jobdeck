@@ -308,7 +308,9 @@ async def test_a_posting_at_a_firm_he_already_wrote_to_says_so(
     # is a fact about the posting, exactly like a score-0 mismatch
     await user.open("/")
     await user.should_not_see("Beispiel GmbH")
-    await user.should_see("bei schon beworbenen Firmen ausgeblendet")
+    await user.should_see("bei schon beworbenen Firmen")
+    # …and the line says once, at its end, what each number means
+    await user.should_see("Nichts wird gelöscht.")
 
     # …and one click away, saying why, with nothing inviting him to spend a
     # draft on an application that can never be sent

@@ -302,11 +302,10 @@ _COUNTS = {"mismatches": 129, "dead": 58, "applied_firm": 30, "old": 12}
 
 @pytest.mark.parametrize("view_key, counts, expected", [
     ("offen", _COUNTS,
-     "129 passen nicht ausgeblendet · 58 offline ausgeblendet · "
-     "30 bei schon beworbenen Firmen ausgeblendet · "
-     "12 älter als 45 Tage ausgeblendet"),
+     "129 passen nicht · 58 offline · "
+     "30 bei schon beworbenen Firmen · 12 älter als 45 Tage"),
     ("offen", {**_COUNTS, "mismatches": 0, "applied_firm": 0, "old": 0},
-     "58 offline ausgeblendet"),
+     "58 offline"),
     ("offen", {"mismatches": 0, "dead": 0, "applied_firm": 0, "old": 0}, ""),
     # a pile view INCLUDES the other piles, so it must not claim to hide them —
     # the label is derived from the filters the query really used
@@ -323,6 +322,22 @@ def test_the_hidden_line_can_never_contradict_the_list(view_key, counts, expecte
     # never a total either: a posting can be both a mismatch and offline, so
     # adding the two would double-count it
     assert jobs._hidden_line(jobs.view_for(view_key), counts, 45) == expected
+
+
+def test_every_pile_the_line_names_is_a_door_to_the_view_that_holds_it():
+    """The counts were printed and never clickable, so a pile was named on
+    screen and reachable only through a dropdown that named it again. A part
+    with no view is one that describes the CURRENT list rather than another."""
+    parts = jobs.hidden_parts(jobs.view_for("offen"), _COUNTS, 45)
+    assert [p["view"] for p in parts] == \
+        ["passt_nicht", "offline", "firma_kontaktiert", "alt"]
+    for part in parts:
+        assert jobs.view_for(part["view"]).key == part["view"], \
+            f"{part['text']} points at a view that does not exist"
+
+    # a pile view states what it IS showing, and that is not a door
+    inside = jobs.hidden_parts(jobs.view_for("passt_nicht"), _COUNTS, 45)
+    assert [p["view"] for p in inside] == [None]
 
 
 def test_a_posting_he_has_acted_on_is_never_hidden_from_its_own_view(con, data_dir):
@@ -1467,7 +1482,7 @@ def test_the_line_under_the_list_owns_up_to_the_search_and_the_read_pile():
                               "applied_firm": 0, "old": 129},
                              45, search=" django ")
     assert line.startswith("gefiltert nach „django“")
-    assert "186 schon gelesen ausgeblendet" in line
+    assert "186 schon gelesen" in line
     # and "Alle offen" hides the piles but not the read ones
     assert "schon gelesen" not in jobs._hidden_line(
         jobs.view_for("offen"), {"read": 186, "mismatches": 0, "dead": 0,

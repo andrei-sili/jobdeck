@@ -132,37 +132,68 @@ def view_for(key: str) -> View:
     return _BY_KEY.get(key, _BY_KEY[DEFAULT_VIEW])
 
 
-def _hidden_line(view: View, counts: dict, stale_age_days: int,
-                 search: str = "") -> str:
+# What the "Ansicht" control offers. The other seven views are still views —
+# nothing is deleted, only moved into a view with a name — but they are piles,
+# and a pile is found by its NUMBER under the list rather than by scrolling an
+# eleven-item dropdown looking for a word. He has rejected this arrangement
+# twice for having too much on screen.
+MAIN_VIEW_KEYS = ("neu", "offen", "vorgemerkt", "in_arbeit",
+                  # These three stay in the control because they have no
+                  # number: they are decided by a STATUS rather than by one of
+                  # the filter arms the line counts, so there is no door to
+                  # click. A posting must always be findable somewhere.
+                  "beworben", "kein_interesse", "doppelt")
+
+
+def hidden_parts(view: View, counts: dict, stale_age_days: int,
+                 search: str = "") -> list[dict]:
+    """The pile line, as data: each part its own sentence and, where there is
+    one, the view that opens it.
+
+    Structured rather than a string so a number can be a DOOR. The counts were
+    always printed and never clickable, which meant the piles were named on
+    screen and reachable only through a dropdown that named them again.
+    """
     """What this view is not showing, derived from the filters it actually used
     so the label cannot contradict the list. Independent statements, never a
     total: a posting can be a mismatch AND offline AND old.
 
     A search narrows the list without hiding a pile, so it is stated first and
     in its own words — otherwise the pile counts read as if they explained a
-    three-row result."""
-    parts = []
+    three-row result.
+    """
+    parts: list[dict] = []
     if search.strip():
-        parts.append(f"gefiltert nach „{search.strip()}“")
+        parts.append({"text": f"gefiltert nach „{search.strip()}“",
+                      "view": None})
     if view.filters.get("opened") == "exclude" and counts.get("read"):
-        parts.append(f"{counts['read']} schon gelesen ausgeblendet")
-    for arm, count_key, hidden, only in (
-        ("mismatches", "mismatches", "{n} passen nicht",
+        parts.append({"text": f"{counts['read']} schon gelesen", "view": "offen"})
+    for arm, count_key, pile, hidden, only in (
+        ("mismatches", "mismatches", "passt_nicht", "{n} passen nicht",
          "{n} verletzen eine harte Anforderung"),
-        ("gone", "dead", "{n} offline", "{n} Anzeigen sind offline"),
-        ("applied", "applied_firm", "{n} bei schon beworbenen Firmen",
+        ("gone", "dead", "offline", "{n} offline", "{n} Anzeigen sind offline"),
+        ("applied", "applied_firm", "firma_kontaktiert",
+         "{n} bei schon beworbenen Firmen",
          "{n} Stellen bei Firmen, bei denen du dich schon beworben hast"),
-        ("old", "old", f"{{n}} älter als {stale_age_days} Tage",
+        ("old", "old", "alt", f"{{n}} älter als {stale_age_days} Tage",
          f"{{n}} Anzeigen älter als {stale_age_days} Tage"),
-        ("hidden", "hidden", "{n} bei ausgeblendeten Firmen",
+        ("hidden", "hidden", "ausgeblendet", "{n} bei ausgeblendeten Firmen",
          "{n} Anzeigen bei ausgeblendeten Firmen"),
     ):
         count = counts.get(count_key, 0)
         if view.filters.get(arm) == "exclude" and count:
-            parts.append(hidden.format(n=count) + " ausgeblendet")
+            parts.append({"text": hidden.format(n=count), "view": pile})
         elif view.filters.get(arm) == "only":
-            parts.append(only.format(n=count))
-    return " · ".join(parts)
+            parts.append({"text": only.format(n=count), "view": None})
+    return parts
+
+
+def _hidden_line(view: View, counts: dict, stale_age_days: int,
+                 search: str = "") -> str:
+    """The same line as plain text, for anything that wants one sentence."""
+    return " · ".join(
+        part["text"] for part in hidden_parts(view, counts, stale_age_days,
+                                              search))
 
 
 # ---------------------------------------------------------------------------
@@ -1126,7 +1157,8 @@ async def jobs_page():
             with ui.row().classes("jd-strip"):
                 ui.label("Stellen").classes("jd-strip-title")
                 range_label = ui.label().classes("jd-meta")
-                hidden_label = ui.label().classes("jd-meta")
+                # Rebuilt rather than re-texted: each part is a control now.
+                hidden_host = ui.row().classes("items-center gap-2 jd-piles")
                 # The chip belongs at the top of the page, not beside the
                 # filters: an update notice under fifty rows is an update
                 # notice nobody sees.
@@ -1156,7 +1188,8 @@ async def jobs_page():
                         search_box.on_value_change(
                             lambda e: set_search(e.value or ""))
                         ui.select(
-                            {view.key: view.label for view in VIEWS},
+                            {view.key: view.label for view in VIEWS
+                             if view.key in MAIN_VIEW_KEYS},
                             value=DEFAULT_VIEW,
                             label="Ansicht",
                             on_change=lambda e: set_view(e.value),
@@ -1259,9 +1292,7 @@ async def jobs_page():
                 shown[dropped["id"]] = dropped
             range_label.set_text(_range_line(
                 view["page"], view["total"], len(view["rows"])))
-            hidden_label.set_text(_hidden_line(
-                view["view"], view["counts"], view["stale_age_days"],
-                search=view["search"]))
+            render_piles(view)
             if not strip_same:
                 render_strip(view)
             if not list_same:
@@ -1700,6 +1731,31 @@ async def jobs_page():
             state["page"] += step
             state["selected"] = None
             await refresh(force=True)
+
+        def render_piles(view: dict) -> None:
+            """The piles, as doors. Every number under the list opens the view
+            that holds what it counts — they were printed and never clickable,
+            so a pile was named on screen and reachable only through a dropdown
+            that named it again."""
+            hidden_host.clear()
+            parts = hidden_parts(view["view"], view["counts"],
+                                 view["stale_age_days"], search=view["search"])
+            with hidden_host:
+                for index, part in enumerate(parts):
+                    if index:
+                        ui.label("·").classes("jd-meta")
+                    if part["view"] is None:
+                        ui.label(part["text"]).classes("jd-meta")
+                        continue
+                    ui.button(part["text"],
+                              on_click=lambda k=part["view"]: set_view(k)) \
+                        .props("flat dense").classes("jd-pile-door") \
+                        .mark(f"pile-{part['view']}")
+                if parts:
+                    # Said once, at the end, instead of "ausgeblendet" after
+                    # every number — five of them in one line is the noise he
+                    # rejected the arrangement over.
+                    ui.label("Nichts wird gelöscht.").classes("jd-meta")
 
         async def set_view(value: str) -> None:
             """Move to another named view.

@@ -356,3 +356,61 @@ async def test_the_way_back_from_the_pile_works(user: User, con, data_dir):
 
     with db.db() as fresh:
         assert db.count_hidden_companies(fresh) == 0
+
+
+# ------------------------------------------------- less on screen, not more
+
+
+async def test_the_view_control_no_longer_lists_eleven_things(user: User, con,
+                                                              data_dir):
+    """He rejected the arrangement twice for having too much on it. The piles
+    are still views — nothing is deleted — but a pile is found by its NUMBER
+    under the list, not by scrolling a dropdown looking for a word."""
+    _job(con, "a", "Firma GmbH", 80)
+
+    await user.open("/")
+
+    offered = _marked(user, "view-select")[0].options
+    assert len(offered) == len(jobs.MAIN_VIEW_KEYS) < len(jobs.VIEWS)
+    assert "passt_nicht" not in offered
+    assert "ausgeblendet" not in offered
+
+
+async def test_every_posting_is_still_reachable_from_the_screen(user: User, con,
+                                                                data_dir):
+    """The rule this change could quietly break: nothing is ever deleted, so
+    every posting has to be findable — and a view that is neither in the
+    control nor behind a number is a view he cannot open."""
+    reachable = set(jobs.MAIN_VIEW_KEYS)
+    for view in jobs.VIEWS:
+        parts = jobs.hidden_parts(
+            view, {"mismatches": 1, "dead": 1, "applied_firm": 1, "old": 1,
+                   "hidden": 1, "read": 1}, 45)
+        reachable.update(p["view"] for p in parts if p["view"])
+
+    missing = {v.key for v in jobs.VIEWS} - reachable
+    assert not missing, f"unreachable from the screen: {missing}"
+
+
+async def test_a_pile_number_opens_the_pile_it_counts(user: User, con, data_dir):
+    _job(con, "a", "Gut GmbH", 80)
+    _job(con, "b", "Schlecht GmbH", 0)
+
+    await user.open("/")
+    await user.should_see("1 passen nicht")
+    user.find(marker="pile-passt_nicht").click()
+    await asyncio.sleep(0.3)
+
+    assert _row_companies(user) == ["Schlecht GmbH"]
+
+
+async def test_the_line_says_once_that_nothing_is_deleted(user: User, con,
+                                                          data_dir):
+    """Instead of "ausgeblendet" after every number — five of them in one line
+    is the noise he rejected the arrangement over."""
+    _job(con, "a", "Gut GmbH", 80)
+    _job(con, "b", "Schlecht GmbH", 0)
+
+    await user.open("/")
+
+    await user.should_see("Nichts wird gelöscht.")
