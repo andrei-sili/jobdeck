@@ -51,6 +51,21 @@ def _marked(user: User, marker: str) -> list:
                 if marker in getattr(el, "_markers", [])]
 
 
+def _row_companies(user: User) -> list[str]:
+    """The company names in the LIST — not in the reading pane, which keeps
+    showing the posting under his cursor on purpose after it leaves the view."""
+    with user.client:
+        rows = [el for el in user.client.elements.values()
+                if "jd-row" in getattr(el, "_classes", [])]
+        names = []
+        for row in rows:
+            labels = [d for d in row.descendants()
+                      if isinstance(d, ui.label) and d.text]
+            if labels:
+                names.append(labels[0].text)
+        return names
+
+
 # --------------------------------------------------------- what the line says
 
 
@@ -167,8 +182,7 @@ async def test_the_list_opens_with_the_floor_already_down(user: User, con,
     await user.open("/")
 
     assert jobs.DEFAULT_MIN_SCORE == 40
-    await user.should_see("Alpha GmbH")
-    await user.should_not_see("Beta GmbH")
+    assert _row_companies(user) == ["Alpha GmbH"]
     assert strong
 
 
@@ -226,3 +240,119 @@ async def test_he_can_ask_for_the_best_match_first_instead(user: User, con,
                   if isinstance(el, ui.label) and el.text in
                   ("Alt GmbH", "Neu GmbH")]
     assert labels[0] == "Alt GmbH"
+
+
+# ------------------------------------------------------ x reaches the company
+
+
+async def test_x_hides_the_whole_company(user: User, con, data_dir):
+    """The complaint, exactly: he pressed it three times on one staffing
+    agency, because each press reached one advert."""
+    # distinct dates, so which row the reader opens on is decided by the sort
+    # rather than by a tie — the list opens newest first
+    for n in range(3):
+        _job(con, f"z{n}", "Zeitarbeit GmbH", 80, days_old=1)
+    _job(con, "k", "Andere GmbH", 80, days_old=5)
+
+    await user.open("/")
+    await user.should_see("Zeitarbeit GmbH")
+    user.find(marker="job-x").click()
+    await user.should_see("ausgeblendet")
+
+    assert _row_companies(user) == ["Andere GmbH"], \
+        "all three adverts of the agency should have gone, not just one"
+    with db.db() as fresh:
+        assert [r["company"] for r in db.list_hidden_companies(fresh)] == \
+            ["Zeitarbeit GmbH"]
+
+
+async def test_the_undo_bar_names_the_price(user: User, con, data_dir):
+    """"26 Anzeigen, die beste mit Bewertung 74" is a decision;
+    "ausgeblendet" is a guess. And it has to say that it keeps applying —
+    that is the whole difference from putting one advert away."""
+    _job(con, "a", "Zeitarbeit GmbH", 74)
+    _job(con, "b", "Zeitarbeit GmbH", 60)
+
+    await user.open("/")
+    user.find(marker="job-x").click()
+
+    await user.should_see("2 Anzeigen")
+    await user.should_see("die beste mit Bewertung 74")
+    await user.should_see("Gilt auch für neue Suchen")
+
+
+async def test_the_undo_really_brings_the_company_back(user: User, con,
+                                                       data_dir):
+    _job(con, "a", "Zeitarbeit GmbH", 80)
+    await user.open("/")
+    user.find(marker="job-x").click()
+    await user.should_see("ausgeblendet")
+    with db.db() as fresh:
+        assert db.count_hidden_companies(fresh) == 1
+
+    user.find(marker="undo-hide").click()
+    await user.should_see("wieder in der Liste")
+
+    assert _row_companies(user) == ["Zeitarbeit GmbH"]
+    with db.db() as fresh:
+        assert db.count_hidden_companies(fresh) == 0
+
+
+async def test_hiding_reaches_an_advert_that_arrives_later(user: User, con,
+                                                           data_dir):
+    """The reason it is a company and not a status: the next search must not
+    bring it straight back."""
+    _job(con, "a", "Zeitarbeit GmbH", 80)
+    await user.open("/")
+    user.find(marker="job-x").click()
+    await user.should_see("ausgeblendet")
+
+    _job(con, "b", "Zeitarbeit GmbH", 90, days_old=0)
+    with db.db() as fresh:
+        visible = db.list_jobs(fresh, status="new", hidden="exclude")
+    assert visible == []
+
+
+async def test_a_posting_with_no_company_is_still_put_away_on_its_own(
+        user: User, con, data_dir):
+    """A blank field is missing information, not an employer — there is
+    nothing to hide but this row, and the old behaviour is right."""
+    job_id = _job(con, "a", "", 80)
+
+    await user.open("/")
+    user.find(marker="job-x").click()
+    await asyncio.sleep(0.2)
+
+    with db.db() as fresh:
+        assert db.get_job(fresh, job_id)["status"] == "skipped"
+        assert db.count_hidden_companies(fresh) == 0
+
+
+async def test_the_hidden_companies_have_a_view_of_their_own(user: User, con,
+                                                             data_dir):
+    """Nothing is deleted, only moved into a view with a name."""
+    _job(con, "a", "Zeitarbeit GmbH", 80)
+    await user.open("/")
+    user.find(marker="job-x").click()
+    await user.should_see("ausgeblendet")
+
+    _marked(user, "view-select")[0].set_value("ausgeblendet")
+    await asyncio.sleep(0.3)
+
+    await user.should_see("Zeitarbeit GmbH")
+    assert _marked(user, "unhide-company"), "no way back from the pile"
+
+
+async def test_the_way_back_from_the_pile_works(user: User, con, data_dir):
+    _job(con, "a", "Zeitarbeit GmbH", 80)
+    await user.open("/")
+    user.find(marker="job-x").click()
+    await user.should_see("ausgeblendet")
+    _marked(user, "view-select")[0].set_value("ausgeblendet")
+    await asyncio.sleep(0.3)
+
+    user.find(marker="unhide-company").click()
+    await user.should_see("wieder in der Liste")
+
+    with db.db() as fresh:
+        assert db.count_hidden_companies(fresh) == 0
