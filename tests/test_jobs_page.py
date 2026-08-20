@@ -519,25 +519,32 @@ def test_one_employer_cannot_decide_how_much_a_page_renders(con, data_dir):
     assert [r["match_score"] for r in siblings] == list(range(89, 79, -1))
 
 
-def test_a_view_that_stands_on_no_status_is_ordered_newest_first(con, data_dir):
-    """A view over every status (Vorgemerkt, In Arbeit) mixes postings he has
-    acted on with ones he has not, and score is not a useful order there — the
-    scores DISAGREE with the ids on purpose, so an id ordering cannot pass by
-    accident."""
-    best = _company_job(con, "z1", "Alpha", 95)     # oldest row, highest score
-    middle = _company_job(con, "z2", "Beta", 10)
-    newest = _company_job(con, "z3", "Gamma", 50)   # newest row, middling score
+def test_a_view_that_stands_on_no_status_obeys_the_chosen_order(con, data_dir):
+    """Vorgemerkt and In Arbeit stand on no status, and they used to fall back
+    to insertion order — which made the sort control a lie in two of the eleven
+    views. The order the caller asked for now applies in every one of them.
+
+    The dates DISAGREE with both the ids and the scores on purpose, so neither
+    an id ordering nor a score ordering can pass by accident."""
+    import datetime
+
     from jobdeck import db
-    for job_id in (best, middle, newest):
+    day = datetime.date.today()
+    old_best = _company_job(con, "z1", "Alpha", 95,
+                            (day - datetime.timedelta(days=20)).isoformat())
+    weak_new = _company_job(con, "z2", "Beta", 10,
+                            (day - datetime.timedelta(days=1)).isoformat())
+    middling = _company_job(con, "z3", "Gamma", 50,
+                            (day - datetime.timedelta(days=10)).isoformat())
+    for job_id in (old_best, weak_new, middling):
         db.set_bookmark(con, job_id, True)
     con.commit()
 
-    assert [r["id"] for r in jobs._load_jobs("vorgemerkt", 0)["rows"]] \
-        == [newest, middle, best]
-    # while a view standing on one status DOES order on the aged score, so the
-    # two are not the same query under a different name
-    assert [r["id"] for r in jobs._load_jobs("offen", 0)["rows"]] \
-        == [best, newest, middle]
+    by_date = db.list_jobs(con, bookmarked="only", sort="date")
+    by_score = db.list_jobs(con, bookmarked="only", sort="score")
+
+    assert [r["id"] for r in by_date] == [weak_new, middling, old_best]
+    assert [r["id"] for r in by_score] == [old_best, middling, weak_new]
 
 
 def test_companies_group_the_way_the_duplicate_gate_compares_them(con, data_dir):

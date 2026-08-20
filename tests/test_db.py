@@ -151,9 +151,11 @@ def test_list_jobs_hides_and_counts_mismatches(con):
     assert db.count_mismatches(con, status="applied") == 0
     assert db.count_mismatches(con) == 1
 
-    # the all-statuses view filters too (id DESC, exact rows)
+    # the all-statuses view filters too, and it is ordered by the caller's
+    # choice like every other view — it used to fall back to insertion order,
+    # which made a sort control a lie in the two views that stand on no status
     assert [r["id"] for r in db.list_jobs(con, mismatches="exclude")] \
-        == [unscored, ok]
+        == [ok, unscored]
 
 
 def test_list_jobs_sorts_by_score_then_newest(con):
