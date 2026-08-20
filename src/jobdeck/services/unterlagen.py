@@ -25,6 +25,7 @@ import pathlib
 import tempfile
 
 from jobdeck import apply_channel, config, db, pdf, templates
+from jobdeck.services import anlagen as anlagen_lib
 from jobdeck.services import mappe
 
 log = logging.getLogger(__name__)
@@ -67,6 +68,11 @@ class Part:
     size_bytes: int
     first_page: int = 0
     error: str = ""
+    # The file this part IS, for the rows that have one. Empty for the letter,
+    # which comes out of the template and has no file in the Anlagen folder —
+    # and that emptiness is what decides whether a row offers to move or
+    # remove itself, rather than the row's position in the list.
+    name: str = ""
 
     @property
     def placed(self) -> bool:
@@ -135,7 +141,8 @@ def anlagen_parts(anlagen_dir: str) -> tuple[list[Part], str]:
         except Exception as exc:  # pypdf raises its own family on a torn file
             pages, error = 0, f"nicht lesbar: {exc}"
         parts.append(Part(label=path.stem, pages=pages,
-                          size_bytes=path.stat().st_size, error=error))
+                          size_bytes=path.stat().st_size, error=error,
+                          name=path.name))
     return parts, ""
 
 
@@ -326,6 +333,31 @@ def _anlagen_stamp(parts: list[Part]) -> str:
     return "|".join(f"{part.label}:{part.pages}" for part in parts)
 
 
+# What the Anlagen folder is, as four states that need four different
+# answers. "No Anlagen" was one state before, and it read the same whether he
+# had never chosen a folder, had moved it, or had simply not put anything in
+# it yet — while the stack below it drew a perfectly plausible Mappe made of
+# the letter alone.
+def folder_state(anlagen_dir: str, count: int) -> dict:
+    """(state, path, note) for the folder the Anlagen are merged from."""
+    folder = anlagen_lib.resolve(anlagen_dir)
+    if folder is None:
+        return {"state": "unset", "path": "", "note":
+                "Noch kein Ordner für deine Anlagen — Zeugnisse und "
+                "Zertifikate haben hier keinen Platz, und die Mappe besteht "
+                "nur aus dem Brief."}
+    if not folder.is_dir():
+        return {"state": "missing", "path": str(folder), "note":
+                f"Diesen Ordner gibt es nicht: {folder} — er wurde "
+                f"verschoben, oder der Pfad in den Einstellungen stimmt "
+                f"nicht."}
+    if not count:
+        return {"state": "empty", "path": str(folder), "note":
+                "Der Ordner ist leer — die Mappe bestünde nur aus dem "
+                "Brief, ohne ein einziges Zeugnis."}
+    return {"state": "ok", "path": str(folder), "note": ""}
+
+
 def read(con, job_id: int | None) -> dict:
     """The stack, the budgets and the letter head, without rendering anything.
 
@@ -349,6 +381,7 @@ def read(con, job_id: int | None) -> dict:
         "settings": settings,
         "parts": _numbered([letter, *parts]),
         "anlagen_error": anlagen_error,
+        "folder": folder_state(settings["anlagen_dir"], len(parts)),
         "specimen": facts,
         "specimen_path": str(specimen_path()),
         "preview": view,

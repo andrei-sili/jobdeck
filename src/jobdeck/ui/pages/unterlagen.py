@@ -12,12 +12,14 @@ path as a real application.
 """
 
 import json
+import pathlib
 
 from fastapi.responses import RedirectResponse
 from nicegui import app, run, ui
 
 from jobdeck import claims as claims_lib
 from jobdeck import db, freshness
+from jobdeck.services import anlagen as anlagen_service
 from jobdeck.services import claims as claims_service
 from jobdeck.services import polling
 from jobdeck.services import unterlagen as unterlagen_service
@@ -86,6 +88,53 @@ def _load() -> dict:
 def _signature() -> tuple:
     with db.db() as con:
         return unterlagen_service.signature(con, _preview_job(con))
+
+
+# Every write into the Anlagen folder answers with {"ok": …} rather than
+# raising. An exception out of a NiceGUI handler is a line in the log and
+# nothing on screen, so a refused upload would look exactly like a successful
+# one — and this is the screen whose whole complaint was "I do not understand
+# what to do".
+def _add_anlage(folder: str, filename: str, data: bytes) -> dict:
+    try:
+        stored = anlagen_service.store(pathlib.Path(folder), filename, data)
+    except anlagen_service.AnlagenError as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "name": stored.name}
+
+
+def _move_anlage(folder: str, name: str, delta: int) -> dict:
+    try:
+        anlagen_service.move(pathlib.Path(folder), name, delta)
+    except anlagen_service.AnlagenError as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True}
+
+
+def _remove_anlage(folder: str, name: str) -> dict:
+    try:
+        landed = anlagen_service.remove(pathlib.Path(folder), name)
+    except anlagen_service.AnlagenError as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "landed": str(landed)}
+
+
+def _adopt_folder(path: str) -> dict:
+    """Create the Anlagen folder and make it the configured one.
+
+    The one press that answers "where do I put my documents" for somebody who
+    has never opened Einstellungen. It is also the repair for a folder that
+    was moved: the same button re-creates the path the setting already names,
+    rather than silently pointing him somewhere else.
+    """
+    folder = pathlib.Path(path).expanduser()
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return {"ok": False, "error": f"Ordner konnte nicht angelegt werden: {exc}"}
+    with db.db() as con:
+        db.set_setting(con, "anlagen_dir", str(folder))
+    return {"ok": True, "path": str(folder)}
 
 
 def _save_claim(claim_id, values):
@@ -164,6 +213,129 @@ async def unterlagen_page():
             job = drawn.get("mappe", {}).get("preview", {}).get("job")
             return job["id"] if job else None
 
+        def _folder() -> dict:
+            return drawn.get("mappe", {}).get("folder", {})
+
+        # ---- the Anlagen folder: getting documents in, and in order --------
+        # An upload is not a dialog, so `live.dialog_open` does not cover it,
+        # and a tick landing mid-upload would clear the container the Quasar
+        # uploader lives in — taking the transfer with it. The flag defers the
+        # tick instead; nothing is lost, it applies once the upload is done.
+        uploading = {"active": False}
+
+        def _busy() -> bool:
+            return live.dialog_open() or uploading["active"]
+
+        async def add_folder() -> None:
+            state = _folder()
+            wanted = state.get("path") or str(anlagen_service.default_dir())
+            result = await run.io_bound(_adopt_folder, wanted)
+            if not result["ok"]:
+                say(result["error"], type="warning", multi_line=True)
+            else:
+                say(f"Ordner angelegt: {result['path']}", type="positive",
+                    multi_line=True)
+            await refresh()
+
+        async def upload_anlage(event) -> None:
+            """One uploaded PDF into his Anlagen folder.
+
+            The size is asked BEFORE the bytes: `read()` pulls the whole file
+            into memory, and the point of a limit is not to have held the file
+            first.
+            """
+            folder = _folder().get("path") or ""
+            if not folder:
+                say("Zuerst einen Ordner für die Anlagen anlegen.",
+                    type="warning")
+                return
+            too_big = anlagen_service.oversize_message(event.file.size())
+            if too_big:
+                say(too_big, type="warning", multi_line=True)
+                return
+            uploading["active"] = True
+            try:
+                data = await event.file.read()
+                result = await run.io_bound(_add_anlage, folder,
+                                            event.file.name, data)
+            finally:
+                uploading["active"] = False
+            if not result["ok"]:
+                say(result["error"], type="warning", multi_line=True)
+            else:
+                say(f"„{result['name']}“ liegt jetzt in der Mappe — für "
+                    f"Seitenzahlen und Gewicht einmal „Neu bauen“.",
+                    type="positive", multi_line=True)
+            await refresh()
+
+        def upload_rejected() -> None:
+            """Quasar refuses on the client too; without this it refuses in
+            silence and the file simply never appears."""
+            say(f"Abgelehnt — nur PDF, höchstens "
+                f"{anlagen_service.MAX_UPLOAD_BYTES // 1024 // 1024} MB "
+                f"pro Anlage.", type="warning", multi_line=True)
+
+        async def move_anlage(name: str, delta: int) -> None:
+            folder = _folder().get("path") or ""
+            result = await run.io_bound(_move_anlage, folder, name, delta)
+            if not result["ok"]:
+                say(result["error"], type="warning", multi_line=True)
+            await refresh()
+
+        async def remove_anlage(part) -> None:
+            """Take an Anlage out of the Mappe — the file survives.
+
+            Asked first, and the question says where the file goes. This is
+            the one control on the screen that could read as "delete my
+            Prüfungszeugnis", and the answer to that fear belongs in the
+            question, not in a toast afterwards.
+            """
+            folder = _folder().get("path") or ""
+            overlay.clear()
+            with overlay, ui.dialog() as confirm, ui.card():
+                ui.label(f"„{part.label}“ aus der Mappe nehmen?") \
+                    .classes("font-bold")
+                ui.label("Die Datei wird nicht gelöscht — sie wandert nach "
+                         f"{anlagen_service.trash_dir()} und ist ab dann "
+                         "nicht mehr Teil der Bewerbung.").classes("text-sm")
+                with ui.row().classes("justify-end gap-2 w-full"):
+                    ui.button("Abbrechen",
+                              on_click=lambda: confirm.submit(False)).props("flat")
+                    ui.button("Herausnehmen", icon="delete",
+                              on_click=lambda: confirm.submit(True)) \
+                        .props("color=negative").mark("confirm-remove-anlage")
+            confirm.open()
+            if not await confirm:
+                return
+            result = await run.io_bound(_remove_anlage, folder, part.name)
+            if not result["ok"]:
+                say(result["error"], type="warning", multi_line=True)
+            else:
+                say(f"„{part.label}“ liegt jetzt in {result['landed']}",
+                    type="positive", multi_line=True)
+            await refresh()
+
+        def _row_actions(part, slot: int, count: int) -> None:
+            """Move it, or take it out. Only for a row that IS a file.
+
+            `slot` is the Anlage's own position among the Anlagen — not its
+            position in the stack, which counts the letter and would put the
+            "cannot go up" boundary one row off."""
+            ui.button(icon="arrow_upward",
+                      on_click=lambda p=part: move_anlage(p.name, -1)) \
+                .props("flat round dense size=sm") \
+                .set_enabled(slot > 0).mark(f"anlage-up-{slot}") \
+                .tooltip("Nach vorn")
+            ui.button(icon="arrow_downward",
+                      on_click=lambda p=part: move_anlage(p.name, 1)) \
+                .props("flat round dense size=sm") \
+                .set_enabled(slot < count - 1).mark(f"anlage-down-{slot}") \
+                .tooltip("Nach hinten")
+            ui.button(icon="close", on_click=lambda p=part: remove_anlage(p)) \
+                .props("flat round dense size=sm color=negative") \
+                .mark(f"remove-anlage remove-anlage-{slot}") \
+                .tooltip("Aus der Mappe nehmen")
+
         def draw_mappe(view: dict) -> None:
             specimen = view["specimen"]
             with ui.column().classes("jd-card gap-3"):
@@ -172,10 +344,17 @@ async def unterlagen_page():
                          "wirklich zusammengeheftet werden.") \
                     .classes("jd-card-sub")
 
-                if view["anlagen_error"]:
-                    ui.label(f"⚠ {view['anlagen_error']}").classes("jd-note danger")
+                folder = view["folder"]
+                if folder["note"]:
+                    tone = "danger" if folder["state"] == "missing" else "warn"
+                    ui.label(folder["note"]).classes(f"jd-note {tone}")
 
                 parts = view["parts"]
+                # Which rows are Anlagen decides which may move where. Taken
+                # from the file each part carries rather than from its
+                # position, so the letter — which has no file — can never be
+                # offered a control that would rename or remove something.
+                files = [i for i, part in enumerate(parts) if part.name]
                 with ui.element("div").classes("jd-stack"):
                     for index, part in enumerate(parts):
                         last = " last" if index == len(parts) - 1 else ""
@@ -199,6 +378,10 @@ async def unterlagen_page():
                         else:
                             ui.label("aus der Vorlage") \
                                 .classes("jd-partmeta" + last)
+                        with ui.row().classes("jd-partacts gap-0" + last):
+                            if part.name:
+                                _row_actions(part, files.index(index),
+                                             len(files))
 
                 if specimen["built"] and specimen["stale"]:
                     # The page count is still right — the letter's length was
@@ -228,6 +411,35 @@ async def unterlagen_page():
                              "das Gesamtgewicht stehen erst danach fest.") \
                         .classes("jd-note")
 
+                if folder["state"] in ("unset", "missing"):
+                    ui.button("Ordner anlegen und verwenden", icon="create_new_folder",
+                              on_click=add_folder).props("flat")
+                    ui.label(f"Angelegt wird: "
+                             f"{folder['path'] or anlagen_service.default_dir()}") \
+                        .classes("jd-card-sub")
+                else:
+                    with ui.element("div").classes("jd-facts w-full"):
+                        ui.label("Deine Anlagen liegen in").classes("k")
+                        with ui.row().classes("items-center gap-2 min-w-0"):
+                            ui.label(folder["path"]).classes("jd-path")
+                            ui.button("Ordner öffnen", icon="folder_open",
+                                      on_click=lambda p=folder["path"]:
+                                          open_in_system(p)) \
+                                .props("flat dense")
+                    ui.upload(on_upload=upload_anlage,
+                              on_rejected=lambda _e: upload_rejected(),
+                              multiple=True, auto_upload=True,
+                              max_file_size=anlagen_service.MAX_UPLOAD_BYTES,
+                              label="Zeugnisse und Zertifikate hierher ziehen "
+                                    "oder auswählen") \
+                        .props('accept=".pdf" flat bordered') \
+                        .classes("w-full jd-upload")
+                    ui.label("Nur PDF — die Mappe wird aus PDFs "
+                             "zusammengeheftet. Der Lebenslauf gehört NICHT "
+                             "hierher: er steht in der Vorlage und käme sonst "
+                             "zweimal in der Bewerbung an.") \
+                        .classes("jd-card-sub")
+
                 with ui.row().classes("gap-2 items-center"):
                     ui.button("Neu bauen", icon="refresh",
                               on_click=rebuild_mappe).props("flat")
@@ -235,9 +447,10 @@ async def unterlagen_page():
                               on_click=lambda p=view["specimen_path"]:
                                   open_in_system(p)) \
                         .props("flat").set_enabled(specimen["built"])
-                ui.label("Die Reihenfolge kommt aus den Dateinamen "
+                ui.label("Die Reihenfolge ist die Reihenfolge der Dateinamen "
                          "(01_, 02_ …) — so blättert ein Personaler: Zeugnis "
-                         "vor Zertifikaten. Umbenennen ordnet um.") \
+                         "vor Zertifikaten. Die Pfeile benennen die Dateien "
+                         "um; im Ordner umbenennen tut dasselbe.") \
                     .classes("jd-card-sub")
 
         def _budget_notes(view: dict) -> list[dict]:
@@ -699,5 +912,5 @@ async def unterlagen_page():
                 draw_profiles(view)
 
         with header:
-            live_view = live.watch(_signature, refresh, busy=live.dialog_open)
+            live_view = live.watch(_signature, refresh, busy=_busy)
         await refresh()

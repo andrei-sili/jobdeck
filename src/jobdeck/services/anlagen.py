@@ -184,6 +184,20 @@ def _free_name(folder: pathlib.Path, number: int, stem: str) -> str:
     raise AnlagenError("Zu viele Dateien mit diesem Namen im Ordner.")
 
 
+def oversize_message(size: int) -> str:
+    """The refusal for a file that is too big, or '' when it fits.
+
+    Shared with the screen so the limit is stated once: the page asks the
+    size before pulling the bytes into memory, and having two sentences for
+    one rule is how a limit ends up being described differently from the way
+    it is enforced.
+    """
+    if size <= MAX_UPLOAD_BYTES:
+        return ""
+    return (f"Zu groß ({size / 1024 / 1024:.1f} MB) — höchstens "
+            f"{MAX_UPLOAD_BYTES // 1024 // 1024} MB pro Anlage.")
+
+
 def _validate_pdf(data: bytes, filename: str) -> None:
     """Refuse anything the merge could not use, with the reason.
 
@@ -198,10 +212,9 @@ def _validate_pdf(data: bytes, filename: str) -> None:
             "alles andere würde stillschweigend fehlen.")
     if not data:
         raise AnlagenError("Die Datei ist leer.")
-    if len(data) > MAX_UPLOAD_BYTES:
-        raise AnlagenError(
-            f"Zu groß ({len(data) / 1024 / 1024:.1f} MB) — höchstens "
-            f"{MAX_UPLOAD_BYTES // 1024 // 1024} MB pro Anlage.")
+    too_big = oversize_message(len(data))
+    if too_big:
+        raise AnlagenError(too_big)
     try:
         reader = PdfReader(io.BytesIO(data))
         # Asked BEFORE the pages: reading a page of an encrypted file raises,
