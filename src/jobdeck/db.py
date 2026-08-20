@@ -750,7 +750,34 @@ _COMPANY_KEY_SQL = (
     "CASE WHEN jd_norm(company)='' THEN 'job:'||id "
     "ELSE 'firma:'||jd_norm(company) END"
 )
-_JOB_ORDER_SQL = "effective_score DESC NULLS LAST, published_on DESC, id DESC"
+# Which posting REPRESENTS a company inside the grouped list. FIXED, and
+# deliberately not his to choose: the row stands for the whole company, so it
+# has to be the best one it holds. Letting the sort control reach in here would
+# mean that switching to "newest first" quietly re-elected the newest advert of
+# a nineteen-advert staffing agency to speak for it — a ranking regression
+# invisible from the screen, because the row still looks like a company.
+_RANK_ORDER_SQL = "effective_score DESC NULLS LAST, published_on DESC, id DESC"
+
+# The order the LIST is drawn in — his choice, and only his choice. Both orders
+# keep the other key as their tie-break, so neither is a pure one-dimensional
+# sort: with 222 of 300 rows under 40 points, "newest first" alone would put
+# fresh noise at the top, which is the complaint it is meant to answer.
+#
+# `NULLIF(published_on,'')` because an unknown date is stored as the empty
+# string, not as NULL — without it the undated postings would sort as if they
+# were the oldest possible date rather than as "we do not know".
+_DATE_ORDER_SQL = ("NULLIF(published_on,'') DESC NULLS LAST, "
+                   "effective_score DESC NULLS LAST, id DESC")
+LIST_ORDERS = {"score": _RANK_ORDER_SQL, "date": _DATE_ORDER_SQL}
+DEFAULT_LIST_ORDER = "date"
+
+
+def list_order_sql(sort: str) -> str:
+    """The ORDER BY for a named sort, falling back rather than raising.
+
+    The name reaches here from a stored setting he can edit; an unknown one is
+    a screen that will not open, and the default is always a safe answer."""
+    return LIST_ORDERS.get(sort or "", LIST_ORDERS[DEFAULT_LIST_ORDER])
 
 
 def _ranked_jobs_cte(where_sql: str) -> str:
@@ -776,7 +803,7 @@ def _ranked_jobs_cte(where_sql: str) -> str:
         # with no ordering, which frames the whole partition.
         " COUNT(*) OVER company AS company_count"
         " FROM filtered"
-        f" WINDOW ranking AS (PARTITION BY company_key ORDER BY {_JOB_ORDER_SQL}),"
+        f" WINDOW ranking AS (PARTITION BY company_key ORDER BY {_RANK_ORDER_SQL}),"
         " company AS (PARTITION BY company_key)"
         ") "
     )
@@ -798,6 +825,7 @@ def list_job_groups(
     keep_ids: tuple[int, ...] = (),
     hidden: str = "include",
     min_score: int = 0,
+    sort: str = DEFAULT_LIST_ORDER,
     offset: int = 0,
 ) -> list[sqlite3.Row]:
     """One row per company: its best-ranked posting, plus `company_count`.
@@ -812,7 +840,7 @@ def list_job_groups(
                                  in_progress, search, keep_ids, hidden,
                                  min_score)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
-    order = _JOB_ORDER_SQL if status else "id DESC"
+    order = list_order_sql(sort)
     return con.execute(
         f"{_ranked_jobs_cte(where_sql)}"
         f"SELECT * FROM ranked WHERE rank_in_company=1 "
@@ -836,6 +864,7 @@ def count_job_groups(
     keep_ids: tuple[int, ...] = (),
     hidden: str = "include",
     min_score: int = 0,
+    sort: str = DEFAULT_LIST_ORDER,
 ) -> int:
     """How many companies the grouped view holds."""
     where, params = _job_filters(status, mismatches, gone, applied, old,
@@ -869,6 +898,7 @@ def list_company_siblings(
     keep_ids: tuple[int, ...] = (),
     hidden: str = "include",
     min_score: int = 0,
+    sort: str = DEFAULT_LIST_ORDER,
     per_company: int = SIBLINGS_PER_COMPANY,
 ) -> list[sqlite3.Row]:
     """The postings a grouped row stands in front of, best-ranked first.
@@ -910,6 +940,7 @@ def count_jobs(
     keep_ids: tuple[int, ...] = (),
     hidden: str = "include",
     min_score: int = 0,
+    sort: str = DEFAULT_LIST_ORDER,
 ) -> int:
     """How many postings a `list_jobs` call with the same filters would have,
     ignoring its page limit — the total a paged view has to print."""
@@ -939,6 +970,7 @@ def list_jobs(
     keep_ids: tuple[int, ...] = (),
     hidden: str = "include",
     min_score: int = 0,
+    sort: str = DEFAULT_LIST_ORDER,
     offset: int = 0,
 ) -> list[sqlite3.Row]:
     """List postings. mismatches: 'include' (default), 'exclude' (hide the
@@ -959,7 +991,7 @@ def list_jobs(
                f"{_DRAFT_STATUS_SQL} AS draft_status, "
                f"{_DRAFT_UPDATED_SQL} AS draft_updated_at, "
                f"{_DRAFT_PDF_SQL} AS pdf_path")
-    order = _JOB_ORDER_SQL if status else "id DESC"
+    order = list_order_sql(sort)
     return con.execute(
         f"SELECT *, {derived} FROM jobs{where_sql} "
         f"ORDER BY {order} LIMIT ? OFFSET ?",
