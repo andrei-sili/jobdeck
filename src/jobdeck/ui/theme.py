@@ -314,4 +314,11 @@ def install() -> None:
     ui.dark_mode(False)
     ui.colors(primary=ACCENT, secondary=WARN, negative=DANGER,
               positive=ACCENT, dark=INK)
+    # No ALL-CAPS buttons — the project's own rule, and Quasar uppercases every
+    # label unless told otherwise. Set once here rather than remembered at each
+    # of the ~127 call sites: the Antworten page is the only one that carried
+    # `no-caps` on every button, which is exactly what "remember it every time"
+    # produces. "ORDNER ÖFFNEN" and "NEU BAUEN" shouted on the screen whose
+    # complaint was that it is hard to read.
+    ui.button.default_props("no-caps")
     ui.add_css(CSS)
