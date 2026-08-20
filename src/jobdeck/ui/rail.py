@@ -322,6 +322,8 @@ def _unterlagen_rubric(facts: dict) -> Rubric:
         sub = "kein Ordner für Anlagen"
     elif facts["folder_state"] == "missing":
         sub = "Anlagen-Ordner fehlt"
+    elif facts["folder_state"] == "unreadable":
+        sub = "Anlagen-Ordner nicht lesbar"
     elif not anlagen:
         sub = "keine Anlagen — nur der Brief"
     elif not facts["built"]:

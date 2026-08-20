@@ -131,7 +131,9 @@ def anlagen_parts(anlagen_dir: str) -> tuple[list[Part], str]:
     """
     try:
         files = pdf.collect_anlagen(anlagen_dir)
-    except pdf.PdfError as exc:
+    except (pdf.PdfError, OSError) as exc:
+        # Reported, never raised past: one unreadable folder must not blank the
+        # screen that is the only place the problem can be seen.
         return [], str(exc)
     parts = []
     for path in files:
@@ -167,9 +169,9 @@ def _folder_fingerprint(anlagen_dir: str) -> tuple:
     renaming is how the order of the stack is set — so the folder itself has
     to be part of what the page compares. Six stats, on a timer.
     """
-    if not (anlagen_dir or "").strip():
+    folder = config.user_path(anlagen_dir)
+    if folder is None:
         return ()
-    folder = pathlib.Path(anlagen_dir).expanduser()
     try:
         entries = sorted(p for p in folder.iterdir()
                          if p.suffix.lower() == ".pdf")
@@ -225,8 +227,7 @@ def signature(con, job_id: int | None) -> tuple:
         _folder_fingerprint(db.get_setting(con, "anlagen_dir", "").strip()),
         # The PATHS to these two are settings and already above; their
         # CONTENTS are facts on disk that no table and no setting can see.
-        _file_fingerprint(pathlib.Path(template).expanduser()
-                          if template else None),
+        _file_fingerprint(config.user_path(template)),
         _file_fingerprint(specimen_path()),
     )
 
@@ -342,6 +343,14 @@ def folder_state(anlagen_dir: str, count: int) -> dict:
     """(state, path, note) for the folder the Anlagen are merged from."""
     folder = anlagen_lib.resolve(anlagen_dir)
     if folder is None:
+        text = (anlagen_dir or "").strip()
+        if text:
+            # A path the system cannot even expand — "~name" with no such
+            # user. Saying "no folder chosen" would send him to set one he
+            # believes he already set.
+            return {"state": "missing", "path": text, "note":
+                    f"Mit diesem Pfad kann nichts angefangen werden: {text} — "
+                    f"in den Einstellungen korrigieren."}
         return {"state": "unset", "path": "", "note":
                 "Noch kein Ordner für deine Anlagen — Zeugnisse und "
                 "Zertifikate haben hier keinen Platz, und die Mappe besteht "
@@ -351,6 +360,12 @@ def folder_state(anlagen_dir: str, count: int) -> dict:
                 f"Diesen Ordner gibt es nicht: {folder} — er wurde "
                 f"verschoben, oder der Pfad in den Einstellungen stimmt "
                 f"nicht."}
+    if not anlagen_lib.readable(folder):
+        # Mounted and not readable answers exactly like empty, and a Mappe
+        # built from it would be the letter alone — reported as complete.
+        return {"state": "unreadable", "path": str(folder), "note":
+                f"Der Ordner lässt sich gerade nicht lesen: {folder} — ist "
+                f"das Laufwerk eingebunden?"}
     if not count:
         return {"state": "empty", "path": str(folder), "note":
                 "Der Ordner ist leer — die Mappe bestünde nur aus dem "
@@ -371,8 +386,7 @@ def read(con, job_id: int | None) -> dict:
     view = preview(con, job_id)
     parts, anlagen_error = anlagen_parts(settings["anlagen_dir"])
     facts = _specimen_facts(con, parts)
-    template = pathlib.Path(settings["template_path"]).expanduser() \
-        if settings["template_path"] else None
+    template = config.user_path(settings["template_path"])
     letter = Part(label=TEMPLATE_LABEL, pages=facts["letter_pages"],
                   size_bytes=0,
                   error="" if template and template.is_file()
@@ -417,8 +431,8 @@ def rail_facts(con) -> dict:
     """(documents, what is missing, whether a build has measured it)."""
     settings = mappe.build_settings(con)
     template = settings["template_path"].strip()
-    template_ok = bool(template) and \
-        pathlib.Path(template).expanduser().is_file()
+    resolved = config.user_path(template)
+    template_ok = resolved is not None and resolved.is_file()
     entries = anlagen_lib.listing(anlagen_lib.resolve(settings["anlagen_dir"]))
     state = folder_state(settings["anlagen_dir"], len(entries))
     # A specimen file alone is not a measurement: the letter's own length is
@@ -442,8 +456,7 @@ def rail_fingerprint(con) -> tuple:
     template = settings["template_path"].strip()
     return (
         _folder_fingerprint(settings["anlagen_dir"]),
-        _file_fingerprint(pathlib.Path(template).expanduser()
-                          if template else None),
+        _file_fingerprint(config.user_path(template)),
         _file_fingerprint(specimen_path()),
         db.get_setting(con, LETTER_PAGES_SETTING, ""),
     )
@@ -480,7 +493,7 @@ def _build(job_id: int | None) -> dict:
     if not settings["template_path"]:
         return {"ok": False, "error": "Trage zuerst den Pfad zur Briefvorlage "
                                       "in den Einstellungen ein"}
-    template_file = pathlib.Path(settings["template_path"]).expanduser()
+    template_file = config.user_path(settings["template_path"])
     if not template_file.is_file():
         return {"ok": False, "error": f"Briefvorlage nicht gefunden: "
                                       f"{template_file}"}

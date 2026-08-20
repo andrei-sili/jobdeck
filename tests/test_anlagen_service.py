@@ -8,6 +8,7 @@ renames one certificate onto another, and a removal that is a deletion.
 """
 
 import io
+import os
 import pathlib
 
 import pytest
@@ -151,10 +152,52 @@ def test_nothing_half_written_is_ever_merged(tmp_path):
     from the constant, so changing the constant to something the merge picks
     up turns this red instead of leaving it true about a name nobody uses."""
     folder = _folder(tmp_path)
-    (folder / f"02_Zeugnis.pdf{anlagen._STAGE_SUFFIX}").write_bytes(b"half")
+    (folder / f"02_Zeugnis.pdf{anlagen._UPLOAD_SUFFIX}").write_bytes(b"half")
 
     assert pdf.collect_anlagen(str(folder)) == []
+
+
+def test_half_an_upload_is_discarded_never_restored(tmp_path):
+    """A transfer that died leaves a TRUNCATED pdf. Putting it back would
+    staple half a document into a Bewerbung; leaving it makes the next upload
+    of the same certificate answer "already being uploaded" for ever."""
+    folder = _folder(tmp_path)
+    (folder / f"01_Zeugnis.pdf{anlagen._UPLOAD_SUFFIX}").write_bytes(b"half")
+
     assert anlagen.listing(folder) == []
+    assert list(folder.iterdir()) == []
+
+    # …and the name is free again, so the same document can be uploaded
+    assert anlagen.store(folder, "Zeugnis.pdf", _pdf_bytes()).name == \
+        "01_Zeugnis.pdf"
+
+
+def test_a_move_killed_between_its_two_phases_gives_the_files_back(tmp_path):
+    """The one that would have been silent and total: the suffix is invisible
+    to the merge, so an interrupted reorder makes the rubric read "keine
+    Anlagen — nur der Brief" while six certificates sit in the folder, and the
+    next Mappe really would be the letter alone."""
+    folder = _folder(tmp_path)
+    for name in ("01_Zeugnis.pdf", "02_Praktikum.pdf"):
+        (folder / (name + anlagen._MOVE_SUFFIX)).write_bytes(_pdf_bytes())
+
+    entries = anlagen.listing(folder)
+
+    assert [e.name for e in entries] == ["01_Zeugnis.pdf", "02_Praktikum.pdf"]
+    assert [p.name for p in pdf.collect_anlagen(str(folder))] == \
+        ["01_Zeugnis.pdf", "02_Praktikum.pdf"]
+
+
+def test_recovery_never_replaces_a_file_that_took_the_name(tmp_path):
+    """He re-uploaded what he thought was lost. Both are his."""
+    folder = _folder(tmp_path, "01_Zeugnis.pdf")
+    (folder / f"01_Zeugnis.pdf{anlagen._MOVE_SUFFIX}").write_bytes(
+        _pdf_bytes(pages=4))
+
+    names = [e.name for e in anlagen.listing(folder)]
+
+    assert names == ["01_Zeugnis.pdf", "01_Zeugnis_2.pdf"]
+    assert len(PdfReader(str(folder / "01_Zeugnis_2.pdf")).pages) == 4
 
 
 def test_a_pdf_with_no_pages_is_refused(tmp_path):
@@ -371,3 +414,104 @@ def test_a_configured_folder_that_is_not_there_lists_nothing_rather_than_raising
 
 def test_the_default_folder_lives_in_the_data_dir(data_dir):
     assert anlagen.default_dir() == data_dir / "Anlagen"
+
+
+# --------------------------------------------- when the filesystem says no
+
+
+def test_an_upload_into_a_hand_named_folder_still_lands_last(tmp_path):
+    """The merge orders by FILE NAME, and any "NN_" sorts before a bare name.
+    So in a folder of hand-named PDFs no number could put the new document
+    last — it landed as the first page after the letter, ahead of the
+    Prüfungszeugnis, while the toast said it had been added."""
+    folder = _folder(tmp_path, "Zeugnis.pdf", "Praktikum.pdf")
+
+    stored = anlagen.store(folder, "Kurszertifikat.pdf", _pdf_bytes())
+
+    order = [p.name for p in pdf.collect_anlagen(str(folder))]
+    assert order[-1] == stored.name
+    # Numbering preserves the order the merge ALREADY had — alphabetical for
+    # bare names — rather than inventing one. The app has no idea which of his
+    # documents should come first; only he does, and the arrows are how he
+    # says so.
+    assert order == ["01_Praktikum.pdf", "02_Zeugnis.pdf",
+                     "03_Kurszertifikat.pdf"]
+
+
+def test_a_failed_reorder_gives_every_document_back(tmp_path, monkeypatch):
+    """The rollback's own trap: two Anlagen of one document are "01_Zeugnis"
+    and "02_Zeugnis" — same human half, different numbers. Unwinding them in
+    the naive order renames the survivor onto a name the landed file already
+    holds, and os.replace destroys a scan without a word."""
+    folder = _folder(tmp_path)
+    anlagen.store(folder, "Zeugnis.pdf", _pdf_bytes(pages=1))
+    anlagen.store(folder, "Zeugnis.pdf", _pdf_bytes(pages=3))
+    real = os.replace
+    calls = {"n": 0}
+
+    def flaky(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 4:          # the second rename OUT of staging
+            raise OSError(28, "No space left on device")
+        return real(src, dst)
+
+    monkeypatch.setattr(anlagen.os, "replace", flaky)
+    with pytest.raises(anlagen.AnlagenError, match="Umsortieren"):
+        anlagen.move(folder, "01_Zeugnis.pdf", 1)
+    monkeypatch.setattr(anlagen.os, "replace", real)
+
+    order = anlagen.listing(folder)
+    assert [e.name for e in order] == ["01_Zeugnis.pdf", "02_Zeugnis.pdf"]
+    # both documents are still here, and still themselves
+    assert sorted(len(PdfReader(str(folder / e.name)).pages) for e in order) \
+        == [1, 3]
+
+
+def test_a_folder_that_cannot_be_written_answers_instead_of_raising(tmp_path):
+    """A raw OSError out of here reaches a NiceGUI handler, where it is a log
+    line and a button that does nothing."""
+    blocked = tmp_path / "nope"
+    blocked.write_bytes(b"a file where a folder should be")
+
+    with pytest.raises(anlagen.AnlagenError, match="nicht beschreibbar"):
+        anlagen.store(blocked, "Zeugnis.pdf", _pdf_bytes())
+
+
+def test_a_removal_that_cannot_move_the_file_says_so(data_dir, monkeypatch):
+    """The dialog promised the file survives. Silence would leave the row on
+    screen with nothing said."""
+    folder = _folder(data_dir, "01_Zeugnis.pdf")
+
+    def refuse(*_a, **_k):
+        raise OSError(30, "Read-only file system")
+
+    monkeypatch.setattr(anlagen.shutil, "move", refuse)
+    with pytest.raises(anlagen.AnlagenError, match="Konnte nicht herausgenommen"):
+        anlagen.remove(folder, "01_Zeugnis.pdf")
+
+    assert (folder / "01_Zeugnis.pdf").exists()
+
+
+def test_a_folder_that_cannot_be_read_is_not_reported_as_empty(tmp_path):
+    """Mounted but unreadable answers exactly like empty, and a Mappe built
+    from it would be the letter alone — reported as complete."""
+    folder = tmp_path / "locked"
+    folder.mkdir()
+    (folder / "01_Zeugnis.pdf").write_bytes(_pdf_bytes())
+    folder.chmod(0o000)
+    try:
+        assert anlagen.readable(folder) is False
+        assert anlagen.listing(folder) == []
+    finally:
+        folder.chmod(0o755)
+
+    assert anlagen.readable(folder) is True
+    assert len(anlagen.listing(folder)) == 1
+
+
+@pytest.mark.parametrize("bad", ["~kein-solcher-benutzer/Anlagen", "", "   "])
+def test_an_unusable_folder_setting_never_raises(bad):
+    """`Path.expanduser()` raises RuntimeError on a "~name" with no such user,
+    and this value is free text in a field he edits. It is read while a page
+    is being BUILT — including the rail, which every page draws."""
+    assert anlagen.resolve(bad) is None

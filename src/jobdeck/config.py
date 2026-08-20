@@ -32,6 +32,27 @@ CLIENT_SECRET_PATH = DATA_DIR / "client_secret.json"
 PROFILE_PATH = DATA_DIR / "profile.md"
 
 
+def user_path(text: str) -> Path | None:
+    """A path out of a SETTING, expanded — or None when there is no usable one.
+
+    `Path.expanduser()` raises RuntimeError on a "~name" whose user does not
+    exist, and every path this app holds is free text in a table the user
+    edits. That made a single typo in the Anlagen folder field — "~andrei/…"
+    on a machine where the account is called something else — an exception
+    raised while a page was being built. It is the same failure shape as the
+    non-finite age threshold that once took down the inbox AND the settings
+    page that could have fixed it, so it is screened here, once, rather than
+    at each of the ten places that expand one.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        return Path(text).expanduser()
+    except (RuntimeError, ValueError, OSError):
+        return None
+
+
 def ensure_data_dirs() -> None:
     """Create the data directory tree on first run."""
     for path in (DATA_DIR, BACKUP_DIR, OUTPUT_DIR, UPLOAD_DIR):

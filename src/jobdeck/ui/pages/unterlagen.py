@@ -18,7 +18,7 @@ from fastapi.responses import RedirectResponse
 from nicegui import app, run, ui
 
 from jobdeck import claims as claims_lib
-from jobdeck import db, freshness
+from jobdeck import config, db, freshness
 from jobdeck.services import anlagen as anlagen_service
 from jobdeck.services import claims as claims_service
 from jobdeck.services import polling
@@ -95,10 +95,16 @@ def _signature() -> tuple:
 # nothing on screen, so a refused upload would look exactly like a successful
 # one — and this is the screen whose whole complaint was "I do not understand
 # what to do".
+# OSError is caught beside AnlagenError, not instead of it. The service turns
+# every filesystem refusal it can foresee into a sentence, but "every one it
+# can foresee" is the part that ages: a mount that goes read-only between two
+# lines, a name the kernel dislikes. Whatever is left must still come back as
+# a message, because the alternative is a log line and a button that looks
+# alive and does nothing.
 def _add_anlage(folder: str, filename: str, data: bytes) -> dict:
     try:
         stored = anlagen_service.store(pathlib.Path(folder), filename, data)
-    except anlagen_service.AnlagenError as exc:
+    except (anlagen_service.AnlagenError, OSError) as exc:
         return {"ok": False, "error": str(exc)}
     return {"ok": True, "name": stored.name}
 
@@ -106,7 +112,7 @@ def _add_anlage(folder: str, filename: str, data: bytes) -> dict:
 def _move_anlage(folder: str, name: str, delta: int) -> dict:
     try:
         anlagen_service.move(pathlib.Path(folder), name, delta)
-    except anlagen_service.AnlagenError as exc:
+    except (anlagen_service.AnlagenError, OSError) as exc:
         return {"ok": False, "error": str(exc)}
     return {"ok": True}
 
@@ -114,7 +120,7 @@ def _move_anlage(folder: str, name: str, delta: int) -> dict:
 def _remove_anlage(folder: str, name: str) -> dict:
     try:
         landed = anlagen_service.remove(pathlib.Path(folder), name)
-    except anlagen_service.AnlagenError as exc:
+    except (anlagen_service.AnlagenError, OSError) as exc:
         return {"ok": False, "error": str(exc)}
     return {"ok": True, "landed": str(landed)}
 
@@ -127,7 +133,10 @@ def _adopt_folder(path: str) -> dict:
     was moved: the same button re-creates the path the setting already names,
     rather than silently pointing him somewhere else.
     """
-    folder = pathlib.Path(path).expanduser()
+    folder = config.user_path(path)
+    if folder is None:
+        return {"ok": False, "error":
+                f"Mit diesem Pfad kann nichts angefangen werden: {path}"}
     try:
         folder.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -217,14 +226,24 @@ async def unterlagen_page():
             return drawn.get("mappe", {}).get("folder", {})
 
         # ---- the Anlagen folder: getting documents in, and in order --------
-        # An upload is not a dialog, so `live.dialog_open` does not cover it,
-        # and a tick landing mid-upload would clear the container the Quasar
-        # uploader lives in — taking the transfer with it. The flag defers the
-        # tick instead; nothing is lost, it applies once the upload is done.
-        uploading = {"active": False}
+        # A rebuild clears `container`, which is where the Quasar uploader
+        # lives — and unmounting it mid-transfer aborts every file still on the
+        # wire AND unregisters the POST route they were using. With
+        # `multiple=True` that is not a corner case: dropping six certificates
+        # at once means the smallest lands, its handler refreshes, and the
+        # other five die in silence with a green toast on screen.
+        #
+        # So a batch is one unit, and it is handled by ONE callback. NiceGUI
+        # schedules an async event handler as a background task rather than
+        # awaiting it, so `on_upload` and `on_multi_upload` do not run in
+        # order — a "store each, refresh at the end" split would race its own
+        # refresh past the last file. With Quasar's `batch`, the whole
+        # selection arrives as a single POST and `on_multi_upload` is the only
+        # handler there is: stores in order, redraws once, says one sentence.
+        batch: dict = {"active": False}
 
         def _busy() -> bool:
-            return live.dialog_open() or uploading["active"]
+            return live.dialog_open() or batch["active"]
 
         async def add_folder() -> None:
             state = _folder()
@@ -237,34 +256,48 @@ async def unterlagen_page():
                     multi_line=True)
             await refresh()
 
-        async def upload_anlage(event) -> None:
-            """One uploaded PDF into his Anlagen folder.
+        def begin_upload() -> None:
+            """The transfer has started — hold the screen still until it ends."""
+            batch["active"] = True
 
-            The size is asked BEFORE the bytes: `read()` pulls the whole file
-            into memory, and the point of a limit is not to have held the file
-            first.
+        async def upload_anlagen(event) -> None:
+            """Everything he dropped, in the order he dropped it.
+
+            The size is asked before the bytes: `read()` pulls a file into
+            memory whole, and the point of a limit is not to have held it
+            first. Each file is reported by name, because "three of five
+            arrived" is useless if it does not say which two did not.
             """
-            folder = _folder().get("path") or ""
-            if not folder:
-                say("Zuerst einen Ordner für die Anlagen anlegen.",
-                    type="warning")
-                return
-            too_big = anlagen_service.oversize_message(event.file.size())
-            if too_big:
-                say(too_big, type="warning", multi_line=True)
-                return
-            uploading["active"] = True
             try:
-                data = await event.file.read()
-                result = await run.io_bound(_add_anlage, folder,
-                                            event.file.name, data)
+                folder = _folder().get("path") or ""
+                done, failed = [], []
+                for file in event.files:
+                    if not folder:
+                        failed.append("Zuerst einen Ordner für die Anlagen "
+                                      "anlegen.")
+                        break
+                    too_big = anlagen_service.oversize_message(file.size())
+                    if too_big:
+                        failed.append(f"{file.name}: {too_big}")
+                        continue
+                    data = await file.read()
+                    result = await run.io_bound(_add_anlage, folder,
+                                                file.name, data)
+                    if result["ok"]:
+                        done.append(result["name"])
+                    else:
+                        failed.append(f"{file.name}: {result['error']}")
             finally:
-                uploading["active"] = False
-            if not result["ok"]:
-                say(result["error"], type="warning", multi_line=True)
-            else:
-                say(f"„{result['name']}“ liegt jetzt in der Mappe — für "
-                    f"Seitenzahlen und Gewicht einmal „Neu bauen“.",
+                # Before the redraw, and whatever happened: a flag left raised
+                # freezes the page's self-refresh for the rest of its life.
+                batch["active"] = False
+            for message in failed:
+                say(message, type="warning", multi_line=True)
+            if done:
+                landed = ("„" + done[0] + "“ liegt" if len(done) == 1
+                          else f"{len(done)} Anlagen liegen")
+                say(f"{landed} jetzt in der Mappe — für Seitenzahlen und "
+                    f"Gewicht einmal „Neu bauen“.",
                     type="positive", multi_line=True)
             await refresh()
 
@@ -426,13 +459,14 @@ async def unterlagen_page():
                                       on_click=lambda p=folder["path"]:
                                           open_in_system(p)) \
                                 .props("flat dense")
-                    ui.upload(on_upload=upload_anlage,
+                    ui.upload(on_multi_upload=upload_anlagen,
+                              on_begin_upload=lambda _e: begin_upload(),
                               on_rejected=lambda _e: upload_rejected(),
                               multiple=True, auto_upload=True,
                               max_file_size=anlagen_service.MAX_UPLOAD_BYTES,
                               label="Zeugnisse und Zertifikate hierher ziehen "
                                     "oder auswählen") \
-                        .props('accept=".pdf" flat bordered') \
+                        .props('accept=".pdf" batch flat bordered') \
                         .classes("w-full jd-upload")
                     ui.label("Nur PDF — die Mappe wird aus PDFs "
                              "zusammengeheftet. Der Lebenslauf gehört NICHT "

@@ -51,11 +51,17 @@ MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 # file name that was never an order marker at all.
 _PREFIX_RE = re.compile(r"^(\d{1,3})(?=[_\-. ])[_\-. ]+(.*)$")
 
-# Renames go through this so a swap never has two files claiming one name.
-# The suffix is deliberately not .pdf: `collect_anlagen` filters on the
-# suffix, so a file caught mid-rename is invisible to a build rather than
-# merged at the wrong position.
-_STAGE_SUFFIX = ".jd-move"
+# Two staging suffixes, and the difference matters more than it looks.
+#
+# Neither ends in .pdf, so a file caught mid-operation is invisible to a build
+# rather than merged at the wrong position. But what should happen to a
+# leftover is OPPOSITE for the two: a file parked by a reorder is a COMPLETE
+# certificate that must be put back, while a file parked by an upload is a
+# PARTIAL write that must never become an Anlage. One suffix for both meant
+# recovery would either merge half a PDF or lose a certificate.
+_MOVE_SUFFIX = ".jd-move"
+_UPLOAD_SUFFIX = ".jd-upload"
+_STAGE_SUFFIXES = (_MOVE_SUFFIX, _UPLOAD_SUFFIX)
 
 
 class AnlagenError(Exception):
@@ -96,10 +102,7 @@ def resolve(anlagen_dir: str) -> pathlib.Path | None:
     answers — one needs a folder chosen, the other needs it found — so this
     does not paper over the difference by inventing a default.
     """
-    text = (anlagen_dir or "").strip()
-    if not text:
-        return None
-    return pathlib.Path(text).expanduser()
+    return config.user_path(anlagen_dir)
 
 
 def split_prefix(stem: str) -> tuple[int | None, str]:
@@ -140,10 +143,15 @@ def listing(folder: pathlib.Path | None) -> list[Entry]:
     """
     if folder is None:
         return []
+    recover(folder)
     try:
         paths = sorted(p for p in folder.iterdir()
                        if p.suffix.lower() == ".pdf")
     except OSError:
+        # An unreadable folder is NOT an empty one, and the difference decides
+        # whether the screen says "put a certificate in" or "this volume is not
+        # readable right now". `readable()` is what tells them apart; answering
+        # with [] here keeps every caller from raising mid-render.
         return []
     entries = []
     for path in paths:
@@ -155,6 +163,76 @@ def listing(folder: pathlib.Path | None) -> list[Entry]:
         entries.append(Entry(name=path.name, stem=path.stem, number=number,
                              size_bytes=size))
     return entries
+
+
+def readable(folder: pathlib.Path | None) -> bool:
+    """Whether the folder can actually be listed right now.
+
+    Asked separately from `listing`, because a folder on a volume that is
+    mounted but not readable answers the same as an empty one — and a Mappe
+    built from it would be the letter alone, reported as complete.
+    """
+    if folder is None:
+        return False
+    try:
+        next(iter(folder.iterdir()), None)
+    except OSError:
+        return False
+    return True
+
+
+def recover(folder: pathlib.Path) -> list[str]:
+    """Put back anything left parked under a staging name.
+
+    A reorder renames through `_STAGE_SUFFIX`, and that suffix is deliberately
+    invisible to the merge. So a process killed between the two phases leaves
+    certificates in the folder that the app cannot see: the rubric reads
+    "keine Anlagen — nur der Brief" and the next Mappe really would be. The
+    same leftover would also wedge an upload for ever behind "this file is
+    already being uploaded".
+
+    Runs from `listing`, which is the one read path both the screen and the
+    rail go through — so the folder heals the moment anything looks at it,
+    rather than only when he happens to press a button. A no-op, and one
+    scandir, in every normal case.
+    """
+    restored = []
+    try:
+        parked = [p for p in folder.iterdir() if p.suffix in _STAGE_SUFFIXES]
+    except OSError:
+        return []
+    for path in parked:
+        if path.suffix == _UPLOAD_SUFFIX:
+            # Half of a transfer that never finished. Restoring it would put a
+            # truncated PDF into a Bewerbung; leaving it makes the next upload
+            # of the same document answer "already being uploaded" for ever.
+            try:
+                path.unlink()
+                log.info("anlagen: discarded %s — an unfinished upload",
+                         path.name)
+            except OSError as exc:
+                log.warning("anlagen: could not discard %s (%s)", path.name, exc)
+            continue
+        target = path.with_suffix("")          # "01_X.pdf.jd-move" -> "01_X.pdf"
+        if target.exists():
+            # Its name was taken while it was parked; keep both rather than
+            # replace one with the other.
+            stem, suffix = target.stem, target.suffix
+            for n in range(2, 100):
+                candidate = folder / f"{stem}_{n}{suffix}"
+                if not candidate.exists():
+                    target = candidate
+                    break
+            else:
+                continue
+        try:
+            os.replace(path, target)
+        except OSError as exc:
+            log.warning("anlagen: could not recover %s (%s)", path.name, exc)
+            continue
+        log.info("anlagen: recovered %s from an interrupted move", target.name)
+        restored.append(target.name)
+    return restored
 
 
 def _next_number(entries: list[Entry]) -> int:
@@ -240,15 +318,27 @@ def store(folder: pathlib.Path, filename: str, data: bytes) -> pathlib.Path:
     the browser is still uploading never merges half a file.
     """
     _validate_pdf(data, filename)
-    folder.mkdir(parents=True, exist_ok=True)
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise AnlagenError(f"Der Ordner ist nicht beschreibbar: {exc}") from exc
     raw = pathlib.Path(filename).name
     _safe_member(folder, raw)  # proves it is a plain member, never a path
     # An uploaded "01_Zeugnis.pdf" must not become "07_01_Zeugnis": the number
     # the app assigns is the only one that decides position.
     _number, human = split_prefix(pathlib.Path(raw).stem)
     clean = pdf.safe_filename(human) or "Anlage"
-    target = folder / _free_name(folder, _next_number(listing(folder)), clean)
-    staging = folder / (target.name + _STAGE_SUFFIX)
+    entries = listing(folder)
+    if any(entry.number is None for entry in entries):
+        # The merge orders by FILE NAME, and any "NN_" sorts before a bare
+        # name — so in a folder of hand-named PDFs no number can put the new
+        # document last. It would land as the first page after the letter,
+        # ahead of the Prüfungszeugnis, while the toast said it was added.
+        # Numbering the folder first is what makes "at the end" mean anything.
+        _apply_order(folder, entries)
+        entries = listing(folder)
+    target = folder / _free_name(folder, _next_number(entries), clean)
+    staging = folder / (target.name + _UPLOAD_SUFFIX)
     try:
         # Exclusive: two uploads landing on one staging name is the one way
         # this could silently merge two different documents into one file.
@@ -283,25 +373,52 @@ def _apply_order(folder: pathlib.Path, order: list[Entry]) -> None:
             moves.append((entry.name, wanted))
     if not moves:
         return
+    origin = {wanted: current for current, wanted in moves}
     staged: list[tuple[pathlib.Path, str]] = []
+    landed: list[tuple[pathlib.Path, str]] = []
     try:
         for current, wanted in moves:
-            stage = folder / (wanted + _STAGE_SUFFIX)
+            stage = folder / (wanted + _MOVE_SUFFIX)
             os.replace(folder / current, stage)
             staged.append((stage, wanted))
         for stage, wanted in staged:
             os.replace(stage, folder / wanted)
+            landed.append((stage, wanted))
     except OSError as exc:
-        # Put back whatever is still parked under a staging name, so a failed
-        # reorder cannot end with documents missing from the Mappe.
-        for stage, wanted in staged:
-            if stage.exists():
-                original = next(c for c, w in moves if w == wanted)
-                try:
-                    os.replace(stage, folder / original)
-                except OSError:
-                    log.error("anlagen: %s stuck at %s", original, stage)
+        _unwind(folder, staged, landed, origin)
         raise AnlagenError(f"Umsortieren fehlgeschlagen: {exc}") from exc
+
+
+def _unwind(folder: pathlib.Path,
+            staged: list[tuple[pathlib.Path, str]],
+            landed: list[tuple[pathlib.Path, str]],
+            origin: dict[str, str]) -> None:
+    """Undo a half-finished reorder, in the order that cannot lose a file.
+
+    The naive version — walk the staged files and rename each straight back to
+    its original name — DESTROYS a document. Two Anlagen of the same document
+    are "01_Zeugnis" and "02_Zeugnis": the same human half, different numbers.
+    Swap them, let phase two fail after the first rename, and the survivor's
+    original name is now held by the file that already landed; `os.replace`
+    overwrites it without a word, and one scan is gone.
+
+    So phase two is unwound FIRST — every file that already landed goes back
+    to its staging name — and only then does everything go back to where it
+    started. Every destination is provably free at the moment it is used.
+    """
+    for stage, wanted in landed:
+        try:
+            os.replace(folder / wanted, stage)
+        except OSError:
+            log.error("anlagen: could not park %s again", wanted)
+    for stage, wanted in staged:
+        original = origin[wanted]
+        try:
+            os.replace(stage, folder / original)
+        except OSError:
+            # Left parked under the staging name — `recover` puts it back the
+            # next time anything lists the folder, so nothing is lost even here.
+            log.error("anlagen: %s stays parked at %s", original, stage.name)
 
 
 def move(folder: pathlib.Path, name: str, delta: int) -> None:
@@ -336,7 +453,11 @@ def remove(folder: pathlib.Path, name: str) -> pathlib.Path:
     if not source.is_file():
         raise AnlagenError(f"„{name}“ liegt nicht mehr im Ordner.")
     pile = trash_dir()
-    pile.mkdir(parents=True, exist_ok=True)
+    try:
+        pile.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise AnlagenError(
+            f"Der Ablage-Ordner konnte nicht angelegt werden: {exc}") from exc
     target = pile / name
     if target.exists():
         stem, suffix = target.stem, target.suffix
@@ -347,6 +468,12 @@ def remove(folder: pathlib.Path, name: str) -> pathlib.Path:
                 break
         else:
             raise AnlagenError("Der Ablage-Ordner ist voll von diesem Namen.")
-    shutil.move(str(source), str(target))
+    try:
+        shutil.move(str(source), str(target))
+    except OSError as exc:
+        # The dialog promised the file survives. A silent failure here would
+        # leave the row on screen and nothing said — the shape this project
+        # calls a dead button.
+        raise AnlagenError(f"Konnte nicht herausgenommen werden: {exc}") from exc
     log.info("anlagen: removed %s -> %s", name, target)
     return target

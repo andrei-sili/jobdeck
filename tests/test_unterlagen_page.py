@@ -7,6 +7,7 @@ does not do yet.
 """
 
 import asyncio
+import io
 import pathlib
 import sys
 
@@ -43,6 +44,15 @@ def _marked(user: User, marker: str) -> list:
     with user.client:
         return [el for el in user.client.elements.values()
                 if marker in getattr(el, "_markers", [])]
+
+
+def _pdf_bytes(pages: int = 1) -> bytes:
+    writer = PdfWriter()
+    for _ in range(pages):
+        writer.add_blank_page(width=595, height=842)
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    return buffer.getvalue()
 
 
 def _blank_pdf(path: pathlib.Path, pages: int = 1) -> pathlib.Path:
@@ -812,3 +822,138 @@ def test_adopting_repairs_a_folder_that_was_moved_away(con, data_dir):
     assert result["ok"] is True and gone.is_dir()
     with db.db() as fresh:
         assert db.get_setting(fresh, "anlagen_dir", "") == str(gone)
+
+
+# --------------------------------------------------------------------------
+# The drop zone, driven. The slice's headline path had no execution coverage
+# at all: a NiceGUI rename, or an early return, would leave the suite green
+# while every dropped file vanished — which is the complaint it exists to fix.
+# --------------------------------------------------------------------------
+def _uploader(user: User):
+    with user.client:
+        return next(el for el in user.client.elements.values()
+                    if isinstance(el, ui.upload))
+
+
+def _files(*specs) -> list:
+    """(name, bytes) pairs as NiceGUI's own upload payload."""
+    return [ui.upload.SmallFileUpload(name=name, content_type="application/pdf",
+                                      _data=data)
+            for name, data in specs]
+
+
+async def _drop(user: User, *specs) -> None:
+    await _uploader(user).handle_uploads(_files(*specs))
+    await asyncio.sleep(0.1)
+
+
+async def test_a_dropped_pdf_really_reaches_the_folder(user: User, con, data_dir):
+    folder = _anlagen(con, data_dir)
+
+    await user.open("/unterlagen")
+    await _drop(user, ("Sprachzertifikat B2.pdf", _pdf_bytes()))
+
+    assert (folder / "03_Sprachzertifikat_B2.pdf").exists()
+    await user.should_see("liegt jetzt in der Mappe")
+    await user.should_see("03_Sprachzertifikat_B2")     # and on the stack
+
+
+async def test_dropping_six_certificates_at_once_keeps_all_six(
+        user: User, con, data_dir):
+    """The natural first action on a drop zone that says "hierher ziehen".
+    Redrawing after each file unmounted the uploader and aborted the rest of
+    the transfer — one green toast, five documents gone, nothing said."""
+    folder = _anlagen(con, data_dir)
+
+    await user.open("/unterlagen")
+    await _drop(user, *[(f"Zertifikat {n}.pdf", _pdf_bytes()) for n in range(1, 7)])
+
+    assert sorted(p.name for p in folder.glob("*.pdf")) == [
+        "01_Zeugnis.pdf", "02_Zertifikat.pdf",
+        "03_Zertifikat_1.pdf", "04_Zertifikat_2.pdf", "05_Zertifikat_3.pdf",
+        "06_Zertifikat_4.pdf", "07_Zertifikat_5.pdf", "08_Zertifikat_6.pdf"]
+    await user.should_see("6 Anlagen liegen jetzt in der Mappe")
+
+
+async def test_one_bad_file_in_a_batch_is_named_and_the_rest_still_land(
+        user: User, con, data_dir):
+    """"Three of five arrived" is useless if it does not say which two did
+    not — he would have to compare the folder against his own memory."""
+    folder = _anlagen(con, data_dir)
+
+    await user.open("/unterlagen")
+    await _drop(user,
+                ("Gut.pdf", _pdf_bytes()),
+                ("Zerrissen.pdf", b"%PDF-1.4\nbroken"),
+                ("AuchGut.pdf", _pdf_bytes()))
+
+    assert (folder / "03_Gut.pdf").exists()
+    assert (folder / "04_AuchGut.pdf").exists()
+    assert not list(folder.glob("*Zerrissen*"))
+    await user.should_see("Zerrissen.pdf")
+    await user.should_see("Kein lesbares PDF")
+    await user.should_see("2 Anlagen liegen jetzt in der Mappe")
+
+
+async def test_a_dropped_word_document_is_refused_with_its_name(
+        user: User, con, data_dir):
+    folder = _anlagen(con, data_dir)
+
+    await user.open("/unterlagen")
+    await _drop(user, ("Lebenslauf.docx", b"PK\x03\x04"))
+
+    await user.should_see("Nur PDF")
+    assert sorted(p.name for p in folder.glob("*")) == [
+        "01_Zeugnis.pdf", "02_Zertifikat.pdf"]
+
+
+async def test_an_oversized_file_is_refused_before_it_is_read(
+        user: User, con, data_dir):
+    """The limit exists so the file is never held in memory; asking after
+    reading it would be a limit that had already been exceeded."""
+    _anlagen(con, data_dir)
+
+    await user.open("/unterlagen")
+    huge = _pdf_bytes() + b"\x00" * anlagen_service.MAX_UPLOAD_BYTES
+    await _drop(user, ("Riesig.pdf", huge))
+
+    await user.should_see("Zu groß")
+
+
+async def test_a_failed_upload_still_redraws_the_screen(
+        user: User, con, data_dir):
+    """The deferral flag holds the screen still during the transfer, and it is
+    lowered in a `finally`. Left raised by a failure it would freeze the page's
+    self-refresh for the rest of its life — the exact staleness the live
+    watcher exists to end — and the redraw after the failure would be skipped
+    too, leaving the stack describing a folder that has moved on."""
+    folder = _anlagen(con, data_dir)
+    await user.open("/unterlagen")
+    _blank_pdf(folder / "03_Nachgereicht.pdf")     # arrives outside the app
+
+    await _drop(user, ("Zerrissen.pdf", b"%PDF-1.4\nbroken"))
+
+    await user.should_see("Kein lesbares PDF")
+    await user.should_see("03_Nachgereicht")       # the redraw happened anyway
+
+
+async def test_the_drop_zone_is_wired_the_one_way_that_does_not_race(
+        user: User, con, data_dir):
+    """Read out of NiceGUI's own source, and easy to undo by accident.
+
+    `handle_event` schedules an async handler as a BACKGROUND TASK rather than
+    awaiting it, so `on_upload` and `on_multi_upload` do not run in order — a
+    "store each file, refresh at the end" split would race its own refresh past
+    the last file. And Quasar sends one POST per file unless `batch` is set,
+    which would fire the whole cycle once per file. One handler, one request:
+    anything else silently drops files."""
+    _anlagen(con, data_dir)
+    await user.open("/unterlagen")
+
+    uploader = _uploader(user)
+    assert uploader.props.get("batch"), "one POST per file races the redraw"
+    assert len(uploader._multi_upload_handlers) == 1
+    assert uploader._upload_handlers == [], \
+        "a per-file handler runs unordered against the batch handler"
+    assert uploader._begin_upload_handlers, \
+        "without this the screen is only held still AFTER the transfer"
