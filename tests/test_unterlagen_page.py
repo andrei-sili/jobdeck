@@ -845,6 +845,31 @@ async def test_the_up_arrow_moves_a_document_towards_the_front(
         "01_Zertifikat.pdf", "02_Zeugnis.pdf"]
 
 
+async def test_a_second_arrow_press_mid_move_cannot_move_the_wrong_document(
+        user: User, con, data_dir):
+    """The arrows RENAME, so between the press and the redraw the name in the
+    next button's closure is already stale — and after a swap that name
+    belongs to a different certificate. Two nudges in a row is the ordinary
+    way to move something two places."""
+    folder = data_dir / "anlagen"
+    folder.mkdir()
+    for name in ("01_A.pdf", "02_B.pdf", "03_C.pdf"):
+        _blank_pdf(folder / name)
+    db.set_setting(con, "anlagen_dir", str(folder))
+    _posting(con)
+    con.commit()
+
+    await user.open("/unterlagen")
+    user.find(marker="anlage-down-0").click()
+    user.find(marker="anlage-down-0").click()      # inside the redraw window
+    await user.should_see("01_B")
+
+    assert sorted(p.name for p in folder.glob("*.pdf")) == [
+        "01_B.pdf", "02_A.pdf", "03_C.pdf"], "the second press acted on a " \
+        "name the first had already rewritten"
+    await user.should_not_see("nicht mehr im Ordner")
+
+
 async def test_the_first_press_of_all_creates_the_folder_and_uses_it(
         user: User, con, data_dir):
     """The one press the whole rubric exists to provide, for somebody who has

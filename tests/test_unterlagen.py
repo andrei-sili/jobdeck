@@ -657,6 +657,39 @@ def test_the_rail_notices_a_certificate_arriving_in_the_folder(con, data_dir):
     assert unterlagen.rail_fingerprint(con) != before
 
 
+def test_the_rail_notices_the_folder_itself_being_chosen(con, data_dir):
+    """A folder just created and still EMPTY fingerprints identically to no
+    folder at all if only its contents are signed — so the one press that
+    answers "where do I put my documents" left the spine reading "kein Ordner
+    für Anlagen" for the life of the page."""
+    empty = data_dir / "Anlagen"
+    empty.mkdir()
+    before = unterlagen.rail_fingerprint(con)          # nothing configured
+
+    db.set_setting(con, "anlagen_dir", str(empty))
+    con.commit()
+
+    assert unterlagen.rail_fingerprint(con) != before
+    # and moving to a DIFFERENT empty folder is a change too
+    other = data_dir / "Anderswo"
+    other.mkdir()
+    mid = unterlagen.rail_fingerprint(con)
+    db.set_setting(con, "anlagen_dir", str(other))
+    con.commit()
+    assert unterlagen.rail_fingerprint(con) != mid
+
+
+def test_the_rail_notices_the_template_being_chosen(con, data_dir):
+    """Same blind spot on the other path: pointing the setting at a template
+    that is not there yet must still reach the rubric."""
+    before = unterlagen.rail_fingerprint(con)
+
+    db.set_setting(con, "template_path", str(data_dir / "noch-nicht-da.html"))
+    con.commit()
+
+    assert unterlagen.rail_fingerprint(con) != before
+
+
 def test_the_rail_notices_the_template_being_replaced(con, data_dir):
     path = _template(data_dir)
     db.set_setting(con, "template_path", str(path))
