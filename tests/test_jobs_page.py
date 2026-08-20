@@ -311,9 +311,17 @@ _COUNTS = {"mismatches": 129, "dead": 58, "applied_firm": 30, "old": 12}
     # the label is derived from the filters the query really used
     ("firma_kontaktiert", _COUNTS,
      "30 Stellen bei Firmen, bei denen du dich schon beworben hast"),
-    ("passt_nicht", _COUNTS, "129 verletzen eine harte Anforderung"),
+    ("passt_nicht", _COUNTS, "129 Anzeigen verletzen eine harte Anforderung"),
     ("offline", _COUNTS, "58 Anzeigen sind offline"),
     ("alt", _COUNTS, "12 Anzeigen älter als 45 Tage"),
+    # every one of these figures can be ONE — this project has shipped
+    # "1 Bewerbungen" before
+    ("offline", {**_COUNTS, "dead": 1}, "1 Anzeige ist offline"),
+    ("alt", {**_COUNTS, "old": 1}, "1 Anzeige älter als 45 Tage"),
+    ("passt_nicht", {**_COUNTS, "mismatches": 1},
+     "1 Anzeige verletzt eine harte Anforderung"),
+    ("firma_kontaktiert", {**_COUNTS, "applied_firm": 1},
+     "1 Stelle bei einer Firma, bei der du dich schon beworben hast"),
     # a view of what he set aside himself hides nothing at all
     ("vorgemerkt", _COUNTS, ""),
     ("in_arbeit", _COUNTS, ""),
