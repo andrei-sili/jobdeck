@@ -782,3 +782,68 @@ def test_migrate_leaves_a_fresh_database_with_the_reply_columns(tmp_path):
     index_names = {r["name"] for r in con.execute("PRAGMA index_list(email_log)")}
     assert "idx_email_log_thread" in index_names
     con.close()
+
+
+def _corpus_hash(con) -> str:
+    import hashlib
+    rows = con.execute("SELECT * FROM jobs ORDER BY id").fetchall()
+    return hashlib.md5(repr([tuple(r) for r in rows]).encode()).hexdigest()
+
+
+def test_v12_becomes_v13_without_touching_a_posting(data_dir):
+    """Strictly additive: one table, no backfill. On his corpus the run must
+    leave 1167 postings byte-identical, which is the promise the first start
+    after a merge has to keep."""
+    from jobdeck import db, migrations
+
+    con = db.connect()
+    migrations.migrate(con)
+    for n in range(5):
+        db.insert_job_if_new(con, {
+            "source": "stub", "external_id": f"e{n}", "title": "Entwickler",
+            "company": f"Firma {n}", "url": "https://example.invalid/1",
+        })
+    con.commit()
+    # Settled first: the published-on and document backfills run on EVERY
+    # start by design and are self-healing, so a corpus that has never seen
+    # them is not the state his database is in. Measured on his real one, the
+    # v12 → v13 run left all 1167 postings byte-identical.
+    migrations.migrate(con)
+    con.execute("PRAGMA user_version = 12")
+    con.execute("DROP TABLE IF EXISTS hidden_companies")
+    con.commit()
+    # tuple(), because `repr(sqlite3.Row)` is a memory address — a hash over
+    # those compares two allocations, not two corpora.
+    before = _corpus_hash(con)
+
+    migrations.migrate(con)
+
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 13
+    assert _corpus_hash(con) == before, "the upgrade touched a posting"
+    assert con.execute("SELECT COUNT(*) FROM hidden_companies").fetchone()[0] == 0
+    # …and running it again is a no-op
+    migrations.migrate(con)
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 13
+    assert _corpus_hash(con) == before
+    con.close()
+
+
+def test_the_hidden_table_hands_out_a_number_that_never_repeats(data_dir):
+    """AUTOINCREMENT, and it is load-bearing: the page signature rests on
+    MAX(id), and a plain rowid is reassigned after a DELETE."""
+    from jobdeck import db, migrations
+
+    con = db.connect()
+    migrations.migrate(con)
+    first = db.hide_company(con, "Alpha GmbH")
+    db.hide_company(con, "Beta GmbH")
+    highest = con.execute("SELECT MAX(id) FROM hidden_companies").fetchone()[0]
+
+    db.unhide_company(con, first)
+    con.execute("DELETE FROM hidden_companies WHERE company_key<>''")
+    con.commit()
+    db.hide_company(con, "Gamma GmbH")
+
+    assert con.execute(
+        "SELECT MAX(id) FROM hidden_companies").fetchone()[0] > highest
+    con.close()

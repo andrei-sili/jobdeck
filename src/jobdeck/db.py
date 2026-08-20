@@ -575,6 +575,37 @@ APPLIED_FIRM_SQL = """(
  OR (jd_norm(jobs.contact_email) <> '' AND jd_norm(jobs.contact_email) IN (
         SELECT jd_norm(b.email) FROM bewerbungen b WHERE jd_norm(b.email) <> '')))"""
 
+# A posting at a company he has hidden. Written as an UNCORRELATED IN, like
+# the gate above and for the same measured reason: the natural EXISTS form
+# calls the jd_norm Python callback once per (posting, company) pair, which
+# cost 330 ms against 6 ms and is paid on every page load.
+#
+# The empty-company arm is not defensive tidiness. `_COMPANY_KEY_SQL` gives a
+# posting with no company its OWN key ('job:<id>'), because a blank field is
+# missing information rather than an employer — so it can never be part of a
+# company, and `jd_norm('') IN (…)` must not match an accidentally empty row
+# in the table either.
+HIDDEN_FIRM_SQL = """(
+    jd_norm(jobs.company) <> '' AND jd_norm(jobs.company) IN (
+        SELECT company_key FROM hidden_companies WHERE company_key <> ''))"""
+
+# The floor he sets under the list. Three things it must get right, and each of
+# them was a way to lie to him:
+#
+# * It compares the AGED score — the very number the row prints and the list
+#   sorts on. Filtering the raw `match_score` instead would put a row reading
+#   "58" above a floor of 60, and the two figures on one screen would disagree.
+# * `match_score IS NULL` passes. `NULL >= 40` is NULL, so without this arm a
+#   posting that arrived between a search and the scoring pass would vanish
+#   silently — which is exactly what a screen must never do to a row nobody has
+#   judged yet.
+# * A score of 0 is NOT a low score. It means the posting violates a hard
+#   requirement, and it has its own named pile; letting it through a floor of
+#   "ab 0" would tip 564 knock-outs into the working list.
+SCORE_FLOOR_SQL = (
+    f"({freshness.effective_score_sql()} >= ? OR match_score IS NULL)"
+)
+
 
 # A posting whose application is UNDER WAY. Two ways that happens and they are
 # one fact from his side: a draft is being written or waiting to be sent, or he
@@ -604,7 +635,8 @@ def _job_filters(
     old: str = "include", stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
     bookmarked: str = "include", opened: str = "include",
     in_progress: str = "include", search: str = "",
-    keep_ids: tuple[int, ...] = (),
+    keep_ids: tuple[int, ...] = (), hidden: str = "include",
+    min_score: int = 0,
 ) -> tuple[list[str], list]:
     """WHERE fragments + bound values shared by the list and the count, so a
     page can never be filtered differently from the total printed beside it.
@@ -615,7 +647,7 @@ def _job_filters(
     for name, value in (("mismatches", mismatches), ("gone", gone),
                         ("applied", applied), ("old", old),
                         ("bookmarked", bookmarked), ("opened", opened),
-                        ("in_progress", in_progress)):
+                        ("in_progress", in_progress), ("hidden", hidden)):
         if value not in ("include", "exclude", "only"):
             raise ValueError(f"{name}={value!r}: expected include/exclude/only")
     where, params = [], []
@@ -634,6 +666,19 @@ def _job_filters(
         where.append(f"NOT ({APPLIED_FIRM_SQL})")
     elif applied == "only":
         where.append(APPLIED_FIRM_SQL)
+    # His decision, not a fact about the posting — but unlike "kein Interesse"
+    # it is about the COMPANY, so it keeps reaching postings that did not exist
+    # when he pressed. That is the whole point: he pressed three times on one
+    # staffing agency because each press only reached one advert.
+    if hidden == "exclude":
+        where.append(f"NOT {HIDDEN_FIRM_SQL}")
+    elif hidden == "only":
+        where.append(HIDDEN_FIRM_SQL)
+    # Bound, and appended together with its value — the params list is
+    # positional, so a clause added without its binding shifts every later one.
+    if min_score > 0:
+        where.append(SCORE_FLOOR_SQL)
+        params.append(min_score)
     # The threshold is BOUND, and the fragment is appended together with its
     # value: the params list is positional, so a clause added without its
     # binding here would silently shift every later one.
@@ -705,7 +750,45 @@ _COMPANY_KEY_SQL = (
     "CASE WHEN jd_norm(company)='' THEN 'job:'||id "
     "ELSE 'firma:'||jd_norm(company) END"
 )
-_JOB_ORDER_SQL = "effective_score DESC NULLS LAST, published_on DESC, id DESC"
+# Which posting REPRESENTS a company inside the grouped list. FIXED, and
+# deliberately not his to choose: the row stands for the whole company, so it
+# has to be the best one it holds. Letting the sort control reach in here would
+# mean that switching to "newest first" quietly re-elected the newest advert of
+# a nineteen-advert staffing agency to speak for it — a ranking regression
+# invisible from the screen, because the row still looks like a company.
+_RANK_ORDER_SQL = "effective_score DESC NULLS LAST, published_on DESC, id DESC"
+
+# The order the LIST is drawn in — his choice, and only his choice. Both orders
+# keep the other key as their tie-break, so neither is a pure one-dimensional
+# sort: with 222 of 300 rows under 40 points, "newest first" alone would put
+# fresh noise at the top, which is the complaint it is meant to answer.
+#
+# An unknown date is stored as the EMPTY STRING, not as NULL, and it still
+# sorts last — checked rather than assumed, and written down here because the
+# obvious "fix" is a NULLIF that changes nothing: '' collates below any date,
+# so DESC already puts it at the bottom, exactly where "we do not know" belongs.
+# `NULLS LAST` covers the NULL a hand-edited row could carry.
+_DATE_ORDER_SQL = ("published_on DESC NULLS LAST, "
+                   "effective_score DESC NULLS LAST, id DESC")
+# The same order for a list of COMPANIES. A row stands for a company's BEST
+# advert, so ordering by that advert's date puts a company whose newest advert
+# went up today at thirty days old because its best one is. "Neueste zuerst"
+# has to mean the company's newest advert, whichever of its adverts represents
+# it — which is what the window over the whole partition answers.
+_GROUP_DATE_ORDER_SQL = ("company_published_on DESC NULLS LAST, "
+                         "effective_score DESC NULLS LAST, id DESC")
+LIST_ORDERS = {"score": _RANK_ORDER_SQL, "date": _DATE_ORDER_SQL}
+_GROUP_ORDERS = {"score": _RANK_ORDER_SQL, "date": _GROUP_DATE_ORDER_SQL}
+DEFAULT_LIST_ORDER = "date"
+
+
+def list_order_sql(sort: str, grouped: bool = False) -> str:
+    """The ORDER BY for a named sort, falling back rather than raising.
+
+    The name reaches here from a stored setting he can edit; an unknown one is
+    a screen that will not open, and the default is always a safe answer."""
+    orders = _GROUP_ORDERS if grouped else LIST_ORDERS
+    return orders.get(sort or "", orders[DEFAULT_LIST_ORDER])
 
 
 def _ranked_jobs_cte(where_sql: str) -> str:
@@ -725,13 +808,16 @@ def _ranked_jobs_cte(where_sql: str) -> str:
         f" FROM jobs{where_sql}"
         "), ranked AS ("
         " SELECT *, ROW_NUMBER() OVER ranking AS rank_in_company,"
+        # The company's newest advert, so "Neueste zuerst" can mean the
+        # company rather than whichever advert represents it.
+        " MAX(published_on) OVER company AS company_published_on,"
         # COUNT over the RANKING window would be a running total: a window with
         # an ORDER BY frames rows up to the current one, so the best-ranked row
         # of every company would report a count of 1. The count needs a window
         # with no ordering, which frames the whole partition.
         " COUNT(*) OVER company AS company_count"
         " FROM filtered"
-        f" WINDOW ranking AS (PARTITION BY company_key ORDER BY {_JOB_ORDER_SQL}),"
+        f" WINDOW ranking AS (PARTITION BY company_key ORDER BY {_RANK_ORDER_SQL}),"
         " company AS (PARTITION BY company_key)"
         ") "
     )
@@ -751,20 +837,25 @@ def list_job_groups(
     in_progress: str = "include",
     search: str = "",
     keep_ids: tuple[int, ...] = (),
+    hidden: str = "include",
+    min_score: int = 0,
+    sort: str = DEFAULT_LIST_ORDER,
     offset: int = 0,
 ) -> list[sqlite3.Row]:
     """One row per company: its best-ranked posting, plus `company_count`.
 
-    Companies are ordered exactly as `list_jobs` orders postings — including
-    the "all statuses" view's id ordering, so switching the grouping toggle
-    never silently reorders the page under the user. Only the ranking WITHIN a
-    company is always by score, because something has to choose which posting
-    represents it."""
+    Two orders, and they answer different questions. WITHIN a company the
+    ranking is always by score, because something has to choose which posting
+    represents it and a row that stands for a whole company should be its best.
+    BETWEEN companies, "newest first" means the company's newest advert — not
+    the date of whichever advert represents it, or a company that posted today
+    would sort at thirty days because its strongest advert is that old."""
     where, params = _job_filters(status, mismatches, gone, applied, old,
                                  stale_age_days, bookmarked, opened,
-                                 in_progress, search, keep_ids)
+                                 in_progress, search, keep_ids, hidden,
+                                 min_score)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
-    order = _JOB_ORDER_SQL if status else "id DESC"
+    order = list_order_sql(sort, grouped=True)
     return con.execute(
         f"{_ranked_jobs_cte(where_sql)}"
         f"SELECT * FROM ranked WHERE rank_in_company=1 "
@@ -786,11 +877,15 @@ def count_job_groups(
     in_progress: str = "include",
     search: str = "",
     keep_ids: tuple[int, ...] = (),
+    hidden: str = "include",
+    min_score: int = 0,
+    sort: str = DEFAULT_LIST_ORDER,
 ) -> int:
     """How many companies the grouped view holds."""
     where, params = _job_filters(status, mismatches, gone, applied, old,
                                  stale_age_days, bookmarked, opened,
-                                 in_progress, search, keep_ids)
+                                 in_progress, search, keep_ids, hidden,
+                                 min_score)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     return con.execute(
         f"{_ranked_jobs_cte(where_sql)}"
@@ -816,6 +911,9 @@ def list_company_siblings(
     in_progress: str = "include",
     search: str = "",
     keep_ids: tuple[int, ...] = (),
+    hidden: str = "include",
+    min_score: int = 0,
+    sort: str = DEFAULT_LIST_ORDER,
     per_company: int = SIBLINGS_PER_COMPANY,
 ) -> list[sqlite3.Row]:
     """The postings a grouped row stands in front of, best-ranked first.
@@ -828,7 +926,8 @@ def list_company_siblings(
         return []
     where, params = _job_filters(status, mismatches, gone, applied, old,
                                  stale_age_days, bookmarked, opened,
-                                 in_progress, search, keep_ids)
+                                 in_progress, search, keep_ids, hidden,
+                                 min_score)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     placeholders = ",".join("?" * len(company_keys))
     return con.execute(
@@ -854,12 +953,16 @@ def count_jobs(
     in_progress: str = "include",
     search: str = "",
     keep_ids: tuple[int, ...] = (),
+    hidden: str = "include",
+    min_score: int = 0,
+    sort: str = DEFAULT_LIST_ORDER,
 ) -> int:
     """How many postings a `list_jobs` call with the same filters would have,
     ignoring its page limit — the total a paged view has to print."""
     where, params = _job_filters(status, mismatches, gone, applied, old,
                                  stale_age_days, bookmarked, opened,
-                                 in_progress, search, keep_ids)
+                                 in_progress, search, keep_ids, hidden,
+                                 min_score)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     return con.execute(
         f"SELECT COUNT(*) FROM jobs{where_sql}", params
@@ -880,6 +983,9 @@ def list_jobs(
     in_progress: str = "include",
     search: str = "",
     keep_ids: tuple[int, ...] = (),
+    hidden: str = "include",
+    min_score: int = 0,
+    sort: str = DEFAULT_LIST_ORDER,
     offset: int = 0,
 ) -> list[sqlite3.Row]:
     """List postings. mismatches: 'include' (default), 'exclude' (hide the
@@ -889,7 +995,8 @@ def list_jobs(
     values over postings whose ad the source says is no longer there."""
     where, params = _job_filters(status, mismatches, gone, applied, old,
                                  stale_age_days, bookmarked, opened,
-                                 in_progress, search, keep_ids)
+                                 in_progress, search, keep_ids, hidden,
+                                 min_score)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     # The age-adjusted score is SELECTED as well as ordered on, so the number
     # the UI prints is the very number that decided the row's position — two
@@ -899,7 +1006,7 @@ def list_jobs(
                f"{_DRAFT_STATUS_SQL} AS draft_status, "
                f"{_DRAFT_UPDATED_SQL} AS draft_updated_at, "
                f"{_DRAFT_PDF_SQL} AS pdf_path")
-    order = _JOB_ORDER_SQL if status else "id DESC"
+    order = list_order_sql(sort)
     return con.execute(
         f"SELECT *, {derived} FROM jobs{where_sql} "
         f"ORDER BY {order} LIMIT ? OFFSET ?",
@@ -1099,6 +1206,10 @@ def list_unscored_jobs(
     extra = f" AND id NOT IN ({','.join('?' * len(excluded))})" if excluded else ""
     return con.execute(
         "SELECT * FROM jobs WHERE status='new' AND match_score IS NULL"
+        # A company he has hidden is one he will not apply to, and scoring is
+        # a paid call: the batch would go on spending haiku on every advert a
+        # nineteen-branch staffing agency posts, for ever.
+        f" AND NOT {HIDDEN_FIRM_SQL}"
         + extra + " ORDER BY id LIMIT ?",
         (*excluded, limit),
     ).fetchall()
@@ -1314,6 +1425,7 @@ def jobs_to_prepare(
                  SELECT 1 FROM drafts d
                   WHERE d.job_id = j.id AND d.status IN ({placeholders}))
            AND NOT ({APPLIED_FIRM_SQL.replace("jobs.", "j.")})
+           AND NOT ({HIDDEN_FIRM_SQL.replace("jobs.", "j.")})
          ORDER BY effective_score DESC, j.published_on DESC, j.id DESC
          LIMIT ?
         """,
@@ -1614,9 +1726,13 @@ def count_active_profiles(con: sqlite3.Connection) -> int:
 
 
 def count_unscored_jobs(con: sqlite3.Connection) -> int:
-    """New postings still waiting for a match score — the scoring backlog."""
+    """New postings still waiting for a match score — the scoring backlog.
+
+    Counted the way the batch SELECTS them, or the Puls would pulse for ever
+    over adverts nothing is going to score."""
     return con.execute(
         "SELECT COUNT(*) FROM jobs WHERE status='new' AND match_score IS NULL"
+        f" AND NOT {HIDDEN_FIRM_SQL}"
     ).fetchone()[0]
 
 
@@ -1713,6 +1829,21 @@ SELECT COUNT(*), MAX(id), TOTAL(needs_review),
 """
 
 
+# Hiding a company removes rows from every list on the pipeline pages, and it
+# is not a write to `jobs` — so without this term the list he just pruned would
+# keep showing the company until something unrelated happened to change.
+#
+# MAX(id), not MAX(hidden_at) and not MAX(rowid). The timestamp has one-second
+# resolution, so hiding a company and taking it back inside the same second
+# would compare EQUAL to never having touched it. A bare rowid is no better: a
+# rowid table without AUTOINCREMENT assigns max(rowid)+1 over the rows PRESENT,
+# so releasing the NEWEST hidden company and hiding another lands on the same
+# number — and that pair is exactly what the undo bar produces.
+_HIDDEN_SIGNATURE_SQL = (
+    "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM hidden_companies"
+)
+
+
 def data_signature(con: sqlite3.Connection) -> tuple:
     """What the pipeline pages (inbox, queue, dashboard, applications, cockpit)
     are showing, compressed to one comparable tuple.
@@ -1726,7 +1857,81 @@ def data_signature(con: sqlite3.Connection) -> tuple:
         *con.execute(_DRAFTS_SIGNATURE_SQL).fetchone(),
         *con.execute(_APPLICATIONS_SIGNATURE_SQL).fetchone(),
         *con.execute(_EMAIL_SIGNATURE_SQL).fetchone(),
+        *con.execute(_HIDDEN_SIGNATURE_SQL).fetchone(),
     )
+
+
+def hide_company(con: sqlite3.Connection, company: str,
+                 source: str = "user") -> str:
+    """Never show this employer again, and answer with the key it was filed
+    under. A company already hidden is left as it was rather than re-stamped:
+    pressing twice is not a second decision.
+
+    Returns '' for a posting with no company — that is missing information, not
+    an employer, and hiding "everything with a blank name" would take out rows
+    that have nothing to do with each other.
+    """
+    key = norm(company or "")
+    if not key:
+        return ""
+    con.execute(
+        "INSERT OR IGNORE INTO hidden_companies (company_key, company, "
+        "hidden_at, source) VALUES (?, ?, ?, ?)",
+        (key, (company or "").strip(), _now(), source))
+    con.commit()
+    return key
+
+
+def unhide_company(con: sqlite3.Connection, company_key: str) -> None:
+    """Take a company back. The postings were never touched, so they simply
+    reappear — including the ones discovered while it was hidden."""
+    con.execute("DELETE FROM hidden_companies WHERE company_key=?",
+                (company_key,))
+    con.commit()
+
+
+def list_hidden_companies(con: sqlite3.Connection) -> list[sqlite3.Row]:
+    """The hidden companies, newest first, each with how many postings of its
+    own are currently out of sight — the figure that makes taking one back a
+    decision rather than a guess."""
+    return con.execute(
+        "SELECT h.*, ("
+        "  SELECT COUNT(*) FROM jobs j"
+        "  WHERE jd_norm(j.company)=h.company_key"
+        ") AS hidden_jobs "
+        "FROM hidden_companies h ORDER BY h.id DESC").fetchall()
+
+
+def count_hidden_companies(con: sqlite3.Connection) -> int:
+    return con.execute("SELECT COUNT(*) FROM hidden_companies").fetchone()[0]
+
+
+def is_company_hidden(con: sqlite3.Connection, company: str) -> bool:
+    key = norm(company or "")
+    if not key:
+        return False
+    return con.execute(
+        "SELECT 1 FROM hidden_companies WHERE company_key=?",
+        (key,)).fetchone() is not None
+
+
+def company_cost(con: sqlite3.Connection, company: str) -> dict:
+    """How many open adverts this employer holds, and the best score among
+    them — what the undo bar has to NAME so hiding is a decision.
+
+    One aggregate over the table. It used to page 1000 rows out of `list_jobs`
+    and filter them in Python, which on his corpus is a CAP (1080 open
+    postings) applied to a list ordered by DATE — so the "best" it reported
+    was the best of whatever the cap happened to keep.
+    """
+    key = norm(company or "")
+    if not key:
+        return {"jobs": 0, "best": 0}
+    row = con.execute(
+        f"SELECT COUNT(*), COALESCE(MAX({freshness.effective_score_sql()}), 0)"
+        " FROM jobs WHERE status='new' AND jd_norm(company)=?",
+        (key,)).fetchone()
+    return {"jobs": row[0], "best": row[1]}
 
 
 def job_signature(con: sqlite3.Connection, job_id: int) -> tuple | None:

@@ -302,19 +302,30 @@ _COUNTS = {"mismatches": 129, "dead": 58, "applied_firm": 30, "old": 12}
 
 @pytest.mark.parametrize("view_key, counts, expected", [
     ("offen", _COUNTS,
-     "129 passen nicht ausgeblendet · 58 offline ausgeblendet · "
-     "30 bei schon beworbenen Firmen ausgeblendet · "
-     "12 älter als 45 Tage ausgeblendet"),
+     "129 passen nicht · 58 offline · "
+     "30 bei schon beworbenen Firmen · 12 älter als 45 Tage"),
+    # …and every one of those four can be ONE
+    ("offen", {"mismatches": 1, "dead": 1, "applied_firm": 1, "old": 1},
+     "1 passt nicht · 1 offline · 1 bei einer schon beworbenen Firma · "
+     "1 älter als 45 Tage"),
     ("offen", {**_COUNTS, "mismatches": 0, "applied_firm": 0, "old": 0},
-     "58 offline ausgeblendet"),
+     "58 offline"),
     ("offen", {"mismatches": 0, "dead": 0, "applied_firm": 0, "old": 0}, ""),
     # a pile view INCLUDES the other piles, so it must not claim to hide them —
     # the label is derived from the filters the query really used
     ("firma_kontaktiert", _COUNTS,
      "30 Stellen bei Firmen, bei denen du dich schon beworben hast"),
-    ("passt_nicht", _COUNTS, "129 verletzen eine harte Anforderung"),
+    ("passt_nicht", _COUNTS, "129 Anzeigen verletzen eine harte Anforderung"),
     ("offline", _COUNTS, "58 Anzeigen sind offline"),
     ("alt", _COUNTS, "12 Anzeigen älter als 45 Tage"),
+    # every one of these figures can be ONE — this project has shipped
+    # "1 Bewerbungen" before
+    ("offline", {**_COUNTS, "dead": 1}, "1 Anzeige ist offline"),
+    ("alt", {**_COUNTS, "old": 1}, "1 Anzeige älter als 45 Tage"),
+    ("passt_nicht", {**_COUNTS, "mismatches": 1},
+     "1 Anzeige verletzt eine harte Anforderung"),
+    ("firma_kontaktiert", {**_COUNTS, "applied_firm": 1},
+     "1 Stelle bei einer Firma, bei der du dich schon beworben hast"),
     # a view of what he set aside himself hides nothing at all
     ("vorgemerkt", _COUNTS, ""),
     ("in_arbeit", _COUNTS, ""),
@@ -323,6 +334,22 @@ def test_the_hidden_line_can_never_contradict_the_list(view_key, counts, expecte
     # never a total either: a posting can be both a mismatch and offline, so
     # adding the two would double-count it
     assert jobs._hidden_line(jobs.view_for(view_key), counts, 45) == expected
+
+
+def test_every_pile_the_line_names_is_a_door_to_the_view_that_holds_it():
+    """The counts were printed and never clickable, so a pile was named on
+    screen and reachable only through a dropdown that named it again. A part
+    with no view is one that describes the CURRENT list rather than another."""
+    parts = jobs.hidden_parts(jobs.view_for("offen"), _COUNTS, 45)
+    assert [p["view"] for p in parts] == \
+        ["passt_nicht", "offline", "firma_kontaktiert", "alt"]
+    for part in parts:
+        assert jobs.view_for(part["view"]).key == part["view"], \
+            f"{part['text']} points at a view that does not exist"
+
+    # a pile view states what it IS showing, and that is not a door
+    inside = jobs.hidden_parts(jobs.view_for("passt_nicht"), _COUNTS, 45)
+    assert [p["view"] for p in inside] == [None]
 
 
 def test_a_posting_he_has_acted_on_is_never_hidden_from_its_own_view(con, data_dir):
@@ -519,25 +546,32 @@ def test_one_employer_cannot_decide_how_much_a_page_renders(con, data_dir):
     assert [r["match_score"] for r in siblings] == list(range(89, 79, -1))
 
 
-def test_a_view_that_stands_on_no_status_is_ordered_newest_first(con, data_dir):
-    """A view over every status (Vorgemerkt, In Arbeit) mixes postings he has
-    acted on with ones he has not, and score is not a useful order there — the
-    scores DISAGREE with the ids on purpose, so an id ordering cannot pass by
-    accident."""
-    best = _company_job(con, "z1", "Alpha", 95)     # oldest row, highest score
-    middle = _company_job(con, "z2", "Beta", 10)
-    newest = _company_job(con, "z3", "Gamma", 50)   # newest row, middling score
+def test_a_view_that_stands_on_no_status_obeys_the_chosen_order(con, data_dir):
+    """Vorgemerkt and In Arbeit stand on no status, and they used to fall back
+    to insertion order — which made the sort control a lie in two of the eleven
+    views. The order the caller asked for now applies in every one of them.
+
+    The dates DISAGREE with both the ids and the scores on purpose, so neither
+    an id ordering nor a score ordering can pass by accident."""
+    import datetime
+
     from jobdeck import db
-    for job_id in (best, middle, newest):
+    day = datetime.date.today()
+    old_best = _company_job(con, "z1", "Alpha", 95,
+                            (day - datetime.timedelta(days=20)).isoformat())
+    weak_new = _company_job(con, "z2", "Beta", 10,
+                            (day - datetime.timedelta(days=1)).isoformat())
+    middling = _company_job(con, "z3", "Gamma", 50,
+                            (day - datetime.timedelta(days=10)).isoformat())
+    for job_id in (old_best, weak_new, middling):
         db.set_bookmark(con, job_id, True)
     con.commit()
 
-    assert [r["id"] for r in jobs._load_jobs("vorgemerkt", 0)["rows"]] \
-        == [newest, middle, best]
-    # while a view standing on one status DOES order on the aged score, so the
-    # two are not the same query under a different name
-    assert [r["id"] for r in jobs._load_jobs("offen", 0)["rows"]] \
-        == [best, newest, middle]
+    by_date = db.list_jobs(con, bookmarked="only", sort="date")
+    by_score = db.list_jobs(con, bookmarked="only", sort="score")
+
+    assert [r["id"] for r in by_date] == [weak_new, middling, old_best]
+    assert [r["id"] for r in by_score] == [old_best, middling, weak_new]
 
 
 def test_companies_group_the_way_the_duplicate_gate_compares_them(con, data_dir):
@@ -1460,7 +1494,7 @@ def test_the_line_under_the_list_owns_up_to_the_search_and_the_read_pile():
                               "applied_firm": 0, "old": 129},
                              45, search=" django ")
     assert line.startswith("gefiltert nach „django“")
-    assert "186 schon gelesen ausgeblendet" in line
+    assert "186 schon gelesen" in line
     # and "Alle offen" hides the piles but not the read ones
     assert "schon gelesen" not in jobs._hidden_line(
         jobs.view_for("offen"), {"read": 186, "mismatches": 0, "dead": 0,
@@ -1827,3 +1861,24 @@ def test_the_press_never_records_an_application_by_itself():
         assert forbidden not in mentioned, (
             f"start_application names {forbidden} — nothing may write an "
             f"application on a timer or a guess")
+
+
+def test_the_page_records_the_very_signature_the_watcher_compares(con, data_dir):
+    """The list-screen equivalent of "signature FIRST": the loader used to hand
+    the watcher a bare `data_signature` while `_signature()` compared that PLUS
+    every watched setting. A 38-tuple recorded against a 46-tuple is never
+    equal, so every tick counted as a change and the screen rebuilt itself on a
+    timer for the life of the page — defeating the one property ui/live.py
+    exists to provide, and it had been so since the first setting was watched.
+    """
+    _company_job(con, "a", "Firma", 80)
+    con.commit()
+
+    recorded = jobs._load_jobs("neu", 0)["signature"]
+
+    assert recorded == jobs._signature()
+    # …and it really does carry the settings, so a change to one is seen
+    from jobdeck import db
+    db.set_setting(con, jobs.MIN_SCORE_SETTING, "60")
+    con.commit()
+    assert jobs._signature() != recorded

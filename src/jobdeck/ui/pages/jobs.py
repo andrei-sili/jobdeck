@@ -13,7 +13,7 @@ from jobdeck import apply_channel, apply_form, config, db, freshness
 from jobdeck.ai import scoring
 from jobdeck.ai.drafting import clean_title
 from jobdeck.constants import DRAFT_DELIVERED
-from jobdeck.dedupe import duplicates_for_jobs
+from jobdeck.dedupe import duplicates_for_jobs, norm
 from jobdeck.services import (
     apply_record,
     apply_resolve,
@@ -21,8 +21,10 @@ from jobdeck.services import (
     drafting,
     liveness,
     mappe,
+    polling,
     preparing,
 )
+from jobdeck.services.register import plural
 from jobdeck.services.replies import RECEIPT_WINDOW_H
 from jobdeck.ui import draft_editor, helpers, live, rail
 from jobdeck.ui.helpers import (
@@ -58,9 +60,12 @@ DESCRIPTION_LIMIT = 40_000
 # what it does with each pile. A screen that computed its filters in the handler
 # is a screen whose printed total can disagree with its own rows.
 _WORKING = {"mismatches": "exclude", "gone": "exclude", "applied": "exclude",
-            "old": "exclude"}
+            "old": "exclude", "hidden": "exclude"}
+# "Everything" still means everything he has not put out of sight: a hidden
+# company is his standing decision, not a property of the posting, so only the
+# view that exists to review those decisions asks for them.
 _EVERYTHING = {"mismatches": "include", "gone": "include", "applied": "include",
-               "old": "include"}
+               "old": "include", "hidden": "exclude"}
 
 
 @dataclass(frozen=True)
@@ -72,13 +77,25 @@ class View:
     status: str | None   # None: whatever he did with it, this view still holds it
     filters: dict
     empty: str
+    # Whether his score floor applies here. TRUE for the working list only.
+    #
+    # Every other view exists to show what was set ASIDE — a pile the working
+    # list hides, or a decision of his own — and a floor there hides things
+    # from the very place he goes to find them. Worse, the door's number is
+    # counted without the floor, so the count and its destination would be
+    # computed under different rules: a door reading "4 älter als 45 Tage"
+    # opening a list of one, and "1 bei ausgeblendeten Firmen" opening a view
+    # that says "Keine Firma ausgeblendet" with no way back on it.
+    floors: bool = False
 
 
 VIEWS = (
     View("neu", "Neu", "new", {**_WORKING, "opened": "exclude"},
-         "Nichts Neues — du hast alles gesehen, was in der Arbeitsliste steht."),
+         "Nichts Neues — du hast alles gesehen, was in der Arbeitsliste steht.",
+         floors=True),
     View("offen", "Alle offen", "new", _WORKING,
-         "Die Arbeitsliste ist leer. Ein Suchprofil füllt sie wieder."),
+         "Die Arbeitsliste ist leer. Ein Suchprofil füllt sie wieder.",
+         floors=True),
     View("vorgemerkt", "Vorgemerkt", None, {**_EVERYTHING, "bookmarked": "only"},
          "Nichts vorgemerkt. Mit „s“ legst du eine Anzeige hier ab."),
     View("in_arbeit", "In Arbeit", None, {**_EVERYTHING, "in_progress": "only"},
@@ -98,9 +115,39 @@ VIEWS = (
          "Keine Stelle bei einer Firma, bei der du dich schon beworben hast."),
     View("doppelt", "Doppelt", "duplicate", _EVERYTHING,
          "Keine Anzeige wurde als Doppelte einer Bewerbung erkannt."),
+    # Nothing is deleted, only moved into a view with a name. This is that
+    # view — and it is the only one that asks for hidden companies, so the
+    # word "everything" everywhere else keeps meaning "everything you have not
+    # put out of sight".
+    # No status: a company he hid may hold nothing on 'new' — an old advert he
+    # applied to, a duplicate, one he had already put away — and then the view
+    # that exists to undo the decision would be empty and there would be no way
+    # back at all.
+    View("ausgeblendet", "Ausgeblendete Firmen", None,
+         {**_EVERYTHING, "hidden": "only"},
+         "Keine Firma ausgeblendet. Mit „x“ legst du eine hier ab."),
 )
+# What the floor control offers. 40 is the default because it is where the
+# measurement puts the cut: his working list holds 300 postings and 222 of them
+# score under 40, so this takes it to 78 — while 60 would take it to 52 and a
+# list that loses 83 % of its rows on the first evening invites a third
+# rejection. He can reach 60 with one press, and it stays where he leaves it.
+SCORE_FLOORS = {0: "Alle", 40: "ab 40", 60: "ab 60", 70: "ab 70"}
+DEFAULT_MIN_SCORE = 40
+
+SORT_LABELS = {"date": "Neueste zuerst", "score": "Beste Treffer zuerst"}
+
+# Kept between visits. He sets the floor once and works under it for an
+# evening; resetting it every time he opens the screen would make him set it
+# again every time, which is the shape of a control nobody uses twice.
+MIN_SCORE_SETTING = "stellen_min_score"
+SORT_SETTING = "stellen_sort"
+
 DEFAULT_VIEW = VIEWS[0].key
 _BY_KEY = {view.key: view for view in VIEWS}
+# The one view a count has to be taken THROUGH rather than beside: its door is
+# its only entrance, so the number and the destination must be one query.
+_HIDDEN_VIEW = _BY_KEY["ausgeblendet"]
 
 
 def view_for(key: str) -> View:
@@ -111,35 +158,91 @@ def view_for(key: str) -> View:
     return _BY_KEY.get(key, _BY_KEY[DEFAULT_VIEW])
 
 
-def _hidden_line(view: View, counts: dict, stale_age_days: int,
-                 search: str = "") -> str:
+# What the "Ansicht" control offers. The other seven views are still views —
+# nothing is deleted, only moved into a view with a name — but they are piles,
+# and a pile is found by its NUMBER under the list rather than by scrolling an
+# eleven-item dropdown looking for a word. He has rejected this arrangement
+# twice for having too much on screen.
+MAIN_VIEW_KEYS = ("neu", "offen", "vorgemerkt", "in_arbeit",
+                  # These three stay in the control because they have no
+                  # number: they are decided by a STATUS rather than by one of
+                  # the filter arms the line counts, so there is no door to
+                  # click. A posting must always be findable somewhere.
+                  "beworben", "kein_interesse", "doppelt")
+
+
+def _view_options(current: str) -> dict:
+    """What the Ansicht control offers: the four ways of looking at the working
+    list, the three piles that have no number — and whichever view is on screen,
+    so a pile opened from its count can be left the same way it was entered."""
+    keys = [*MAIN_VIEW_KEYS]
+    if current not in keys:
+        keys.append(current)
+    return {view.key: view.label for view in VIEWS if view.key in keys}
+
+
+def hidden_parts(view: View, counts: dict, stale_age_days: int,
+                 search: str = "") -> list[dict]:
+    """The pile line, as data: each part its own sentence and, where there is
+    one, the view that opens it.
+
+    Structured rather than a string so a number can be a DOOR. The counts were
+    always printed and never clickable, which meant the piles were named on
+    screen and reachable only through a dropdown that named them again.
+    """
     """What this view is not showing, derived from the filters it actually used
     so the label cannot contradict the list. Independent statements, never a
     total: a posting can be a mismatch AND offline AND old.
 
     A search narrows the list without hiding a pile, so it is stated first and
     in its own words — otherwise the pile counts read as if they explained a
-    three-row result."""
-    parts = []
+    three-row result.
+    """
+    parts: list[dict] = []
     if search.strip():
-        parts.append(f"gefiltert nach „{search.strip()}“")
+        parts.append({"text": f"gefiltert nach „{search.strip()}“",
+                      "view": None})
     if view.filters.get("opened") == "exclude" and counts.get("read"):
-        parts.append(f"{counts['read']} schon gelesen ausgeblendet")
-    for arm, count_key, hidden, only in (
-        ("mismatches", "mismatches", "{n} passen nicht",
-         "{n} verletzen eine harte Anforderung"),
-        ("gone", "dead", "{n} offline", "{n} Anzeigen sind offline"),
-        ("applied", "applied_firm", "{n} bei schon beworbenen Firmen",
-         "{n} Stellen bei Firmen, bei denen du dich schon beworben hast"),
-        ("old", "old", f"{{n}} älter als {stale_age_days} Tage",
-         f"{{n}} Anzeigen älter als {stale_age_days} Tage"),
+        parts.append({"text": f"{counts['read']} schon gelesen", "view": "offen"})
+    # Every one of these figures can be ONE. Written only in the plural they
+    # read "1 Anzeigen sind offline" — the kind of German that makes a reader
+    # distrust the number beside it, and this project has shipped it before.
+    for arm, count_key, pile, hidden, one, many in (
+        ("mismatches", "mismatches", "passt_nicht",
+         ("passt nicht", "passen nicht"),
+         "Anzeige verletzt eine harte Anforderung",
+         "Anzeigen verletzen eine harte Anforderung"),
+        ("gone", "dead", "offline", ("offline", "offline"),
+         "Anzeige ist offline", "Anzeigen sind offline"),
+        ("applied", "applied_firm", "firma_kontaktiert",
+         ("bei einer schon beworbenen Firma", "bei schon beworbenen Firmen"),
+         "Stelle bei einer Firma, bei der du dich schon beworben hast",
+         "Stellen bei Firmen, bei denen du dich schon beworben hast"),
+        ("old", "old", "alt",
+         (f"älter als {stale_age_days} Tage", f"älter als {stale_age_days} Tage"),
+         f"Anzeige älter als {stale_age_days} Tage",
+         f"Anzeigen älter als {stale_age_days} Tage"),
+        ("hidden", "hidden", "ausgeblendet",
+         ("bei einer ausgeblendeten Firma", "bei ausgeblendeten Firmen"),
+         "Anzeige bei einer ausgeblendeten Firma",
+         "Anzeigen bei ausgeblendeten Firmen"),
     ):
         count = counts.get(count_key, 0)
         if view.filters.get(arm) == "exclude" and count:
-            parts.append(hidden.format(n=count) + " ausgeblendet")
-        elif view.filters.get(arm) == "only":
-            parts.append(only.format(n=count))
-    return " · ".join(parts)
+            parts.append({"text": plural(count, *hidden), "view": pile})
+        elif view.filters.get(arm) == "only" and count:
+            # `plural` answers '' for zero, and an empty part draws a blank
+            # label with a dangling "·" beside it.
+            parts.append({"text": plural(count, one, many), "view": None})
+    return parts
+
+
+def _hidden_line(view: View, counts: dict, stale_age_days: int,
+                 search: str = "") -> str:
+    """The same line as plain text, for anything that wants one sentence."""
+    return " · ".join(
+        part["text"] for part in hidden_parts(view, counts, stale_age_days,
+                                              search))
 
 
 # ---------------------------------------------------------------------------
@@ -411,7 +514,8 @@ def _salary_short(job: dict) -> str:
 
 
 def _load_jobs(view_key: str, page: int, search: str = "",
-               keep_ids: tuple[int, ...] = ()) -> dict:
+               keep_ids: tuple[int, ...] = (), min_score: int = 0,
+               sort: str = db.DEFAULT_LIST_ORDER) -> dict:
     """One page of a named view, with everything needed to describe it.
 
     A row stands for a COMPANY — its best-ranked posting, with the others
@@ -432,7 +536,7 @@ def _load_jobs(view_key: str, page: int, search: str = "",
         # a FRESH signature — and the watcher would then record that signature
         # as "what the page is showing" and never rebuild. This order can only
         # fail the safe way: one rebuild nobody needed.
-        signature = db.data_signature(con)
+        signature = signature_of(con)
         stale_age_days = freshness.stale_age_setting(
             db.get_setting(con, "stale_age_days", ""))
         # Whether a letter may still be written today. Read once and carried on
@@ -441,7 +545,14 @@ def _load_jobs(view_key: str, page: int, search: str = "",
         # is the defect this project keeps pinning.
         draft_room = db.count_drafts_today(con) < db.daily_draft_cap(con)
         filters = {**view.filters, "stale_age_days": stale_age_days,
-                   "search": search, "keep_ids": keep_ids}
+                   "search": search, "keep_ids": keep_ids,
+                   # Only where the view says the floor belongs — the working
+                   # list. Everywhere else it would hide things from the place
+                   # he opened to find them, and the door's count is computed
+                   # without it, so the two would disagree by construction.
+                   "min_score": min_score if view.floors else 0,
+                   "hidden": view.filters.get("hidden", "exclude"),
+                   "sort": sort}
         total = db.count_job_groups(con, view.status, **filters)
         read_total = None
         if view.filters.get("opened") == "exclude":
@@ -449,7 +560,12 @@ def _load_jobs(view_key: str, page: int, search: str = "",
                 con, view.status, **{**filters, "opened": "include"})
         pages = max(1, -(-total // PAGE_SIZE))
         page = min(max(page, 0), pages - 1)
-        rows = [{**dict(r), "draft_room": draft_room}
+        # True for every row of the pile view by construction, rather than a
+        # per-row question: the view IS "only hidden companies", so asking the
+        # database again once per row could only ever disagree with itself.
+        in_hidden_view = filters["hidden"] == "only"
+        rows = [{**dict(r), "draft_room": draft_room,
+                 "company_hidden": in_hidden_view}
                 for r in db.list_job_groups(
                     con, view.status, limit=PAGE_SIZE,
                     offset=page * PAGE_SIZE, **filters)]
@@ -457,7 +573,8 @@ def _load_jobs(view_key: str, page: int, search: str = "",
         siblings: dict[str, list[dict]] = {}
         for row in db.list_company_siblings(con, keys, view.status, **filters):
             siblings.setdefault(row["company_key"], []).append(
-                {**dict(row), "draft_room": draft_room})
+                {**dict(row), "draft_room": draft_room,
+                 "company_hidden": in_hidden_view})
         # Asked of the duplicate gate itself, for the rows on screen — see
         # dedupe.duplicates_for_jobs for why the stored flag cannot answer it.
         on_screen = rows + [r for group in siblings.values() for r in group]
@@ -481,7 +598,16 @@ def _load_jobs(view_key: str, page: int, search: str = "",
                 # unit as the list it labels: the difference between this view
                 # and the same view with the read postings put back.
                 "read": (read_total - total) if read_total is not None else 0,
+                # Counted the way its DESTINATION is filtered, not the way
+                # the current view is: the door opens "Ausgeblendete Firmen",
+                # which includes every pile and every status. Inheriting this
+                # view's arms made it read 0 for exactly the company he had
+                # just read and hidden — and that view is in no dropdown, so
+                # the door is its only entrance.
+                "hidden": db.count_jobs(con, _HIDDEN_VIEW.status,
+                                        **_HIDDEN_VIEW.filters),
             },
+            "poll": polling.last_poll(con),
             "search": search,
             "stale_age_days": stale_age_days,
             "total": total,
@@ -567,7 +693,8 @@ def _range_line(page: int, total: int, shown: int) -> str:
     if not total:
         return ""
     first = page * PAGE_SIZE + 1
-    return f"{first}–{first + shown - 1} von {total} Firmen"
+    return (f"{first}–{first + shown - 1} von "
+            f"{plural(total, 'Firma', 'Firmen')}")
 
 
 # What this screen states that lives in app_settings rather than in a table.
@@ -576,14 +703,135 @@ def _range_line(page: int, total: int, shown: int) -> str:
 # Without this the button keeps saying "Tageslimit aufgebraucht" after he has
 # raised the limit in Einstellungen, and after midnight, until he reloads.
 _WATCHED_SETTINGS = ("daily_draft_cap", "drafts_written_count",
-                     "drafts_written_date")
+                     "drafts_written_date",
+                     # The two filter controls: they decide which rows the list
+                     # holds, so a second tab changing one has to reach here.
+                     MIN_SCORE_SETTING, SORT_SETTING,
+                     # The search line states these, and none of them is a row
+                     # any table signature can see.
+                     polling.LAST_POLL_AT, polling.LAST_POLL_REPORT,
+                     polling.LAST_POLL_SOURCE)
+
+
+def _whole(value) -> int:
+    """A control's value as a whole number, 0 for anything that is not one."""
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def poll_line(report: dict, now: datetime.datetime | None = None) -> str:
+    """What the last search found, as the one sentence above the list.
+
+    The first word answers "cind?" — whether it was him or the schedule — which
+    is half of what he was asking. Written as a pure function of the report so
+    what the screen claims can be pinned without a browser.
+
+    An empty report says the engine has never run rather than printing zeros:
+    "0 neue Anzeigen" is a result, and no search is not a result.
+    """
+    if not report.get("at"):
+        return "Noch nie gesucht."
+    who = ("Von dir gestartet" if report.get("by") == "user"
+           else "Automatisch gesucht")
+    when = rail.clock_at(report["at"], now) if now else rail.clock(report["at"])
+    parts = [f"{report['new']} neue Anzeigen" if report["new"] != 1
+             else "1 neue Anzeige"]
+    if report.get("known"):
+        parts.append(f"{report['known']} schon bekannt")
+    if report.get("duplicate"):
+        # The check he asked for by name — "la căutare, programul verifică
+        # DB-ul ca să nu aducă iar firme la care a trimis". It has always
+        # happened at ingestion; it has never been said out loud.
+        parts.append(f"{report['duplicate']} bei Firmen, bei denen du dich "
+                     f"schon beworben hast")
+    return f"{who} {when} — " + " · ".join(parts)
+
+
+def _hide_company(company: str) -> dict:
+    """Put a company out of sight, and answer with what that cost.
+
+    The figures come back with it because the undo bar has to NAME the price:
+    "26 Anzeigen, die beste mit Bewertung 74" is a decision, "ausgeblendet" is
+    a guess. Counted before the write, so they describe what was on screen.
+
+    `already` matters: pressing `x` on a company that is already hidden must
+    not announce a hide that did not happen — and must never offer an undo
+    that would REVEAL it, which is what an unconditional bar did inside the
+    "Ausgeblendete Firmen" view.
+    """
+    with db.db() as con:
+        already = db.is_company_hidden(con, company)
+        cost = db.company_cost(con, company)
+        stored = "" if already else db.hide_company(con, company)
+    return {"ok": bool(stored), "already": already, "key": stored,
+            "company": company, **cost}
+
+
+def _unhide_company(company_key: str) -> None:
+    with db.db() as con:
+        db.unhide_company(con, company_key)
+
+
+def _hidden_companies() -> list[dict]:
+    with db.db() as con:
+        return [dict(row) for row in db.list_hidden_companies(con)]
+
+
+def _poll_report() -> dict:
+    with db.db() as con:
+        return polling.last_poll(con)
+
+
+def stored_min_score(raw: str) -> int:
+    """The stored floor, screened. Anything that is not one of the offered
+    values falls back to the default rather than raising: this is a row in a
+    table he can edit, and it is read while a page is being BUILT."""
+    try:
+        value = int(float(str(raw).strip()))
+    except (TypeError, ValueError, OverflowError):
+        return DEFAULT_MIN_SCORE
+    return value if value in SCORE_FLOORS else DEFAULT_MIN_SCORE
+
+
+def stored_sort(raw: str) -> str:
+    return raw if raw in SORT_LABELS else db.DEFAULT_LIST_ORDER
+
+
+def _read_filters() -> dict:
+    with db.db() as con:
+        return {
+            "min_score": stored_min_score(
+                db.get_setting(con, MIN_SCORE_SETTING, "")),
+            "sort": stored_sort(db.get_setting(con, SORT_SETTING, "")),
+        }
+
+
+def _store_filter(key: str, value: str) -> None:
+    with db.db() as con:
+        db.set_setting(con, key, value)
+
+
+def signature_of(con) -> tuple:
+    """Everything this page states, as one comparable tuple.
+
+    ONE definition, and `_load_jobs` hands back exactly this. It used to hand
+    back the bare `data_signature` while the watcher compared that PLUS the
+    watched settings — a 38-tuple recorded against a 46-tuple compared, never
+    equal, so every tick counted as a change and the screen rebuilt itself on
+    a timer for the life of the page. That is precisely the property
+    `ui/live.py` exists to provide, and it had been defeated since the moment
+    the first setting was watched.
+    """
+    return (*db.data_signature(con),
+            *(db.get_setting(con, key, "") for key in _WATCHED_SETTINGS))
 
 
 def _signature() -> tuple:
     """One cheap read of everything this page's rows can say (see ui/live.py)."""
     with db.db() as con:
-        return (*db.data_signature(con),
-                *(db.get_setting(con, key, "") for key in _WATCHED_SETTINGS))
+        return signature_of(con)
 
 
 def _set_status(job_id: int, status: str):
@@ -956,8 +1204,15 @@ def legacy_cockpit_page(job_id: int):
 @ui.page(STELLEN_PATH)
 async def jobs_page():
     async with frame("Stellen", current="stellen", padded=False):
+        # The two filter controls open where he left them. Read BEFORE the
+        # page draws its controls, so the select and the list can never start
+        # out saying different things.
+        stored = await run.io_bound(_read_filters)
+        if stored is None:
+            return                      # the page is going away
         state = {"view": DEFAULT_VIEW, "page": 0, "search": "",
-                 "selected": None, "prefer_index": None}
+                 "selected": None, "prefer_index": None,
+                 "min_score": stored["min_score"], "sort": stored["sort"]}
         # What is on screen right now, so a tick that changes nothing this page
         # shows can draw nothing at all.
         drawn: dict = {}
@@ -1006,18 +1261,26 @@ async def jobs_page():
             with ui.row().classes("jd-strip"):
                 ui.label("Stellen").classes("jd-strip-title")
                 range_label = ui.label().classes("jd-meta")
-                hidden_label = ui.label().classes("jd-meta")
+                # Rebuilt rather than re-texted: each part is a control now.
+                hidden_host = ui.row().classes("items-center gap-2 jd-piles")
                 # The chip belongs at the top of the page, not beside the
                 # filters: an update notice under fifty rows is an update
                 # notice nobody sees.
                 chip_host = ui.row().classes("items-center ml-auto gap-2")
                 with chip_host:
-                    ui.label("j k bewegen · x kein Interesse · s merken · "
+                    ui.label("j k bewegen · x Firma ausblenden · s merken · "
                              "o Anzeige öffnen · ⏎ Hauptaktion") \
                         .classes("jd-meta")
             with ui.element("div").classes("jd-panes"):
                 with ui.element("div").classes("jd-list"):
-                    with ui.row().classes("items-center gap-2 p-2 border-b"):
+                    with ui.row().classes("items-center gap-3 px-2 pt-2 w-full"):
+                        search_button = ui.button(
+                            "Jetzt suchen", icon="search",
+                            on_click=lambda: search_now()) \
+                            .props("flat dense").mark("poll-now")
+                        poll_label = ui.label("").classes("jd-meta") \
+                            .mark("poll-line")
+                    with ui.row().classes("items-center gap-2 p-2"):
                         # `debounce` is Quasar's own: without it every
                         # keystroke resets the page, drops the selection and
                         # awaits a full reload — three windowed CTEs, four pile
@@ -1028,13 +1291,25 @@ async def jobs_page():
                             .classes("flex-1")
                         search_box.on_value_change(
                             lambda e: set_search(e.value or ""))
-                        ui.select(
-                            {view.key: view.label for view in VIEWS},
+                        view_select = ui.select(
+                            _view_options(DEFAULT_VIEW),
                             value=DEFAULT_VIEW,
                             label="Ansicht",
                             on_change=lambda e: set_view(e.value),
                         ).mark("view-select").props("dense outlined") \
-                            .classes("min-w-40")
+                            .classes("min-w-36")
+                        score_select = ui.select(
+                            SCORE_FLOORS, value=state["min_score"],
+                            label="Ab Bewertung",
+                            on_change=lambda e: set_min_score(e.value),
+                        ).mark("score-select").props("dense outlined") \
+                            .classes("min-w-32")
+                        ui.select(
+                            SORT_LABELS, value=state["sort"],
+                            label="Sortierung",
+                            on_change=lambda e: set_sort(e.value),
+                        ).mark("sort-select").props("dense outlined") \
+                            .classes("min-w-36")
                     # A sibling of the rows and ABOVE the scroll container, so
                     # an application under way is on screen in every view, at
                     # every page, under any search. `.jd-list` is a flex
@@ -1044,7 +1319,7 @@ async def jobs_page():
                     laeuft_host = ui.column().classes("jd-laeuft w-full gap-0")
                     rows_host = ui.column().classes("jd-rows w-full gap-0") \
                         .props('role=listbox aria-label="Anzeigen"')
-                    pager = ui.row().classes("items-center gap-2 p-2 border-t")
+                    pager = ui.row().classes("items-center gap-2 p-2")
                 reader = ui.element("div").classes("jd-reader")
 
         # ------------------------------------------------------------------
@@ -1061,10 +1336,26 @@ async def jobs_page():
             gen = refresh_gen["n"]
             view = await run.io_bound(
                 _load_jobs, state["view"], state["page"], state["search"],
-                tuple(read_here))
+                tuple(read_here), state["min_score"], state["sort"])
             if gen != refresh_gen["n"] or view is None:
                 return  # superseded, or the page is going away
             state["page"] = view["page"]   # the loader clamped it to what exists
+            # A pile opened from its number is not in the control's short list,
+            # and a control naming a different view from the one on screen is a
+            # control that lies. It carries the current view whatever it is, so
+            # the way in through a number and the way out through the control
+            # are the same place.
+            view_select.set_options(_view_options(view["view"].key),
+                                    value=view["view"].key)
+            # A control that silently does nothing teaches him it is broken.
+            # The floor belongs to the working list; every pile shows what was
+            # set aside, and hiding things there is the opposite of the point.
+            score_select.set_enabled(view["view"].floors)
+            score_select.props(
+                remove="hint" if view["view"].floors else "",
+                add="" if view["view"].floors
+                    else 'hint="gilt nur für die Arbeitsliste"')
+            poll_label.set_text(poll_line(view["poll"]))
             live_view.mark(view["signature"])
             fresh = {row["id"]: row for row in view["rows"]}
             new_order = [row["id"] for row in view["rows"]]
@@ -1119,9 +1410,7 @@ async def jobs_page():
                 shown[dropped["id"]] = dropped
             range_label.set_text(_range_line(
                 view["page"], view["total"], len(view["rows"])))
-            hidden_label.set_text(_hidden_line(
-                view["view"], view["counts"], view["stale_age_days"],
-                search=view["search"]))
+            render_piles(view)
             if not strip_same:
                 render_strip(view)
             if not list_same:
@@ -1400,7 +1689,15 @@ async def jobs_page():
                     ui.button("★ gemerkt" if marked else "☆ merken",
                               on_click=lambda j=job["id"]: toggle_bookmark(j)) \
                         .props("flat dense no-caps")
-                    if job["status"] == "skipped" or job["form_opened_at"]:
+                    if job.get("company_hidden"):
+                        # In the hidden view the triage buttons are about a
+                        # posting, and the decision here was about a company —
+                        # so this is the one that undoes what he actually did.
+                        ui.button("↩ Firma wieder anzeigen",
+                                  on_click=lambda c=job["company"]:
+                                      unhide(c)) \
+                            .props("flat dense").mark("unhide-company")
+                    elif job["status"] == "skipped" or job["form_opened_at"]:
                         # Two different ways back, one button: he put the
                         # posting away, or he started a form here and decided
                         # against it. The second is the one that needs asking —
@@ -1409,10 +1706,10 @@ async def jobs_page():
                                   on_click=lambda j=job["id"]: revive(j)) \
                             .props("flat dense no-caps")
                     else:
-                        ui.button("✕ kein Interesse",
+                        ui.button("✕ Firma ausblenden",
                                   on_click=lambda j=job["id"]:
                                       not_interested(j)) \
-                            .props("flat dense no-caps") \
+                            .props("flat dense").mark("job-x") \
                             .set_enabled(job["status"] == "new")
                     open_url = _openable_url(job)
                     if open_url:
@@ -1553,13 +1850,44 @@ async def jobs_page():
             state["selected"] = None
             await refresh(force=True)
 
+        def render_piles(view: dict) -> None:
+            """The piles, as doors. Every number under the list opens the view
+            that holds what it counts — they were printed and never clickable,
+            so a pile was named on screen and reachable only through a dropdown
+            that named it again."""
+            hidden_host.clear()
+            parts = hidden_parts(view["view"], view["counts"],
+                                 view["stale_age_days"], search=view["search"])
+            with hidden_host:
+                for index, part in enumerate(parts):
+                    if index:
+                        ui.label("·").classes("jd-meta")
+                    if part["view"] is None:
+                        ui.label(part["text"]).classes("jd-meta")
+                        continue
+                    ui.button(part["text"],
+                              on_click=lambda k=part["view"]: set_view(k)) \
+                        .props("flat dense").classes("jd-pile-door") \
+                        .mark(f"pile-{part['view']}")
+                if parts:
+                    # Said once, at the end, instead of "ausgeblendet" after
+                    # every number — five of them in one line is the noise he
+                    # rejected the arrangement over.
+                    ui.label("Nichts wird gelöscht.").classes("jd-meta")
+
         async def set_view(value: str) -> None:
             """Move to another named view.
 
-            One assignment and one refresh: nothing here writes another control,
-            so no handler can be echoed back into this one — which is what made
-            the two pile switches rebuild the page forever."""
-            state["view"] = value or DEFAULT_VIEW
+            The refresh WRITES this control now — it has to carry whichever
+            view a pile door opened — and NiceGUI dispatches a server-side
+            value write as a background task, so that write lands back here.
+            A no-op returns immediately; without it every redraw would load
+            the list a second time, which is the echo that once made two pile
+            switches rebuild the page forever."""
+            wanted = value or DEFAULT_VIEW
+            if wanted == state["view"]:
+                return
+            state["view"] = wanted
             state["page"] = 0  # a different list: page 3 of it means nothing
             state["selected"] = None
             read_here.clear()   # coming back to Neu is when it should have emptied
@@ -1569,6 +1897,47 @@ async def jobs_page():
             state["search"] = value
             state["page"] = 0
             state["selected"] = None
+            await refresh(force=True)
+
+        async def set_min_score(value) -> None:
+            """The floor under the list. Three quarters of what he scrolls is
+            noise the machine has already graded as weak."""
+            state["min_score"] = stored_min_score(value)
+            state["page"] = 0    # a shorter list: page 3 of it means nothing
+            state["selected"] = None
+            await run.io_bound(_store_filter, MIN_SCORE_SETTING,
+                               str(state["min_score"]))
+            await refresh(force=True)
+
+        async def set_sort(value) -> None:
+            state["sort"] = stored_sort(value)
+            state["page"] = 0
+            state["selected"] = None
+            await run.io_bound(_store_filter, SORT_SETTING, state["sort"])
+            await refresh(force=True)
+
+        async def search_now() -> None:
+            """Look for postings, now, from the screen he is looking at.
+
+            The function is the one Einstellungen used to call in English. It
+            is a coroutine and is awaited directly — `run.io_bound` would hand
+            a worker thread an un-awaited coroutine, and the arity rule that
+            catches the shape cannot see a mistake this asks for.
+            """
+            if polling.running():
+                say("Es läuft schon eine Suche.", type="warning")
+                return
+            search_button.disable()
+            search_button.set_text("Sucht …")
+            try:
+                await polling.poll_all_profiles(force=True)
+            except Exception as exc:        # a source can refuse at any moment
+                log.exception("manual poll failed")
+                say(f"Die Suche ist gescheitert: {exc}", type="warning",
+                    multi_line=True)
+            finally:
+                search_button.set_text("Jetzt suchen")
+                search_button.enable()
             await refresh(force=True)
 
         async def ask_before_committing(step: Step, job: dict) -> bool:
@@ -1851,9 +2220,28 @@ async def jobs_page():
             await refresh(force=True)
 
         async def not_interested(job_id: int) -> None:
+            """`x` — and it now reaches the COMPANY, not this one advert.
+
+            Measured before the change: eleven presses, eleven different
+            companies. Per-posting exclusion had never once helped him, while
+            nineteen companies hold a hundred and fifty of his open postings
+            and one staffing agency holds seven under seven different branch
+            names. Hiding the advert in front of him left the other six.
+
+            A posting with no company keeps the old behaviour: a blank field is
+            missing information, not an employer, so there is nothing to hide
+            but this row.
+            """
             job = shown.get(job_id)
             if job is None or job["status"] != "new":
                 return
+            # First, before any branch and before any await. Consecutive
+            # presses would otherwise stack undo bars with only the top one
+            # reachable — and a clear placed after an await destroys a dialog
+            # opened while it was pending, so anything parked on that dialog
+            # never wakes. The branches below are exclusive, but the rule that
+            # pins this cannot know that and is right not to guess.
+            overlay.clear()
             if job["form_opened_at"]:
                 # Defence in depth: `revive` is the way out of a started
                 # application because it ASKS whether one went out. Reaching
@@ -1861,8 +2249,72 @@ async def jobs_page():
                 await revive(job_id)
                 return
             _hold_place(job_id)
-            await run.io_bound(_set_status, job_id, "skipped")
+            result = await run.io_bound(_hide_company, job["company"] or "")
+            if result["already"]:
+                # He is standing in the pile looking at what he hid. Saying
+                # "ausgeblendet" again would be a lie, and the Rückgängig
+                # beside it would REVEAL the company rather than take it back.
+                say(f"{result['company']} ist schon ausgeblendet — „↩ Firma "
+                    f"wieder anzeigen“ holt sie zurück.", multi_line=True)
+                return
+            if not result["ok"]:
+                # No company on the posting: a blank field is missing
+                # information, not an employer, so there is nothing to hide but
+                # this row — and the screen has to say which of the two it did.
+                await run.io_bound(_set_status, job_id, "skipped")
+                await refresh(force=True)
+                say("Diese Anzeige nennt keine Firma — nur sie wurde weggelegt.",
+                    multi_line=True)
+                return
             await refresh(force=True)
+            with overlay:
+                _hidden_bar(result)
+
+        async def unhide(company: str) -> None:
+            await run.io_bound(_unhide_company, norm(company or ""))
+            await refresh(force=True)
+            say(f"{company} ist wieder in der Liste.", type="positive")
+
+        def _hidden_bar(result: dict) -> None:
+            """Ten seconds in which the press can be taken back, with the price
+            written into it.
+
+            No confirmation dialog: he hides companies often, and a dialog on
+            every press is a dialog he learns to click through, which guards
+            nothing. What makes the trade honest is that the undo is real work
+            and the bar states what was hidden — including that it goes on
+            applying to searches he has not run yet.
+            """
+            bar = ui.row().classes("jd-undo items-center gap-3")
+            gone = {"yes": False}
+
+            async def dismiss() -> None:
+                if gone["yes"] or bar.is_deleted:
+                    gone["yes"] = True
+                    return
+                gone["yes"] = True
+                bar.delete()
+
+            with bar:
+                best = (f", die beste mit Bewertung {result['best']}"
+                        if result["best"] else "")
+                many = result["jobs"] != 1
+                ui.label(
+                    f"{result['company']} ausgeblendet — "
+                    f"{result['jobs']} {'Anzeigen' if many else 'Anzeige'}"
+                    f"{best}. Gilt auch für neue Suchen.").classes("text-sm")
+
+                async def take_back() -> None:
+                    await dismiss()
+                    await run.io_bound(_unhide_company, result["key"])
+                    await refresh(force=True)
+                    say(f"{result['company']} ist wieder in der Liste.",
+                        type="positive")
+
+                ui.button("Rückgängig", on_click=take_back) \
+                    .props("flat dense").mark("undo-hide")
+            with timers:
+                ui.timer(10.0, dismiss, once=True)
 
         # ------------------------------------------------------------------
         # the slow actions, unchanged in substance from the old inbox

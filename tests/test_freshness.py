@@ -97,8 +97,14 @@ def test_the_inbox_orders_on_the_aged_score_and_reports_it(con, data_dir):
     undated = _job(con, "no-date-80", 80, "")
     con.commit()
 
-    rows = db.list_jobs(con, status="new")
+    # Under the score order — no longer the default, but still the order this
+    # whole module exists to define
+    rows = db.list_jobs(con, status="new", sort="score")
     assert [r["id"] for r in rows] == [undated, fresh_good, stale_star]
+    # …and the aged score is REPORTED whichever order is asked for, because the
+    # row prints the number that decided its place
+    assert [r["id"] for r in db.list_jobs(con, status="new", sort="date")] \
+        == [fresh_good, stale_star, undated]
     by_id = {r["id"]: r for r in rows}
     assert by_id[stale_star]["effective_score"] == 72
     assert by_id[stale_star]["age_days"] in (149, 150, 151)
@@ -113,7 +119,8 @@ def test_a_known_date_wins_the_tie_over_an_unknown_one(con, data_dir):
     dated = _job(con, "dated", 80, today)
     undated = _job(con, "undated", 80, "")
     con.commit()
-    assert [r["id"] for r in db.list_jobs(con, status="new")] == [dated, undated]
+    assert [r["id"] for r in db.list_jobs(con, status="new", sort="score")] \
+        == [dated, undated]
 
 
 # ---------------------------------------------------------------------------

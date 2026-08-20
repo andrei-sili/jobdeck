@@ -330,7 +330,7 @@ async def test_a_row_action_leaves_the_page_able_to_update_itself(
     await user.open("/")
     await user.should_see("Python Entwickler")
 
-    user.find("✕ kein Interesse").click()
+    user.find("✕ Firma ausblenden").click()
     await asyncio.sleep(0.3)
     await user.should_not_see("Python Entwickler")
 
@@ -436,8 +436,11 @@ async def test_the_keyboard_moves_the_selection_and_opens_what_it_lands_on(
     assert len(_selected(user)) == 1
 
 
-async def test_x_puts_a_posting_away_and_s_sets_it_aside(user: User, con,
-                                                         data_dir):
+async def test_x_hides_the_company_and_s_sets_a_posting_aside(user: User, con,
+                                                              data_dir):
+    """`x` reaches the COMPANY now. Measured before the change: eleven presses,
+    eleven different companies — putting one advert away had never once helped
+    him, while one staffing agency held seven under seven branch names."""
     job_id = _posting(con)
     await user.open("/")
     await user.should_see("Beispiel GmbH")
@@ -447,9 +450,12 @@ async def test_x_puts_a_posting_away_and_s_sets_it_aside(user: User, con,
                        (job_id,)).fetchone()[0] != ""
 
     await _press(user, "x")
+    assert [r["company"] for r in db.list_hidden_companies(con)] == \
+        ["Beispiel GmbH"]
+    # …and the posting itself is untouched: it is a view, not a status
     assert con.execute("SELECT status FROM jobs WHERE id=?",
-                       (job_id,)).fetchone()[0] == "skipped"
-    await user.should_not_see("Beispiel GmbH")
+                       (job_id,)).fetchone()[0] == "new"
+    assert db.count_job_groups(con, "new", hidden="exclude") == 0
 
 
 async def test_the_keyboard_keeps_out_of_the_fields_he_types_in(user: User, con,
@@ -1248,7 +1254,7 @@ async def test_the_reader_redraws_when_a_form_is_started_somewhere_else(
                          "https://join.com/companies/x/1/apply")
     con.commit()
     await user.open("/")
-    await user.should_see("kein Interesse")
+    await user.should_see("Firma ausblenden")
 
     # exactly what another tab's press writes — nothing on THIS page ran
     db.mark_form_opened(con, job_id)
