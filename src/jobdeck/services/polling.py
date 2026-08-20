@@ -22,6 +22,23 @@ log = logging.getLogger(__name__)
 
 _client: httpx.AsyncClient | None = None
 
+# One pass at a time, whoever asked for it. The scheduler wakes every profile
+# hourly and there is now a button on the Stellen screen; without this, a press
+# landing on top of the scheduled pass sends every query twice — to an API this
+# project already uses on sufferance.
+_lock = asyncio.Lock()
+
+# Where the last pass writes down what it found. `poll_all_profiles` has always
+# RETURNED these three numbers and thrown them into a log line, so a search that
+# found nothing looked exactly like a search that never ran — which is half of
+# what he was asking when he said "cind? cum?".
+#
+# Stored rather than notified: a toast answers the question for whoever happened
+# to be looking, and he asks it precisely when he was not.
+LAST_POLL_AT = "last_poll_at"
+LAST_POLL_REPORT = "last_poll_report"
+LAST_POLL_SOURCE = "last_poll_source"
+
 
 def http_client() -> httpx.AsyncClient:
     """Shared client with sane timeouts and light retries."""
@@ -128,16 +145,77 @@ def _mark_polled(profile_id: int, error: str | None) -> None:
 
 
 async def poll_all_profiles(force: bool = False) -> dict[str, int]:
-    """Poll every active profile that is due (or all, when forced)."""
-    now = datetime.datetime.now()
-    profiles = await asyncio.to_thread(_list_active_profiles)
-    total = {"new": 0, "duplicate": 0, "known": 0}
-    for profile in profiles:
-        if force or _profile_due(profile, now):
-            counters = await poll_profile(profile)
-            for key, value in counters.items():
-                total[key] += value
-    return total
+    """Poll every active profile that is due (or all, when forced).
+
+    `force` is what a press means and `due` is what the schedule means, and the
+    two are the same pass — so the report is written on both paths. A screen
+    that only remembered his own searches would go blank overnight and say
+    nothing about the twelve postings that arrived while he slept.
+    """
+    async with _lock:  # a press landing on the scheduled pass is one pass
+        now = datetime.datetime.now()
+        profiles = await asyncio.to_thread(_list_active_profiles)
+        total = {"new": 0, "duplicate": 0, "known": 0, "profiles": 0}
+        for profile in profiles:
+            if force or _profile_due(profile, now):
+                counters = await poll_profile(profile)
+                total["profiles"] += 1
+                for key, value in counters.items():
+                    total[key] += value
+        # …but only when a pass actually ran. A scheduler tick that found
+        # nothing due must not overwrite the receipt of the last real search
+        # with three zeros.
+        if total["profiles"]:
+            await asyncio.to_thread(_record_poll, total, force)
+        return total
+
+
+def running() -> bool:
+    """Whether a pass is under way — for a button that must not offer a second."""
+    return _lock.locked()
+
+
+def _record_poll(total: dict[str, int], force: bool) -> None:
+    with db.db() as con:
+        db.set_setting(con, LAST_POLL_AT, datetime.datetime.now().isoformat())
+        db.set_setting(con, LAST_POLL_REPORT, json.dumps(total))
+        db.set_setting(con, LAST_POLL_SOURCE, "user" if force else "schedule")
+
+
+def _whole(value) -> int:
+    """One figure out of a stored report, 0 for anything that is not one.
+
+    Screened per FIGURE rather than per report: a single unparseable value
+    would otherwise blank all four, and the report is read while a page is
+    being built — the shape that once took down the inbox AND the settings
+    page that could have fixed it.
+    """
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def last_poll(con) -> dict:
+    """What the last pass found, for the line above the list.
+
+    Answers with empty rather than raising on anything unparseable: these are
+    rows in a table he can edit, and they are read while a page is being built.
+    """
+    raw = db.get_setting(con, LAST_POLL_REPORT, "")
+    try:
+        report = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        report = {}
+    if not isinstance(report, dict):
+        report = {}
+    counts = {key: _whole(report.get(key))
+              for key in ("new", "duplicate", "known", "profiles")}
+    return {
+        "at": db.get_setting(con, LAST_POLL_AT, ""),
+        "by": db.get_setting(con, LAST_POLL_SOURCE, ""),
+        **counts,
+    }
 
 
 def _list_active_profiles():
