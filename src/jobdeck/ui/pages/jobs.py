@@ -145,6 +145,16 @@ MAIN_VIEW_KEYS = ("neu", "offen", "vorgemerkt", "in_arbeit",
                   "beworben", "kein_interesse", "doppelt")
 
 
+def _view_options(current: str) -> dict:
+    """What the Ansicht control offers: the four ways of looking at the working
+    list, the three piles that have no number — and whichever view is on screen,
+    so a pile opened from its count can be left the same way it was entered."""
+    keys = [*MAIN_VIEW_KEYS]
+    if current not in keys:
+        keys.append(current)
+    return {view.key: view.label for view in VIEWS if view.key in keys}
+
+
 def hidden_parts(view: View, counts: dict, stale_age_days: int,
                  search: str = "") -> list[dict]:
     """The pile line, as data: each part its own sentence and, where there is
@@ -1187,9 +1197,8 @@ async def jobs_page():
                             .classes("flex-1")
                         search_box.on_value_change(
                             lambda e: set_search(e.value or ""))
-                        ui.select(
-                            {view.key: view.label for view in VIEWS
-                             if view.key in MAIN_VIEW_KEYS},
+                        view_select = ui.select(
+                            _view_options(DEFAULT_VIEW),
                             value=DEFAULT_VIEW,
                             label="Ansicht",
                             on_change=lambda e: set_view(e.value),
@@ -1237,6 +1246,13 @@ async def jobs_page():
             if gen != refresh_gen["n"] or view is None:
                 return  # superseded, or the page is going away
             state["page"] = view["page"]   # the loader clamped it to what exists
+            # A pile opened from its number is not in the control's short list,
+            # and a control naming a different view from the one on screen is a
+            # control that lies. It carries the current view whatever it is, so
+            # the way in through a number and the way out through the control
+            # are the same place.
+            view_select.set_options(_view_options(view["view"].key),
+                                    value=view["view"].key)
             poll_label.set_text(poll_line(view["poll"]))
             live_view.mark(view["signature"])
             fresh = {row["id"]: row for row in view["rows"]}

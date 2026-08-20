@@ -414,3 +414,41 @@ async def test_the_line_says_once_that_nothing_is_deleted(user: User, con,
     await user.open("/")
 
     await user.should_see("Nichts wird gelöscht.")
+
+
+async def test_the_control_names_the_view_that_is_on_screen(user: User, con,
+                                                            data_dir):
+    """Found only by driving the real screen: opening a pile from its number
+    left the control reading "Neu" while the list showed the offline pile — a
+    control naming a different view from the one on screen is a control that
+    lies, and it was also the way back out."""
+    _job(con, "a", "Gut GmbH", 80)
+    _job(con, "b", "Schlecht GmbH", 0)
+    await user.open("/")
+
+    user.find(marker="pile-passt_nicht").click()
+    await asyncio.sleep(0.3)
+
+    control = _marked(user, "view-select")[0]
+    assert control.value == "passt_nicht"
+    assert "passt_nicht" in control.options
+    # …and the four main ways of looking are still offered, so it is a way out
+    assert set(jobs.MAIN_VIEW_KEYS) <= set(control.options)
+
+
+async def test_the_control_drops_the_pile_again_once_he_leaves_it(
+        user: User, con, data_dir):
+    """It carries the CURRENT view, not every view he has visited — otherwise
+    the eleven-item dropdown grows back one press at a time."""
+    _job(con, "a", "Gut GmbH", 80)
+    _job(con, "b", "Schlecht GmbH", 0)
+    await user.open("/")
+    user.find(marker="pile-passt_nicht").click()
+    await asyncio.sleep(0.3)
+
+    _marked(user, "view-select")[0].set_value("offen")
+    await asyncio.sleep(0.3)
+
+    control = _marked(user, "view-select")[0]
+    assert control.value == "offen"
+    assert "passt_nicht" not in control.options
