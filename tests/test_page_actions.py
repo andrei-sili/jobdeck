@@ -429,3 +429,23 @@ async def test_the_reading_pane_notices_the_save(user: User, con, data_dir):
         "SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()))
 
     assert before != after
+
+
+# ---------------------------------------------------------------------------
+# No ALL-CAPS buttons — the project's rule, and Quasar's default is the
+# opposite. Pinned as a property of every rendered button rather than checked
+# per call site: the Antworten page carried `no-caps` on all nineteen of its
+# buttons and every other page carried it on none, which is what "remember it
+# each time" always produces.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("route", ["/unterlagen", "/", "/bewerbungen",
+                                   "/antworten", "/settings", "/queue"])
+async def test_no_screen_shouts_at_him(user: User, con, data_dir, route):
+    await user.open(route)
+
+    with user.client:
+        shouting = [el for el in user.client.elements.values()
+                    if isinstance(el, ui.button)
+                    and not el.props.get("no-caps")]
+    assert shouting == [], \
+        f"{route}: {[el.props.get('label') for el in shouting]} render ALL-CAPS"

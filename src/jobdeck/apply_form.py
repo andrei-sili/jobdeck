@@ -1,7 +1,13 @@
 """What a German application form asks for, assembled per posting.
 
-Portals and ATS forms are never automated — that is a settled product decision
-(platform AGB, Art. 22 DSGVO), and 237 of his postings route to one. So the work
+Portals and ATS forms are never automated — that is a settled product decision.
+The reason is the platforms' own terms plus the fact that a form submitted
+without being read is irreversible, and one application per company means a
+silent mistake burns that company for good. It is NOT Art. 22 GDPR, which this
+docstring used to cite: that article governs the EMPLOYER making an automated
+decision about the applicant, and says nothing about how the applicant fills a
+form. A wrong justification is how a rule survives without ever being examined.
+237 of his postings route to a form. So the work
 that remains is the five minutes of typing, and every one of those minutes goes
 into fields he has already written down somewhere: his address, his links, his
 availability, the Stellenbezeichnung, the Referenznummer, the Anschreiben.

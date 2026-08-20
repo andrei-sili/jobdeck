@@ -568,3 +568,153 @@ def test_without_ueberlassung_the_ordinary_reason_still_stands(con, data_dir):
     reasons = {m["key"]: m["why"]
                for m in unterlagen.preview(con, job_id)["missing"]}
     assert "weder Anzeige noch Board" in reasons["strasse"]
+
+
+# --------------------------------------------------------------------------
+# What the spine says about the documents rubric. Untested, the whole rubric
+# could report zeros — telling him his Mappe is the letter alone while six
+# certificates sit in the folder.
+# --------------------------------------------------------------------------
+def _template(data_dir) -> pathlib.Path:
+    path = data_dir / "vorlage.html"
+    path.write_text(TEMPLATE, encoding="utf-8")
+    return path
+
+
+def test_the_rail_counts_the_template_and_every_anlage(con, data_dir):
+    folder = data_dir / "anlagen"
+    folder.mkdir()
+    _blank_pdf(folder / "01_A.pdf")
+    _blank_pdf(folder / "02_B.pdf")
+    db.set_setting(con, "anlagen_dir", str(folder))
+    db.set_setting(con, "template_path", str(_template(data_dir)))
+    con.commit()
+
+    facts = unterlagen.rail_facts(con)
+
+    assert facts["documents"] == 3      # the letter template plus two Anlagen
+    assert facts["anlagen"] == 2
+    assert facts["template_ok"] is True
+    assert facts["folder_state"] == "ok"
+    assert facts["built"] is False      # nothing has measured it yet
+
+
+def test_the_rail_does_not_count_a_template_that_is_not_there(con, data_dir):
+    folder = data_dir / "anlagen"
+    folder.mkdir()
+    _blank_pdf(folder / "01_A.pdf")
+    db.set_setting(con, "anlagen_dir", str(folder))
+    db.set_setting(con, "template_path", str(data_dir / "weg.html"))
+    con.commit()
+
+    facts = unterlagen.rail_facts(con)
+
+    assert (facts["template_ok"], facts["documents"]) == (False, 1)
+
+
+def test_a_specimen_without_a_measurement_does_not_count_as_built(con, data_dir):
+    """The letter's own length is what a build writes down. A specimen file
+    left behind by an older version measures nothing, and every page span on
+    the screen would still be unknown."""
+    unterlagen.specimen_path().parent.mkdir(parents=True, exist_ok=True)
+    _blank_pdf(unterlagen.specimen_path(), pages=4)
+    con.commit()
+
+    assert unterlagen.rail_facts(con)["built"] is False
+
+    db.set_setting(con, unterlagen.LETTER_PAGES_SETTING, "3")
+    con.commit()
+    assert unterlagen.rail_facts(con)["built"] is True
+
+
+def test_an_unusable_folder_setting_does_not_take_the_rail_down(con, data_dir):
+    """The rail is drawn on EVERY page. `Path.expanduser()` raises on a "~name"
+    with no such user, and this value is free text in a field he edits — so one
+    typo would have made the whole app unrenderable, settings page included."""
+    db.set_setting(con, "anlagen_dir", "~kein-solcher-benutzer/Anlagen")
+    db.set_setting(con, "template_path", "~kein-solcher-benutzer/vorlage.html")
+    con.commit()
+
+    facts = unterlagen.rail_facts(con)
+
+    assert facts["folder_state"] == "missing"
+    assert facts["template_ok"] is False
+    assert unterlagen.rail_fingerprint(con) is not None
+
+
+def test_the_rail_notices_a_certificate_arriving_in_the_folder(con, data_dir):
+    """None of this is in a table. Without the folder in the fingerprint the
+    spine goes on reading "keine Anlagen" for the life of the page he just
+    filled — the staleness class the live watcher exists to end."""
+    folder = data_dir / "anlagen"
+    folder.mkdir()
+    db.set_setting(con, "anlagen_dir", str(folder))
+    con.commit()
+    before = unterlagen.rail_fingerprint(con)
+
+    _blank_pdf(folder / "01_Zeugnis.pdf")
+
+    assert unterlagen.rail_fingerprint(con) != before
+
+
+def test_the_rail_notices_the_folder_itself_being_chosen(con, data_dir):
+    """A folder just created and still EMPTY fingerprints identically to no
+    folder at all if only its contents are signed — so the one press that
+    answers "where do I put my documents" left the spine reading "kein Ordner
+    für Anlagen" for the life of the page."""
+    empty = data_dir / "Anlagen"
+    empty.mkdir()
+    before = unterlagen.rail_fingerprint(con)          # nothing configured
+
+    db.set_setting(con, "anlagen_dir", str(empty))
+    con.commit()
+
+    assert unterlagen.rail_fingerprint(con) != before
+    # and moving to a DIFFERENT empty folder is a change too
+    other = data_dir / "Anderswo"
+    other.mkdir()
+    mid = unterlagen.rail_fingerprint(con)
+    db.set_setting(con, "anlagen_dir", str(other))
+    con.commit()
+    assert unterlagen.rail_fingerprint(con) != mid
+
+
+def test_the_rail_notices_the_template_being_chosen(con, data_dir):
+    """Same blind spot on the other path: pointing the setting at a template
+    that is not there yet must still reach the rubric."""
+    before = unterlagen.rail_fingerprint(con)
+
+    db.set_setting(con, "template_path", str(data_dir / "noch-nicht-da.html"))
+    con.commit()
+
+    assert unterlagen.rail_fingerprint(con) != before
+
+
+def test_the_rail_notices_the_template_being_replaced(con, data_dir):
+    path = _template(data_dir)
+    db.set_setting(con, "template_path", str(path))
+    con.commit()
+    before = unterlagen.rail_fingerprint(con)
+
+    path.write_text(TEMPLATE + "<p>eine Seite mehr</p>", encoding="utf-8")
+
+    assert unterlagen.rail_fingerprint(con) != before
+
+
+def test_a_folder_that_cannot_be_read_is_its_own_state(con, data_dir):
+    """Mounted and unreadable answered exactly like empty, and the Mappe built
+    from it would be the letter alone — reported as complete."""
+    folder = data_dir / "anlagen"
+    folder.mkdir()
+    _blank_pdf(folder / "01_A.pdf")
+    db.set_setting(con, "anlagen_dir", str(folder))
+    con.commit()
+    folder.chmod(0o000)
+    try:
+        state = unterlagen.folder_state(str(folder), 0)
+    finally:
+        folder.chmod(0o755)
+
+    assert state["state"] == "unreadable"
+    assert "nicht lesen" in state["note"]
+    assert unterlagen.folder_state(str(folder), 1)["state"] == "ok"

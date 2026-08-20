@@ -19,6 +19,8 @@ import tempfile
 from PIL import Image
 from pypdf import PdfReader, PdfWriter
 
+from jobdeck import config
+
 log = logging.getLogger(__name__)
 
 MAX_MAPPE_BYTES = 5 * 1024 * 1024  # German-application convention: ONE PDF < 5 MB
@@ -445,9 +447,15 @@ def compress_to_target(src: pathlib.Path, out: pathlib.Path,
 def collect_anlagen(anlagen_dir: str) -> list[pathlib.Path]:
     """PDFs from the Anlagen folder, sorted by filename (prefix 01_, 02_ …
     to control the order). Empty/missing dir → no Anlagen."""
-    if not (anlagen_dir or "").strip():
+    folder = config.user_path(anlagen_dir)
+    if folder is None:
         return []
-    folder = pathlib.Path(anlagen_dir).expanduser()
     if not folder.is_dir():
         raise PdfError(f"Anlagen folder does not exist: {folder}")
-    return sorted(p for p in folder.iterdir() if p.suffix.lower() == ".pdf")
+    try:
+        return sorted(p for p in folder.iterdir() if p.suffix.lower() == ".pdf")
+    except OSError as exc:
+        # A folder that exists and cannot be read is not an empty folder: on an
+        # unmounted or permission-lost volume the merge would quietly produce a
+        # Mappe of the letter alone.
+        raise PdfError(f"Anlagen folder cannot be read: {folder} — {exc}") from exc

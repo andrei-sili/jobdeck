@@ -186,8 +186,8 @@ def _build_mappe(job_id: int) -> dict:
                       "the letter's date line")
     if not settings["template_path"]:
         return _error("set the letter template path in Settings first")
-    template_file = pathlib.Path(settings["template_path"]).expanduser()
-    if not template_file.is_file():
+    template_file = config.user_path(settings["template_path"])
+    if template_file is None or not template_file.is_file():
         return _error(f"letter template not found: {template_file}")
     draft_revision = draft["updated_at"]
 

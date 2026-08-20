@@ -170,6 +170,9 @@ body { background: var(--paper); color: var(--ink); font-family: var(--jd-sans);
 .jd-pulse-dot { width:6px; height:6px; border-radius:50%; background: var(--accent);
                 flex:none; }
 .jd-pulse-dot.idle { background: var(--rule-2); }
+/* A source that answered with an error, or none configured at all: the amber
+   the Unterlagen rubric used to carry, moved here with the profiles. */
+.jd-pulse-dot.warn { background: var(--warn); }
 .jd-pulse-dot.run { animation: jd-pulse 1.4s ease-in-out infinite; }
 @keyframes jd-pulse { 0%,100%{opacity:1} 50%{opacity:.25} }
 @media (prefers-reduced-motion: reduce) { .jd-pulse-dot.run { animation: none; } }
@@ -182,8 +185,8 @@ body { background: var(--paper); color: var(--ink); font-family: var(--jd-sans);
 
 /* Page range, what it is, how heavy — one grid so the columns line up and
    the eye can run down the weights without reading the names. */
-.jd-stack { display:grid; grid-template-columns:auto 1fr auto auto; gap:0 14px;
-            width:100%; }
+.jd-stack { display:grid; grid-template-columns:auto 1fr auto auto auto;
+            gap:0 14px; width:100%; }
 .jd-stack > * { padding:6px 0; border-bottom:1px solid var(--rule); min-width:0; }
 .jd-stack > .last { border-bottom:0; }
 .jd-pageno { font:400 11.5px/1.6 var(--jd-mono); color: var(--ink-4);
@@ -195,6 +198,18 @@ body { background: var(--paper); color: var(--ink); font-family: var(--jd-sans);
                text-align:right; }
 .jd-partmeta.warn { color: var(--warn); }
 .jd-total { font:500 13px/1.6 var(--jd-mono); font-variant-numeric: tabular-nums; }
+/* The actions column: present on every row so the grid keeps its shape, but
+   only ever filled for a row that is a file on disk. Reserved rather than
+   collapsed, so the page does not reflow as the last Anlage is removed. */
+.jd-partacts { min-width:104px; justify-content:flex-end; flex-wrap:nowrap;
+               align-items:center; padding-top:0; padding-bottom:0; }
+/* The folder his documents really live in. Monospaced because it is a path he
+   compares against what his file manager shows, and breakable because it is
+   long and must not push the card wide. */
+.jd-path { font:400 11.5px/1.6 var(--jd-mono); color: var(--ink-2);
+           word-break:break-all; }
+.jd-upload { min-height:0; }
+.jd-upload .q-uploader__header { background: var(--surface-2); color: var(--ink-2); }
 
 /* The letter head, drawn the way the page it describes is laid out. */
 .jd-letter { border:1px solid var(--rule); border-radius:8px; background: var(--surface-2);
@@ -302,4 +317,11 @@ def install() -> None:
     ui.dark_mode(False)
     ui.colors(primary=ACCENT, secondary=WARN, negative=DANGER,
               positive=ACCENT, dark=INK)
+    # No ALL-CAPS buttons — the project's own rule, and Quasar uppercases every
+    # label unless told otherwise. Set once here rather than remembered at each
+    # of the ~127 call sites: the Antworten page is the only one that carried
+    # `no-caps` on every button, which is exactly what "remember it every time"
+    # produces. "ORDNER ÖFFNEN" and "NEU BAUEN" shouted on the screen whose
+    # complaint was that it is hard to read.
+    ui.button.default_props("no-caps")
     ui.add_css(CSS)
