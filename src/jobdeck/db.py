@@ -589,6 +589,23 @@ HIDDEN_FIRM_SQL = """(
     jd_norm(jobs.company) <> '' AND jd_norm(jobs.company) IN (
         SELECT company_key FROM hidden_companies WHERE company_key <> ''))"""
 
+# The floor he sets under the list. Three things it must get right, and each of
+# them was a way to lie to him:
+#
+# * It compares the AGED score — the very number the row prints and the list
+#   sorts on. Filtering the raw `match_score` instead would put a row reading
+#   "58" above a floor of 60, and the two figures on one screen would disagree.
+# * `match_score IS NULL` passes. `NULL >= 40` is NULL, so without this arm a
+#   posting that arrived between a search and the scoring pass would vanish
+#   silently — which is exactly what a screen must never do to a row nobody has
+#   judged yet.
+# * A score of 0 is NOT a low score. It means the posting violates a hard
+#   requirement, and it has its own named pile; letting it through a floor of
+#   "ab 0" would tip 564 knock-outs into the working list.
+SCORE_FLOOR_SQL = (
+    f"({freshness.effective_score_sql()} >= ? OR match_score IS NULL)"
+)
+
 
 # A posting whose application is UNDER WAY. Two ways that happens and they are
 # one fact from his side: a draft is being written or waiting to be sent, or he
@@ -619,6 +636,7 @@ def _job_filters(
     bookmarked: str = "include", opened: str = "include",
     in_progress: str = "include", search: str = "",
     keep_ids: tuple[int, ...] = (), hidden: str = "include",
+    min_score: int = 0,
 ) -> tuple[list[str], list]:
     """WHERE fragments + bound values shared by the list and the count, so a
     page can never be filtered differently from the total printed beside it.
@@ -656,6 +674,11 @@ def _job_filters(
         where.append(f"NOT {HIDDEN_FIRM_SQL}")
     elif hidden == "only":
         where.append(HIDDEN_FIRM_SQL)
+    # Bound, and appended together with its value — the params list is
+    # positional, so a clause added without its binding shifts every later one.
+    if min_score > 0:
+        where.append(SCORE_FLOOR_SQL)
+        params.append(min_score)
     # The threshold is BOUND, and the fragment is appended together with its
     # value: the params list is positional, so a clause added without its
     # binding here would silently shift every later one.
@@ -774,6 +797,7 @@ def list_job_groups(
     search: str = "",
     keep_ids: tuple[int, ...] = (),
     hidden: str = "include",
+    min_score: int = 0,
     offset: int = 0,
 ) -> list[sqlite3.Row]:
     """One row per company: its best-ranked posting, plus `company_count`.
@@ -785,7 +809,8 @@ def list_job_groups(
     represents it."""
     where, params = _job_filters(status, mismatches, gone, applied, old,
                                  stale_age_days, bookmarked, opened,
-                                 in_progress, search, keep_ids, hidden)
+                                 in_progress, search, keep_ids, hidden,
+                                 min_score)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     order = _JOB_ORDER_SQL if status else "id DESC"
     return con.execute(
@@ -810,11 +835,13 @@ def count_job_groups(
     search: str = "",
     keep_ids: tuple[int, ...] = (),
     hidden: str = "include",
+    min_score: int = 0,
 ) -> int:
     """How many companies the grouped view holds."""
     where, params = _job_filters(status, mismatches, gone, applied, old,
                                  stale_age_days, bookmarked, opened,
-                                 in_progress, search, keep_ids, hidden)
+                                 in_progress, search, keep_ids, hidden,
+                                 min_score)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     return con.execute(
         f"{_ranked_jobs_cte(where_sql)}"
@@ -841,6 +868,7 @@ def list_company_siblings(
     search: str = "",
     keep_ids: tuple[int, ...] = (),
     hidden: str = "include",
+    min_score: int = 0,
     per_company: int = SIBLINGS_PER_COMPANY,
 ) -> list[sqlite3.Row]:
     """The postings a grouped row stands in front of, best-ranked first.
@@ -853,7 +881,8 @@ def list_company_siblings(
         return []
     where, params = _job_filters(status, mismatches, gone, applied, old,
                                  stale_age_days, bookmarked, opened,
-                                 in_progress, search, keep_ids, hidden)
+                                 in_progress, search, keep_ids, hidden,
+                                 min_score)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     placeholders = ",".join("?" * len(company_keys))
     return con.execute(
@@ -880,12 +909,14 @@ def count_jobs(
     search: str = "",
     keep_ids: tuple[int, ...] = (),
     hidden: str = "include",
+    min_score: int = 0,
 ) -> int:
     """How many postings a `list_jobs` call with the same filters would have,
     ignoring its page limit — the total a paged view has to print."""
     where, params = _job_filters(status, mismatches, gone, applied, old,
                                  stale_age_days, bookmarked, opened,
-                                 in_progress, search, keep_ids, hidden)
+                                 in_progress, search, keep_ids, hidden,
+                                 min_score)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     return con.execute(
         f"SELECT COUNT(*) FROM jobs{where_sql}", params
@@ -907,6 +938,7 @@ def list_jobs(
     search: str = "",
     keep_ids: tuple[int, ...] = (),
     hidden: str = "include",
+    min_score: int = 0,
     offset: int = 0,
 ) -> list[sqlite3.Row]:
     """List postings. mismatches: 'include' (default), 'exclude' (hide the
@@ -916,7 +948,8 @@ def list_jobs(
     values over postings whose ad the source says is no longer there."""
     where, params = _job_filters(status, mismatches, gone, applied, old,
                                  stale_age_days, bookmarked, opened,
-                                 in_progress, search, keep_ids, hidden)
+                                 in_progress, search, keep_ids, hidden,
+                                 min_score)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     # The age-adjusted score is SELECTED as well as ordered on, so the number
     # the UI prints is the very number that decided the row's position — two
