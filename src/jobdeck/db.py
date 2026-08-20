@@ -763,10 +763,12 @@ _RANK_ORDER_SQL = "effective_score DESC NULLS LAST, published_on DESC, id DESC"
 # sort: with 222 of 300 rows under 40 points, "newest first" alone would put
 # fresh noise at the top, which is the complaint it is meant to answer.
 #
-# `NULLIF(published_on,'')` because an unknown date is stored as the empty
-# string, not as NULL — without it the undated postings would sort as if they
-# were the oldest possible date rather than as "we do not know".
-_DATE_ORDER_SQL = ("NULLIF(published_on,'') DESC NULLS LAST, "
+# An unknown date is stored as the EMPTY STRING, not as NULL, and it still
+# sorts last — checked rather than assumed, and written down here because the
+# obvious "fix" is a NULLIF that changes nothing: '' collates below any date,
+# so DESC already puts it at the bottom, exactly where "we do not know" belongs.
+# `NULLS LAST` covers the NULL a hand-edited row could carry.
+_DATE_ORDER_SQL = ("published_on DESC NULLS LAST, "
                    "effective_score DESC NULLS LAST, id DESC")
 LIST_ORDERS = {"score": _RANK_ORDER_SQL, "date": _DATE_ORDER_SQL}
 DEFAULT_LIST_ORDER = "date"
