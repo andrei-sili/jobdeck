@@ -24,6 +24,7 @@ from jobdeck.services import (
     polling,
     preparing,
 )
+from jobdeck.services.register import plural
 from jobdeck.services.replies import RECEIPT_WINDOW_H
 from jobdeck.ui import draft_editor, helpers, live, rail
 from jobdeck.ui.helpers import (
@@ -178,23 +179,31 @@ def hidden_parts(view: View, counts: dict, stale_age_days: int,
                       "view": None})
     if view.filters.get("opened") == "exclude" and counts.get("read"):
         parts.append({"text": f"{counts['read']} schon gelesen", "view": "offen"})
-    for arm, count_key, pile, hidden, only in (
+    # Every one of these figures can be ONE. Written only in the plural they
+    # read "1 Anzeigen sind offline" — the kind of German that makes a reader
+    # distrust the number beside it, and this project has shipped it before.
+    for arm, count_key, pile, hidden, one, many in (
         ("mismatches", "mismatches", "passt_nicht", "{n} passen nicht",
-         "{n} verletzen eine harte Anforderung"),
-        ("gone", "dead", "offline", "{n} offline", "{n} Anzeigen sind offline"),
+         "Anzeige verletzt eine harte Anforderung",
+         "Anzeigen verletzen eine harte Anforderung"),
+        ("gone", "dead", "offline", "{n} offline",
+         "Anzeige ist offline", "Anzeigen sind offline"),
         ("applied", "applied_firm", "firma_kontaktiert",
          "{n} bei schon beworbenen Firmen",
-         "{n} Stellen bei Firmen, bei denen du dich schon beworben hast"),
+         "Stelle bei einer Firma, bei der du dich schon beworben hast",
+         "Stellen bei Firmen, bei denen du dich schon beworben hast"),
         ("old", "old", "alt", f"{{n}} älter als {stale_age_days} Tage",
-         f"{{n}} Anzeigen älter als {stale_age_days} Tage"),
+         f"Anzeige älter als {stale_age_days} Tage",
+         f"Anzeigen älter als {stale_age_days} Tage"),
         ("hidden", "hidden", "ausgeblendet", "{n} bei ausgeblendeten Firmen",
-         "{n} Anzeigen bei ausgeblendeten Firmen"),
+         "Anzeige bei einer ausgeblendeten Firma",
+         "Anzeigen bei ausgeblendeten Firmen"),
     ):
         count = counts.get(count_key, 0)
         if view.filters.get(arm) == "exclude" and count:
             parts.append({"text": hidden.format(n=count), "view": pile})
         elif view.filters.get(arm) == "only":
-            parts.append({"text": only.format(n=count), "view": None})
+            parts.append({"text": plural(count, one, many), "view": None})
     return parts
 
 
@@ -650,7 +659,8 @@ def _range_line(page: int, total: int, shown: int) -> str:
     if not total:
         return ""
     first = page * PAGE_SIZE + 1
-    return f"{first}–{first + shown - 1} von {total} Firmen"
+    return (f"{first}–{first + shown - 1} von "
+            f"{plural(total, 'Firma', 'Firmen')}")
 
 
 # What this screen states that lives in app_settings rather than in a table.
