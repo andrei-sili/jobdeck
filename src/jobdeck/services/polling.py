@@ -192,7 +192,10 @@ def _whole(value) -> int:
     """
     try:
         return max(0, int(value))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError, not only ValueError: `int(float("inf"))` raises the
+        # first, and JSON really does carry Infinity — the same shape that
+        # once took the inbox down over a non-finite age threshold.
         return 0
 
 

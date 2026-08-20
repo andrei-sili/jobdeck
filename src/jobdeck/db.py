@@ -770,16 +770,25 @@ _RANK_ORDER_SQL = "effective_score DESC NULLS LAST, published_on DESC, id DESC"
 # `NULLS LAST` covers the NULL a hand-edited row could carry.
 _DATE_ORDER_SQL = ("published_on DESC NULLS LAST, "
                    "effective_score DESC NULLS LAST, id DESC")
+# The same order for a list of COMPANIES. A row stands for a company's BEST
+# advert, so ordering by that advert's date puts a company whose newest advert
+# went up today at thirty days old because its best one is. "Neueste zuerst"
+# has to mean the company's newest advert, whichever of its adverts represents
+# it — which is what the window over the whole partition answers.
+_GROUP_DATE_ORDER_SQL = ("company_published_on DESC NULLS LAST, "
+                         "effective_score DESC NULLS LAST, id DESC")
 LIST_ORDERS = {"score": _RANK_ORDER_SQL, "date": _DATE_ORDER_SQL}
+_GROUP_ORDERS = {"score": _RANK_ORDER_SQL, "date": _GROUP_DATE_ORDER_SQL}
 DEFAULT_LIST_ORDER = "date"
 
 
-def list_order_sql(sort: str) -> str:
+def list_order_sql(sort: str, grouped: bool = False) -> str:
     """The ORDER BY for a named sort, falling back rather than raising.
 
     The name reaches here from a stored setting he can edit; an unknown one is
     a screen that will not open, and the default is always a safe answer."""
-    return LIST_ORDERS.get(sort or "", LIST_ORDERS[DEFAULT_LIST_ORDER])
+    orders = _GROUP_ORDERS if grouped else LIST_ORDERS
+    return orders.get(sort or "", orders[DEFAULT_LIST_ORDER])
 
 
 def _ranked_jobs_cte(where_sql: str) -> str:
@@ -799,6 +808,9 @@ def _ranked_jobs_cte(where_sql: str) -> str:
         f" FROM jobs{where_sql}"
         "), ranked AS ("
         " SELECT *, ROW_NUMBER() OVER ranking AS rank_in_company,"
+        # The company's newest advert, so "Neueste zuerst" can mean the
+        # company rather than whichever advert represents it.
+        " MAX(published_on) OVER company AS company_published_on,"
         # COUNT over the RANKING window would be a running total: a window with
         # an ORDER BY frames rows up to the current one, so the best-ranked row
         # of every company would report a count of 1. The count needs a window
@@ -832,17 +844,18 @@ def list_job_groups(
 ) -> list[sqlite3.Row]:
     """One row per company: its best-ranked posting, plus `company_count`.
 
-    Companies are ordered exactly as `list_jobs` orders postings — including
-    the "all statuses" view's id ordering, so switching the grouping toggle
-    never silently reorders the page under the user. Only the ranking WITHIN a
-    company is always by score, because something has to choose which posting
-    represents it."""
+    Two orders, and they answer different questions. WITHIN a company the
+    ranking is always by score, because something has to choose which posting
+    represents it and a row that stands for a whole company should be its best.
+    BETWEEN companies, "newest first" means the company's newest advert — not
+    the date of whichever advert represents it, or a company that posted today
+    would sort at thirty days because its strongest advert is that old."""
     where, params = _job_filters(status, mismatches, gone, applied, old,
                                  stale_age_days, bookmarked, opened,
                                  in_progress, search, keep_ids, hidden,
                                  min_score)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
-    order = list_order_sql(sort)
+    order = list_order_sql(sort, grouped=True)
     return con.execute(
         f"{_ranked_jobs_cte(where_sql)}"
         f"SELECT * FROM ranked WHERE rank_in_company=1 "

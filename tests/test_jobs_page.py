@@ -304,6 +304,10 @@ _COUNTS = {"mismatches": 129, "dead": 58, "applied_firm": 30, "old": 12}
     ("offen", _COUNTS,
      "129 passen nicht · 58 offline · "
      "30 bei schon beworbenen Firmen · 12 älter als 45 Tage"),
+    # …and every one of those four can be ONE
+    ("offen", {"mismatches": 1, "dead": 1, "applied_firm": 1, "old": 1},
+     "1 passt nicht · 1 offline · 1 bei einer schon beworbenen Firma · "
+     "1 älter als 45 Tage"),
     ("offen", {**_COUNTS, "mismatches": 0, "applied_firm": 0, "old": 0},
      "58 offline"),
     ("offen", {"mismatches": 0, "dead": 0, "applied_firm": 0, "old": 0}, ""),

@@ -55,9 +55,14 @@ def _preview_job(con) -> int | None:
     """
     stale_age = freshness.stale_age_setting(
         db.get_setting(con, "stale_age_days", ""))
+    # `sort="score"` explicitly: the list default became "newest first" for
+    # the Stellen screen, and this panel wants the BEST open posting — a
+    # preview filled from whatever arrived last says less about whether his
+    # letter head is complete.
     rows = db.list_jobs(con, status="new", limit=1, mismatches="exclude",
                         gone="exclude", applied="exclude", old="exclude",
-                        stale_age_days=stale_age)
+                        hidden="exclude", stale_age_days=stale_age,
+                        sort="score")
     return rows[0]["id"] if rows else None
 
 

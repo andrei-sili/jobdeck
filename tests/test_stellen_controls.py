@@ -397,7 +397,7 @@ async def test_a_pile_number_opens_the_pile_it_counts(user: User, con, data_dir)
     _job(con, "b", "Schlecht GmbH", 0)
 
     await user.open("/")
-    await user.should_see("1 passen nicht")
+    await user.should_see("1 passt nicht")
     user.find(marker="pile-passt_nicht").click()
     await asyncio.sleep(0.3)
 
@@ -518,3 +518,102 @@ async def test_the_control_and_the_list_start_out_agreeing(user: User, con,
 
     assert _marked(user, "score-select")[0].value == 60
     assert _row_companies(user) == ["Stark GmbH"]
+
+
+# --------------------------------------------------------- the panel's gaps
+
+
+async def test_every_posting_stays_reachable_WITH_the_floor_down(user: User, con,
+                                                                 data_dir):
+    """The reachability tests proved reachability with the floor OFF, which is
+    not the state he is ever in: it opens at 40. A weak posting in every pile
+    and every record view has to survive that."""
+    weak = {}
+    weak["mismatch"] = _job(con, "m", "Mis GmbH", 0)
+    weak["old"] = _job(con, "o", "Alt GmbH", 20, days_old=400)
+    weak["gone"] = _job(con, "g", "Weg GmbH", 20)
+    con.execute("UPDATE jobs SET liveness='gone' WHERE id=?", (weak["gone"],))
+    weak["marked"] = _job(con, "v", "Gemerkt GmbH", 20)
+    db.set_bookmark(con, weak["marked"], True)
+    weak["hidden"] = _job(con, "h", "Versteckt GmbH", 20)
+    con.commit()
+    db.hide_company(con, "Versteckt GmbH")
+
+    await user.open("/")
+    assert _marked(user, "score-select")[0].value == jobs.DEFAULT_MIN_SCORE
+
+    seen = set()
+    for view in jobs.VIEWS:
+        rows = jobs._load_jobs(view.key, 0,
+                               min_score=jobs.DEFAULT_MIN_SCORE)["rows"]
+        seen.update(r["id"] for r in rows)
+
+    missing = {name: job_id for name, job_id in weak.items()
+               if job_id not in seen}
+    assert not missing, f"unreachable at the default floor: {missing}"
+
+
+async def test_the_floor_control_says_why_it_is_inert_in_a_pile(
+        user: User, con, data_dir):
+    """A control that silently does nothing teaches him it is broken — and the
+    project's rule is that a blocked control states its reason beside itself,
+    never in a tooltip."""
+    _job(con, "a", "Gut GmbH", 80)
+    _job(con, "b", "Schlecht GmbH", 0)
+    await user.open("/")
+    assert _marked(user, "score-select")[0].enabled
+
+    user.find(marker="pile-passt_nicht").click()
+    await asyncio.sleep(0.3)
+
+    control = _marked(user, "score-select")[0]
+    assert control.enabled is False
+    assert control.props.get("hint") == "gilt nur für die Arbeitsliste"
+
+
+async def test_opening_a_pile_loads_the_list_once(user: User, con, data_dir):
+    """The refresh WRITES the view control now, and NiceGUI dispatches a
+    server-side value write as a background task — so it lands back in the
+    handler. Without the no-op guard every redraw loads the list twice, which
+    is the echo that once made two pile switches rebuild the page forever."""
+    _job(con, "a", "Gut GmbH", 80)
+    _job(con, "b", "Schlecht GmbH", 0)
+    await user.open("/")
+    loads = {"n": 0}
+    real = jobs._load_jobs
+
+    def counting(*a, **kw):
+        loads["n"] += 1
+        return real(*a, **kw)
+
+    jobs._load_jobs = counting
+    try:
+        user.find(marker="pile-passt_nicht").click()
+        await asyncio.sleep(0.4)
+    finally:
+        jobs._load_jobs = real
+
+    assert loads["n"] == 1, f"the list was loaded {loads['n']} times"
+
+
+async def test_the_read_pile_number_opens_the_view_that_holds_them(
+        user: User, con, data_dir):
+    """"Neu" hides what he has already read; the door has to lead to the view
+    that puts them back, not to a pile that does not hold them."""
+    parts = jobs.hidden_parts(jobs.view_for("neu"), {"read": 3}, 45)
+
+    assert [p["view"] for p in parts] == ["offen"]
+    assert parts[0]["text"] == "3 schon gelesen"
+
+
+@pytest.mark.parametrize("report,when,expected", [
+    ({"at": "2026-08-20T13:02:00", "by": "user", "new": 2},
+     datetime.datetime(2026, 8, 20, 18, 0), "Von dir gestartet 13:02"),
+    ({"at": "2026-08-20T13:02:00", "by": "user", "new": 2},
+     datetime.datetime(2026, 9, 1, 9, 0), "Von dir gestartet 20.08."),
+])
+def test_the_line_reads_the_clock_it_was_given(report, when, expected):
+    """`now` was accepted and ignored, so its tests were true only on the day
+    they were written — and the line would silently change wording overnight
+    with nothing pinning either form."""
+    assert jobs.poll_line(report, when).startswith(expected)

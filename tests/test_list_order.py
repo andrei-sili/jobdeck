@@ -92,3 +92,47 @@ def test_the_default_is_newest_first(con):
     newer = _job(con, "b", "Beta GmbH", 45, days_old=1)
 
     assert [r["id"] for r in db.list_jobs(con, status="new")] == [newer, older]
+
+
+def test_a_company_is_ranked_by_its_newest_advert_not_its_best_ones_date(con):
+    """A row stands for a company's BEST advert. Ordering the LIST by that
+    advert's date puts a company that posted today at thirty days old because
+    its strongest advert is that old — which is not what "Neueste zuerst"
+    means to anyone reading it."""
+    _job(con, "a", "Alpha GmbH", 90, days_old=30)   # best, but old
+    _job(con, "b", "Alpha GmbH", 40, days_old=0)    # newest
+    _job(con, "c", "Beta GmbH", 60, days_old=10)
+
+    by_date = db.list_job_groups(con, status="new", sort="date")
+
+    assert [r["company"] for r in by_date] == ["Alpha GmbH", "Beta GmbH"]
+    # …and the row is still the company's BEST advert, not its newest
+    assert by_date[0]["match_score"] == 90
+
+
+def test_the_score_order_still_ranks_companies_by_their_best(con):
+    _job(con, "a", "Alpha GmbH", 40, days_old=0)
+    _job(con, "b", "Beta GmbH", 90, days_old=30)
+
+    by_score = db.list_job_groups(con, status="new", sort="score")
+
+    assert [r["company"] for r in by_score] == ["Beta GmbH", "Alpha GmbH"]
+
+
+def test_the_floor_reaches_the_sibling_query_too(con):
+    """A grouped row lists the OTHER adverts of its company through its own
+    query. Without the floor there, a company row respecting "ab 60" would
+    unfold to a list of adverts scoring 20."""
+    _job(con, "a", "Alpha GmbH", 90, days_old=1)
+    _job(con, "b", "Alpha GmbH", 80, days_old=2)
+    weak = _job(con, "c", "Alpha GmbH", 20, days_old=3)
+
+    groups = db.list_job_groups(con, status="new", min_score=60)
+    keys = [r["company_key"] for r in groups]
+    siblings = db.list_company_siblings(con, keys, status="new", min_score=60)
+
+    assert weak not in [r["id"] for r in siblings]
+    assert len(siblings) == 1
+    # …and with the floor off it is there, so the test is not passing on an
+    # empty sibling list
+    assert len(db.list_company_siblings(con, keys, status="new")) == 2
