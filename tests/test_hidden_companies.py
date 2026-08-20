@@ -172,16 +172,27 @@ def test_the_pipeline_notices_a_company_being_hidden(con):
     assert db.data_signature(con) != before
 
 
-def test_hiding_and_taking_back_within_one_second_is_still_a_change(con):
-    """`MAX(hidden_at)` has one-second resolution, so this pair would compare
-    EQUAL to never having touched it — and the screen would stay pruned."""
-    _job(con, "Zeitarbeit GmbH")
-    key = db.hide_company(con, "Zeitarbeit GmbH")
-    hidden = db.data_signature(con)
+def test_swapping_one_hidden_company_for_another_is_a_change(con):
+    """The case a timestamp cannot see, and the reason the term counts rowids.
 
-    db.unhide_company(con, key)
+    Take one company back and hide a different one inside the same second: the
+    COUNT returns to what it was and `MAX(hidden_at)` is the same second, so a
+    timestamp-keyed term compares EQUAL — and the list keeps hiding the company
+    he just released while showing the one he just hid."""
+    _job(con, "Alpha GmbH", external="a")
+    _job(con, "Beta GmbH", external="b")
+    _job(con, "Gamma GmbH", external="c")
+    first = db.hide_company(con, "Alpha GmbH")
+    db.hide_company(con, "Beta GmbH")
+    before = db.data_signature(con)
 
-    assert db.data_signature(con) != hidden
+    db.unhide_company(con, first)
+    db.hide_company(con, "Gamma GmbH")
+
+    stamps = {r["hidden_at"] for r in db.list_hidden_companies(con)}
+    assert len(stamps) == 1, "the fixture needs both stamps in the same second"
+    assert db.count_hidden_companies(con) == 2, "and the same count"
+    assert db.data_signature(con) != before
 
 
 # ------------------------------------------------------- every query, one truth
