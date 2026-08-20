@@ -13,7 +13,7 @@ from jobdeck import apply_channel, apply_form, config, db, freshness
 from jobdeck.ai import scoring
 from jobdeck.ai.drafting import clean_title
 from jobdeck.constants import DRAFT_DELIVERED
-from jobdeck.dedupe import duplicates_for_jobs
+from jobdeck.dedupe import duplicates_for_jobs, norm
 from jobdeck.services import (
     apply_record,
     apply_resolve,
@@ -102,6 +102,13 @@ VIEWS = (
          "Keine Stelle bei einer Firma, bei der du dich schon beworben hast."),
     View("doppelt", "Doppelt", "duplicate", _EVERYTHING,
          "Keine Anzeige wurde als Doppelte einer Bewerbung erkannt."),
+    # Nothing is deleted, only moved into a view with a name. This is that
+    # view — and it is the only one that asks for hidden companies, so the
+    # word "everything" everywhere else keeps meaning "everything you have not
+    # put out of sight".
+    View("ausgeblendet", "Ausgeblendete Firmen", "new",
+         {**_EVERYTHING, "hidden": "only"},
+         "Keine Firma ausgeblendet. Mit „x“ legst du eine hier ab."),
 )
 # What the floor control offers. 40 is the default because it is where the
 # measurement puts the cut: his working list holds 300 postings and 222 of them
@@ -147,6 +154,8 @@ def _hidden_line(view: View, counts: dict, stale_age_days: int,
          "{n} Stellen bei Firmen, bei denen du dich schon beworben hast"),
         ("old", "old", f"{{n}} älter als {stale_age_days} Tage",
          f"{{n}} Anzeigen älter als {stale_age_days} Tage"),
+        ("hidden", "hidden", "{n} bei ausgeblendeten Firmen",
+         "{n} Anzeigen bei ausgeblendeten Firmen"),
     ):
         count = counts.get(count_key, 0)
         if view.filters.get(arm) == "exclude" and count:
@@ -472,7 +481,12 @@ def _load_jobs(view_key: str, page: int, search: str = "",
                 con, view.status, **{**filters, "opened": "include"})
         pages = max(1, -(-total // PAGE_SIZE))
         page = min(max(page, 0), pages - 1)
-        rows = [{**dict(r), "draft_room": draft_room}
+        # True for every row of the pile view by construction, rather than a
+        # per-row question: the view IS "only hidden companies", so asking the
+        # database again once per row could only ever disagree with itself.
+        in_hidden_view = filters["hidden"] == "only"
+        rows = [{**dict(r), "draft_room": draft_room,
+                 "company_hidden": in_hidden_view}
                 for r in db.list_job_groups(
                     con, view.status, limit=PAGE_SIZE,
                     offset=page * PAGE_SIZE, **filters)]
@@ -480,7 +494,8 @@ def _load_jobs(view_key: str, page: int, search: str = "",
         siblings: dict[str, list[dict]] = {}
         for row in db.list_company_siblings(con, keys, view.status, **filters):
             siblings.setdefault(row["company_key"], []).append(
-                {**dict(row), "draft_room": draft_room})
+                {**dict(row), "draft_room": draft_room,
+                 "company_hidden": in_hidden_view})
         # Asked of the duplicate gate itself, for the rows on screen — see
         # dedupe.duplicates_for_jobs for why the stored flag cannot answer it.
         on_screen = rows + [r for group in siblings.values() for r in group]
@@ -643,6 +658,34 @@ def poll_line(report: dict, now: datetime.datetime | None = None) -> str:
         parts.append(f"{report['duplicate']} bei Firmen, bei denen du dich "
                      f"schon beworben hast")
     return f"{who} {rail.clock(report['at'])} — " + " · ".join(parts)
+
+
+def _hide_company(company: str) -> dict:
+    """Put a company out of sight, and answer with what that cost.
+
+    The figures come back with it because the undo bar has to NAME the price:
+    "26 Anzeigen, die beste mit Bewertung 74" is a decision, "ausgeblendet" is
+    a guess. Counted before the write, so they describe what was on screen.
+    """
+    with db.db() as con:
+        rows = db.list_jobs(con, status="new", limit=1000,
+                            search="", hidden="include")
+        key = norm(company or "")
+        mine = [r for r in rows if norm(r["company"] or "") == key]
+        best = max((r["effective_score"] or 0) for r in mine) if mine else 0
+        stored = db.hide_company(con, company)
+    return {"ok": bool(stored), "key": stored, "company": company,
+            "jobs": len(mine), "best": best}
+
+
+def _unhide_company(company_key: str) -> None:
+    with db.db() as con:
+        db.unhide_company(con, company_key)
+
+
+def _hidden_companies() -> list[dict]:
+    with db.db() as con:
+        return [dict(row) for row in db.list_hidden_companies(con)]
 
 
 def _poll_report() -> dict:
@@ -1089,7 +1132,7 @@ async def jobs_page():
                 # notice nobody sees.
                 chip_host = ui.row().classes("items-center ml-auto gap-2")
                 with chip_host:
-                    ui.label("j k bewegen · x kein Interesse · s merken · "
+                    ui.label("j k bewegen · x Firma ausblenden · s merken · "
                              "o Anzeige öffnen · ⏎ Hauptaktion") \
                         .classes("jd-meta")
             with ui.element("div").classes("jd-panes"):
@@ -1497,7 +1540,15 @@ async def jobs_page():
                     ui.button("★ gemerkt" if marked else "☆ merken",
                               on_click=lambda j=job["id"]: toggle_bookmark(j)) \
                         .props("flat dense no-caps")
-                    if job["status"] == "skipped" or job["form_opened_at"]:
+                    if job.get("company_hidden"):
+                        # In the hidden view the triage buttons are about a
+                        # posting, and the decision here was about a company —
+                        # so this is the one that undoes what he actually did.
+                        ui.button("↩ Firma wieder anzeigen",
+                                  on_click=lambda c=job["company"]:
+                                      unhide(c)) \
+                            .props("flat dense").mark("unhide-company")
+                    elif job["status"] == "skipped" or job["form_opened_at"]:
                         # Two different ways back, one button: he put the
                         # posting away, or he started a form here and decided
                         # against it. The second is the one that needs asking —
@@ -1506,10 +1557,10 @@ async def jobs_page():
                                   on_click=lambda j=job["id"]: revive(j)) \
                             .props("flat dense no-caps")
                     else:
-                        ui.button("✕ kein Interesse",
+                        ui.button("✕ Firma ausblenden",
                                   on_click=lambda j=job["id"]:
                                       not_interested(j)) \
-                            .props("flat dense no-caps") \
+                            .props("flat dense").mark("job-x") \
                             .set_enabled(job["status"] == "new")
                     open_url = _openable_url(job)
                     if open_url:
@@ -1986,6 +2037,18 @@ async def jobs_page():
             await refresh(force=True)
 
         async def not_interested(job_id: int) -> None:
+            """`x` — and it now reaches the COMPANY, not this one advert.
+
+            Measured before the change: eleven presses, eleven different
+            companies. Per-posting exclusion had never once helped him, while
+            nineteen companies hold a hundred and fifty of his open postings
+            and one staffing agency holds seven under seven different branch
+            names. Hiding the advert in front of him left the other six.
+
+            A posting with no company keeps the old behaviour: a blank field is
+            missing information, not an employer, so there is nothing to hide
+            but this row.
+            """
             job = shown.get(job_id)
             if job is None or job["status"] != "new":
                 return
@@ -1996,8 +2059,60 @@ async def jobs_page():
                 await revive(job_id)
                 return
             _hold_place(job_id)
-            await run.io_bound(_set_status, job_id, "skipped")
+            result = await run.io_bound(_hide_company, job["company"] or "")
+            if not result["ok"]:
+                await run.io_bound(_set_status, job_id, "skipped")
+                await refresh(force=True)
+                return
             await refresh(force=True)
+            with overlay:
+                _hidden_bar(result)
+
+        async def unhide(company: str) -> None:
+            await run.io_bound(_unhide_company, norm(company or ""))
+            await refresh(force=True)
+            say(f"{company} ist wieder in der Liste.", type="positive")
+
+        def _hidden_bar(result: dict) -> None:
+            """Ten seconds in which the press can be taken back, with the price
+            written into it.
+
+            No confirmation dialog: he hides companies often, and a dialog on
+            every press is a dialog he learns to click through, which guards
+            nothing. What makes the trade honest is that the undo is real work
+            and the bar states what was hidden — including that it goes on
+            applying to searches he has not run yet.
+            """
+            bar = ui.row().classes("jd-undo items-center gap-3")
+            gone = {"yes": False}
+
+            async def dismiss() -> None:
+                if gone["yes"] or bar.is_deleted:
+                    gone["yes"] = True
+                    return
+                gone["yes"] = True
+                bar.delete()
+
+            with bar:
+                best = (f", die beste mit Bewertung {result['best']}"
+                        if result["best"] else "")
+                many = result["jobs"] != 1
+                ui.label(
+                    f"{result['company']} ausgeblendet — "
+                    f"{result['jobs']} {'Anzeigen' if many else 'Anzeige'}"
+                    f"{best}. Gilt auch für neue Suchen.").classes("text-sm")
+
+                async def take_back() -> None:
+                    await dismiss()
+                    await run.io_bound(_unhide_company, result["key"])
+                    await refresh(force=True)
+                    say(f"{result['company']} ist wieder in der Liste.",
+                        type="positive")
+
+                ui.button("Rückgängig", on_click=take_back) \
+                    .props("flat dense").mark("undo-hide")
+            with timers:
+                ui.timer(10.0, dismiss, once=True)
 
         # ------------------------------------------------------------------
         # the slow actions, unchanged in substance from the old inbox
