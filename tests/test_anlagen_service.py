@@ -147,12 +147,29 @@ def test_a_filename_from_the_browser_cannot_escape_the_folder(tmp_path):
 
 def test_nothing_half_written_is_ever_merged(tmp_path):
     """The staging name deliberately does not end in .pdf: a build running
-    while the browser is still uploading must not merge half a file."""
+    while the browser is still uploading must not merge half a file. Built
+    from the constant, so changing the constant to something the merge picks
+    up turns this red instead of leaving it true about a name nobody uses."""
     folder = _folder(tmp_path)
-    (folder / "02_Zeugnis.pdf.jd-move").write_bytes(b"half")
+    (folder / f"02_Zeugnis.pdf{anlagen._STAGE_SUFFIX}").write_bytes(b"half")
 
     assert pdf.collect_anlagen(str(folder)) == []
     assert anlagen.listing(folder) == []
+
+
+def test_a_pdf_with_no_pages_is_refused(tmp_path):
+    """A structurally valid PDF that contributes nothing. It would merge
+    without error and appear on the stack as a part with no pages — a row
+    naming a document an employer never sees."""
+    folder = _folder(tmp_path)
+    empty = PdfWriter()
+    buffer = io.BytesIO()
+    empty.write(buffer)
+
+    with pytest.raises(anlagen.AnlagenError, match="keine Seiten"):
+        anlagen.store(folder, "Zeugnis.pdf", buffer.getvalue())
+
+    assert list(folder.iterdir()) == []
 
 
 # --------------------------------------------------------------- ordering
@@ -161,11 +178,18 @@ def test_nothing_half_written_is_ever_merged(tmp_path):
 def test_the_screen_lists_exactly_what_the_merge_will_staple(tmp_path):
     """The one differential that matters: if these two ever disagree, the
     screen describes a document nobody receives."""
-    folder = _folder(tmp_path, "02_B.pdf", "01_A.pdf", "10_J.pdf", "C.pdf")
+    folder = _folder(tmp_path, "02_B.pdf", "01_A.pdf", "10_J.pdf", "9_I.pdf",
+                     "C.pdf")
     (folder / "notes.txt").write_bytes(b"x")
 
-    assert [e.name for e in anlagen.listing(folder)] == \
-        [p.name for p in pdf.collect_anlagen(str(folder))]
+    order = [e.name for e in anlagen.listing(folder)]
+
+    assert order == [p.name for p in pdf.collect_anlagen(str(folder))]
+    # And spelled out, because the interesting half is where a filename sort
+    # and a "sort by the number a human reads" disagree: unpadded 9_ comes
+    # AFTER 10_ in the merge, and the screen has to say so rather than show
+    # the order he meant.
+    assert order == ["01_A.pdf", "02_B.pdf", "10_J.pdf", "9_I.pdf", "C.pdf"]
 
 
 def test_moving_one_down_swaps_it_with_its_neighbour(tmp_path):
@@ -198,6 +222,23 @@ def test_a_move_renames_only_what_has_to_move(tmp_path):
     after = {p.name for p in folder.iterdir()}
     assert after - set(before) == {"01_B.pdf", "02_A.pdf"}
     assert {"03_C.pdf", "04_D.pdf"} <= after
+
+
+def test_a_move_between_two_files_of_the_same_name_loses_neither(tmp_path):
+    """Two uploads of one document are "01_Zeugnis" and "02_Zeugnis" — the
+    same human half, different numbers. Swapping them is the case where a
+    one-phase rename puts the second onto the first's name and os.replace
+    destroys it silently. Every other pair survives a one-phase pass by luck.
+    """
+    folder = _folder(tmp_path)
+    anlagen.store(folder, "Zeugnis.pdf", _pdf_bytes(pages=1))
+    anlagen.store(folder, "Zeugnis.pdf", _pdf_bytes(pages=3))
+
+    anlagen.move(folder, "01_Zeugnis.pdf", 1)
+
+    order = anlagen.listing(folder)
+    assert [e.name for e in order] == ["01_Zeugnis.pdf", "02_Zeugnis.pdf"]
+    assert [len(PdfReader(str(folder / e.name)).pages) for e in order] == [3, 1]
 
 
 def test_a_move_at_the_end_changes_nothing(tmp_path):
@@ -242,11 +283,15 @@ def test_moving_a_file_that_is_gone_says_so(tmp_path):
         anlagen.move(folder, "09_ghost.pdf", -1)
 
 
-def test_a_move_cannot_be_pointed_outside_the_folder(tmp_path):
+@pytest.mark.parametrize("name", ["../01_A.pdf", "sub/01_A.pdf",
+                                  "/etc/passwd", "", ".", "..", "a\x00b.pdf"])
+def test_a_move_cannot_be_pointed_outside_the_folder(tmp_path, name):
+    """`..` is the one that needs its own guard: `folder / ".."` has `folder`
+    as its parent, so the "is it a direct member" check passes it."""
     folder = _folder(tmp_path, "01_A.pdf")
 
     with pytest.raises(anlagen.AnlagenError, match="Ungültiger Dateiname"):
-        anlagen.move(folder, "../01_A.pdf", 1)
+        anlagen.move(folder, name, 1)
 
 
 # --------------------------------------------------------------- removing
@@ -293,10 +338,13 @@ def test_removing_refuses_a_name_that_is_a_path(data_dir):
     outside = data_dir / "keep.pdf"
     outside.write_bytes(_pdf_bytes())
 
-    with pytest.raises(anlagen.AnlagenError, match="Ungültiger Dateiname"):
-        anlagen.remove(folder, "../keep.pdf")
+    for name in ("../keep.pdf", "sub/keep.pdf", str(outside), "", ".", "..",
+                 "a\x00b.pdf"):
+        with pytest.raises(anlagen.AnlagenError, match="Ungültiger Dateiname"):
+            anlagen.remove(folder, name)
 
     assert outside.exists()
+    assert (folder / "01_A.pdf").exists()
 
 
 def test_removing_something_already_gone_says_so(data_dir):

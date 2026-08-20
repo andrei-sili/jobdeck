@@ -117,13 +117,17 @@ def _safe_member(folder: pathlib.Path, name: str) -> pathlib.Path:
     an upload's own filename, or a row identifier echoed back by a click — and
     two of them delete or overwrite. A name is therefore never joined onto the
     folder without proving it is a plain member of it.
+
+    `Path(name).name == name` is the whole rule: it fails for anything holding
+    a separator, an absolute path or a drive. The three special names are
+    enumerated because they survive it — and `..` in particular is the one a
+    containment check on the joined path does NOT catch, since `folder / ".."`
+    reports `folder` itself as its parent.
     """
-    if not name or name != pathlib.Path(name).name or name in (".", ".."):
+    if (not name or name in (".", "..") or "\x00" in name
+            or name != pathlib.Path(name).name):
         raise AnlagenError(f"Ungültiger Dateiname: {name!r}")
-    target = folder / name
-    if target.parent != folder:
-        raise AnlagenError(f"Ungültiger Dateiname: {name!r}")
-    return target
+    return folder / name
 
 
 def listing(folder: pathlib.Path | None) -> list[Entry]:
