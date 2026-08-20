@@ -1216,7 +1216,7 @@ async def jobs_page():
                     laeuft_host = ui.column().classes("jd-laeuft w-full gap-0")
                     rows_host = ui.column().classes("jd-rows w-full gap-0") \
                         .props('role=listbox aria-label="Anzeigen"')
-                    pager = ui.row().classes("items-center gap-2 p-2 border-t")
+                    pager = ui.row().classes("items-center gap-2 p-2")
                 reader = ui.element("div").classes("jd-reader")
 
         # ------------------------------------------------------------------
