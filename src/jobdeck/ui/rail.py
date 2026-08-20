@@ -20,6 +20,8 @@ from jobdeck import config, constants, db, freshness, gmail
 from jobdeck.constants import BEANTWORTET_STATUS, OFFENE_STATUS
 from jobdeck.dates import days_since, silence_anchor
 from jobdeck.services import liveness
+from jobdeck.services import unterlagen as unterlagen_service
+from jobdeck.services.unterlagen import RAIL_PARTS
 from jobdeck.ui import live
 
 # Where each rubric goes.
@@ -153,6 +155,7 @@ def facts() -> dict:
             "sent_today": db.count_outbound_today(con),
             "send_cap": _int_setting(
                 db.get_setting(con, "daily_send_cap", ""), SEND_CAP_DEFAULT),
+            "unterlagen": unterlagen_service.rail_facts(con),
             "connections": connections(),
             "replies_pending": db.count_pending_replies(con),
             "replies_total": db.count_inbound_replies(con),
@@ -183,6 +186,10 @@ def _signature(con) -> tuple:
         # `poll_progress` counts only the active ones.
         db.count_active_profiles(con),
         *(db.get_setting(con, key, "") for key in _WATCHED_SETTINGS),
+        # The documents are files, not rows: no table signature can see one
+        # arriving in the Anlagen folder, and the rubric above states how many
+        # there are.
+        unterlagen_service.rail_fingerprint(con),
         *(present for _name, present in connections()),
         # token PRESENCE is above; the read SCOPE is a different fact, and a
         # re-connect that adds it must reach the Antworten rubric
@@ -236,18 +243,7 @@ def rubrics(view: dict, current: str, now: datetime.datetime) -> list[Rubric]:
     connected = [name for name, ok in view["connections"] if ok]
     missing = [name for name, ok in view["connections"] if not ok]
     return [
-        Rubric(
-            key="unterlagen",
-            label="Unterlagen",
-            path=UNTERLAGEN_PATH,
-            count=f"{active} Profil" if active == 1 else f"{active} Profile",
-            sub=(f"{poll_errors} Profil ohne Antwort" if poll_errors == 1 else
-                 f"{poll_errors} Profile ohne Antwort" if poll_errors else
-                 f"zuletzt gesucht {_clock(last_polled, now)}" if last_polled else
-                 "noch nie gesucht"),
-            fill=1.0 if active else 0.0,
-            amber=bool(poll_errors) or not active,
-        ),
+        _unterlagen_rubric(view["unterlagen"]),
         Rubric(
             key="stellen",
             label="Stellen",
@@ -299,6 +295,49 @@ def rubrics(view: dict, current: str, now: datetime.datetime) -> list[Rubric]:
             amber=bool(missing),
         ),
     ]
+
+
+def _unterlagen_rubric(facts: dict) -> Rubric:
+    """The documents rubric, about documents.
+
+    It used to count SEARCH PROFILES — "3 Profile" under the heading
+    Unterlagen, with the last poll time beneath it. Both facts are real and
+    neither is about what an employer receives, on the one rubric he opened
+    looking for his CV. The profiles say what they have to say in the Puls,
+    where the engine reports itself.
+
+    The sub-line names the FIRST thing standing between him and a Mappe that
+    could be sent, in the order they block each other: without the template
+    there is no letter to attach anything to, without an Anlage the Mappe is
+    the letter alone, and without a build nothing on the screen has been
+    measured.
+    """
+    documents = int(facts["documents"])
+    anlagen = int(facts["anlagen"])
+    present = sum((bool(facts["template_ok"]), bool(anlagen),
+                   bool(facts["built"])))
+    if not facts["template_ok"]:
+        sub = "Vorlage fehlt"
+    elif facts["folder_state"] == "unset":
+        sub = "kein Ordner für Anlagen"
+    elif facts["folder_state"] == "missing":
+        sub = "Anlagen-Ordner fehlt"
+    elif not anlagen:
+        sub = "keine Anlagen — nur der Brief"
+    elif not facts["built"]:
+        sub = "Mappe noch nie gebaut"
+    else:
+        sub = f"Vorlage + {anlagen} Anlagen" if anlagen != 1 \
+            else "Vorlage + 1 Anlage"
+    return Rubric(
+        key="unterlagen",
+        label="Unterlagen",
+        path=UNTERLAGEN_PATH,
+        count=("1 Dokument" if documents == 1 else f"{documents} Dokumente"),
+        sub=sub,
+        fill=_share(present, RAIL_PARTS),
+        amber=present < RAIL_PARTS,
+    )
 
 
 def _antworten_rubric(view: dict, now: datetime.datetime) -> Rubric:
@@ -354,12 +393,21 @@ def pulse(view: dict, now: datetime.datetime) -> list[Pulse]:
     while it silently fails, which is exactly the reassurance this must not
     give.
     """
-    _active, last_polled, _errors = view["profiles"]
+    active, last_polled, errors = view["profiles"]
     last_checked, unchecked = view["liveness"]
     unscored = view["unscored"]
     return [
-        Pulse("Suche", _clock(last_polled, now) or "noch nie",
-              _beat(last_polled, now)),
+        # What the Unterlagen rubric used to say. It belongs here: a search
+        # profile is not a document, and this is the line that reports whether
+        # the engine is running. A profile whose source refused outranks the
+        # clock — the clock would say the pass ran, which is true and beside
+        # the point when it came back with nothing.
+        Pulse("Suche",
+              "kein aktives Profil" if not active else
+              (f"{errors} Profil ohne Antwort" if errors == 1 else
+               f"{errors} Profile ohne Antwort") if errors else
+              _clock(last_polled, now) or "noch nie",
+              "idle" if not active else _beat(last_polled, now)),
         # The animated dot means "something ran just now". A BACKLOG is not
         # evidence of a worker: with AI spend switched off — his own default —
         # a queue of twelve pulsed forever while nothing was ever going to

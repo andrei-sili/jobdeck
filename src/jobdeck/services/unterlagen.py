@@ -397,6 +397,58 @@ def read(con, job_id: int | None) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# What the spine says about this rubric.
+#
+# It used to say how many SEARCH PROFILES he has — under the heading
+# "Unterlagen", on the app whose complaint was that nothing was where he
+# expected it. The documents are three things, and a Mappe an employer can
+# receive needs all three: the letter template, at least one Anlage, and one
+# build to have measured them.
+#
+# Deliberately cheap: names, sizes and mtimes only. Counting PAGES would mean
+# opening every certificate on every page load and every thirty-second tick,
+# and the page counts already have a home on the screen that states them.
+# ---------------------------------------------------------------------------
+RAIL_PARTS = 3
+
+
+def rail_facts(con) -> dict:
+    """(documents, what is missing, whether a build has measured it)."""
+    settings = mappe.build_settings(con)
+    template = settings["template_path"].strip()
+    template_ok = bool(template) and \
+        pathlib.Path(template).expanduser().is_file()
+    entries = anlagen_lib.listing(anlagen_lib.resolve(settings["anlagen_dir"]))
+    state = folder_state(settings["anlagen_dir"], len(entries))
+    # A specimen file alone is not a measurement: the letter's own length is
+    # what a build writes down, and without it every page span on the screen
+    # is unknown.
+    built = bool(specimen_path().is_file()
+                 and _int_setting(db.get_setting(con, LETTER_PAGES_SETTING, "")))
+    return {"template_ok": template_ok, "anlagen": len(entries),
+            "folder_state": state["state"], "built": built,
+            "documents": (1 if template_ok else 0) + len(entries)}
+
+
+def rail_fingerprint(con) -> tuple:
+    """The same facts as one comparable value, for the spine's signature.
+
+    None of it is in a table, so without this the rail would go on reporting
+    an empty Anlagen folder for the life of the page he just filled — which is
+    the exact staleness class the live watcher exists to end.
+    """
+    settings = mappe.build_settings(con)
+    template = settings["template_path"].strip()
+    return (
+        _folder_fingerprint(settings["anlagen_dir"]),
+        _file_fingerprint(pathlib.Path(template).expanduser()
+                          if template else None),
+        _file_fingerprint(specimen_path()),
+        db.get_setting(con, LETTER_PAGES_SETTING, ""),
+    )
+
+
 def _inspect(job_id: int | None) -> dict:
     with db.db() as con:
         # First, before anything it labels: sqlite3 gives every SELECT its own

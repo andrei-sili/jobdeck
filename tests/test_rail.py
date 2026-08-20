@@ -43,6 +43,8 @@ def _view(**over) -> dict:
         "replies_last_poll": "2026-08-12T17:55:00",
         "replies_last_error": "",
         "gmail_can_read": True,
+        "unterlagen": {"template_ok": True, "anlagen": 6,
+                       "folder_state": "ok", "built": True, "documents": 7},
     }
     view.update(over)
     return view
@@ -118,21 +120,63 @@ def test_an_application_answered_long_ago_is_not_counted_as_silent():
     assert _rubric(view, "bewerbungen").count == "1 Bewerbungen"
 
 
-def test_unterlagen_reports_a_source_that_stopped_answering():
-    rubric = _rubric(_view(profiles=(2, "2026-08-12T17:58:00", 1)), "unterlagen")
-    assert rubric.count == "2 Profile"
-    assert rubric.sub == "1 Profil ohne Antwort"
+def _docs(**over) -> dict:
+    facts = {"template_ok": True, "anlagen": 6, "folder_state": "ok",
+             "built": True, "documents": 7}
+    facts.update(over)
+    return facts
+
+
+def test_unterlagen_counts_documents_and_not_search_profiles():
+    """It used to read "3 Profile" under the heading Unterlagen — a true
+    number about something else entirely, on the one rubric he opened looking
+    for his CV."""
+    rubric = _rubric(_view(profiles=(3, "2026-08-12T17:58:00", 0)), "unterlagen")
+    assert rubric.count == "7 Dokumente"
+    assert rubric.sub == "Vorlage + 6 Anlagen"
+    assert rubric.amber is False
+    assert rubric.fill == 1.0
+
+
+def test_one_document_is_not_called_dokumente_plural():
+    rubric = _rubric(_view(unterlagen=_docs(anlagen=0, documents=1)),
+                     "unterlagen")
+    assert rubric.count == "1 Dokument"
+
+
+def test_one_anlage_is_not_called_anlagen_plural():
+    rubric = _rubric(_view(unterlagen=_docs(anlagen=1, documents=2)),
+                     "unterlagen")
+    assert rubric.sub == "Vorlage + 1 Anlage"
+
+
+@pytest.mark.parametrize("facts,expected", [
+    ({"template_ok": False}, "Vorlage fehlt"),
+    ({"folder_state": "unset", "anlagen": 0, "documents": 1},
+     "kein Ordner für Anlagen"),
+    ({"folder_state": "missing", "anlagen": 0, "documents": 1},
+     "Anlagen-Ordner fehlt"),
+    ({"folder_state": "empty", "anlagen": 0, "documents": 1},
+     "keine Anlagen — nur der Brief"),
+    ({"built": False}, "Mappe noch nie gebaut"),
+])
+def test_the_rubric_names_the_first_thing_standing_in_the_way(facts, expected):
+    """In the order they block each other: without the template there is no
+    letter to attach anything to, without an Anlage the Mappe is the letter
+    alone, and without a build nothing on the screen has been measured."""
+    rubric = _rubric(_view(unterlagen=_docs(**facts)), "unterlagen")
+    assert rubric.sub == expected
     assert rubric.amber is True
 
 
-def test_one_profile_is_not_called_profile_plural():
-    assert _rubric(_view(profiles=(1, "", 0)), "unterlagen").count == "1 Profil"
-
-
-def test_unterlagen_says_so_when_nothing_has_ever_been_searched():
-    rubric = _rubric(_view(profiles=(0, "", 0)), "unterlagen")
-    assert rubric.sub == "noch nie gesucht"
-    assert rubric.amber is True, "no active profile means nothing arrives at all"
+def test_the_bar_fills_as_the_mappe_becomes_sendable():
+    """Three parts, and an employer needs all three."""
+    nothing = _rubric(_view(unterlagen=_docs(
+        template_ok=False, anlagen=0, folder_state="unset", built=False,
+        documents=0)), "unterlagen")
+    half = _rubric(_view(unterlagen=_docs(built=False)), "unterlagen")
+    whole = _rubric(_view(), "unterlagen")
+    assert (nothing.fill, round(half.fill, 3), whole.fill) == (0.0, 0.667, 1.0)
 
 
 def test_einstellungen_names_the_one_connection_that_is_missing():
@@ -224,8 +268,29 @@ def test_an_older_poll_reads_as_done_rather_than_running():
 
 
 def test_a_source_never_polled_reads_as_idle():
-    beat = rail.pulse(_view(profiles=(0, "", 0)), NOW)[0]
+    beat = rail.pulse(_view(profiles=(1, "", 0)), NOW)[0]
     assert (beat.state, beat.detail) == ("idle", "noch nie")
+
+
+def test_the_puls_carries_what_the_documents_rubric_no_longer_says():
+    """A search profile is not a document. The two facts that used to sit
+    under "Unterlagen" belong on the line that reports the engine."""
+    beat = rail.pulse(_view(profiles=(2, "2026-08-12T17:58:00", 1)), NOW)[0]
+    assert beat.detail == "1 Profil ohne Antwort"
+
+
+def test_a_refusing_source_outranks_the_clock():
+    """The clock would say the pass ran — true, and beside the point when it
+    came back with nothing."""
+    beats = rail.pulse(_view(profiles=(3, "2026-08-12T17:58:00", 2)), NOW)
+    assert beats[0].detail == "2 Profile ohne Antwort"
+
+
+def test_no_active_profile_at_all_is_stated_rather_than_read_as_quiet():
+    """Nothing will ever arrive, and "zuletzt gesucht 17:58" would look
+    exactly like a healthy app."""
+    beat = rail.pulse(_view(profiles=(0, "2026-08-12T17:58:00", 0)), NOW)[0]
+    assert (beat.state, beat.detail) == ("idle", "kein aktives Profil")
 
 
 def test_the_scoring_backlog_is_stated_without_claiming_a_worker():
