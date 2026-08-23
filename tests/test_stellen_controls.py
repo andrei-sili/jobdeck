@@ -85,8 +85,11 @@ def _row_companies(user: User) -> list[str]:
 def test_the_line_says_who_searched_and_what_came_back(report, expected):
     """The first word answers "cind?". A search that found nothing used to look
     exactly like a search that never ran — and "0 neue Anzeigen" is a result
-    while "never searched" is not, so they are different sentences."""
-    assert jobs.poll_line(report) == expected
+    while "never searched" is not, so they are different sentences. Pin the
+    clock so same-day expectations remain deterministic."""
+    now = datetime.datetime(2026, 8, 20, 20, 0)
+
+    assert jobs.poll_line(report, now) == expected
 
 
 def test_one_new_posting_is_not_called_anzeigen_plural():
