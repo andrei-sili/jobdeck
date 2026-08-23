@@ -78,6 +78,7 @@ select = ["E", "F", "W", "I", "UP", "B"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+faulthandler_timeout = 120
 # NiceGUI's in-process page harness. `user_plugin`, not the full `plugin`:
 # the latter pulls in selenium for its browser fixture, which this project
 # neither needs nor installs.

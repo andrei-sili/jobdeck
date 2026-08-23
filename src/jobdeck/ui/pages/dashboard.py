@@ -3,6 +3,7 @@
 from nicegui import run, ui
 
 from jobdeck import constants, db
+from jobdeck import settings as app_settings
 from jobdeck.constants import BEANTWORTET_STATUS, OFFENE_STATUS, STATUS_OPTIONS
 from jobdeck.dates import days_since, iso_to_de, silence_anchor
 from jobdeck.ui import live
@@ -18,8 +19,13 @@ def _load():
             "apps": [dict(r) for r in db.list_bewerbungen(con)],
             "jobs": db.count_jobs_by_status(con),
             "activity": [dict(r) for r in db.recent_activity(con, limit=10)],
-            "threshold": int(db.get_setting(con, "follow_up_days",
-                                            str(FOLLOW_UP_DEFAULT))),
+            "threshold": app_settings.integer(
+                con,
+                "follow_up_days",
+                FOLLOW_UP_DEFAULT,
+                minimum=1,
+                clamp=False,
+            ),
             "signature": signature,
         }
 

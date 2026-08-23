@@ -5,6 +5,7 @@ import asyncio
 from nicegui import run, ui
 
 from jobdeck import apply_form, backup, config, db, freshness, gmail
+from jobdeck import settings as app_settings
 from jobdeck.constants import DEFAULT_SILENCE_CLOSES_DAYS
 from jobdeck.services import (
     apply_resolve,
@@ -23,10 +24,14 @@ from jobdeck.ui.layout import frame
 def _get_settings():
     with db.db() as con:
         return {
-            "follow_up_days": db.get_setting(con, "follow_up_days", "14"),
+            "follow_up_days": app_settings.integer(
+                con, "follow_up_days", 14, minimum=1, clamp=False
+            ),
             "stale_age_days": freshness.stale_age_setting(
                 db.get_setting(con, "stale_age_days", "")),
-            "daily_send_cap": db.get_setting(con, "daily_send_cap", "15"),
+            "daily_send_cap": app_settings.integer(
+                con, "daily_send_cap", 15, minimum=0
+            ),
             # Parsed by the rule's own parser, not a bare int(): a
             # hand-edited or non-numeric value must show the window that will
             # actually be used instead of raising out of the page that is the
@@ -35,8 +40,12 @@ def _get_settings():
             "daily_draft_cap": db.daily_draft_cap(con),
             "drafts_today": db.count_drafts_today(con),
             "ai_enabled": db.ai_enabled(con),
-            "web_contact_search": db.get_setting(con, "web_contact_search", "0"),
-            "reply_ai_classify": db.get_setting(con, "reply_ai_classify", "0"),
+            "web_contact_search": app_settings.boolean(
+                con, "web_contact_search", False
+            ),
+            "reply_ai_classify": app_settings.boolean(
+                con, "reply_ai_classify", False
+            ),
             "applicant_name": db.get_setting(con, "applicant_name", ""),
             "applicant_ort": db.get_setting(con, "applicant_ort", ""),
             # the apply-cockpit fields, one entry per APPLICANT_LABELS key
@@ -45,7 +54,7 @@ def _get_settings():
             "template_path": db.get_setting(con, "template_path", ""),
             "anlagen_dir": db.get_setting(con, "anlagen_dir", ""),
             "email_signature": db.get_setting(con, "email_signature", ""),
-            "mappe_compress": db.get_setting(con, "mappe_compress", "1"),
+            "mappe_compress": app_settings.boolean(con, "mappe_compress", True),
             # Parsed the same way the builder parses it, so a hand-edited or
             # unset value shows the budget that will actually be used instead
             # of breaking the page on float("").
@@ -56,14 +65,22 @@ def _get_settings():
                 db.get_setting(con, "mappe_target_portal_mb", ""),
                 mappe.DEFAULT_PORTAL_TARGET_MB),
             "global_hard_tags": db.get_setting(con, "global_hard_tags", ""),
-            "real_send_enabled": db.get_setting(con, "real_send_enabled", "0"),
+            "real_send_enabled": app_settings.boolean(
+                con, "real_send_enabled", False
+            ),
             "test_recipient": db.get_setting(con, "test_recipient", ""),
             "gmail_address": db.get_setting(con, "gmail_address", ""),
             "sent_today": db.count_outbound_today(con),
-            "llm_calls": db.get_setting(con, "llm_calls", "0"),
-            "llm_input_tokens": db.get_setting(con, "llm_input_tokens", "0"),
-            "llm_output_tokens": db.get_setting(con, "llm_output_tokens", "0"),
-            "llm_cost_usd": db.get_setting(con, "llm_cost_usd", "0"),
+            "llm_calls": app_settings.integer(con, "llm_calls", 0, minimum=0),
+            "llm_input_tokens": app_settings.integer(
+                con, "llm_input_tokens", 0, minimum=0
+            ),
+            "llm_output_tokens": app_settings.integer(
+                con, "llm_output_tokens", 0, minimum=0
+            ),
+            "llm_cost_usd": max(
+                0.0, app_settings.floating(con, "llm_cost_usd", 0.0)
+            ),
         }
 
 
@@ -73,10 +90,16 @@ def _get_meters():
     with db.db() as con:
         signature = db.meter_signature(con)  # first: see jobs._load_jobs
         return {
-            "llm_calls": db.get_setting(con, "llm_calls", "0"),
-            "llm_input_tokens": db.get_setting(con, "llm_input_tokens", "0"),
-            "llm_output_tokens": db.get_setting(con, "llm_output_tokens", "0"),
-            "llm_cost_usd": db.get_setting(con, "llm_cost_usd", "0"),
+            "llm_calls": app_settings.integer(con, "llm_calls", 0, minimum=0),
+            "llm_input_tokens": app_settings.integer(
+                con, "llm_input_tokens", 0, minimum=0
+            ),
+            "llm_output_tokens": app_settings.integer(
+                con, "llm_output_tokens", 0, minimum=0
+            ),
+            "llm_cost_usd": max(
+                0.0, app_settings.floating(con, "llm_cost_usd", 0.0)
+            ),
             "sent_today": db.count_outbound_today(con),
             "signature": signature,
         }
@@ -277,7 +300,7 @@ async def settings_page():
             ).classes("text-xs text-gray-500")
             compress = ui.switch(
                 "Shrink the Mappe to fit the application channel",
-                value=settings["mappe_compress"] == "1",
+                value=settings["mappe_compress"],
             )
             with ui.row().classes("items-center gap-4"):
                 target_mb = ui.number("E-mail target (MB)",
@@ -498,7 +521,7 @@ async def settings_page():
 
             real_switch = ui.switch(
                 "Enable REAL sending (e-mails go to companies)",
-                value=settings["real_send_enabled"] == "1",
+                value=settings["real_send_enabled"],
                 on_change=toggle_real,
             )
             sent_today_label = ui.label().classes("text-xs text-gray-500")
@@ -536,7 +559,7 @@ async def settings_page():
                           type="positive" if e.value else "info")
 
             ui.switch("Find the application e-mail via web search (AI)",
-                      value=settings["web_contact_search"] == "1",
+                      value=settings["web_contact_search"],
                       on_change=toggle_web_search)
             ui.label(
                 "On demand only: when a posting has no e-mail, an LLM web search "
@@ -555,7 +578,7 @@ async def settings_page():
                           type="positive" if e.value else "info")
 
             ui.switch("Classify ambiguous replies with AI",
-                      value=settings["reply_ai_classify"] == "1",
+                      value=settings["reply_ai_classify"],
                       on_change=toggle_reply_ai)
             ui.label(
                 "Only for replies the German keyword rules cannot place, and "
@@ -623,10 +646,13 @@ async def settings_page():
             ui.label("Maintenance").classes("font-bold")
             with ui.row().classes("gap-2"):
                 async def backup_now():
-                    warning = await run.io_bound(backup.run_startup_backup)
-                    ui.notify(warning or "Backup created ✓",
-                              type="warning" if warning else "positive",
-                              multi_line=True)
+                    result = await run.io_bound(backup.run_startup_backup)
+                    if result.error:
+                        ui.notify(result.error, type="negative", multi_line=True)
+                    elif result.warning:
+                        ui.notify(result.warning, type="warning", multi_line=True)
+                    else:
+                        ui.notify("Backup created and verified ✓", type="positive")
 
                 async def score_now():
                     if not await run.io_bound(_ai_enabled):

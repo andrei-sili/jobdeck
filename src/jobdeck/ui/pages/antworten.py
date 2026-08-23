@@ -22,6 +22,7 @@ import dataclasses
 from nicegui import run, ui
 
 from jobdeck import db, gmail, replies
+from jobdeck import settings as app_settings
 from jobdeck.constants import CLASSIFICATION_TO_STATUS, OFFENE_STATUS, STATUS_RANK
 from jobdeck.services import register
 from jobdeck.services import replies as reply_service
@@ -285,8 +286,12 @@ def _load() -> dict:
                         for row in db.list_inbound_replies(con, LEDGER_LIMIT)],
             "last_poll": db.get_setting(con, reply_service.LAST_POLL_KEY, ""),
             "last_error": db.get_setting(con, reply_service.LAST_ERROR_KEY, ""),
-            "ai_on": (db.ai_enabled(con) and db.get_setting(
-                con, reply_service.AI_TOGGLE_KEY, "0") == "1"),
+            "ai_on": (
+                db.ai_enabled(con)
+                and app_settings.boolean(
+                    con, reply_service.AI_TOGGLE_KEY, False
+                )
+            ),
             "connected": gmail.is_connected(),
             "can_read": gmail.can_read(),
             "skipped": db.count_skipped_messages(con),

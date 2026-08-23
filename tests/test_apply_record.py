@@ -9,6 +9,8 @@ Online-Portal ledger rows point at no document because one of them passed
 
 import pathlib
 
+import pytest
+
 from jobdeck import db
 from jobdeck.services import apply_record, upload
 
@@ -207,6 +209,113 @@ def test_the_undo_gives_the_documents_back_too(con, data_dir):
     assert pathlib.Path(job["upload_path"]).exists()
     assert pathlib.Path(job["upload_path"]).read_bytes() == archive.read_bytes()
     assert jobs_page.mappe_line(dict(job)) == ("Mappe bereit", "")
+
+
+def test_stage_failure_leaves_the_application_recorded_and_retryable(
+    con, data_dir, monkeypatch
+):
+    job_id = _job(con)
+    _with_mappe(con, data_dir, job_id)
+    result = apply_record.record_form_application(job_id)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            upload,
+            "stage",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("injected stage failure")
+            ),
+        )
+        with pytest.raises(OSError, match="injected stage failure"):
+            apply_record.undo(
+                job_id, result["bewerbung_id"], result["previous_status"]
+            )
+
+    assert db.get_bewerbung(con, result["bewerbung_id"]) is not None
+    assert db.get_job(con, job_id)["status"] == "applied"
+    assert db.get_draft_by_job(con, job_id)["status"] == "filed"
+
+    apply_record.undo(job_id, result["bewerbung_id"], result["previous_status"])
+    assert db.get_bewerbung(con, result["bewerbung_id"]) is None
+
+
+def test_database_failure_rolls_back_undo_and_removes_new_stage(
+    con, data_dir, monkeypatch
+):
+    job_id = _job(con)
+    _with_mappe(con, data_dir, job_id)
+    result = apply_record.record_form_application(job_id)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            db,
+            "set_upload",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("injected upload pointer failure")
+            ),
+        )
+        with pytest.raises(RuntimeError, match="injected upload pointer failure"):
+            apply_record.undo(
+                job_id, result["bewerbung_id"], result["previous_status"]
+            )
+
+    assert db.get_bewerbung(con, result["bewerbung_id"]) is not None
+    assert db.get_job(con, job_id)["status"] == "applied"
+    assert db.get_draft_by_job(con, job_id)["status"] == "filed"
+    assert list(pathlib.Path(data_dir, "Bewerbung-hochladen").glob("*.pdf")) == []
+
+    apply_record.undo(job_id, result["bewerbung_id"], result["previous_status"])
+    assert db.get_bewerbung(con, result["bewerbung_id"]) is None
+
+
+def test_process_death_before_undo_commit_is_recovered_without_a_duplicate_stage(
+    con, data_dir, monkeypatch
+):
+    job_id = _job(con)
+    _with_mappe(con, data_dir, job_id)
+    result = apply_record.record_form_application(job_id)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            db,
+            "unrecord_application",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(SystemExit()),
+        )
+        with pytest.raises(SystemExit):
+            apply_record.undo(
+                job_id, result["bewerbung_id"], result["previous_status"]
+            )
+
+    upload_dir = pathlib.Path(data_dir, "Bewerbung-hochladen")
+    orphan = list(upload_dir.glob("*restore*.pdf"))
+    assert len(orphan) == 1
+    assert db.get_bewerbung(con, result["bewerbung_id"]) is not None
+
+    assert upload.recover_interrupted_undos(con) == 1
+    assert list(upload_dir.glob("*restore*.pdf")) == []
+
+    apply_record.undo(job_id, result["bewerbung_id"], result["previous_status"])
+    staged = list(upload_dir.glob("*restore*.pdf"))
+    assert len(staged) == 1
+    assert db.get_job(con, job_id)["upload_path"] == str(staged[0])
+    assert upload.recover_interrupted_undos(con) == 0
+
+
+def test_a_stale_undo_never_detaches_a_newer_application(con, data_dir):
+    job_id = _job(con)
+    _with_mappe(con, data_dir, job_id)
+    old = apply_record.record_form_application(job_id)
+    apply_record.undo(job_id, old["bewerbung_id"], old["previous_status"])
+    newer = apply_record.record_form_application(job_id)
+
+    with pytest.raises(RuntimeError, match="no longer linked"):
+        apply_record.undo(job_id, old["bewerbung_id"], old["previous_status"])
+
+    job = db.get_job(con, job_id)
+    assert job["status"] == "applied"
+    assert job["bewerbung_id"] == newer["bewerbung_id"]
+    assert db.get_bewerbung(con, newer["bewerbung_id"]) is not None
+    assert list(pathlib.Path(data_dir, "Bewerbung-hochladen").glob("*restore*.pdf")) == []
 
 
 def test_the_undo_survives_a_posting_that_was_refused_because_of_it(con, data_dir):

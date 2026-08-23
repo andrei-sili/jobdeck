@@ -16,6 +16,7 @@ import random
 from zoneinfo import ZoneInfo
 
 from jobdeck import db, gmail
+from jobdeck import settings as app_settings
 from jobdeck.services import send
 
 log = logging.getLogger(__name__)
@@ -51,10 +52,10 @@ def _due(con, now: datetime.datetime) -> bool:
 
 def _global_block(con) -> str:
     """Conditions that pause the whole queue (no draft is at fault)."""
-    if (db.get_setting(con, "real_send_enabled", "0") != "1"
+    if (not app_settings.boolean(con, "real_send_enabled", False)
             and not db.get_setting(con, "test_recipient", "").strip()):
         return "test mode without a test recipient"
-    cap = int(db.get_setting(con, "daily_send_cap", "15") or "15")
+    cap = app_settings.integer(con, "daily_send_cap", 15, minimum=0)
     if db.count_outbound_today(con) >= cap:
         return "daily cap reached"
     return ""
@@ -70,7 +71,7 @@ def _pick(now: datetime.datetime):
         # In test mode a send leaves the draft approved, so each draft is
         # rehearsed once and the queue still drains — otherwise the worker
         # would re-pick the same posting until the daily cap ran out.
-        test_mode = db.get_setting(con, "real_send_enabled", "0") != "1"
+        test_mode = not app_settings.boolean(con, "real_send_enabled", False)
         job_id = db.next_approved_autosend_job(con, exclude_test_sent=test_mode)
         if (job_id is None and test_mode
                 and db.next_approved_autosend_job(con) is not None):

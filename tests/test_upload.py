@@ -9,6 +9,7 @@ dialog.
 
 import os
 import pathlib
+import shutil
 
 import pytest
 
@@ -94,6 +95,44 @@ def test_a_filesystem_without_hardlinks_still_gets_the_file(data_dir,
 
     assert staged.read_bytes() == b"eins"
     assert staged.stat().st_ino != source.stat().st_ino   # a copy this time
+
+
+def test_failed_copy_never_replaces_a_valid_stage_with_partial_bytes(
+    data_dir, monkeypatch
+):
+    source = _pdf(data_dir / "output" / "job_7" / "Bewerbung_A_Firma.pdf", "old")
+    staged = upload.stage(source)
+    replacement = source.with_suffix(".new")
+    replacement.write_bytes(b"new complete bytes")
+    os.replace(replacement, source)
+
+    monkeypatch.setattr(
+        os,
+        "link",
+        lambda *args: (_ for _ in ()).throw(OSError(18, "cross-device")),
+    )
+
+    def fail_copy(_source, target):
+        pathlib.Path(target).write_bytes(b"partial")
+        raise OSError("injected copy failure")
+
+    monkeypatch.setattr(shutil, "copyfile", fail_copy)
+
+    with pytest.raises(OSError, match="injected copy failure"):
+        upload.stage(source, previous=str(staged))
+
+    assert staged.read_bytes() == b"old"
+    assert list(staged.parent.glob("*.part")) == []
+
+
+def test_startup_recovery_removes_an_interrupted_partial_stage(con, data_dir):
+    folder = pathlib.Path(data_dir, "Bewerbung-hochladen")
+    folder.mkdir(parents=True, exist_ok=True)
+    partial = folder / ".Bewerbung_A (restore-7-9).pdf.deadbeef.part"
+    partial.write_bytes(b"candidate data")
+
+    assert upload.recover_interrupted_undos(con) == 1
+    assert not partial.exists()
 
 
 def test_clearing_takes_the_file_back_out(data_dir):

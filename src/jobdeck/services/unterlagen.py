@@ -25,6 +25,7 @@ import pathlib
 import tempfile
 
 from jobdeck import apply_channel, config, db, pdf, templates
+from jobdeck import settings as app_settings
 from jobdeck.services import anlagen as anlagen_lib
 from jobdeck.services import mappe
 
@@ -93,11 +94,7 @@ def _int_setting(raw: str) -> int:
 
     The directory holding these is one the user is invited to edit, so the
     value is screened rather than trusted to parse."""
-    try:
-        value = int(str(raw).strip())
-    except (TypeError, ValueError):
-        return 0
-    return max(0, value)
+    return app_settings.parse_int(raw, 0, minimum=0)
 
 
 def _numbered(parts: list[Part]) -> list[Part]:
@@ -382,7 +379,7 @@ def read(con, job_id: int | None) -> dict:
     """
     settings = mappe.build_settings(con)
     shrunk_from = _int_setting(db.get_setting(con, BEFORE_SETTING, ""))
-    lossless = db.get_setting(con, LOSSLESS_SETTING, "") == "1"
+    lossless = app_settings.boolean(con, LOSSLESS_SETTING, False)
     view = preview(con, job_id)
     parts, anlagen_error = anlagen_parts(settings["anlagen_dir"])
     facts = _specimen_facts(con, parts)
@@ -407,7 +404,7 @@ def read(con, job_id: int | None) -> dict:
         "lossless": lossless,
         # A budget line may only promise more compression when compression is
         # actually switched on; with it off, what was merged is what is sent.
-        "compress": settings["compress"] == "1",
+        "compress": settings["compress"],
     }
 
 
@@ -536,7 +533,7 @@ def _build(job_id: int | None) -> dict:
             letter_pages = pdf.page_count(letter_pdf)
             merged = pathlib.Path(tmp) / "mappe.pdf"
             pdf.merge_pdfs([letter_pdf, *anlagen], merged)
-            if settings["compress"] == "1":
+            if settings["compress"]:
                 compression = pdf.compress_to_target(merged, out_path, budget)
             else:
                 pdf.install_pdf(merged, out_path)

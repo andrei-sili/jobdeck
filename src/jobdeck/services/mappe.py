@@ -14,11 +14,11 @@ instead of being blessed as the new draft's PDF.
 
 import asyncio
 import logging
-import math
 import pathlib
 import tempfile
 
 from jobdeck import apply_channel, config, db, pdf, templates
+from jobdeck import settings as app_settings
 from jobdeck.ai import drafting as ai_drafting
 from jobdeck.dates import heute_de
 from jobdeck.services import upload
@@ -103,13 +103,7 @@ def target_mb_setting(raw: str, fallback: float) -> float:
     directory the user is invited to edit, so the value has to be screened
     for being a real number, not merely for parsing.
     """
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        return fallback
-    if not math.isfinite(value) or value <= 0:
-        return fallback
-    return value
+    return app_settings.parse_float(raw, fallback, minimum_exclusive=0)
 
 
 # field -> (app_settings key, default, strip?). The single definition of what
@@ -142,11 +136,13 @@ def build_settings(con) -> dict:
     Anlagen folder and the same size budgets — a screen describing documents
     assembled under different settings is worse than no screen.
     """
-    return {
+    values = {
         field: (db.get_setting(con, key, default).strip() if strip
                 else db.get_setting(con, key, default))
         for field, key, default, strip in _BUILD_SETTINGS
     }
+    values["compress"] = app_settings.parse_bool(values["compress"], True)
+    return values
 
 
 def target_bytes(settings: dict, channel: str) -> int:
@@ -217,7 +213,7 @@ def _build_mappe(job_id: int) -> dict:
             # compression works on the same bytes that will be attached.
             merged = pathlib.Path(tmp) / "mappe.pdf"
             pdf.merge_pdfs([letter_pdf, *anlagen], merged)
-            if settings["compress"] == "1":
+            if settings["compress"]:
                 compression = pdf.compress_to_target(merged, out_path, budget)
             else:
                 pdf.install_pdf(merged, out_path)
@@ -244,7 +240,7 @@ def _build_mappe(job_id: int) -> dict:
         # floor is in the way, when they simply switched shrinking off, sends
         # them looking for a limit instead of a switch.
         reason = ("the quality floor stops further compression"
-                  if settings["compress"] == "1"
+                  if settings["compress"]
                   else "shrinking is switched off in Settings")
         warning = (f"Mappe is {size / 1024 / 1024:.1f} MB — over the "
                    f"{budget / 1024 / 1024:.1f} MB target for this "

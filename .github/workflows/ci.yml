@@ -5,12 +5,17 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.12", "3.14"]
+        python-version: ["3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -21,4 +26,40 @@ jobs:
       - name: Lint
         run: uv run ruff check .
       - name: Test
-        run: uv run pytest
+        run: timeout --signal=TERM 15m uv run pytest
+      - name: Build and install wheel
+        shell: bash
+        run: |
+          set -eu
+          dist_dir="${RUNNER_TEMP}/dist-${{ matrix.python-version }}"
+          smoke_venv="${RUNNER_TEMP}/smoke-${{ matrix.python-version }}"
+          uv build --out-dir "${dist_dir}"
+          uv venv --python "${{ matrix.python-version }}" "${smoke_venv}"
+          uv pip install --no-deps --python "${smoke_venv}/bin/python" "${dist_dir}"/*.whl
+          "${smoke_venv}/bin/python" -c "import importlib.metadata, jobdeck; assert importlib.metadata.version('jobdeck')"
+
+  documentation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - name: Validate canonical documentation
+        run: uv run --no-project python scripts/validate_docs.py
+      - name: Scan tracked files for credential signatures
+        run: uv run --no-project python scripts/scan_secrets.py
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - name: Export locked runtime dependencies
+        run: uv export --quiet --frozen --no-dev --no-emit-project --format requirements-txt --output-file "${RUNNER_TEMP}/requirements.txt"
+      - name: Audit locked runtime dependencies
+        run: uvx --from pip-audit==2.10.1 pip-audit --requirement "${RUNNER_TEMP}/requirements.txt"

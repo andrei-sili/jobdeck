@@ -377,6 +377,11 @@ def test_a_usable_setting_is_honoured():
     assert rail._int_setting(" 45 ", 15) == 45
 
 
+def test_bounded_settings_match_their_workflow_defaults():
+    assert rail._int_setting("-1", 14, minimum=1, clamp=False) == 14
+    assert rail._int_setting("-1", 15, minimum=0) == 0
+
+
 def test_the_rails_send_cap_default_is_the_send_services_own():
     """Two defaults for one number would let the bar promise a budget the send
     path refuses."""

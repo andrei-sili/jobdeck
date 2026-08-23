@@ -22,6 +22,7 @@ import datetime
 import logging
 
 from jobdeck import apply_channel, db, dedupe, gmail, replies
+from jobdeck import settings as app_settings
 from jobdeck.ai import llm
 from jobdeck.ai import replies as ai_replies
 from jobdeck.ai.drafting import resolve_refnr
@@ -195,12 +196,14 @@ def _lookback_days(con) -> int:
     Guarded: a stored value can be anything a text field accepted, and an
     unparseable one must not take the reader down — a settings page is
     reachable, a crashed scheduler job is not."""
-    raw = db.get_setting(con, LOOKBACK_KEY, "")
-    try:
-        days = int(float(raw))
-    except (TypeError, ValueError):
-        return FIRST_RUN_LOOKBACK_DAYS
-    return min(max(days, 1), 3650)
+    return app_settings.integer(
+        con,
+        LOOKBACK_KEY,
+        FIRST_RUN_LOOKBACK_DAYS,
+        minimum=1,
+        maximum=3650,
+        allow_decimal=True,
+    )
 
 
 def rescan(lookback_days: int | None = None) -> dict:
@@ -619,7 +622,7 @@ def _ai_classify_enabled() -> bool:
     promise is that nothing is sent to the API while it is off."""
     with db.db() as con:
         return (db.ai_enabled(con)
-                and db.get_setting(con, AI_TOGGLE_KEY, "0") == "1")
+                and app_settings.boolean(con, AI_TOGGLE_KEY, False))
 
 
 def _ai_classify(subject: str, body: str) -> tuple[str, str, object]:

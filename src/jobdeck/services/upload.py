@@ -28,11 +28,15 @@ Two properties this module exists to hold:
 import logging
 import os
 import pathlib
+import re
 import shutil
+import tempfile
 
 from jobdeck import config
 
 log = logging.getLogger(__name__)
+
+_UNDO_NAME = re.compile(r"^.+ \(restore-(\d+)-(\d+)\)(?:\.[^.]*)?$")
 
 
 def staged_path(source: pathlib.Path, previous: str = "") -> pathlib.Path:
@@ -72,24 +76,83 @@ def staged_path(source: pathlib.Path, previous: str = "") -> pathlib.Path:
     return folder / f"{stem} (99){suffix}"
 
 
+def undo_staged_path(
+    source: pathlib.Path, job_id: int, bewerbung_id: int
+) -> pathlib.Path:
+    """Return the stable target used by one retryable application undo."""
+    return pathlib.Path(config.UPLOAD_DIR) / (
+        f"{source.stem} (restore-{job_id}-{bewerbung_id}){source.suffix}"
+    )
+
+
+def recover_interrupted_undos(con) -> int:
+    """Remove staging left by an undo that crashed before its DB commit.
+
+    A completed undo deleted the application row and left the job pointing at
+    the deterministic target, so it is retained. An interrupted undo still has
+    the application linked to the job and its target is safe to remove. Partial
+    siblings can only come from a stage operation interrupted before replace;
+    startup runs before workers, so all of them are stale.
+    """
+    folder = pathlib.Path(config.UPLOAD_DIR)
+    if not folder.is_dir():
+        return 0
+    removed = 0
+    for partial in folder.glob(".*.part"):
+        try:
+            partial.unlink()
+        except OSError:
+            log.warning("upload: could not remove interrupted stage %s", partial)
+        else:
+            removed += 1
+    for target in folder.iterdir():
+        match = _UNDO_NAME.fullmatch(target.name)
+        if match is None or not target.is_file():
+            continue
+        job_id, bewerbung_id = (int(value) for value in match.groups())
+        application_still_recorded = con.execute(
+            "SELECT 1 FROM jobs j JOIN bewerbungen b ON b.id=j.bewerbung_id "
+            "WHERE j.id=? AND b.id=?",
+            (job_id, bewerbung_id),
+        ).fetchone()
+        if application_still_recorded is None:
+            continue
+        try:
+            target.unlink()
+        except OSError:
+            log.warning("upload: could not remove interrupted undo %s", target)
+        else:
+            removed += 1
+    return removed
+
+
 def stage(source: pathlib.Path, previous: str = "") -> pathlib.Path:
     """Put `source` in the upload folder and answer with the staged path.
 
-    Unlinks first: `os.link` refuses an existing destination, and the
-    destination existing is the NORMAL case — a rebuilt Mappe re-stages over
-    its own previous link.
+    Build beside the current target and replace it only after the link or copy
+    is complete. A failed fallback copy therefore leaves neither a partial
+    final file nor a missing previously valid staged file.
     """
     target = staged_path(source, previous)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.unlink(missing_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        dir=target.parent, prefix=f".{target.name}.", suffix=".part"
+    )
+    os.close(fd)
+    temporary = pathlib.Path(temporary_name)
     try:
-        os.link(source, target)
-    except OSError as exc:
-        # another filesystem (EXDEV), or one without hardlinks (exFAT, several
-        # network mounts) — the file still has to be there
-        log.info("upload: hardlink refused (%s), copying instead",
-                 exc.strerror or exc)
-        shutil.copyfile(source, target)
+        temporary.unlink()
+        try:
+            os.link(source, temporary)
+        except OSError as exc:
+            # another filesystem (EXDEV), or one without hardlinks (exFAT,
+            # several network mounts) — the file still has to be there
+            log.info("upload: hardlink refused (%s), copying instead",
+                     exc.strerror or exc)
+            shutil.copyfile(source, temporary)
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
     return target
 
 

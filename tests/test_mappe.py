@@ -1,5 +1,6 @@
 import pathlib
 
+import pytest
 from pypdf import PdfWriter
 
 from jobdeck import config, db, pdf
@@ -561,6 +562,19 @@ def test_the_signed_setting_keys_are_exactly_the_ones_read(con, data_dir):
     assert set(settings) == {"applicant_name", "applicant_ort", "template_path",
                              "anlagen_dir", "compress", "target_mb",
                              "target_portal_mb"}
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [("1", True), ("0", False), ("yes", True)],
+)
+def test_compression_toggle_is_typed_consistently(
+    con, data_dir, stored, expected
+):
+    db.set_setting(con, "mappe_compress", stored)
+    con.commit()
+
+    assert mappe.build_settings(con)["compress"] is expected
 
 
 def test_the_cover_sheet_and_the_subject_name_the_same_role(con, data_dir):

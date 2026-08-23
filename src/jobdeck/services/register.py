@@ -21,6 +21,7 @@ import datetime
 from dataclasses import dataclass
 
 from jobdeck import db
+from jobdeck import settings as app_settings
 from jobdeck.constants import (
     BEANTWORTET_STATUS,
     DEFAULT_FOLLOW_UP_DAYS,
@@ -436,8 +437,10 @@ FOLLOW_UP_DEFAULT = DEFAULT_FOLLOW_UP_DAYS
 
 def follow_up_setting(raw: str) -> int:
     """The stored threshold as a whole number of days, never raising."""
-    try:
-        days = int(float(str(raw).strip()))
-    except (TypeError, ValueError, OverflowError):
-        return FOLLOW_UP_DEFAULT
-    return days if days > 0 else FOLLOW_UP_DEFAULT
+    return app_settings.parse_int(
+        raw,
+        FOLLOW_UP_DEFAULT,
+        minimum=1,
+        allow_decimal=True,
+        clamp=False,
+    )
