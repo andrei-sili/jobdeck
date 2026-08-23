@@ -9,7 +9,7 @@ opaque Gmail id — without it the pass could never advance past a capped
 backlog, and with only it no content of anyone else's mail enters this
 database.
 
-The tiering rule (ROADMAP, 2026-08-05): a status is written automatically
+The current tiering rule: a status is written automatically
 only when deterministic German rules matched on a thread- or exact-address-
 matched message. LLM verdicts, domain matches and everything ambiguous wait
 for his click. The receipt path — the only one that WRITES an application —

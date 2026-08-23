@@ -33,11 +33,10 @@ _lock = asyncio.Lock()  # double-clicks must not race Chrome on one output file
 # be possible to get one back without un-approving first.
 EDITABLE_STATUS = ("ready", "approved")
 
-# What `jobs.mappe_kind` says when a build finished. One value, because a
-# Bewerbungsmappe is always complete — Deckblatt, Anschreiben, Lebenslauf,
-# Zeugnisse (his decision, 2026-08-14). The column distinguishes "complete" from
-# "nothing staged", not two kinds of Mappe, and it is written BY the build so no
-# screen ever has to guess from the file system.
+# What `jobs.mappe_kind` says when the current legacy build finishes. The
+# implementation emits one complete package rather than versioned, selectable
+# artifacts. The accepted target is documented in
+# `docs/adr/0005-job-specific-application-documents.md`.
 MAPPE_COMPLETE = "vollständig"
 
 # Size budgets, in MB. E-mail: 2-3 MB is the deliverability sweet spot and

@@ -518,11 +518,10 @@ def _load_jobs(view_key: str, page: int, search: str = "",
                sort: str = db.DEFAULT_LIST_ORDER) -> dict:
     """One page of a named view, with everything needed to describe it.
 
-    A row stands for a COMPANY — its best-ranked posting, with the others
-    listed beneath it. Only one application per company is possible anyway, so
-    the count and the page both count companies and the printed range stays
-    true to what is on screen. It is no longer a toggle: a screen that could be
-    switched between two units is a screen whose numbers need explaining.
+    A row currently stands for a COMPANY: its best-ranked posting, with the
+    others listed beneath it. The count and page therefore count companies.
+    This legacy grouping is broader than the accepted application identity
+    policy in `docs/adr/0002-application-identity-and-duplicate-policy.md`.
 
     The page number is clamped HERE, against the total this very query saw: a
     view change or a background poll can shrink the result set under the user's
@@ -617,8 +616,9 @@ def _load_jobs(view_key: str, page: int, search: str = "",
 
 
 # After this long, an entry stops reporting its age and starts asking the
-# question. Not a dialog and not a dismissible prompt: he learns to close those,
-# and the app genuinely cannot see whether he pressed the employer's submit.
+# question. Not a dialog and not a dismissible modal: repeated confirmation
+# becomes mechanical, and the app cannot detect whether the employer form was
+# submitted.
 ASK_AFTER_MIN = 10
 # And after this long it is worth noticing from across the screen.
 STALE_FORM_H = 24
@@ -640,7 +640,7 @@ def started_line(job: dict, now: datetime.datetime | None = None) -> str:
     """One running application, as the strip says it.
 
     Under ten minutes it reports; past ten it asks. The question is the LABEL
-    rather than a prompt, so there is nothing to dismiss and therefore nothing
+    rather than a modal, so there is nothing to dismiss and therefore nothing
     to learn to dismiss — and since replies are read, an arriving
     Eingangsbestätigung closes it by itself. Past the receipt window (the
     SAME number the reader matches receipts within — two claims from one
@@ -673,10 +673,10 @@ def started_line(job: dict, now: datetime.datetime | None = None) -> str:
 def mappe_line(job: dict) -> tuple[str, str]:
     """What the strip says about the documents, and how loudly.
 
-    `mappe_kind` is written by the build, so "nothing is staged" is a fact
-    rather than a guess. It has to be said out loud: a Bewerbungsmappe is
-    always complete by his decision, so an incomplete one offered silently to
-    an upload button is the worst outcome this flow can produce.
+    `mappe_kind` is written by the legacy build, so "nothing is staged" is a
+    fact rather than a guess. The current UI exposes only complete-package or
+    missing-package states; the target versioned selection is defined in ADR
+    0005.
     """
     if job.get("mappe_kind"):
         return "Mappe bereit", ""
@@ -1248,8 +1248,8 @@ async def jobs_page():
         # the top of every handler, and NiceGUI reads a timer's parent slot
         # BEFORE its own stop check — so a one-shot parked in `overlay` whose
         # slot is cleared before it fires writes an ERROR traceback into his
-        # log instead of quietly stopping. Observed live, twice in one session,
-        # and the same class as the queue timer that logged on every leave.
+        # log instead of quietly stopping. The same failure class affected the
+        # queue timer whenever its page was left.
         timers = ui.column().classes("contents")
 
         def say(message: str, **kwargs) -> None:
@@ -2038,7 +2038,7 @@ async def jobs_page():
             await refresh(force=True)
 
         async def start_application(job: dict, button=None) -> None:
-            """One press: his tab opens, and everything behind it is prepared.
+            """Open the employer tab and prepare the current application package.
 
             The ORDER is the feature, and the first two steps are forced by the
             browser rather than chosen:
@@ -2050,15 +2050,14 @@ async def jobs_page():
                window.open pushed after a minute of server work is what a popup
                blocker refuses, and the letter takes about a minute.
 
-            Then, while he reads their form: the moment is stamped, the channel
-            is resolved if the scheduler has not got to it yet, the letter is
-            written, the COMPLETE Mappe is built and staged where their upload
-            dialog opens, and that folder is opened for him.
+            Then, while the candidate reads the form: the moment is stamped,
+            the channel is resolved if the scheduler has not got to it yet, the
+            letter is written, the current complete Mappe is built and staged
+            where the upload dialog opens, and the staging folder is opened.
 
             If the letter fails the Mappe is not built and the strip says the
-            documents are NOT complete. A Bewerbungsmappe is always complete by
-            his decision, so a partial one put silently in front of an upload
-            button is the worst outcome available here.
+            documents are not complete. This describes the legacy complete-
+            package flow; the target versioned selection is defined in ADR 0005.
             """
             overlay.clear()
             url = _openable_url(job)

@@ -1,29 +1,56 @@
 # JobDeck
 
-**Your job application cockpit.** JobDeck discovers job postings across German job boards, drafts a tailored application (cover letter + email) for each posting with AI, and lets you review and send it with one click via Gmail — with every send gated behind your approval. Reply tracking, which closes the loop by updating an application's status when an answer lands in your inbox, is the next phase.
+**Your local job application cockpit.** JobDeck discovers postings, evaluates
+fit, drafts German application documents, prepares form applications, sends
+candidate-approved e-mails through Gmail, and tracks replies.
 
-> Built for the German job market (Bewerbung norms: one merged PDF, proper Betreff, named contact person), but the architecture is source-pluggable and language-agnostic.
+JobDeck is designed for the German employment market and currently runs as a
+single-user application on the local machine.
 
 ## Features
 
-- **Multi-source discovery** — parallel saved search profiles against the Bundesagentur für Arbeit Jobsuche, Jooble, and Arbeitnow, with cross-source deduplication and duplicate protection against companies you already applied to.
-- **AI-tailored drafting** — reads the full posting and writes a concise, posting-specific German cover letter and email. Facts come only from your profile file; the AI cannot invent experience.
-- **Human-in-the-loop sending** — a Postausgang where you edit and approve every application before it goes out through the Gmail API. Optional per-profile auto-send with a hard daily cap, off by default.
-- **Local-first** — your data lives in a local SQLite database with automatic rotating backups. No cloud, no accounts, no telemetry.
+- **Multi-source discovery** — saved search profiles query Arbeitsagentur,
+  Jooble, and Arbeitnow through a common adapter contract.
+- **Match scoring and drafting** — optional Anthropic processing scores postings
+  and prepares a tailored Anschreiben and e-mail from `profile.md`. Generated
+  content remains subject to candidate review.
+- **Application documents** — a local HTML template and Anlagen PDFs are
+  rendered into a merged Bewerbungsmappe with channel-aware size handling.
+- **Candidate-controlled sending** — every application must be approved before
+  it can be sent. Per-profile scheduled sending can transmit previously
+  approved drafts and is off by default.
+- **Form support** — JobDeck detects common ATS and company-form channels,
+  prepares copy-ready values and a staged PDF, and never submits the form.
+  JobDeck records an application after candidate confirmation or when a
+  strongly matched receipt proves that a submission already occurred.
+- **Reply tracking** — Gmail replies are matched to applications, classified by
+  deterministic rules with optional Anthropic fallback, and presented for
+  review when confidence or identity is insufficient.
+- **Local-first storage** — the active database, profile, credentials, generated
+  files, and backups remain in the local data directory.
 
-### Planned
-
-- **Automatic reply tracking** — poll the inbox, match replies to applications, classify them (confirmation / rejection / interview invitation) and update statuses with a full audit trail.
+Local-first does not mean offline. Enabled discovery, Anthropic, contact lookup,
+and Gmail features communicate with external services. See
+[Local Operations](docs/engineering/local-operations.md) for the data boundary
+and current limitations.
 
 ## Status
 
-Work in progress. Discovery, AI match scoring, application drafting, PDF assembly and Gmail sending are implemented; reply tracking is next. See the issues for the roadmap.
+JobDeck is alpha software. Discovery, scoring, drafting, PDF assembly, Gmail
+sending, form preparation, application tracking, and reply ingestion are
+implemented with documented limitations. See
+[Current Delivery State](docs/engineering/current-delivery-state.md) for the
+verified implementation and the
+[Refactoring Roadmap](docs/engineering/refactoring-roadmap.md) for proposed
+next slices.
 
 ## Requirements
 
 - Python ≥ 3.12, [uv](https://docs.astral.sh/uv/)
 - Google Chrome or Chromium (PDF rendering)
-- API keys: [Jooble](https://jooble.org/api/about) (free), [Anthropic](https://console.anthropic.com) (drafting), Google OAuth client (Gmail send/read)
+- Optional external integrations: [Jooble](https://jooble.org/api/about),
+  [Anthropic](https://console.anthropic.com), and a Google OAuth installed-app
+  client for Gmail send/read access
 
 ## Quick start
 
@@ -33,7 +60,19 @@ uv sync
 uv run jobdeck
 ```
 
-On first run JobDeck creates its data directory (`~/.local/share/jobdeck/`), where your database, `.env`, profile, and templates live — nothing personal is ever stored in the repository.
+On first run JobDeck creates its data directory at
+`~/.local/share/jobdeck/`. Keep candidate data and credentials there rather
+than in the repository. Start from [`.env.example`](.env.example) and
+[`profile.example.md`](profile.example.md).
+
+## Documentation
+
+- [Product Direction](docs/product/product-direction.md)
+- [Current Delivery State](docs/engineering/current-delivery-state.md)
+- [Target Architecture](docs/engineering/target-architecture.md)
+- [Refactoring Roadmap](docs/engineering/refactoring-roadmap.md)
+- [Local Operations](docs/engineering/local-operations.md)
+- [Architecture Decision Records](docs/adr/README.md)
 
 ## License
 

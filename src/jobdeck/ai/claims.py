@@ -2,10 +2,9 @@
 
 profile.md is prose the user wrote for himself, and the register wants pairs:
 a competence and the ONE project it belongs to. Extracting them is a small,
-strictly-shaped reading task, so it goes to the cheap model with a JSON schema
-— the split the drafting prompt does NOT follow, and for the opposite reason
-(see .claude/rules/ai-llm.md: long German prose goes plain-text, short
-structured data stays JSON).
+strictly-shaped reading task, so it uses the lower-cost model with a JSON
+schema. Long-form prose generation uses plain text; short, structured
+extraction uses schema-constrained JSON.
 
 What comes back is a PROPOSAL. Nothing is stored until the user confirms it,
 because the register is the list of things a letter is allowed to say about

@@ -6,7 +6,7 @@ VORGANG — one application with every mail that arrived for it — not a mail:
 a mail-per-card shelf scattered one firm's four replies across four unrelated
 positions in a 7 000 px column.
 
-Two rules the measurements forced, both his decisions (ROADMAP 2026-08-18):
+Two current product rules protect application state:
 a verdict may raise an application's status on one press but never lower it
 — 23 of those 42 hang off applications already closed — and the closed ones
 are a VIEW rather than a pile, clearable in one gesture that writes no status
@@ -550,7 +550,7 @@ async def antworten_page():
 
         def _automation_note() -> None:
             """What files itself, said out loud. The tiering decision
-            (ROADMAP 2026-08-05) supersedes the mockup's blanket "nothing
+            supersedes the earlier blanket rule that "nothing
             changes a status without you", and a screen that writes statuses
             has to name which ones."""
             ui.label("Eindeutige Absagen und Einladungen im Mail-Verlauf "

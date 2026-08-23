@@ -459,8 +459,10 @@ async def test_the_search_box_narrows_the_register(user: User, con):
 
 async def test_a_second_application_at_one_company_is_refused_in_the_dialog(
         user: User, con):
-    """One application per company — the rule the send gate enforces. The
-    refusal branch in `_save` was driven by nothing."""
+    """The dialog reflects the current company-wide send gate.
+
+    The narrower accepted identity policy in ADR 0002 is not implemented yet.
+    """
     _app_row(con, firma="Einmal GmbH")
     await user.open("/bewerbungen")
 

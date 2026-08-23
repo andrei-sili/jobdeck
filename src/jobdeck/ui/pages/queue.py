@@ -127,9 +127,9 @@ def _load(filter_value: str) -> dict:
         rows = [dict(r) for r in
                 db.list_drafts_with_jobs(con, FILTER_STATUSES[filter_value])]
         # Asked of the duplicate gate itself, for the drafts on screen: the
-        # send path refuses a second application to a company (send.py), and
-        # until now only the job inbox said so — on the FORM path, where he
-        # drafts from the cockpit, nothing did.
+        # current send path refuses a second application to a company
+        # (send.py). The accepted identity policy is documented in ADR 0002;
+        # this warning reflects current behavior until that policy is built.
         postings = [{"id": r["job_id"], "company": r["job_company"],
                      "contact_email": r["job_contact_email"]} for r in rows]
         applied = duplicates_for_jobs(con, postings)

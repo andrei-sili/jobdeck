@@ -576,9 +576,8 @@ def test_a_view_that_stands_on_no_status_obeys_the_chosen_order(con, data_dir):
 
 def test_companies_group_the_way_the_duplicate_gate_compares_them(con, data_dir):
     """dedupe.py exists because SQLite's lower() folds ASCII only. The grouped
-    view claims "one application per company", so it must group by the very
-    function that enforces that — otherwise it shows two rows for one company
-    and the second application is refused after he has written it."""
+    view currently mirrors the legacy gate, so it must use the same comparison
+    function. ADR 0002 defines the narrower target identity policy."""
     from jobdeck.dedupe import find_duplicate_bewerbung
     best = _company_job(con, "u1", "MÜLLER Software GmbH", 88)
     _company_job(con, "u2", "Müller Software GmbH", 70)
@@ -1447,10 +1446,10 @@ def test_a_posting_he_put_away_offers_nothing_until_it_comes_back():
 
 
 def test_a_form_posting_can_still_be_given_a_letter():
-    """The German market is form-first, and the letter is not optional: his
-    decision is that a Bewerbungsmappe is always complete. So the one press
-    writes it — there is no separate "Anschreiben" step to skip, which is what
-    left six of his eleven open applications without one."""
+    """The current complete-package flow writes a letter for form postings.
+
+    ADR 0005 defines the target as job-specific, versioned document selection.
+    """
     for channel in ("ats_form", "board_apply", "company_site", "unknown"):
         steps = {s.key: s for s in jobs.apply_steps(_row(apply_channel=channel))}
         assert steps[jobs.STEP_START].enabled, channel
@@ -1800,8 +1799,8 @@ def test_a_form_opened_before_the_app_could_stamp_it_says_so():
      "Mappe bereit", ""),
     ({"mappe_kind": "", "draft_status": "generating"},
      "Mappe wird gebaut …", ""),
-    # the one that matters: a Bewerbungsmappe is always complete, so an
-    # incomplete one has to be SAID rather than quietly offered for upload
+    # The legacy flow exposes complete-package or missing-package states, so a
+    # missing package must be explicit rather than offered for upload.
     ({"mappe_kind": "", "draft_status": "failed"},
      "Mappe NICHT fertig — von Hand hochladen", "warn"),
     ({"mappe_kind": "", "draft_status": None},

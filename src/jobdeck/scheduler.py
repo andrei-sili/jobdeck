@@ -56,9 +56,9 @@ def create_scheduler() -> AsyncIOScheduler:
         liveness.check_pending,
         "interval",
         hours=6,
-        # An interval job first fires one interval in, and his sessions are
-        # shorter than six hours — the pass would never run. It starts shortly
-        # after launch instead, and the per-posting recheck window
+        # An interval job first fires one interval in, and normal local runs
+        # are shorter than six hours — the pass would never run. It starts
+        # shortly after launch instead, and the per-posting recheck window
         # (RECHECK_AFTER_H) is what keeps repeated restarts from re-probing
         # anything: the batch is bounded by that, not by the tick.
         next_run_time=(datetime.datetime.now(TIMEZONE)
@@ -76,7 +76,7 @@ def create_scheduler() -> AsyncIOScheduler:
         # the time he reads the posting, on four rows out of five.
         minutes=30,
         # Same reason as the liveness pass: an interval job first fires one
-        # interval in, and the first pass has to happen inside a session. 120 s
+        # interval in, and the first pass has to happen during a normal run. 120 s
         # so it does not land on top of that pass at 90 s.
         next_run_time=(datetime.datetime.now(TIMEZONE)
                        + datetime.timedelta(seconds=120)),
@@ -95,7 +95,7 @@ def create_scheduler() -> AsyncIOScheduler:
     scheduler.add_job(
         replies.ingest_replies,
         "interval",
-        minutes=10,  # the ROADMAP's reply-polling cadence
+        minutes=10,  # current reply-polling cadence; see Current Delivery State
         # First pass shortly after launch, like liveness and the channel
         # resolver, and staggered behind both (90 s / 120 s): a reply he is
         # waiting on should not wait for the first full interval — and with

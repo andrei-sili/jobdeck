@@ -1,22 +1,12 @@
-"""What a German application form asks for, assembled per posting.
+"""Assemble copy-ready values for a German application form.
 
-Portals and ATS forms are never automated — that is a settled product decision.
-The reason is the platforms' own terms plus the fact that a form submitted
-without being read is irreversible, and one application per company means a
-silent mistake burns that company for good. It is NOT Art. 22 GDPR, which this
-docstring used to cite: that article governs the EMPLOYER making an automated
-decision about the applicant, and says nothing about how the applicant fills a
-form. A wrong justification is how a rule survives without ever being examined.
-237 of his postings route to a form. So the work
-that remains is the five minutes of typing, and every one of those minutes goes
-into fields he has already written down somewhere: his address, his links, his
-availability, the Stellenbezeichnung, the Referenznummer, the Anschreiben.
+The current implementation performs no browser fill or submit. The accepted
+target progresses from copy-ready values to candidate-triggered autofill,
+preview, confirmation, and controlled submission; see
+``docs/adr/0004-assisted-application-form-boundary.md``.
 
-This module answers "what will the form ask, and what is the answer" as pure
-data — no I/O, no UI. The cockpit page renders it as copy-one-click rows beside
-the employer's own tab; a field with no answer yet says where to put one instead
-of rendering an empty box, because a blank in a Bewerbung is worse than a gap he
-can see.
+This module represents expected fields and available answers as pure data. A
+field with no known answer remains visibly unanswered for candidate review.
 """
 
 from dataclasses import dataclass

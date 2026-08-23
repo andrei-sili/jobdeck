@@ -1,8 +1,7 @@
 """What a German application form asks for, and what JobDeck answers.
 
-Nothing here touches the employer's page — portals are never automated.
-These tests are about the ANSWERS being exactly right, because a Referenznummer
-or a Stellenbezeichnung that is nearly right is worse than a gap he can see.
+The current copy-ready implementation does not touch the employer page. These
+tests verify that known values are exact and unknown values remain visible.
 """
 
 import ast
@@ -182,12 +181,10 @@ def test_the_referenznummer_row_uses_the_apps_own_resolver(job, expected, why):
 
 
 def test_the_screen_that_opens_a_form_never_reaches_the_employers_page():
-    """Portals are never automated. The app may open a form in HIS browser and
-    nothing else — no fetch, no submit, no client.
+    """The current posting page opens a form but does not fetch or submit it.
 
-    This rule used to live over the cockpit; the cockpit is gone and the
-    posting screen took its job, so the rule moved with it rather than being
-    deleted along with the file it happened to be written against."""
+    Candidate-triggered autofill is a future stage defined in ADR 0004, not a
+    behavior of the current posting page."""
     source = pathlib.Path(jobs_page.__file__).read_text()
     tree = ast.parse(source)
     banned = {"httpx", "requests", "urlopen", "AsyncClient", "probe_status"}

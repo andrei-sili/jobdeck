@@ -20,14 +20,13 @@ def openable_url(url: str) -> str:
 def applied_line(already: dict) -> str:
     """'⚠ Bei X hast du dich bereits beworben (am 12.06. · Absage)'.
 
-    Only ONE application per company is possible — the send path refuses a
-    second one inside its own claim (services/send.py) — so a posting at such a
-    company can never become an application. It says WHICH application and how
-    it ended, because that is the difference between a company still deciding
-    and one that already said no.
+    The current send path refuses a second application to the same normalized
+    company. The accepted target permits another position after candidate
+    confirmation; see
+    `docs/adr/0002-application-identity-and-duplicate-policy.md`.
 
-    Shared by the job inbox and the review queue: two wordings of one gate is
-    how a screen ends up telling him something the send path will not do.
+    The job inbox and review queue share this wording so the UI reflects the
+    behavior currently enforced by the send path.
     """
     parts = []
     when = str(already.get("gesendet_am") or "")[:10]

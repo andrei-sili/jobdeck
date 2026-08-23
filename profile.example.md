@@ -1,10 +1,19 @@
-# Candidate profile — facts the AI may use
+# Candidate profile — current free-form format
 
-This file is the single source of truth about you for match scoring and
-application drafting. Copy it to `~/.local/share/jobdeck/profile.md` and
-replace everything with YOUR facts. The AI is instructed to never claim
-anything that is not written here — the more concrete this file is, the
-better the scores and drafts.
+Copy this file to `~/.local/share/jobdeck/profile.md` and replace the example
+with accurate professional facts. The current scoring, claim-proposal, and
+drafting flows send this text to the configured Anthropic integration when
+those features are enabled.
+
+JobDeck instructs the provider to use this profile as its factual source, but
+the current implementation does not verify generated claims deterministically.
+Review every generated application before approval. Do not include facts that
+you cannot support or personal data that is unnecessary for scoring and
+drafting.
+
+The target structured and versioned profile is described in
+[`Product Direction`](docs/product/product-direction.md). This file documents
+the current operational format only.
 
 ## Basics
 

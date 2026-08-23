@@ -199,7 +199,7 @@ def _effective_dpi(px_w: int, px_h: int, page_w_in: float, page_h_in: float) -> 
 
     It is a LOWER bound only for images drawn no larger than the page. One
     scaled up beyond the page edges reads higher than it truly is — see the
-    residual noted in ROADMAP.
+    residual documented in docs/engineering/current-delivery-state.md.
     """
     if page_w_in <= 0 or page_h_in <= 0:
         return 0.0

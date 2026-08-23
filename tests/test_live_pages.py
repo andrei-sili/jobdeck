@@ -324,8 +324,8 @@ async def test_a_closed_dialog_does_not_freeze_the_page(user: User, con,
 async def test_a_row_action_leaves_the_page_able_to_update_itself(
         user: User, con, data_dir):
     """Every row action ends in a refresh that deletes the element the action
-    was fired from. If that left the page believing he is still busy it would
-    defer every future update for the rest of the session."""
+    was fired from. A stale busy marker would defer every later update for the
+    remainder of the page visit."""
     _posting(con)
     await user.open("/")
     await user.should_see("Python Entwickler")
@@ -1066,12 +1066,11 @@ async def test_recording_from_the_strip_closes_the_loop(
 
 async def test_a_failed_letter_says_the_mappe_is_not_complete(
         user: User, con, data_dir, monkeypatch):
-    """A Bewerbungsmappe is always complete — his decision, 2026-08-14. So the
-    one outcome that must never be silent is a Mappe that is not: staging a
-    partial one in front of an upload button is worse than staging nothing.
+    """The legacy flow makes a failed complete-package build visible.
 
-    The employer's tab still opens either way. The app's document machinery
-    never stands between him and someone's form."""
+    The employer tab still opens when document preparation fails. ADR 0005
+    defines the target versioned document model.
+    """
     from jobdeck.services import drafting, mappe
     job_id = _posting(con)
     db.set_apply_channel(con, job_id, "ats_form", "JOIN",
@@ -1497,11 +1496,11 @@ async def test_the_undo_timer_survives_the_next_press(user: User, con, data_dir,
                                                       monkeypatch):
     """NiceGUI reads a timer's parent slot BEFORE its own stop check, so a
     one-shot parked in `overlay` — which every handler clears at its top —
-    writes an ERROR traceback into his log instead of quietly stopping.
+    writes an ERROR traceback instead of quietly stopping.
 
     Reachable in ten seconds by the most ordinary sequence there is: record
-    one application, start the next. Observed twice in one live session, and
-    the same class as the queue timer that logged on every leave."""
+    one application, start the next. It is the same failure class as the queue
+    timer that logged whenever its page was left."""
     done = _posting(con)
     db.mark_form_opened(con, done)
     nxt = _posting(con, external_id="e2", title="Django Entwickler",

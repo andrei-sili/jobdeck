@@ -93,10 +93,11 @@ def test_closing_the_loop_takes_the_file_out_of_the_upload_folder(
 
 def test_a_second_application_at_one_company_is_refused_and_offers_no_undo(
         con, data_dir):
-    """One application per company. `apply_job` marks the posting a duplicate
-    and points it at the blocking application BEFORE returning None, so there
-    is no earlier state an undo could restore — offering one would restore a
-    state that never existed."""
+    """The current company-wide gate refuses and records a duplicate atomically.
+
+    ADR 0002 narrows the target rule to posting and company-position identity,
+    but this test preserves the behavior of the legacy gate until refactoring.
+    """
     first = _job(con)
     _with_mappe(con, data_dir, first)
     apply_record.record_form_application(first)

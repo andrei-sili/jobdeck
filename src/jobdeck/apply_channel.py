@@ -8,10 +8,10 @@ can label the channel and deep-link the apply page. The German market is
 form/ATS-first (research 2026-07-18): most no-email postings land on an ATS or a
 board, never an auto-sendable inbox.
 
-Portals/ATS are NEVER auto-submitted (platform AGB bot-bans, Art. 22 DSGVO);
-only a DIRECT_EMAIL is eligible for the Gmail auto-send path. This module ONLY
-classifies — no network, no side effects, no actions. Following aggregator
-redirects (jooble/arbeitnow) and web e-mail lookup are later slices.
+The current implementation does not fill or submit portal/ATS forms; only a
+DIRECT_EMAIL is eligible for the Gmail send path. The accepted assisted-form
+boundary is documented in ``docs/adr/0004-assisted-application-form-boundary.md``.
+This module only classifies: it performs no network access and no action.
 """
 
 import posixpath
@@ -23,7 +23,7 @@ from jobdeck import netsafe
 
 # Channel vocabulary — a subset of the full cascade enum; the rest (RECRUITER,
 # IMPRESSUM_ONLY, PHONE_POSTAL) needs the web-lookup slice.
-CHANNEL_DIRECT_EMAIL = "direct_email"    # a company e-mail we hold -> auto-send eligible
+CHANNEL_DIRECT_EMAIL = "direct_email"    # a company e-mail -> eligible for approved send
 CHANNEL_ATS = "ats_form"                 # a known ATS/e-recruiting portal -> open + apply
 CHANNEL_BOARD = "board_apply"            # apply through the job board itself
 CHANNEL_COMPANY_SITE = "company_site"    # employer's own page (likely a form) -> open + apply

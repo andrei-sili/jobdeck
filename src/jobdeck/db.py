@@ -53,11 +53,10 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
     # create their database through this function for the same reason.
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA foreign_keys=ON")
-    # The duplicate gate compares companies in Python with str.casefold(),
-    # because SQLite's own lower() folds ASCII only (see dedupe.py). SQL that
-    # groups by company must use the SAME function or it would tell the user
-    # "one application per company" while disagreeing with the gate that
-    # enforces it — and would miss "MÜLLER" vs "Müller" while doing so.
+    # The current duplicate gate compares companies in Python with
+    # str.casefold(), because SQLite's own lower() folds ASCII only (see
+    # dedupe.py). SQL grouping must use the same function to agree with that
+    # legacy gate and to match "MÜLLER" with "Müller".
     con.create_function("jd_norm", 1, norm, deterministic=True)
     return con
 
@@ -737,15 +736,13 @@ def _job_filters(
     return where, params
 
 
-# Postings are grouped by company because `find_duplicate_bewerbung` allows
-# exactly ONE application per company: 36 companies held 83 of his 237 no-email
-# postings, so 47 of those rows could never become an application and were only
-# taking up places. An empty company name groups with nothing (its own id is the
-# key) — a blank field is missing data, not a company they share.
-# `jd_norm` is dedupe.norm itself (registered in connect()), so a grouped row's
-# claim "one application per company" is judged by the very function that
-# enforces it. The two branches are namespaced so a company literally called
-# "job:7" cannot land in a blank row's group.
+# The current list groups postings by company to match the legacy duplicate
+# gate. The accepted product policy distinguishes posting identity from
+# company-and-position identity; see
+# `docs/adr/0002-application-identity-and-duplicate-policy.md`. An empty company
+# name groups with nothing (its own id is the key): a blank field is missing
+# data, not a shared company. `jd_norm` is dedupe.norm itself (registered in
+# connect()), so list grouping and the current gate use the same normalization.
 _COMPANY_KEY_SQL = (
     "CASE WHEN jd_norm(company)='' THEN 'job:'||id "
     "ELSE 'firma:'||jd_norm(company) END"
@@ -1149,11 +1146,10 @@ def set_upload(
 ) -> None:
     """Record what the build staged for an employer's file picker.
 
-    `kind` is written BY the build and never inferred back out of the file
-    system — the Unterlagen lesson. Empty means nothing complete is staged,
-    which is a statement the screen has to make rather than a gap it fills in
-    optimistically: a Bewerbungsmappe is always complete, so a partial one
-    offered silently to an upload button is the worst outcome available."""
+    `kind` is written by the legacy build and never inferred from the file
+    system. Empty means no complete legacy package is staged. Versioned,
+    job-specific document selection is the accepted target described in
+    `docs/adr/0005-job-specific-application-documents.md`."""
     con.execute(
         "UPDATE jobs SET upload_path=?, mappe_kind=? WHERE id=?",
         (path, kind, job_id),

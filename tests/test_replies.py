@@ -28,7 +28,7 @@ Für Ihren weiteren Berufsweg wünschen wir Ihnen alles Gute.
 Mit freundlichen Grüßen
 Personalabteilung"""
 
-# The polite no-"leider" rejection the ROADMAP explicitly warns about.
+# A polite rejection without the common "leider" marker.
 ABSAGE_OHNE_LEIDER = """Guten Tag Herr Beispiel,
 
 wir danken Ihnen für Ihre Bewerbung. Die Auswahl ist uns nicht leichtgefallen;
@@ -783,10 +783,11 @@ Andrei"""
 
 
 def test_the_quoted_application_is_not_read_as_the_employers_answer():
-    """A reply carries the whole conversation below it, and his own letter is
-    in there. Read as the employer's, "Über ein kurzes Gespräch würde ich
-    mich sehr freuen" filed a rank-4 Einladung — on his real mailbox, onto a
-    mail that actually asked him to re-apply through a portal."""
+    """Quoted sent text must not be classified as the employer's answer.
+
+    Without quote handling, wording from the sent application can outweigh the
+    actual response and produce an incorrect invitation classification.
+    """
     verdict = replies.classify("AW: Bewerbung als Softwareentwickler",
                                REPLY_WITH_QUOTE)
     assert verdict is not None and verdict.classification == "absage"

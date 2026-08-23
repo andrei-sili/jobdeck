@@ -287,12 +287,10 @@ def _ensure_form_flow_columns(con: sqlite3.Connection) -> None:
       on `drafts.pdf_path` and is archived under `output/job_<id>/`; this is a
       second, transient artifact with a different lifetime, and giving it the
       Mappe's name is how two columns start disagreeing about one file.
-    * `mappe_kind`: what the build actually produced, written BY the build and
-      never inferred back out. Empty means no complete Mappe is staged, which
-      the strip must say out loud: a Bewerbungsmappe is always complete
-      (Deckblatt, Anschreiben, Lebenslauf, Zeugnisse) by the owner's decision,
-      so a partial one put silently in front of an upload button is the worst
-      outcome available.
+    * `mappe_kind`: what the legacy build produced, written by the build and
+      never inferred from the file system. Empty means no complete legacy
+      package is staged. The target document model is defined separately in
+      `docs/adr/0005-job-specific-application-documents.md`.
     """
     existing = [row[1] for row in con.execute("PRAGMA table_info(jobs)")]
     for col in ("form_opened_at", "upload_path", "mappe_kind"):
