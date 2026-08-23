@@ -117,18 +117,30 @@ the review queue. Do not retry blindly.
 
 ## Backups and restore
 
-At startup, JobDeck attempts to create a consistent SQLite snapshot using the
-SQLite backup API. A snapshot is validated before retention. Backups are grouped
-by database directory, the normal retention target is ten snapshots, and the
-best valid snapshot is protected from rotation.
+Before migrating an existing database, JobDeck creates a consistent snapshot
+using the SQLite backup API. The snapshot must pass SQLite integrity checks and
+match the source schema version, tables, and application count before migration
+can continue. This includes an imported legacy database and an existing database
+with no application rows. A new empty installation has no prior state to back
+up. Backup failure stops migration and is reported as an error; the manual
+maintenance action likewise distinguishes failure, warning, and verified
+success.
+
+Backups are grouped by database directory, the normal retention target is ten
+snapshots, and the best valid snapshot is protected from rotation. A data-loss
+or rotation warning does not invalidate an otherwise verified recovery point.
 
 Current limitations:
 
-- startup migration occurs before the startup backup;
-- backup failure does not stop startup and is not always reported accurately;
 - there is no built-in restore workflow;
 - backup retention is count-based rather than an explicit time period;
 - restoring an old backup can reintroduce data that was later deleted.
+
+Application undo coordinates database changes with the upload staging folder.
+If the process exits after staging but before the database commit, startup
+removes the deterministic orphan and any interrupted partial copy while leaving
+the application recorded. Ordinary staging or database failures are reported
+and leave the action safe to retry.
 
 To perform a manual restore, stop JobDeck, preserve the current database as a
 separate recovery copy, select a validated snapshot, and replace `jobdeck.db`.
@@ -156,7 +168,11 @@ The repository-defined checks are:
 ```bash
 uv run ruff check .
 uv run pytest
+uv run --no-project python scripts/validate_docs.py
+uv run --no-project python scripts/scan_secrets.py
 ```
 
 Tests must use their temporary data fixtures. Do not point tests, experiments,
-or migrations at the active candidate data directory.
+or migrations at the active candidate data directory. CI additionally builds
+and installs the wheel on every declared Python version and audits the locked
+runtime dependencies.

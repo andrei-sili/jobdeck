@@ -53,6 +53,8 @@ roadmap references from tracked comments.
 
 ## S0 — Reliability baseline
 
+**Status:** Implemented.
+
 **Purpose:** Make current storage and validation behavior trustworthy before
 adding new domain data.
 

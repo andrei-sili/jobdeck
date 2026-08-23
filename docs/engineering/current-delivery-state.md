@@ -64,7 +64,15 @@ processes sharing a database.
 | Form support | JobDeck detects known ATS and form channels, opens the employer page, prepares copy-ready values, and stages a PDF. It records an application after candidate confirmation or after a strongly matched receipt; it does not submit the form. |
 | Reply tracking | Gmail history polling, deterministic and optional Anthropic classification, matching, review, Gmail labels, and status history. |
 | Application register | Applications, status changes, inbound/outbound message metadata, and selected reply bodies are stored locally. |
-| Backups | Startup snapshots use the SQLite backup API, are validated, rotated, and retain the best valid snapshot. |
+| Backups | Existing databases receive a verified SQLite recovery snapshot before startup migration. Creation failures stop migration and are reported explicitly; snapshots are rotated while retaining the best valid copy. |
+
+Application undo prepares a deterministic staged artifact before changing the
+ledger, commits all database changes together, and compensates ordinary
+failures. Startup removes partial or orphaned undo staging when process death
+occurred before the database commit; a completed undo remains referenced by its
+job. Typed settings accessors keep the string-backed storage schema compatible
+while applying consistent boolean, integer, finite-number, default, and bound
+handling in core workflows.
 
 ## Partial or disconnected capabilities
 
@@ -139,30 +147,26 @@ the application offline: its configured features use external services.
 
 ## Delivery and verification
 
-The package supports Python 3.12 or newer. CI currently runs Ruff and pytest on
-Python 3.12 and 3.14. Python 3.13 is declared by package classifiers but is not
-an explicit CI matrix entry. CI does not currently run a type checker, package
-build/install smoke test, dependency scan, secret scan, or Markdown link check.
+The package supports Python 3.12 or newer. CI runs Ruff, bounded pytest, and a
+wheel build/install smoke test on Python 3.12, 3.13, and 3.14. Separate bounded
+jobs validate canonical-document metadata and relative links, scan tracked
+files for high-confidence credential signatures, and audit locked runtime
+dependencies. No type checker is currently configured.
 
 The test suite covers substantial domain, database, source, Gmail, PDF, SSRF,
 and NiceGUI behavior. It does not provide a real browser end-to-end workflow or
 live provider contract gate. Live external behavior cannot be inferred from
 mocked provider tests.
 
-A local live-page validation currently exposes a timing-sensitive unread-marker
-risk: after keyboard navigation persists `opened_at`, the first rendered row can
-retain `data-unread="true"`. The database transition succeeds, but the UI marker
-assertion in
-`tests/test_live_pages.py::test_reading_a_posting_marks_it_read_and_empties_neu`
-fails. Production reachability cannot be determined from the available test
-evidence.
+Timing-sensitive keyboard tests wait for the actual NiceGUI handler task and
+use a bounded timeout instead of assuming completion after a fixed sleep. In a
+restricted sandbox where `run.io_bound` or `asyncio.to_thread` cannot complete,
+the focused test terminates with an explicit timeout rather than asserting
+against partially updated UI state. Production reachability cannot be inferred
+from that environmental failure.
 
 ## Known operational limitations
 
-- Startup migrations run before the startup backup, so the backup is not a
-  pre-migration recovery point.
-- Backup creation failures can be swallowed and are not reliably distinguished
-  from success in the current UI.
 - Permanent deletion does not purge all related draft, e-mail, output, removed
   attachment, and backup data.
 - Local data directory and database permissions depend on the process umask,

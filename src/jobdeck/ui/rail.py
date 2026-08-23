@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from nicegui import run, ui
 
 from jobdeck import config, constants, db, freshness, gmail
+from jobdeck import settings as app_settings
 from jobdeck.constants import BEANTWORTET_STATUS, OFFENE_STATUS
 from jobdeck.dates import days_since, silence_anchor
 from jobdeck.services import liveness
@@ -76,17 +77,26 @@ class Pulse:
     state: str
 
 
-def _int_setting(raw: str, default: int) -> int:
+def _int_setting(
+    raw: str,
+    default: int,
+    *,
+    minimum: int | None = None,
+    clamp: bool = True,
+) -> int:
     """A stored setting as a whole number, falling back rather than raising.
 
     Settings are free text in a table he can edit, and every one of these is
     read while a page is being built: `int("")` taking down the whole rail is
     the same failure shape that once took down the inbox over a non-finite age
     threshold."""
-    try:
-        return int(float(str(raw).strip()))
-    except (TypeError, ValueError, OverflowError):
-        return default
+    return app_settings.parse_int(
+        raw,
+        default,
+        minimum=minimum,
+        allow_decimal=True,
+        clamp=clamp,
+    )
 
 
 def _clock(iso: str, now: datetime.datetime) -> str:
@@ -168,10 +178,17 @@ def facts() -> dict:
             "started": db.count_started_forms(con),
             "apps": [dict(row) for row in db.list_bewerbungen(con)],
             "follow_up_days": _int_setting(
-                db.get_setting(con, "follow_up_days", ""), FOLLOW_UP_DEFAULT),
+                db.get_setting(con, "follow_up_days", ""),
+                FOLLOW_UP_DEFAULT,
+                minimum=1,
+                clamp=False,
+            ),
             "sent_today": db.count_outbound_today(con),
             "send_cap": _int_setting(
-                db.get_setting(con, "daily_send_cap", ""), SEND_CAP_DEFAULT),
+                db.get_setting(con, "daily_send_cap", ""),
+                SEND_CAP_DEFAULT,
+                minimum=0,
+            ),
             "unterlagen": unterlagen_service.rail_facts(con),
             "connections": connections(),
             "replies_pending": db.count_pending_replies(con),

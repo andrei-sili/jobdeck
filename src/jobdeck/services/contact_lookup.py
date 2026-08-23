@@ -20,6 +20,7 @@ import re
 import httpx
 
 from jobdeck import apply_channel, contact_resolve, db, netsafe
+from jobdeck import settings as app_settings
 from jobdeck.ai import llm
 
 log = logging.getLogger(__name__)
@@ -142,7 +143,7 @@ def _ai_search_enabled() -> bool:
     is that nothing is sent to the API while it is off."""
     with db.db() as con:
         return (db.ai_enabled(con)
-                and db.get_setting(con, "web_contact_search", "0") == "1")
+                and app_settings.boolean(con, "web_contact_search", False))
 
 
 async def lookup_and_propose(job_id: int) -> dict:

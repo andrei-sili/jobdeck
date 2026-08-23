@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from jobdeck import apply_channel, backup, config, dates, freshness, migrations
+from jobdeck import settings as app_settings
 from jobdeck.constants import (
     BEANTWORTET_STATUS,
     DEFAULT_DAILY_CAP,
@@ -100,11 +101,12 @@ def _find_legacy_db() -> Path | None:
     return None
 
 
-def bootstrap() -> str | None:
-    """Prepare the data dir, import legacy data once, migrate, back up.
+def bootstrap() -> backup.BackupResult | None:
+    """Prepare storage and migrate only behind a verified recovery point.
 
-    Returns the backup system's data-loss warning, if any, so the UI can
-    surface it at startup.
+    A new database has no prior state to preserve. Every existing database,
+    including a freshly imported legacy database, must have a validated
+    snapshot before migration or startup stops without changing its schema.
     """
     config.ensure_data_dirs()
     if not config.DB_PATH.exists():
@@ -112,7 +114,9 @@ def bootstrap() -> str | None:
         if legacy is not None:
             # Consistent snapshot via the sqlite backup API — never a raw
             # file copy, the legacy DB may be open elsewhere.
-            src = sqlite3.connect(f"file:{legacy}?mode=ro", uri=True)
+            src = sqlite3.connect(
+                f"{legacy.resolve().as_uri()}?mode=ro", uri=True
+            )
             try:
                 dst = sqlite3.connect(config.DB_PATH)
                 try:
@@ -121,8 +125,22 @@ def bootstrap() -> str | None:
                     dst.close()
             finally:
                 src.close()
+    recovery = None
+    if config.DB_PATH.exists():
+        recovery = backup.run_startup_backup()
+        if not recovery.ok:
+            raise RuntimeError(
+                recovery.error or "A verified pre-migration backup could not be created."
+            )
     with db() as con:
         migrations.migrate(con)
+        # Reconcile the filesystem half of an application undo interrupted by
+        # process death. This runs before background workers or UI actions.
+        from jobdeck.services import upload
+
+        recovered = upload.recover_interrupted_undos(con)
+        if recovered:
+            log.info("upload: removed %s interrupted undo artifacts", recovered)
         # Self-healing, like the published_on backfill beside it: derived from
         # data the row already holds, so it is idempotent and a posting whose
         # e-mail was harvested before this rule existed stops looking like a
@@ -130,7 +148,7 @@ def bootstrap() -> str | None:
         converted = resolve_email_channels(con)
         if converted:
             log.info("apply channel: %s postings apply by e-mail", converted)
-    return backup.run_startup_backup()
+    return recovery
 
 
 # --------------------------------------------------------------------------
@@ -2208,9 +2226,11 @@ def send_mode(con: sqlite3.Connection) -> dict:
     queue's banner and the pre-send confirmation wherever it is opened from.
     """
     return {
-        "real": get_setting(con, "real_send_enabled", "0") == "1",
+        "real": app_settings.boolean(con, "real_send_enabled", False),
         "test_recipient": get_setting(con, "test_recipient", "").strip(),
-        "cap": get_setting(con, "daily_send_cap", DEFAULT_DAILY_CAP),
+        "cap": app_settings.integer(
+            con, "daily_send_cap", int(DEFAULT_DAILY_CAP), minimum=0
+        ),
         "sent_today": count_outbound_today(con),
     }
 
@@ -2312,23 +2332,20 @@ def count_drafts_today(con: sqlite3.Connection) -> int:
     write having happened — the stored count belongs to the stored date."""
     if get_setting(con, _DRAFT_DAY_KEY, "") != datetime.date.today().isoformat():
         return 0
-    try:
-        return max(0, int(get_setting(con, _DRAFT_COUNT_KEY, "0") or 0))
-    except (TypeError, ValueError):
-        return 0
+    return app_settings.integer(con, _DRAFT_COUNT_KEY, 0, minimum=0)
 
 
 def daily_draft_cap(con: sqlite3.Connection) -> int:
     """How many letters may be written in a day. His decision, 2026-08-15: a
     HARD cap, raised deliberately in Einstellungen rather than by a one-press
     override, because an override always one press away is not a limit."""
-    raw = (get_setting(con, "daily_draft_cap", "") or "").strip()
-    try:
-        return max(0, int(float(raw)))
-    except (TypeError, ValueError, OverflowError):
-        # OverflowError as well: float("1e999") is inf and int(inf) raises —
-        # app_settings is a file he is invited to edit
-        return int(DEFAULT_DAILY_DRAFT_CAP)
+    return app_settings.integer(
+        con,
+        "daily_draft_cap",
+        int(DEFAULT_DAILY_DRAFT_CAP),
+        minimum=0,
+        allow_decimal=True,
+    )
 
 
 def next_approved_autosend_job(
@@ -2418,60 +2435,43 @@ def unrecord_application(
     bewerbung_id: int,
     previous_status: str,
 ) -> None:
-    """Undo `apply_job` completely — every write it made, in one transaction.
+    """Undo the database writes made by ``apply_job``.
 
-    This exists so a form application can be recorded with a press and taken
-    back with a press, instead of being guarded by a confirmation dialog he
-    would learn to click through. That trade is only honest if the undo is
-    REAL: a half-undo leaves a company marked as applied-to and permanently
-    spends its only application slot, silently.
+    The caller owns the transaction so filesystem staging and the upload
+    pointer can be coordinated with these writes. No commit occurs here.
 
     Four writes, because `apply_job` made four: `add_bewerbung` writes a
     `status_history` row of its own, and `set_job_status` sets both the status
     and the link. `previous_status` is what the posting was BEFORE — restoring
     a hardcoded 'new' would quietly revive a posting he had skipped.
     """
-    con.execute("BEGIN IMMEDIATE")
-    try:
-        # The posting first: `jobs.bewerbung_id` is a foreign key into the row
-        # about to be deleted, so deleting it while the link stands raises.
-        con.execute(
-            "UPDATE jobs SET status=?, bewerbung_id=NULL WHERE id=?",
-            (previous_status, job_id),
-        )
-        # `jobs.duplicate_of` is a SECOND foreign key into the row being
-        # deleted, and it is written by the very gate this application armed:
-        # every posting refused because of it points here. Leaving them would
-        # make the DELETE raise — inside a worker thread, so one log line, a
-        # bar that vanishes and a user who believes the undo happened — and
-        # they are not duplicates of an application that never existed.
-        con.execute(
-            "UPDATE jobs SET status='new', duplicate_of=NULL "
-            " WHERE duplicate_of=? AND bewerbung_id IS NULL",
-            (bewerbung_id,),
-        )
-        # `email_log.bewerbung_id` is a FOURTH foreign key into the row about
-        # to be deleted. `delete_bewerbung` clears it and this path did not, so
-        # an undo after any e-mail had been logged against the application
-        # raised — inside a worker thread, so a log line and a bar that simply
-        # vanishes, and a user who believes the undo happened.
-        con.execute(
-            "UPDATE email_log SET bewerbung_id=NULL WHERE bewerbung_id=?",
-            (bewerbung_id,),
-        )
-        con.execute("DELETE FROM status_history WHERE bewerbung_id=?",
-                    (bewerbung_id,))
-        # `drafts.bewerbung_id` is a THIRD foreign key into the row being
-        # deleted, written by the filing that recording just did. Leaving it
-        # would make the DELETE raise — in a worker thread, so a log line and
-        # a bar that simply vanishes — and would strand the letter in a state
-        # nothing can send and nothing can rewrite.
-        unfile_draft(con, bewerbung_id)
-        con.execute("DELETE FROM bewerbungen WHERE id=?", (bewerbung_id,))
-    except Exception:
-        con.rollback()
-        raise
-    con.commit()
+    # The posting first: `jobs.bewerbung_id` is a foreign key into the row
+    # about to be deleted, so deleting it while the link stands raises.
+    changed = con.execute(
+        "UPDATE jobs SET status=?, bewerbung_id=NULL "
+        "WHERE id=? AND bewerbung_id=?",
+        (previous_status, job_id, bewerbung_id),
+    )
+    if changed.rowcount != 1:
+        raise RuntimeError("the application is no longer linked to this posting")
+    # `jobs.duplicate_of` is a SECOND foreign key into the row being deleted,
+    # and it is written by the very gate this application armed. Refused
+    # postings are not duplicates of an application that no longer exists.
+    con.execute(
+        "UPDATE jobs SET status='new', duplicate_of=NULL "
+        " WHERE duplicate_of=? AND bewerbung_id IS NULL",
+        (bewerbung_id,),
+    )
+    # `email_log.bewerbung_id` is another foreign key into the application.
+    con.execute(
+        "UPDATE email_log SET bewerbung_id=NULL WHERE bewerbung_id=?",
+        (bewerbung_id,),
+    )
+    con.execute("DELETE FROM status_history WHERE bewerbung_id=?",
+                (bewerbung_id,))
+    # Filing also linked the draft; remove that link before deleting the row.
+    unfile_draft(con, bewerbung_id)
+    con.execute("DELETE FROM bewerbungen WHERE id=?", (bewerbung_id,))
 
 
 # --------------------------------------------------------------------------
@@ -2734,8 +2734,8 @@ def first_answer_dates(con: sqlite3.Connection) -> dict[int, str]:
 # Settings
 # --------------------------------------------------------------------------
 def get_setting(con: sqlite3.Connection, key: str, default: str = "") -> str:
-    row = con.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
-    return row["value"] if row and row["value"] is not None else default
+    """Compatibility reader for settings that are intentionally raw text."""
+    return app_settings.text(con, key, default)
 
 
 def set_setting(con: sqlite3.Connection, key: str, value: str) -> None:
@@ -2749,7 +2749,7 @@ def set_setting(con: sqlite3.Connection, key: str, value: str) -> None:
 def ai_enabled(con: sqlite3.Connection) -> bool:
     """Master switch for all LLM spend. Off by default — the user opts in
     from Settings; every service that calls the LLM must check this first."""
-    return get_setting(con, "ai_enabled", "0") == "1"
+    return app_settings.boolean(con, "ai_enabled", False)
 
 
 def _bump_int_setting(con: sqlite3.Connection, key: str, delta: int) -> None:

@@ -130,25 +130,36 @@ def record_application(job_id: int, kanal: str,
 
 
 def undo(job_id: int, bewerbung_id: int, previous_status: str) -> None:
-    """Take the application back out again — every write, or none.
+    """Take the application back out again, or leave it safe to retry.
 
-    Including the two the ledger does not hold. Recording clears the staged
-    file and blanks `upload_path`/`mappe_kind`, so an undo that reversed only
-    `apply_job` handed him back an application whose strip entry read "Mappe
-    NICHT fertig" while the complete Mappe sat untouched at `drafts.pdf_path`
-    — and whose "Ordner öffnen" had disappeared.
+    A restaged file is prepared before changing the ledger. Database removal
+    and its upload pointer then commit together. If either step fails, the
+    application remains recorded and any newly staged artifact is removed.
     """
+    staged: pathlib.Path | None = None
     with db.db() as con:
-        db.unrecord_application(con, job_id, bewerbung_id, previous_status)
         job = db.get_job(con, job_id)
         draft = db.get_draft_by_job(con, job_id)
         archive = str((draft["pdf_path"] if draft is not None else "") or "")
         if job is not None and job["form_opened_at"] and archive:
             source = pathlib.Path(archive)
             if source.is_file():
-                staged = upload.stage(source)
+                staged = upload.stage(
+                    source,
+                    previous=str(
+                        upload.undo_staged_path(source, job_id, bewerbung_id)
+                    ),
+                )
+    try:
+        with db.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            db.unrecord_application(con, job_id, bewerbung_id, previous_status)
+            if staged is not None:
                 db.set_upload(con, job_id, str(staged), MAPPE_COMPLETE)
-        con.commit()
+    except Exception:
+        if staged is not None:
+            upload.clear(staged)
+        raise
     log.info("undid the form application for job %s (bewerbung %s)",
              job_id, bewerbung_id)
 

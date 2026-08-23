@@ -28,6 +28,7 @@ import asyncio
 import logging
 
 from jobdeck import db, gmail
+from jobdeck import settings as app_settings
 from jobdeck.constants import DEFAULT_SILENCE_CLOSES_DAYS, STATUS_NO_ANSWER
 
 log = logging.getLogger(__name__)
@@ -47,12 +48,9 @@ BLOCKED_UNREAD = "mailbox-not-read"
 
 def configured_days(con) -> int:
     """The silence window, as he set it. 0 means the rule is off."""
-    raw = db.get_setting(con, SETTING_DAYS, str(DEFAULT_SILENCE_CLOSES_DAYS))
-    try:
-        days = int(str(raw).strip())
-    except (TypeError, ValueError):
-        return DEFAULT_SILENCE_CLOSES_DAYS
-    return max(OFF, days)
+    return app_settings.integer(
+        con, SETTING_DAYS, DEFAULT_SILENCE_CLOSES_DAYS, minimum=OFF
+    )
 
 
 def mailbox_is_read(con) -> bool:

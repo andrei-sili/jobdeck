@@ -20,6 +20,7 @@ import asyncio
 import logging
 
 from jobdeck import config, db
+from jobdeck import settings as app_settings
 from jobdeck.services import drafting, mappe
 
 log = logging.getLogger(__name__)
@@ -42,23 +43,22 @@ _lock = asyncio.Lock()
 
 def settings(con) -> dict:
     """His filter as stored, with the agreed defaults when unset."""
-    def number(key: str, default: int) -> int:
-        raw = (db.get_setting(con, key, "") or "").strip()
-        try:
-            return max(0, int(float(raw)))
-        except (ValueError, OverflowError):
-            # OverflowError, not just ValueError: float("1e999") is inf, and
-            # int(inf) raises — the same shape that silently killed Create PDF
-            # in July when a budget setting was hand-edited to infinity
-            return default
-
     return {
-        "max_age_days": number("prepare_max_age_days", DEFAULT_MAX_AGE_DAYS),
-        "min_score": number("prepare_min_score", DEFAULT_MIN_SCORE),
-        "per_day": number("prepare_per_day", DEFAULT_PER_DAY),
-        "include_forms": db.get_setting(
-            con, "prepare_include_forms", "1" if DEFAULT_INCLUDE_FORMS else "0"
-        ) != "0",
+        "max_age_days": app_settings.integer(
+            con, "prepare_max_age_days", DEFAULT_MAX_AGE_DAYS,
+            minimum=0, allow_decimal=True,
+        ),
+        "min_score": app_settings.integer(
+            con, "prepare_min_score", DEFAULT_MIN_SCORE,
+            minimum=0, allow_decimal=True,
+        ),
+        "per_day": app_settings.integer(
+            con, "prepare_per_day", DEFAULT_PER_DAY,
+            minimum=0, allow_decimal=True,
+        ),
+        "include_forms": app_settings.boolean(
+            con, "prepare_include_forms", DEFAULT_INCLUDE_FORMS
+        ),
     }
 
 
@@ -155,7 +155,4 @@ def _ai_enabled() -> bool:
 
 def _cost_usd() -> float:
     with db.db() as con:
-        try:
-            return float(db.get_setting(con, "llm_cost_usd", "0") or 0)
-        except ValueError:
-            return 0.0
+        return max(0.0, app_settings.floating(con, "llm_cost_usd", 0.0))

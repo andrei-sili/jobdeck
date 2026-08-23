@@ -2569,10 +2569,20 @@ async def jobs_page():
                     .classes("text-sm")
 
                 async def take_back() -> None:
+                    try:
+                        await run.io_bound(_undo_application, job["id"],
+                                           result["bewerbung_id"],
+                                           result["previous_status"])
+                    except Exception:
+                        log.exception("application undo failed for job %s", job["id"])
+                        await dismiss()
+                        with overlay:
+                            _undo_bar(result, job)
+                        say("Rückgängig fehlgeschlagen — die Bewerbung bleibt "
+                            "eingetragen. Bitte erneut versuchen.",
+                            type="negative", multi_line=True)
+                        return
                     await dismiss()
-                    await run.io_bound(_undo_application, job["id"],
-                                       result["bewerbung_id"],
-                                       result["previous_status"])
                     _hold_place(job["id"])
                     await refresh(force=True)
                     say(f"Rückgängig gemacht — {result['company']} ist wieder "

@@ -29,6 +29,7 @@ import logging
 import pathlib
 
 from jobdeck import db, gmail, templates
+from jobdeck import settings as app_settings
 from jobdeck.constants import (
     DEFAULT_DAILY_CAP,
     EMAIL_OUTBOUND,
@@ -61,10 +62,13 @@ def _load_context(job_id: int) -> tuple[dict | None, dict | None, dict]:
         draft = db.get_draft_by_job(con, job_id)
         job = db.get_job(con, job_id)
         settings = {
-            "real_send_enabled": db.get_setting(con, "real_send_enabled", "0"),
+            "real_send_enabled": app_settings.boolean(
+                con, "real_send_enabled", False
+            ),
             "test_recipient": db.get_setting(con, "test_recipient", "").strip(),
-            "daily_send_cap": db.get_setting(
-                con, "daily_send_cap", DEFAULT_DAILY_CAP),
+            "daily_send_cap": app_settings.integer(
+                con, "daily_send_cap", int(DEFAULT_DAILY_CAP), minimum=0
+            ),
             "applicant_name": db.get_setting(con, "applicant_name", "").strip(),
             "gmail_address": db.get_setting(con, "gmail_address", "").strip(),
         }
@@ -81,7 +85,8 @@ def resolve_recipient(draft_recipient: str, settings: dict) -> tuple[str, bool, 
 
     Fail closed: real mode needs the user's explicit opt-in setting; test
     mode refuses to guess an address when none is configured."""
-    if settings["real_send_enabled"] != "1":
+    real_send_enabled = settings["real_send_enabled"] in (True, "1")
+    if not real_send_enabled:
         test = settings["test_recipient"]
         if not test:
             return "", True, (
@@ -138,10 +143,17 @@ def _claim(job_id: int, snapshot: dict, expect: dict | None) -> tuple[str, str, 
         if current["status"] not in ("ready", "approved"):
             return (f"the draft is not sendable (status: {current['status']})",
                     "", True)
-        recipient, test_mode, error = resolve_recipient(current["recipient"], {
-            "real_send_enabled": db.get_setting(con, "real_send_enabled", "0"),
-            "test_recipient": db.get_setting(con, "test_recipient", "").strip(),
-        })
+        recipient, test_mode, error = resolve_recipient(
+            current["recipient"],
+            {
+                "real_send_enabled": app_settings.boolean(
+                    con, "real_send_enabled", False
+                ),
+                "test_recipient": db.get_setting(
+                    con, "test_recipient", ""
+                ).strip(),
+            },
+        )
         if error:
             return error, "", True
         if not gmail.is_plausible_address(recipient):
@@ -322,7 +334,9 @@ def _send_draft(job_id: int, expect: dict | None = None) -> dict:
         if dup is not None:
             return _error("you already applied at this company — see "
                           "Applications before sending again")
-    cap = int(settings["daily_send_cap"] or DEFAULT_DAILY_CAP)
+    cap = app_settings.parse_int(
+        settings["daily_send_cap"], int(DEFAULT_DAILY_CAP), minimum=0
+    )
     if settings["sent_today"] >= cap:
         return _error(f"daily send cap reached ({settings['sent_today']}/{cap})"
                       f" — sending continues tomorrow, or raise the cap in "

@@ -11,7 +11,7 @@ import asyncio
 import sys
 
 import pytest
-from nicegui import ui
+from nicegui import background_tasks, ui
 from nicegui.testing import User
 
 from jobdeck import db
@@ -79,6 +79,12 @@ async def _press(user: User, key: str, *, action: str = "keydown",
     from nicegui.events import GenericEventArguments
     keyboard = next(e for e in user.client.elements.values()
                     if isinstance(e, ui.keyboard))
+    running_before = set(background_tasks.running_tasks)
+    open_dialogs_before = {
+        id(element)
+        for element in user.client.elements.values()
+        if isinstance(element, ui.dialog) and element.value
+    }
     with user.client:
         keyboard._handle_key(GenericEventArguments(
             sender=keyboard, client=user.client, args={
@@ -86,7 +92,22 @@ async def _press(user: User, key: str, *, action: str = "keydown",
                 "code": f"Key{key.upper()}", "location": 0,
                 "altKey": altKey, "ctrlKey": ctrlKey, "metaKey": metaKey,
                 "shiftKey": False}))
-    await asyncio.sleep(0.4)
+    handlers = set(background_tasks.running_tasks) - running_before
+    if handlers:
+        done, pending = await asyncio.wait(handlers, timeout=2)
+        for task in done:
+            task.result()
+        opened_dialog = any(
+            isinstance(element, ui.dialog)
+            and element.value
+            and id(element) not in open_dialogs_before
+            for element in user.client.elements.values()
+        )
+        if pending and not opened_dialog:
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            raise TimeoutError("keyboard handler did not finish or open a dialog")
 
 
 def _ancestors(element):

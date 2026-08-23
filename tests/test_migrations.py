@@ -1,6 +1,8 @@
 import sqlite3
 
-from jobdeck import config, constants, db, migrations
+import pytest
+
+from jobdeck import backup, config, constants, db, migrations
 
 
 def make_legacy_db(path, rows):
@@ -306,9 +308,18 @@ def test_bootstrap_imports_legacy_db(data_dir, monkeypatch):
     make_legacy_db(legacy_path, LEGACY_ROWS)
     monkeypatch.setattr(db, "_find_legacy_db", lambda: legacy_path)
 
-    db.bootstrap()
+    result = db.bootstrap()
 
     assert config.DB_PATH.exists()
+    assert result is not None and result.ok and result.path is not None
+    recovery = sqlite3.connect(result.path)
+    recovery_tables = {
+        row[0]
+        for row in recovery.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    assert "jobs" not in recovery_tables
+    assert recovery.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 2
+    recovery.close()
     with db.db() as con:
         assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 2
     # legacy file untouched (still pre-migration: no jobs table)
@@ -321,9 +332,79 @@ def test_bootstrap_imports_legacy_db(data_dir, monkeypatch):
 
 def test_bootstrap_without_legacy_starts_empty(data_dir, monkeypatch):
     monkeypatch.setattr(db, "_find_legacy_db", lambda: None)
-    db.bootstrap()
+    assert db.bootstrap() is None
     with db.db() as con:
         assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 0
+
+
+def test_bootstrap_refuses_to_migrate_without_a_verified_recovery_point(
+    data_dir, monkeypatch
+):
+    make_legacy_db(config.DB_PATH, LEGACY_ROWS)
+    migrated = False
+
+    def mark_migration(_con):
+        nonlocal migrated
+        migrated = True
+
+    monkeypatch.setattr(migrations, "migrate", mark_migration)
+    monkeypatch.setattr(
+        backup,
+        "run_startup_backup",
+        lambda: backup.BackupResult(error="Backup failed: injected failure"),
+    )
+
+    with pytest.raises(RuntimeError, match="injected failure"):
+        db.bootstrap()
+
+    assert not migrated
+    legacy = sqlite3.connect(config.DB_PATH)
+    assert "jobs" not in _tables(legacy)
+    assert legacy.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 2
+    legacy.close()
+
+
+def test_bootstrap_imports_a_legacy_path_with_uri_delimiters(data_dir, monkeypatch):
+    legacy_path = data_dir / "legacy?#candidate.db"
+    make_legacy_db(legacy_path, LEGACY_ROWS)
+    monkeypatch.setattr(db, "_find_legacy_db", lambda: legacy_path)
+
+    result = db.bootstrap()
+
+    assert result is not None and result.ok
+    with db.db() as con:
+        assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 2
+
+
+def test_failed_migration_keeps_recovery_snapshot_and_retries_safely(
+    data_dir, monkeypatch
+):
+    make_legacy_db(config.DB_PATH, LEGACY_ROWS)
+    original = migrations._ensure_search_profile_columns
+
+    def fail_after_additive_ddl(_con):
+        raise RuntimeError("injected migration failure")
+
+    monkeypatch.setattr(migrations, "_ensure_search_profile_columns", fail_after_additive_ddl)
+
+    with pytest.raises(RuntimeError, match="injected migration failure"):
+        db.bootstrap()
+
+    first_backup = config.BACKUP_DIR / backup._list_backups(backup._backup_key())[0]
+    recovery = sqlite3.connect(first_backup)
+    assert "jobs" not in _tables(recovery)
+    assert recovery.execute("PRAGMA user_version").fetchone()[0] == 0
+    assert recovery.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 2
+    recovery.close()
+
+    monkeypatch.setattr(migrations, "_ensure_search_profile_columns", original)
+    result = db.bootstrap()
+
+    assert result is not None and result.ok
+    migrated = sqlite3.connect(config.DB_PATH)
+    assert migrated.execute("PRAGMA user_version").fetchone()[0] == migrations.SCHEMA_VERSION
+    assert migrated.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 2
+    migrated.close()
 
 
 def test_migrate_adds_the_source_fact_columns_to_pre_v7_jobs(tmp_path):

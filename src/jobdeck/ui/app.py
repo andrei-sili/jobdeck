@@ -25,7 +25,8 @@ startup_warning: str | None = None
 
 async def _startup() -> None:
     global startup_warning
-    startup_warning = await run.io_bound(db.bootstrap)
+    result = await run.io_bound(db.bootstrap)
+    startup_warning = result.warning if result is not None else None
     if startup_warning:
         log.warning("startup backup warning: %s", startup_warning)
     create_scheduler().start()

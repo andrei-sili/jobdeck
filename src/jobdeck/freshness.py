@@ -26,6 +26,8 @@ label is rendered from the same numbers, and two hand-written copies of one
 rule drift.
 """
 
+from jobdeck import settings as app_settings
+
 # (age in days STRICTLY below, penalty) — first match wins, ascending.
 STALENESS_STEPS = ((14, 0), (30, 5), (60, 12))
 STALE_PENALTY = 20  # 60 days and older
@@ -66,10 +68,7 @@ def stale_age_setting(raw: object, default: int = DEFAULT_STALE_AGE_DAYS) -> int
     ArithmeticError and would sail straight past a `ValueError` guard. A finite
     but absurd value is clamped rather than refused: he meant "very old", and
     that is what he gets."""
-    try:
-        days = int(float(str(raw).strip()))
-    except (TypeError, ValueError, OverflowError):
-        return default
+    days = app_settings.parse_int(raw, default, allow_decimal=True)
     if days <= 0:
         return default
     return min(days, MAX_STALE_AGE_DAYS)
