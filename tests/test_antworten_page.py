@@ -14,7 +14,7 @@ import sys
 import time
 
 import pytest
-from nicegui import ui
+from nicegui import background_tasks, ui
 from nicegui.testing import User
 
 from jobdeck import config, db, gmail
@@ -511,6 +511,7 @@ async def antworten_key(user: User, key: str, *, action: str = "keydown",
     from nicegui.events import GenericEventArguments
     keyboard = next(e for e in user.client.elements.values()
                     if isinstance(e, ui.keyboard))
+    running_before = set(background_tasks.running_tasks)
     with user.client:
         keyboard._handle_key(GenericEventArguments(
             sender=keyboard, client=user.client, args={
@@ -518,7 +519,17 @@ async def antworten_key(user: User, key: str, *, action: str = "keydown",
                 "code": f"Key{key.upper()}", "location": 0,
                 "altKey": False, "ctrlKey": ctrlKey, "metaKey": False,
                 "shiftKey": False}))
-    await asyncio.sleep(0.4)
+    handlers = set(background_tasks.running_tasks) - running_before
+    if handlers:
+        done, pending = await asyncio.wait(handlers, timeout=5)
+        if pending:
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+        for task in done:
+            task.result()
+        if pending:
+            raise TimeoutError("keyboard handler did not finish")
 
 
 async def test_enter_takes_the_machines_proposal(user: User, con):
