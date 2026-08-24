@@ -94,6 +94,46 @@ def normalise_state(raw: object) -> str:
     return key if key in STATES else "proposed"
 
 
+
+def group_by_kind(rows) -> list[tuple[str, str, list]]:
+    """The register grouped for reading: (kind, label, rows).
+
+    Families keep their fixed order and an empty one is left out: a heading
+    over nothing is a family he has to read past on every visit, and the
+    register is meant to be scanned.
+
+    Rows keep the order they arrived in, which is the register's own — the
+    grouping decides which heading a row sits under, never where it sits
+    beneath it.
+    """
+    buckets: dict[str, list] = {}
+    for row in rows:
+        buckets.setdefault(normalise_kind(row["kind"]), []).append(row)
+    return [(kind, KINDS[kind], buckets[kind])
+            for kind in KINDS if kind in buckets]
+
+
+def count_proposals(count: int) -> str:
+    """"1 Vorschlag" or "N Vorschläge" — a register holding one row must not
+    read as though it held several. German inflects; a screen that does not
+    is a screen that looks machine-written."""
+    return "1 Vorschlag" if count == 1 else f"{count} Vorschläge"
+
+
+def provenance(claim) -> str:
+    """Where a claim came from, as the register states it.
+
+    The register is a list of permissions, and "who said so" is the question
+    it has to be able to answer about every row. A section name is kept when
+    there is one: "aus profile.md" alone leaves him hunting through the file
+    for the sentence he is being asked about.
+    """
+    if str(claim["source"] or "") != "profile_md":
+        return "von dir eingetragen"
+    section = str(claim["source_ref"] or "").strip()
+    return f"aus profile.md · {section}" if section else "aus profile.md"
+
+
 # Where a claim's match terms may be separated. A term may contain spaces
 # ("Spring Boot"), so a space is deliberately NOT a separator.
 _TERM_SEPARATORS = (",", "\n", ";")

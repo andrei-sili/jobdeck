@@ -79,7 +79,8 @@ def _load() -> dict:
         register = [
             {**dict(row),
              "uses": claims_lib.count_uses(row["terms"], letters),
-             "headline": claims_lib.headline(row)}
+             "headline": claims_lib.headline(row),
+             "provenance": claims_lib.provenance(row)}
             for row in db.list_claims(con)
         ]
         profiles = [dict(row) for row in db.list_profiles(con)]
@@ -640,25 +641,25 @@ async def unterlagen_page():
             await run.io_bound(_delete_claim, claim["id"])
             await refresh()
 
-        async def propose_claims():
-            """Read profile.md once and offer what the register does not hold.
+        async def import_claims():
+            """Read profile.md once and put what the register lacks in it.
 
-            Proposes only. The register is the list of things a letter may say
-            about him, and a model's reading of his own file is not authority
-            for that — every row is his to keep or drop before anything is
-            written.
+            Proposes only. Every row it writes says where it came from and
+            counts for nothing until he answers it — the register is the list
+            of things a letter may say about him, and a model's reading of his
+            own file is not authority for that.
             """
             # It costs money, so it asks first — the same rule the drafting
-            # keyboard follows. The figure is what a reading of his profile has
-            # cost so far; it is stated BEFORE the spend, not inside the
-            # proposal dialog afterwards.
+            # keyboard follows. The figure is stated BEFORE the spend, not
+            # inside a summary afterwards.
             overlay.clear()
             with overlay, ui.dialog() as confirm, ui.card():
                 ui.label("profile.md von der KI lesen lassen?") \
                     .classes("font-bold")
                 ui.label("Ein Aufruf über deine profile.md, ungefähr zwei "
-                         "Cent. Vorgeschlagen wird nur — gespeichert "
-                         "wird, was du behältst.").classes("text-sm")
+                         "Cent. Was dabei herauskommt, steht als Vorschlag "
+                         "im Register — behaupten darf ein Brief es erst, "
+                         "wenn du es bestätigt hast.").classes("text-sm")
                 with ui.row().classes("justify-end gap-2 w-full"):
                     ui.button("Abbrechen",
                               on_click=lambda: confirm.submit(False)) \
@@ -670,107 +671,120 @@ async def unterlagen_page():
                 return
 
             say("profile.md wird gelesen…")
-            result = await claims_service.propose_from_profile()
+            result = await claims_service.import_from_profile()
             if not result["ok"]:
                 say(result["error"], type="warning")
                 return
-            if not result["claims"]:
-                skipped = result.get("skipped", 0)
+            written, skipped = result["written"], result.get("skipped", 0)
+            if not written:
                 say("Nichts Neues gefunden"
-                    + (f" — {skipped} stehen schon im Register" if skipped
+                    + (f" — {skipped} sind schon beantwortet" if skipped
                        else ""))
                 return
-            # Deliberately NOT overlay.clear() here. This is the one point in
-            # the module that would clear it AFTER an await, and the page stays
-            # live for the seconds the model takes: a delete confirmation or a
-            # half-typed Erlaubnis opened in that window would be destroyed —
-            # and a dialog awaited on then never resolves at all.
-            with overlay, ui.dialog() as dialog, ui.card().classes("w-[36rem]"):
-                ui.label("Vorschlag aus profile.md").classes("font-bold")
-                ui.label("Nichts davon ist gespeichert. Nimm nur, was ein Brief "
-                         "wirklich behaupten darf.").classes("text-sm")
-                boxes = []
-                for claim in result["claims"]:
-                    box = ui.checkbox(claim["headline"], value=True) \
-                        .classes("w-full")
-                    if claim["terms"]:
-                        ui.label(f"erkennbar an: {claim['terms']}") \
-                            .classes("text-xs text-gray-500 ml-8")
-                    boxes.append((box, claim))
-                if result.get("skipped"):
-                    ui.label(f"{result['skipped']} standen bereits im Register "
-                             "und sind nicht dabei.") \
-                        .classes("text-xs text-gray-500")
-                ui.label(f"Kosten dieses Aufrufs: "
-                         f"{result['cost_usd']:.4f} $").classes("text-xs "
-                                                                "text-gray-500")
+            say(f"{written} Vorschläge warten auf dich", type="positive")
+            await refresh()
 
-                async def keep():
-                    # Every field the reading produced, not only the three the
-                    # register used to have: the family and the section it was
-                    # read from are the answer to "where does this come from",
-                    # and dropping them here would lose it silently.
-                    chosen = [{"fact": c["fact"], "binding": c["binding"],
-                               "terms": c["terms"], "kind": c.get("kind"),
-                               "source": "profile_md",
-                               "source_ref": c.get("source_ref", "")}
-                              for box, c in boxes if box.value]
-                    dialog.close()
-                    written = await claims_service.accept(chosen)
-                    say(f"{written} übernommen", type="positive")
-                    await refresh()
+        async def answer_claims(claim_ids, state, spoken):
+            changed = await claims_service.answer(claim_ids, state)
+            say(f"{changed} {spoken}", type="positive")
+            await refresh()
 
-                with ui.row().classes("w-full justify-end"):
-                    ui.button("Verwerfen", on_click=dialog.close).props("flat")
-                    ui.button("Übernehmen", on_click=keep) \
-                        .mark("accept-claims")
-            dialog.open()
+        def draw_claim_row(claim: dict, *, counted: bool) -> None:
+            with ui.element("div").classes("jd-claim"):
+                # Two labels rather than one span of markup: the text is
+                # the user's own, but a screen that renders stored text
+                # as HTML is a habit, and this app already had to unlearn
+                # it once for postings.
+                with ui.column().classes("gap-0 min-w-0"):
+                    with ui.row().classes("jd-claim-fact items-baseline "
+                                          "gap-1 no-wrap"):
+                        ui.label(claim["fact"])
+                        if claim["binding"]:
+                            ui.label(f"— {claim['binding']}") \
+                                .classes("jd-claim-bind")
+                    ui.label(claim["provenance"]).classes("jd-claim-source")
+                if counted:
+                    tone = ("never" if claim["uses"] == 0 else
+                            "unknown" if claim["uses"] is None else "")
+                    ui.label(claims_lib.describe_uses(claim["uses"])) \
+                        .classes(f"jd-claim-count {tone}")
+                else:
+                    # A proposal has never been in a letter, so a counter
+                    # here would read "noch nie" — which is true of every
+                    # proposal and says nothing about this one.
+                    ui.label("noch kein Wort davon") \
+                        .classes("jd-claim-count unknown")
+                with ui.row().classes("gap-0 items-center no-wrap"):
+                    if not counted:
+                        ui.button(
+                            icon="check",
+                            on_click=lambda c=claim: answer_claims(
+                                [c["id"]], "confirmed", "bestätigt")) \
+                            .props("flat round dense size=sm color=positive") \
+                            .mark("confirm-claim")
+                        ui.button(
+                            icon="block",
+                            on_click=lambda c=claim: answer_claims(
+                                [c["id"]], "rejected", "abgelehnt")) \
+                            .props("flat round dense size=sm") \
+                            .mark("reject-claim")
+                    ui.button(icon="edit",
+                              on_click=lambda c=claim: claim_dialog(c)) \
+                        .props("flat round dense size=sm")
+                    if counted:
+                        ui.button(
+                            icon="delete",
+                            on_click=lambda c=claim: delete_claim(c)) \
+                            .props("flat round dense size=sm "
+                                   "color=negative") \
+                            .mark("delete-claim")
 
         def draw_claims(register: list[dict], letters: int) -> None:
+            waiting = [c for c in register if c["state"] == "proposed"]
+            settled = [c for c in register if c["state"] == "confirmed"]
             with ui.column().classes("jd-card gap-3"):
                 ui.label("Was ein Brief behaupten darf — und wie oft er es tat") \
                     .classes("jd-card-title")
                 ui.label(f"Gezählt über {letters} geschriebene Anschreiben.") \
                     .classes("jd-card-sub")
 
-                if not register:
-                    ui.label("Noch keine Erlaubnis eingetragen. Jede Zeile ist "
+                if waiting:
+                    ui.label(f"{claims_lib.count_proposals(len(waiting))} aus "
+                             "profile.md — noch zählt keiner davon") \
+                        .classes("jd-urgent-note")
+                    for kind, label, rows in claims_lib.group_by_kind(waiting):
+                        with ui.row().classes("items-center gap-2 w-full "
+                                              "mt-2"):
+                            ui.label(f"{label} · {len(rows)}") \
+                                .classes("jd-claim-family")
+                            ui.button(
+                                "Alle bestätigen",
+                                on_click=lambda r=rows: answer_claims(
+                                    [c["id"] for c in r], "confirmed",
+                                    "bestätigt")) \
+                                .props("flat dense size=sm") \
+                                .mark(f"confirm-family-{kind}")
+                        for claim in rows:
+                            draw_claim_row(claim, counted=False)
+
+                if not settled:
+                    ui.label("Noch keine Erlaubnis bestätigt. Jede Zeile ist "
                              "eine: ein Können und das eine Projekt, an dem es "
                              "hängt.").classes("jd-note")
-                for claim in register:
-                    with ui.element("div").classes("jd-claim"):
-                        # Two labels rather than one span of markup: the text is
-                        # the user's own, but a screen that renders stored text
-                        # as HTML is a habit, and this app already had to unlearn
-                        # it once for postings.
-                        with ui.row().classes("jd-claim-fact items-baseline "
-                                              "gap-1 no-wrap"):
-                            ui.label(claim["fact"])
-                            if claim["binding"]:
-                                ui.label(f"— {claim['binding']}") \
-                                    .classes("jd-claim-bind")
-                        tone = ("never" if claim["uses"] == 0 else
-                                "unknown" if claim["uses"] is None else "")
-                        ui.label(claims_lib.describe_uses(claim["uses"])) \
-                            .classes(f"jd-claim-count {tone}")
-                        with ui.row().classes("gap-0 items-center no-wrap"):
-                            ui.button(icon="edit",
-                                      on_click=lambda c=claim: claim_dialog(c)) \
-                                .props("flat round dense size=sm")
-                            ui.button(icon="delete",
-                                      on_click=lambda c=claim: delete_claim(c)) \
-                                .props("flat round dense size=sm color=negative") \
-                                .mark("delete-claim")
+                for _kind, label, rows in claims_lib.group_by_kind(settled):
+                    ui.label(label).classes("jd-claim-family mt-2")
+                    for claim in rows:
+                        draw_claim_row(claim, counted=True)
 
                 with ui.row().classes("gap-2 items-center"):
                     ui.button("Erlaubnis hinzufügen", icon="add",
                               on_click=lambda: claim_dialog(None)).props("flat")
                     ui.button("Aus profile.md lesen", icon="auto_awesome",
-                              on_click=propose_claims) \
+                              on_click=import_claims) \
                         .props("flat").mark("propose-claims") \
                         .tooltip("Ein KI-Aufruf über deine profile.md. "
-                                 "Nichts wird gespeichert, bevor du es "
-                                 "bestätigt hast.")
+                                 "Was er findet, wartet als Vorschlag, "
+                                 "bis du es bestätigst.")
                 # The register counts; it does not yet constrain. Saying so is
                 # the difference between a screen and a promise — the drafting
                 # prompt still reads profile.md, and a line claiming otherwise

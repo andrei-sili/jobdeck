@@ -255,9 +255,9 @@ async def test_the_register_counts_the_letters_that_claimed_each_permission(
     job_id = _posting(con)
     _letter(con, job_id, "… FastAPI und PostgreSQL im Abschlussprojekt …")
     db.add_claim(con, {"fact": "FastAPI, PostgreSQL", "binding": "IHK-Projekt",
-                       "terms": "FastAPI"})
+                       "terms": "FastAPI", "state": "confirmed"})
     db.add_claim(con, {"fact": "Java & Spring Boot", "binding": "Eigenprojekt",
-                       "terms": "Spring Boot"})
+                       "terms": "Spring Boot", "state": "confirmed"})
     con.commit()
 
     await user.open("/unterlagen")
@@ -275,7 +275,8 @@ async def test_a_permission_with_no_terms_says_it_cannot_be_counted(
     showing "noch nie" for the first invites deleting a live permission."""
     job_id = _posting(con)
     _letter(con, job_id, "… Django im Praktikum …")
-    db.add_claim(con, {"fact": "Django & DRF", "binding": "Praktikum"})
+    db.add_claim(con, {"fact": "Django & DRF", "binding": "Praktikum",
+                       "state": "confirmed"})
     con.commit()
 
     await user.open("/unterlagen")
@@ -345,7 +346,10 @@ async def test_reading_the_profile_is_refused_while_the_ai_switch_is_off(
 
 async def test_deleting_a_permission_asks_first(user: User, con, data_dir):
     _posting(con)
-    claim_id = db.add_claim(con, {"fact": "Java", "binding": "Eigenprojekt"})
+    # Confirmed: deleting is what he does to a permission he has vouched for.
+    # A proposal is refused instead, which keeps the row.
+    claim_id = db.add_claim(con, {"fact": "Java", "binding": "Eigenprojekt",
+                                  "state": "confirmed"})
     con.commit()
 
     await user.open("/unterlagen")
@@ -520,46 +524,78 @@ async def test_a_shrunk_mappe_says_so_in_german(user: User, con, data_dir):
 # --------------------------------------------------------------------------
 # The consent boundary on the AI proposal
 # --------------------------------------------------------------------------
-async def test_only_the_ticked_proposals_are_written(user: User, con, data_dir):
-    """The checkbox IS the consent boundary of this feature: the register
-    exists to stop a real skill being bound to the wrong employer, and the
-    proposal is a model's guess at those bindings. Nothing drove this path."""
+async def test_a_reading_lands_as_proposals_that_count_for_nothing(
+        user: User, con, data_dir):
+    """The consent boundary of this feature, and where it moved to.
+
+    It used to be a dialog of checkboxes: tick, press Übernehmen, and what
+    was ticked became a permission. Nothing survived a closed window — a
+    reading he had paid for was simply gone. Now the reading lands, visibly,
+    as rows that count for nothing until he answers each one.
+    """
     from jobdeck.services import claims as claims_service
     _posting(con)
 
-    async def propose():
-        return {"ok": True, "error": "", "skipped": 0, "cost_usd": 0.004,
-                "claims": [
-                    {"fact": "FastAPI", "binding": "IHK-Projekt",
-                     "terms": "FastAPI", "headline": "FastAPI — IHK-Projekt"},
-                    {"fact": "Kotlin", "binding": "Praktikum",
-                     "terms": "Kotlin", "headline": "Kotlin — Praktikum"},
-                ]}
+    async def read():
+        db.add_claim(con, {"fact": "FastAPI", "binding": "IHK-Projekt",
+                           "terms": "FastAPI", "kind": "skill",
+                           "source": "profile_md",
+                           "source_ref": "Technische Kenntnisse"})
+        db.add_claim(con, {"fact": "Kotlin", "binding": "Praktikum",
+                           "terms": "Kotlin", "kind": "skill",
+                           "source": "profile_md",
+                           "source_ref": "Technische Kenntnisse"})
+        con.commit()
+        return {"ok": True, "error": "", "written": 2, "skipped": 0,
+                "cost_usd": 0.02}
 
-    saved = claims_service.propose_from_profile
-    claims_service.propose_from_profile = propose
+    saved = claims_service.import_from_profile
+    claims_service.import_from_profile = read
     try:
         await user.open("/unterlagen")
         user.find(marker="propose-claims").click()
         await asyncio.sleep(0.2)
         user.find(marker="confirm-propose").click()
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.4)
 
-        await user.should_see("Vorschlag aus profile.md")
-        boxes = [e for e in user.client.elements.values()
-                 if isinstance(e, ui.checkbox)]
-        assert len(boxes) == 2, "the proposal did not render one row each"
-        wrong = next(b for b in boxes if "Kotlin" in (b.text or ""))
-        wrong.set_value(False)   # he unticks the one welded to the wrong project
-        await asyncio.sleep(0.1)
+        await user.should_see("2 Vorschläge")
+        await user.should_see("noch zählt keiner davon")
+        # Where each came from, on the row itself — the question the register
+        # has to answer about anything it holds.
+        await user.should_see("aus profile.md · Technische Kenntnisse")
+        assert db.list_claims(con, states=("confirmed",)) == [], (
+            "a reading confirmed itself")
 
-        user.find(marker="accept-claims").click()
+        # He refuses the one welded to the wrong employer, keeps the other.
+        rejects = _marked(user, "reject-claim")
+        assert len(rejects) == 2, "a proposal rendered without a way to refuse"
+        assert len(_marked(user, "confirm-claim")) == 2
+        user.find(marker="confirm-family-skill").click()
         await asyncio.sleep(0.4)
     finally:
-        claims_service.propose_from_profile = saved
+        claims_service.import_from_profile = saved
 
-    assert [r["fact"] for r in db.list_claims(con)] == ["FastAPI"], \
-        "an unticked proposal was written into the register anyway"
+    assert sorted(r["fact"] for r in db.list_claims(con, states=("confirmed",))
+                  ) == ["FastAPI", "Kotlin"]
+
+
+async def test_a_refused_proposal_leaves_the_register_and_stays_refused(
+        user: User, con, data_dir):
+    """Refusing is an answer, and the register keeps it — otherwise the next
+    reading of the profile offers back exactly what he just said no to."""
+    _posting(con)
+    db.add_claim(con, {"fact": "C#", "binding": "Eigenprojekt", "terms": "C#",
+                       "source": "profile_md", "source_ref": "Kenntnisse"})
+    con.commit()
+
+    await user.open("/unterlagen")
+    user.find(marker="reject-claim").click()
+    await asyncio.sleep(0.4)
+
+    await user.should_not_see("C#")
+    rows = db.list_claims(con, states=("rejected",))
+    assert [r["fact"] for r in rows] == ["C#"]
+    assert rows[0]["confirmed_at"] == "", "a refusal was stamped as consent"
 
 
 async def test_the_cost_is_stated_before_the_spend_not_after(user: User, con,

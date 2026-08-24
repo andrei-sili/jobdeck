@@ -1,12 +1,18 @@
-"""Filling the permission register from the profile, on demand and confirmed.
+"""Filling the register from the profile, on demand and answered afterwards.
 
-One model call, on the user's press. It PROPOSES; nothing reaches the register
-until he confirms, because the register is the list of things a letter may say
-about him and a model's reading of his own file is not authority for that.
+One model call, on the user's press. What it reads lands as PROPOSALS: rows
+that exist, are visible, and count for nothing until he answers them. The
+register is the list of things a letter may say about him, and a model's
+reading of his own file is not authority for that.
 
-Entries the register already holds are filtered out here rather than merged in
-the UI: the register is a set of permissions, and a second row saying the same
-thing would split its counter in two.
+The proposals are STORED rather than shown in a dialog and forgotten. A
+reading he paid for should survive a closed window, and answering fifty rows
+across eight families is a screen's work, not a modal's.
+
+Entries the register already holds — in any state, including the ones he has
+refused — are filtered out here rather than merged in the UI: the register is
+a set of permissions, and a second row saying the same thing would split its
+counter in two.
 """
 
 import asyncio
@@ -36,17 +42,6 @@ def _key(fact: str, binding: str) -> tuple[str, str]:
     return (fold(fact).strip(), fold(binding).strip())
 
 
-def _existing_keys() -> set[tuple[str, str]]:
-    """Every answer already given, not only the ones on screen.
-
-    A rejected claim is an answer: offering it back at the next reading is
-    exactly what keeping the rejected row instead of deleting it prevents.
-    """
-    with db.db() as con:
-        return {_key(row["fact"], row["binding"])
-                for row in db.list_claims(con, states=claims_lib.STATES)}
-
-
 def _record_usage(usage: llm.LLMResult) -> None:
     with db.db() as con:
         db.record_llm_usage(con, usage.input_tokens, usage.output_tokens,
@@ -59,14 +54,14 @@ def _enabled() -> bool:
         return db.ai_enabled(con)
 
 
-def _propose() -> dict:
+def _import() -> dict:
     if not _enabled():
         return {"ok": False, "error": "KI ist in den Einstellungen "
-                                      "ausgeschaltet", "claims": []}
+                                      "ausgeschaltet", "written": 0}
     profile_text = profile.load_profile()
     if not profile_text:
         return {"ok": False, "error": "profile.md ist leer oder fehlt — daraus "
-                                      "gibt es nichts zu lesen", "claims": []}
+                                      "gibt es nichts zu lesen", "written": 0}
     try:
         proposed, usage = ai_claims.extract_claims(profile_text)
     except llm.LLMNotConfigured:
@@ -75,7 +70,7 @@ def _propose() -> dict:
         # handler wrapper, which turns it into a log line. The button then did
         # nothing and said nothing, however often it was pressed. Every other
         # spending service names this case; this one has to as well.
-        return {"ok": False, "claims": [],
+        return {"ok": False, "written": 0,
                 "error": "Kein Anthropic-Schlüssel geladen — in "
                          "secrets.env eintragen"}
     except llm.LLMError as exc:
@@ -83,58 +78,48 @@ def _propose() -> dict:
         if exc.usage is not None:
             _record_usage(exc.usage)
         log.info("claims: extraction failed: %s", exc)
-        return {"ok": False, "error": str(exc), "claims": []}
+        return {"ok": False, "error": str(exc), "written": 0}
     _record_usage(usage)
 
-    known = _existing_keys()
-    fresh, skipped = [], 0
-    for claim in proposed:
-        if _key(claim["fact"], claim["binding"]) in known:
-            skipped += 1
-            continue
-        known.add(_key(claim["fact"], claim["binding"]))
-        fresh.append({**claim,
-                      "headline": claims_lib.headline(claim)})
-    return {"ok": True, "error": "", "claims": fresh, "skipped": skipped,
+    written, skipped = 0, 0
+    with db.db() as con:
+        # Read inside the writing connection: the reading took seconds, and he
+        # may have typed one of these in by hand while it ran.
+        known = {_key(row["fact"], row["binding"])
+                 for row in db.list_claims(con, states=claims_lib.STATES)}
+        for claim in proposed:
+            key = _key(claim["fact"], claim.get("binding", ""))
+            if key in known:
+                skipped += 1
+                continue
+            known.add(key)
+            db.add_claim(con, {**claim, "source": "profile_md",
+                               "state": "proposed"})
+            written += 1
+    return {"ok": True, "error": "", "written": written, "skipped": skipped,
             "cost_usd": usage.cost_usd}
 
 
-async def propose_from_profile() -> dict:
-    """Read profile.md and propose register entries the register lacks.
+async def import_from_profile() -> dict:
+    """Read profile.md and put what the register lacks in it, as proposals.
 
-    Returns {"ok", "error", "claims", "skipped", "cost_usd"}. Writes nothing
-    but the spend meter. A second press while one reading is in flight is
-    refused rather than queued: the answer would be the same proposal, and
-    paying twice for it is the whole failure mode.
+    Returns {"ok", "error", "written", "skipped", "cost_usd"}. Nothing it
+    writes counts for anything until he answers it. A second press while one
+    reading is in flight is refused rather than queued: the answer would be
+    the same proposal, and paying twice for it is the whole failure mode.
     """
     if _lock.locked():
-        return {"ok": False, "claims": [], "skipped": 0, "cost_usd": 0.0,
+        return {"ok": False, "written": 0, "skipped": 0, "cost_usd": 0.0,
                 "error": "profile.md wird bereits gelesen"}
     async with _lock:
-        return await asyncio.to_thread(_propose)
+        return await asyncio.to_thread(_import)
 
 
-def _store(chosen: list[dict]) -> int:
+def _answer(claim_ids: list[int], state: str) -> int:
     with db.db() as con:
-        known = {_key(row["fact"], row["binding"])
-                 for row in db.list_claims(con, states=claims_lib.STATES)}
-        written = 0
-        for claim in chosen:
-            # Re-checked against the register as it is NOW: the proposal was
-            # made before he read it, and he may have typed one of these in by
-            # hand in the meantime.
-            key = _key(claim["fact"], claim.get("binding", ""))
-            if key in known:
-                continue
-            known.add(key)
-            # Ticking a box in the proposal dialog IS his confirmation; the
-            # proposals that reach the register unanswered come from the
-            # import path, which says so itself.
-            db.add_claim(con, {**claim, "state": "confirmed"})
-            written += 1
-    return written
+        return db.answer_claims(con, claim_ids, state)
 
 
-async def accept(chosen: list[dict]) -> int:
-    """Write the proposals he kept. Returns how many were actually added."""
-    return await asyncio.to_thread(_store, chosen)
+async def answer(claim_ids: list[int], state: str) -> int:
+    """Confirm or refuse waiting proposals. Returns how many changed."""
+    return await asyncio.to_thread(_answer, list(claim_ids), state)

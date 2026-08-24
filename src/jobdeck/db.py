@@ -552,6 +552,31 @@ def set_claim_state(
     )
 
 
+def answer_claims(
+    con: sqlite3.Connection, claim_ids: list[int], state: str
+) -> int:
+    """Answer several waiting proposals at once. Returns how many changed.
+
+    One statement rather than a loop of them: confirming a family is one
+    gesture, and a partial result would leave him looking at a heading whose
+    count no longer matches what is under it.
+    """
+    state = claims_lib.normalise_state(state)
+    if state not in ("confirmed", "rejected"):
+        raise ValueError(f"a claim cannot be set to {state!r}")
+    ids = [int(claim_id) for claim_id in claim_ids]
+    if not ids:
+        return 0
+    stamp = _now()
+    placeholders = ",".join("?" * len(ids))
+    cur = con.execute(
+        f"UPDATE claims SET state=?, confirmed_at=?, updated_at=? "
+        f"WHERE state='proposed' AND id IN ({placeholders})",
+        (state, stamp if state == "confirmed" else "", stamp, *ids),
+    )
+    return cur.rowcount
+
+
 def delete_claim(con: sqlite3.Connection, claim_id: int) -> None:
     con.execute("DELETE FROM claims WHERE id=?", (claim_id,))
 
