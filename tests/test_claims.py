@@ -548,3 +548,43 @@ def test_an_unreadable_profile_reads_as_empty_not_as_a_crash(data_dir):
     config.PROFILE_PATH.mkdir(parents=True, exist_ok=True)
     assert ai_profile.load_profile() == ""
     assert claims.profile_sections(ai_profile.load_profile()) == []
+
+
+def test_a_hand_typed_claim_says_so_and_an_imported_one_names_its_section():
+    """"Who said so" is the question the register has to answer about
+    anything it holds, and the two answers must not read alike."""
+    assert claims.provenance(
+        {"source": "user", "source_ref": ""}) == "von dir eingetragen"
+    assert claims.provenance(
+        {"source": "profile_md", "source_ref": "Zertifikate"}
+    ) == "aus profile.md · Zertifikate"
+    # A reading that lost its section still says it was a reading.
+    assert claims.provenance(
+        {"source": "profile_md", "source_ref": "  "}) == "aus profile.md"
+    # An unknown source is not silently promoted to "he said it".
+    assert claims.provenance(
+        {"source": "", "source_ref": "Zertifikate"}) == "von dir eingetragen"
+
+
+def test_the_grouping_keeps_the_family_order_and_drops_empty_families():
+    rows = [{"kind": "condition", "fact": "a"}, {"kind": "skill", "fact": "b"},
+            {"kind": "condition", "fact": "c"}, {"kind": "nonsense",
+                                                 "fact": "d"}]
+    grouped = claims.group_by_kind(rows)
+
+    assert [kind for kind, _label, _rows in grouped] == ["skill", "condition"]
+    assert [label for _kind, label, _rows in grouped] == [
+        "Technische Kenntnisse", "Rahmenbedingungen"]
+    # Rows keep the register's own order beneath their heading, and the
+    # unreadable family joined the strictest one rather than vanishing.
+    assert [r["fact"] for r in grouped[0][2]] == ["b", "d"]
+    assert [r["fact"] for r in grouped[1][2]] == ["a", "c"]
+    assert claims.group_by_kind([]) == []
+
+
+def test_one_proposal_does_not_read_as_several():
+    """German inflects; a screen that does not is a screen that looks
+    machine-written."""
+    assert claims.count_proposals(1) == "1 Vorschlag"
+    assert claims.count_proposals(2) == "2 Vorschläge"
+    assert claims.count_proposals(0) == "0 Vorschläge"

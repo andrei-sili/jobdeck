@@ -537,6 +537,22 @@ def test_the_signature_sees_the_template_file_itself(con, data_dir):
     assert unterlagen.signature(con, None) != after, "an edit is invisible"
 
 
+def test_the_signature_sees_the_profile_file_being_edited(con, data_dir):
+    """The coverage line names sections read from profile.md, and he edits
+    that file outside this app. Without its fingerprint the screen would go
+    on naming a section he had renamed, or reporting a gap he had filled —
+    the same reason the template's CONTENT is signed and not only its path."""
+    from jobdeck import config
+
+    _setup(con, data_dir)
+    config.PROFILE_PATH.write_text("## Zertifikate\nEins\n", encoding="utf-8")
+    before = unterlagen.signature(con, None)
+
+    config.PROFILE_PATH.write_text("## Zertifikate\n## Sprachen\n",
+                                   encoding="utf-8")
+    assert unterlagen.signature(con, None) != before, "an edit is invisible"
+
+
 # --------------------------------------------------------------------------
 # The reason a field is empty
 # --------------------------------------------------------------------------
