@@ -9,11 +9,11 @@ from dataclasses import dataclass
 from fastapi.responses import RedirectResponse
 from nicegui import app, run, ui
 
-from jobdeck import apply_channel, apply_form, config, db, freshness
+from jobdeck import apply_channel, apply_form, attempts, config, db, freshness
 from jobdeck.ai import scoring
 from jobdeck.ai.drafting import clean_title
 from jobdeck.constants import DRAFT_DELIVERED
-from jobdeck.dedupe import duplicates_for_jobs, norm
+from jobdeck.dedupe import norm
 from jobdeck.services import (
     apply_record,
     apply_resolve,
@@ -110,9 +110,9 @@ VIEWS = (
          "Keine alten Anzeigen — alles in der Arbeitsliste ist frisch."),
     View("offline", "Offline", "new", {**_EVERYTHING, "gone": "only"},
          "Keine tote Anzeige — alles Geprüfte steht noch online."),
-    View("firma_kontaktiert", "Firma schon kontaktiert", "new",
+    View("firma_kontaktiert", "Firma zurückgestellt", "new",
          {**_EVERYTHING, "applied": "only"},
-         "Keine Stelle bei einer Firma, bei der du dich schon beworben hast."),
+         "Keine Firma ist gerade zurückgestellt."),
     View("doppelt", "Doppelt", "duplicate", _EVERYTHING,
          "Keine Anzeige wurde als Doppelte einer Bewerbung erkannt."),
     # Nothing is deleted, only moved into a view with a name. This is that
@@ -215,9 +215,9 @@ def hidden_parts(view: View, counts: dict, stale_age_days: int,
         ("gone", "dead", "offline", ("offline", "offline"),
          "Anzeige ist offline", "Anzeigen sind offline"),
         ("applied", "applied_firm", "firma_kontaktiert",
-         ("bei einer schon beworbenen Firma", "bei schon beworbenen Firmen"),
-         "Stelle bei einer Firma, bei der du dich schon beworben hast",
-         "Stellen bei Firmen, bei denen du dich schon beworben hast"),
+         ("bei einer zurückgestellten Firma", "bei zurückgestellten Firmen"),
+         "Stelle bei einer Firma, die gerade zurückgestellt ist",
+         "Stellen bei Firmen, die gerade zurückgestellt sind"),
         ("old", "old", "alt",
          (f"älter als {stale_age_days} Tage", f"älter als {stale_age_days} Tage"),
          f"Anzeige älter als {stale_age_days} Tage",
@@ -293,7 +293,7 @@ def _blocking_reason(job: dict, already: dict | None) -> str:
     if status == "applied":
         return "Diese Anzeige ist schon als Bewerbung eingetragen."
     if already:
-        return helpers.applied_line(already)
+        return helpers.hold_line(already, str(job.get("company") or ""))
     if status == "duplicate":
         return ("Diese Anzeige gehört zu einer Firma, bei der schon eine "
                 "Bewerbung liegt.")
@@ -580,7 +580,7 @@ def _load_jobs(view_key: str, page: int, search: str = "",
         return {
             "signature": signature,
             "view": view,
-            "applied": duplicates_for_jobs(con, on_screen),
+            "applied": attempts.decisions_for_jobs(con, on_screen),
             "rows": rows,
             "siblings": siblings,
             # Read outside every filter on purpose: an application under way is
@@ -1088,7 +1088,8 @@ def reader_notes(job: dict, already: dict | None) -> list[tuple[str, str]]:
     prose."""
     notes = []
     if already:
-        notes.append((helpers.applied_line(already), "danger"))
+        notes.append((helpers.hold_line(already, str(job.get("company") or "")),
+                      "danger"))
     if job.get("liveness") == liveness.LIVENESS_GONE:
         checked = str(job.get("liveness_checked_at") or "")[:10]
         notes.append((f"⚠ Anzeige offline — beim letzten Abruf am {checked} "
@@ -2534,9 +2535,9 @@ async def jobs_page():
             result = await run.io_bound(_record_application, job["id"], kanal)
             await refresh(force=True)
             if not result["ok"]:
-                blocking = result["duplicate"]
-                say(helpers.applied_line(blocking) if blocking else
-                    "Diese Anzeige gibt es nicht mehr.",
+                line = helpers.hold_line(result.get("decision"),
+                                         result.get("company", ""))
+                say(line or "Diese Anzeige gibt es nicht mehr.",
                     type="warning", multi_line=True)
                 return
             with overlay:

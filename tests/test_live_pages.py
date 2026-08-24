@@ -818,8 +818,11 @@ async def test_a_refused_action_renders_disabled_and_says_why(
     deleted with the suite green, and the only rendered string that could have
     caught it is produced by reader_notes as well."""
     _posting(con, company="Beispiel GmbH")
-    db.add_bewerbung(con, {"gesendet_am": "2026-06-12", "firma": "Beispiel GmbH",
-                           "email": "", "kanal": "E-Mail", "status": "Absage"})
+    db.add_bewerbung(con, {
+        "gesendet_am": (datetime.date.today()
+                        - datetime.timedelta(days=5)).isoformat(),
+        "firma": "Beispiel GmbH", "email": "", "kanal": "E-Mail",
+        "status": "Absage"})
     con.commit()
     await user.open("/")
     select = next(iter(user.find(marker="view-select").elements))
@@ -835,7 +838,7 @@ async def test_a_refused_action_renders_disabled_and_says_why(
     assert all(not b.enabled for b in steps), \
         "an application that cannot happen is offered as a live button"
     reasons = _classed(user, "jd-reason")
-    assert reasons and any("bereits beworben" in r.text for r in reasons)
+    assert reasons and any("zurückgestellt" in r.text for r in reasons)
 
 
 async def test_the_warnings_stand_above_the_advert_on_the_screen(
@@ -1238,7 +1241,7 @@ async def test_an_application_landing_while_the_editor_is_open_reaches_the_confi
     await asyncio.sleep(0.4)
 
     await user.should_see("Diese Bewerbung abschicken?")
-    await user.should_see("bereits beworben")
+    await user.should_see("zurückgestellt")
 
 
 async def test_the_way_back_is_on_screen_the_second_after_the_form_opens(
@@ -1370,7 +1373,7 @@ async def test_a_refused_application_offers_no_undo_at_all(
     user.find("Abgeschickt", kind=ui.button).click()
     await asyncio.sleep(0.4)
 
-    await user.should_see("bereits beworben")
+    await user.should_see("zurückgestellt")
     assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 1
     assert db.get_job(con, job_id)["status"] == "new"
     with pytest.raises(AssertionError):

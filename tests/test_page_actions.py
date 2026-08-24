@@ -5,6 +5,7 @@ it do", which no data-layer test can see.
 """
 
 import asyncio
+import datetime
 import sys
 
 import pytest
@@ -306,14 +307,15 @@ async def test_the_queue_shows_the_duplicate_warning_on_the_row(
         "betreff": "Bewerbung als Python Entwickler",
         "email_body": "Guten Tag,", "anschreiben_body": "Sehr geehrte Damen,",
         "pdf_path": "/tmp/mappe.pdf"})
-    db.add_bewerbung(con, {"gesendet_am": "2026-06-12", "firma": "Beispiel GmbH",
+    recent = (datetime.date.today() - datetime.timedelta(days=5)).isoformat()
+    db.add_bewerbung(con, {"gesendet_am": recent, "firma": "Beispiel GmbH",
                            "email": "", "kanal": "E-Mail", "status": "Absage"})
     con.commit()
 
     await user.open("/queue")
 
-    await user.should_see("bereits beworben")
-    await user.should_see("Absage")
+    await user.should_see("zurückgestellt")
+    await user.should_see("Beispiel GmbH")
 
 
 async def test_the_send_confirmation_repeats_the_duplicate_warning(
@@ -326,7 +328,8 @@ async def test_the_send_confirmation_repeats_the_duplicate_warning(
         "betreff": "Bewerbung als Python Entwickler",
         "email_body": "Guten Tag,", "anschreiben_body": "Sehr geehrte Damen,",
         "pdf_path": "/tmp/mappe.pdf"})
-    db.add_bewerbung(con, {"gesendet_am": "2026-06-12", "firma": "Beispiel GmbH",
+    recent = (datetime.date.today() - datetime.timedelta(days=5)).isoformat()
+    db.add_bewerbung(con, {"gesendet_am": recent, "firma": "Beispiel GmbH",
                            "email": "", "kanal": "E-Mail", "status": "Absage"})
     db.set_setting(con, "test_recipient", "probe@example.org")
     con.commit()
@@ -345,7 +348,7 @@ async def test_the_send_confirmation_repeats_the_duplicate_warning(
                            for d in e.descendants()))
     shown = [getattr(el, "text", "") for el in confirm.descendants()]
     assert any("Diese Bewerbung abschicken?" in (t or "") for t in shown)
-    assert any("bereits beworben" in (t or "") for t in shown), \
+    assert any("zurückgestellt" in (t or "") for t in shown), \
         "the last screen before the press does not repeat the warning"
 
 
@@ -449,3 +452,63 @@ async def test_no_screen_shouts_at_him(user: User, con, data_dir, route):
                     and not el.props.get("no-caps")]
     assert shouting == [], \
         f"{route}: {[el.props.get('label') for el in shouting]} render ALL-CAPS"
+
+
+async def test_the_cooldown_he_types_reaches_the_gate_and_the_filter(
+        user: User, con, data_dir):
+    """One number, two consumers: the gate that refuses a send and the SQL
+    filter that decides whether a posting is listed. A field connected to
+    neither would leave the suite green."""
+    from jobdeck import attempts
+    from jobdeck import db as jobdeck_db
+
+    await user.open("/settings")
+    field = next(e for e in user.client.elements.values()
+                 if isinstance(e, ui.number)
+                 and "zurückstellen" in (e.props.get("label") or ""))
+    field.set_value(14)
+    await asyncio.sleep(0.1)
+
+    user.find(marker="save-tunables").click()
+    await asyncio.sleep(0.3)
+
+    assert attempts.cooldown_days(con) == 14
+    held_since, = jobdeck_db.applied_firm_params(con)
+    assert held_since == (
+        datetime.date.today() - datetime.timedelta(days=14)).isoformat()
+
+
+async def test_the_saved_cooldown_is_what_the_field_shows_next_time(
+        user: User, con, data_dir):
+    """The reading half. Set 14, come back, see 60, press Save, and you have
+    silently reset your own window — the exact shape the silence slice shipped
+    and had to fix."""
+    db.set_setting(con, "company_cooldown_days", "14")
+    con.commit()
+
+    await user.open("/settings")
+
+    field = next(e for e in user.client.elements.values()
+                 if isinstance(e, ui.number)
+                 and "zurückstellen" in (e.props.get("label") or ""))
+    assert field.value == 14
+
+
+async def test_zero_in_the_cooldown_field_stops_holding_companies(
+        user: User, con, data_dir):
+    from jobdeck import attempts
+    from jobdeck import db as jobdeck_db
+
+    await user.open("/settings")
+    field = next(e for e in user.client.elements.values()
+                 if isinstance(e, ui.number)
+                 and "zurückstellen" in (e.props.get("label") or ""))
+    field.set_value(0)
+    await asyncio.sleep(0.1)
+
+    user.find(marker="save-tunables").click()
+    await asyncio.sleep(0.3)
+
+    assert attempts.cooldown_days(con) == 0
+    held_since, = jobdeck_db.applied_firm_params(con)
+    assert held_since == "9999-12-31", "no application may hold its company"

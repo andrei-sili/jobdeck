@@ -3,7 +3,7 @@
 import subprocess
 import sys
 
-from jobdeck import netsafe
+from jobdeck import dates, netsafe
 
 
 def openable_url(url: str) -> str:
@@ -17,27 +17,41 @@ def openable_url(url: str) -> str:
     return url if netsafe.is_openable(url or "") else ""
 
 
-def applied_line(already: dict) -> str:
-    """'⚠ Bei X hast du dich bereits beworben (am 12.06. · Absage)'.
+def hold_line(decision, company: str = "") -> str:
+    """Why this posting is being held back, in the words the screens use.
 
-    The current send path refuses a second application to the same normalized
-    company. The accepted target permits another position after candidate
-    confirmation; see
-    `docs/adr/0002-application-identity-and-duplicate-policy.md`.
+    One wording for one rule: every screen that shows a refusal builds it from
+    the same `identity.Decision` the gate acted on, so a screen cannot promise
+    what the gate will refuse or refuse what it would allow.
 
-    The job inbox and review queue share this wording so the UI reflects the
-    behavior currently enforced by the send path.
+    A cooling-off hold names the day it lifts whenever the ledger can date it,
+    and says plainly when it cannot — inventing a date would be worse than
+    admitting the application carries none. Policy:
+    `docs/adr/0010-company-cooling-off-window.md`.
     """
-    parts = []
-    when = str(already.get("gesendet_am") or "")[:10]
-    if when:
-        parts.append(f"am {when}")
-    status = str(already.get("status") or "").strip()
-    if status:
-        parts.append(status)
-    detail = f" ({' · '.join(parts)})" if parts else ""
-    return (f"⚠ Bei {already.get('firma') or 'dieser Firma'} hast du dich "
-            f"bereits beworben{detail} — eine Bewerbung pro Firma.")
+    from jobdeck import identity
+
+    firma = (company or "").strip() or "dieser Firma"
+    if decision is None:
+        return ""
+    if decision.verdict == identity.BLOCKED_REPUBLICATION:
+        stelle = f" auf „{decision.position}\u201c" if decision.position else ""
+        when = f" am {dates.iso_to_de(decision.sent_on)}" if decision.sent_on else ""
+        return (f"⚠ Bei {firma} hast du dich{when}{stelle} schon beworben — "
+                f"dieselbe Stelle ein zweites Mal geht nicht.")
+    if decision.verdict == identity.RESERVED:
+        return (f"⚠ Für {firma} läuft gerade eine Bewerbung — warte, bis sie "
+                f"durch ist.")
+    if decision.verdict == identity.COOLING_OFF:
+        when = f" am {dates.iso_to_de(decision.sent_on)}" if decision.sent_on else ""
+        if decision.reopens_on:
+            bis = (f" Diese Firma ist bis zum "
+                   f"{dates.iso_to_de(decision.reopens_on)} zurückgestellt.")
+        else:
+            bis = (" Wann das war, steht nicht im Register — deshalb bleibt "
+                   "die Firma zurückgestellt.")
+        return f"⚠ Bei {firma} hast du dich{when} beworben.{bis}"
+    return ""
 
 
 def mappe_summary(result: dict, *, with_anlagen: bool = False) -> str:

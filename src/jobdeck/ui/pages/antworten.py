@@ -27,7 +27,7 @@ from jobdeck.constants import CLASSIFICATION_TO_STATUS, OFFENE_STATUS, STATUS_RA
 from jobdeck.services import register
 from jobdeck.services import replies as reply_service
 from jobdeck.ui import live
-from jobdeck.ui.helpers import applied_line
+from jobdeck.ui.helpers import hold_line
 from jobdeck.ui.layout import frame
 from jobdeck.ui.rail import ANTWORTEN_PATH, EINSTELLUNGEN_PATH, clock
 
@@ -813,7 +813,8 @@ async def antworten_page():
                 say("Bewerbung eingetragen — sie steht jetzt im Register.",
                     type="positive")
             elif outcome.get("duplicate") is not None:
-                say(applied_line(outcome["duplicate"]), type="warning")
+                say(hold_line(outcome.get("decision"),
+                              outcome.get("company", "")), type="warning")
             else:
                 say("Eintragen ging nicht — die Anzeige fehlt.",
                     type="warning")

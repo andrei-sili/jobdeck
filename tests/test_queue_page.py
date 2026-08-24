@@ -4,7 +4,7 @@ import ast
 import datetime
 import pathlib
 
-from jobdeck import db
+from jobdeck import db, identity
 from jobdeck.services import drafting
 from jobdeck.ui import draft_editor, helpers, live
 from jobdeck.ui.pages import queue
@@ -181,24 +181,30 @@ def test_the_queue_asks_the_duplicate_gate_about_every_draft(con, data_dir):
     send path would refuse, and only the job inbox said so — on the form path,
     where the cockpit drafts, nothing did."""
     job_id = _job_with_draft(con)
-    db.add_bewerbung(con, {"gesendet_am": "2026-06-12", "firma": "Firma GmbH",
+    recent = (datetime.date.today() - datetime.timedelta(days=5)).isoformat()
+    db.add_bewerbung(con, {"gesendet_am": recent, "firma": "Firma GmbH",
                            "email": "", "kanal": "E-Mail", "status": "Absage"})
     con.commit()
 
     view = queue._load("open")
 
-    assert view["applied"][job_id]["status"] == "Absage"
-    assert "Firma GmbH" in helpers.applied_line(view["applied"][job_id])
+    decision = view["applied"][job_id]
+    assert decision.verdict == identity.COOLING_OFF
+    assert decision.sent_on == recent
+    line = helpers.hold_line(decision, "Firma GmbH")
+    assert "Firma GmbH" in line and "zurückgestellt" in line
 
 
 def test_a_sent_draft_is_not_warned_about_its_own_application(con, data_dir):
     """It MADE that application: matching it against itself is an echo, and
     every row of the 'sent' tab would carry one."""
     job_id = _job_with_draft(con, status="sent")
-    row_id = db.add_bewerbung(con, {"gesendet_am": "2026-08-11",
+    today = datetime.date.today().isoformat()
+    row_id = db.add_bewerbung(con, {"gesendet_am": today,
                                     "firma": "Firma GmbH", "email": "hr@firma.de",
                                     "kanal": "E-Mail", "status": "Gesendet"})
     con.execute("UPDATE drafts SET bewerbung_id=? WHERE job_id=?", (row_id, job_id))
+    con.execute("UPDATE jobs SET bewerbung_id=? WHERE id=?", (row_id, job_id))
     con.commit()
 
     assert queue._load("sent")["applied"] == {}
@@ -208,16 +214,18 @@ def test_a_second_application_at_that_company_still_warns(con, data_dir):
     """The echo is only the draft's OWN application; another one is exactly the
     thing the gate refuses."""
     job_id = _job_with_draft(con, status="sent")
-    mine = db.add_bewerbung(con, {"gesendet_am": "2026-08-11",
-                                  "firma": "Firma GmbH", "email": "hr@firma.de",
-                                  "kanal": "E-Mail", "status": "Gesendet"})
-    db.add_bewerbung(con, {"gesendet_am": "2026-08-12", "firma": "Firma GmbH",
-                           "email": "hr@firma.de", "kanal": "E-Mail",
-                           "status": "Absage"})
+    today = datetime.date.today()
+    mine = db.add_bewerbung(con, {"gesendet_am": (today - datetime.timedelta(
+        days=1)).isoformat(), "firma": "Firma GmbH", "email": "hr@firma.de",
+        "kanal": "E-Mail", "status": "Gesendet"})
+    db.add_bewerbung(con, {"gesendet_am": today.isoformat(),
+                           "firma": "Firma GmbH", "email": "hr@firma.de",
+                           "kanal": "E-Mail", "status": "Absage"})
     con.execute("UPDATE drafts SET bewerbung_id=? WHERE job_id=?", (mine, job_id))
+    con.execute("UPDATE jobs SET bewerbung_id=? WHERE id=?", (mine, job_id))
     con.commit()
 
-    assert queue._load("sent")["applied"][job_id]["id"] != mine
+    assert queue._load("sent")["applied"][job_id].application_id != mine
 
 
 def test_a_draft_at_an_untouched_company_carries_no_warning(con, data_dir):
@@ -344,11 +352,13 @@ def test_the_editor_asks_the_database_rather_than_being_told(con, data_dir):
         "company": "Eine GmbH"})
     con.commit()
     assert draft_editor.applied_at_this_company(job_id) is None
-    db.add_bewerbung(con, {"gesendet_am": "2026-06-12", "firma": "Eine GmbH",
-                           "kanal": "E-Mail", "status": "Absage"})
+    recent = (datetime.date.today() - datetime.timedelta(days=5)).isoformat()
+    blocking = db.add_bewerbung(con, {"gesendet_am": recent,
+                                      "firma": "Eine GmbH", "kanal": "E-Mail",
+                                      "status": "Absage"})
     con.commit()
     found = draft_editor.applied_at_this_company(job_id)
-    assert found is not None and found["firma"] == "Eine GmbH"
+    assert found is not None and found.application_id == blocking
     assert draft_editor.applied_at_this_company(999999) is None
 
 

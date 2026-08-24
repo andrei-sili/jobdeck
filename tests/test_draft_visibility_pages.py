@@ -14,7 +14,7 @@ import sys
 import pytest
 from nicegui.testing import User
 
-from jobdeck import db
+from jobdeck import dates, db
 from jobdeck.services import drafting
 
 pytest_plugins = ["nicegui.testing.user_plugin"]
@@ -293,12 +293,18 @@ async def test_an_unexpected_failure_does_not_leave_the_button_dead(
 async def test_a_posting_at_a_firm_he_already_wrote_to_says_so(
         user: User, con, data_dir):
     """`jobs.duplicate_of` is written once, when the posting is discovered, so
-    every application sent afterwards makes more inbox rows lie. Measured on
-    his real data: 30 open postings were at firms the send gate would already
-    refuse, and the top-ranked posting of all had had an Absage."""
+    every application sent afterwards makes more inbox rows lie. Measured on a
+    real corpus: 30 open postings were at firms the gate would already refuse,
+    and the top-ranked posting of all had had an Absage.
+
+    The hold is a window now, so the blocking application has to be inside it
+    — that IS the behaviour under test."""
     job_id = _posting(con, company="Beispiel GmbH")
-    db.add_bewerbung(con, {"gesendet_am": "2026-06-12", "firma": "Beispiel GmbH",
-                           "email": "", "kanal": "E-Mail", "status": "Absage"})
+    db.add_bewerbung(con, {
+        "gesendet_am": (datetime.date.today()
+                        - datetime.timedelta(days=5)).isoformat(),
+        "firma": "Beispiel GmbH", "email": "", "kanal": "E-Mail",
+        "status": "Absage"})
     con.commit()
     # nothing wrote jobs.duplicate_of — the posting still looks untouched
     assert con.execute("SELECT duplicate_of FROM jobs WHERE id=?",
@@ -308,7 +314,7 @@ async def test_a_posting_at_a_firm_he_already_wrote_to_says_so(
     # is a fact about the posting, exactly like a score-0 mismatch
     await user.open("/")
     await user.should_not_see("Beispiel GmbH")
-    await user.should_see("bei einer schon beworbenen Firma")
+    await user.should_see("bei einer zurückgestellten Firma")
     # …and the line says once, at its end, what each number means
     await user.should_see("Nichts wird gelöscht.")
 
@@ -316,26 +322,32 @@ async def test_a_posting_at_a_firm_he_already_wrote_to_says_so(
     # draft on an application that can never be sent
     await _open_view(user)
     await user.should_see("Beispiel GmbH")
-    await user.should_see("bereits beworben")
-    await user.should_see("Absage")
-    await user.should_see("2026-06-12")
+    # the reason names the day the hold lifts: a window that does not say when
+    # it ends reads exactly like the permanent block it replaced
+    await user.should_see("zurückgestellt")
+    reopens = dates.iso_to_de(
+        (datetime.date.today() + datetime.timedelta(days=55)).isoformat())
+    await user.should_see(reopens)
     from nicegui import ui as _ui
     blocked = [e for e in user.client.elements.values()
                if isinstance(e, _ui.button) and DRAFT_BUTTON in e.text]
     assert blocked and not any(b.enabled for b in blocked), \
-        "a draft is offered for a company that can never receive one"
+        "a draft is offered for a company that cannot receive one yet"
 
 
 async def test_the_decorated_spelling_is_covered_by_the_same_warning(
         user: User, con, data_dir):
     """The whole point of the norm fix, seen from the screen."""
     _posting(con, company="Beispiel® GmbH")
-    db.add_bewerbung(con, {"gesendet_am": "2026-06-12", "firma": "Beispiel GmbH",
-                           "email": "", "kanal": "E-Mail", "status": "Absage"})
+    db.add_bewerbung(con, {
+        "gesendet_am": (datetime.date.today()
+                        - datetime.timedelta(days=5)).isoformat(),
+        "firma": "Beispiel GmbH", "email": "", "kanal": "E-Mail",
+        "status": "Absage"})
     con.commit()
     await user.open("/")
     await _open_view(user)
-    await user.should_see("bereits beworben")
+    await user.should_see("zurückgestellt")
 
 
 async def test_a_firm_he_never_wrote_to_is_left_alone(user: User, con, data_dir):

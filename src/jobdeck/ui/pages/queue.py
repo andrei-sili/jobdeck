@@ -12,8 +12,7 @@ import logging
 
 from nicegui import run, ui
 
-from jobdeck import db
-from jobdeck.dedupe import duplicates_for_jobs
+from jobdeck import attempts, db
 from jobdeck.services import drafting, liveness, send
 from jobdeck.ui import draft_editor, helpers, live
 from jobdeck.ui.helpers import open_in_system, openable_url
@@ -126,20 +125,23 @@ def _load(filter_value: str) -> dict:
         signature = _signature_of(con)
         rows = [dict(r) for r in
                 db.list_drafts_with_jobs(con, FILTER_STATUSES[filter_value])]
-        # Asked of the duplicate gate itself, for the drafts on screen: the
-        # current send path refuses a second application to a company
-        # (send.py). The accepted identity policy is documented in ADR 0002;
-        # this warning reflects current behavior until that policy is built.
+        # Asked of the identity rule itself, for the drafts on screen: the send
+        # path refuses an application to a company still inside its
+        # cooling-off window, and saying so HERE is what stops him building a
+        # Mappe and pressing Send to be told no. Policy:
+        # `docs/adr/0010-company-cooling-off-window.md`.
+        #
+        # `bewerbung_id` travels with each posting because a sent draft MADE
+        # the application at that company: matching it against itself is not a
+        # warning, it is an echo, and every row of the 'sent' tab would carry
+        # one. The DRAFT's own link is the right one to exclude here, and the
+        # exclusion lives in `decisions_for_jobs` so this screen and the job
+        # inbox cannot disagree about which match is an echo.
         postings = [{"id": r["job_id"], "company": r["job_company"],
+                     "title": r["job_title"],
+                     "bewerbung_id": r["bewerbung_id"],
                      "contact_email": r["job_contact_email"]} for r in rows]
-        applied = duplicates_for_jobs(con, postings)
-        # A sent draft MADE the application at that company, so matching it
-        # against itself is not a warning, it is an echo — every row of the
-        # 'sent' tab would carry one. A second application at the same company
-        # still warns, because then the match is a different row.
-        own = {r["job_id"]: r["bewerbung_id"] for r in rows}
-        applied = {job_id: match for job_id, match in applied.items()
-                   if own.get(job_id) != match["id"]}
+        applied = attempts.decisions_for_jobs(con, postings)
         return {
             "drafts": rows,
             "status": db.send_mode(con),
@@ -272,7 +274,7 @@ async def queue_page():
                     # Mappe and pressing Send to be told no — two of the five
                     # drafts waiting in his queue were at such companies, and
                     # only the job inbox warned.
-                    ui.label(helpers.applied_line(already)) \
+                    ui.label(helpers.hold_line(already, row["job_company"])) \
                         .classes("text-sm text-amber-700")
                 if row["pdf_path"]:
                     ui.label(f"Mappe: {row['pdf_path']}") \

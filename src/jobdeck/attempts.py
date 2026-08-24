@@ -36,8 +36,10 @@ RESERVED = "reserved"
 RECORDED = "recorded"
 RELEASED = "released"
 
-COOLDOWN_SETTING = "company_cooldown_days"
-DEFAULT_COOLDOWN_DAYS = 60
+# Re-exported from `identity`, which owns the policy: the SQL filter in `db`
+# reads the same two names, and a second default is a second rule.
+COOLDOWN_SETTING = identity.COOLDOWN_SETTING
+DEFAULT_COOLDOWN_DAYS = identity.DEFAULT_COOLDOWN_DAYS
 
 # The ledger stays the source of truth for "did an application go out", and
 # the attempt table only supplies the position it never stored. Read this way
@@ -280,3 +282,34 @@ def reconcile_interrupted(con: sqlite3.Connection, now: str) -> int:
         (now,),
     )
     return changed.rowcount
+
+def decisions_for_jobs(
+    con: sqlite3.Connection, jobs: list, *, window_days: int | None = None
+) -> dict[int, identity.Decision]:
+    """{job id: what the policy says}, for every posting that is not free.
+
+    Asked per PAGE rather than per row, so one read of the ledger and the
+    reservations serves the whole view — the same reason its predecessor was
+    written that way, and `jobs.duplicate_of` still cannot answer it: that
+    column is written once, when a posting is discovered, so every application
+    made afterwards silently makes more rows lie.
+
+    A posting that BECAME an application is not held by it. Without that, every
+    row in the "Beworben" view carried a warning about its own application,
+    which reads as a duplicate-send error rather than as the record he opened.
+    """
+    ledger = applications(con)
+    reservations = live_reservations(con)
+    days = cooldown_days(con) if window_days is None else window_days
+    found: dict[int, identity.Decision] = {}
+    for job in jobs:
+        keys = job.keys() if isinstance(job, sqlite3.Row) else job
+        own = job["bewerbung_id"] if "bewerbung_id" in keys else None
+        visible = ([a for a in ledger if a.id != own] if own is not None
+                   else ledger)
+        decision = identity.decide(
+            _posting(job), visible, reservations, window_days=days
+        )
+        if not decision.allowed:
+            found[job["id"]] = decision
+    return found

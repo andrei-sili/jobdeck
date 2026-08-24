@@ -49,6 +49,12 @@ RESERVED = "reserved"
 # allows is a listing, never a send.
 WINDOW_OFF = 0
 
+# The candidate setting that carries the window, and the default the product
+# ships with. Here rather than beside the database access, because both the
+# gate and the SQL filter that mirrors it have to read the same number.
+COOLDOWN_SETTING = "company_cooldown_days"
+DEFAULT_COOLDOWN_DAYS = 60
+
 
 @dataclasses.dataclass(frozen=True)
 class Application:
@@ -134,6 +140,39 @@ def reopens_on(sent_on: object, window_days: int) -> str:
     return (day + datetime.timedelta(days=window_days)).isoformat()
 
 
+def holds_company(
+    at_company: list[Application],
+    *,
+    window_days: int,
+    today: datetime.date | None = None,
+) -> Application | None:
+    """The application still holding this company, or None.
+
+    Narrower than `decide` on purpose, and separate from it for one reason:
+    the SQL filter that decides whether a posting is LISTED answers exactly
+    this question, while `decide` answers what happens if an application is
+    attempted — a republication is refused whether or not its company is
+    still held. Two questions, one rule, so a differential test can pin the
+    filter and the gate to the same statement instead of to two that merely
+    resemble each other.
+
+    The most recent application decides: an older one at the same company has
+    already been superseded by it, and the window is about how long ago the
+    company was last written to.
+    """
+    now = today or datetime.date.today()
+    if window_days <= WINDOW_OFF or not at_company:
+        return None
+    newest = max(at_company, key=lambda a: (str(a.sent_on or ""), a.id))
+    opens = reopens_on(newest.sent_on, window_days)
+    # No usable date means the window cannot be proven to have passed. Held,
+    # with an empty `reopens_on` so the screen says so instead of printing a
+    # day it invented.
+    if not opens or _date(opens) > now:
+        return newest
+    return None
+
+
 def decide(
     posting: Posting,
     applications: list[Application],
@@ -197,23 +236,15 @@ def decide(
         )
     )
 
-    if window_days > WINDOW_OFF and at_company:
-        # The most recent application decides: an older one at the same
-        # company has already been superseded by it, and the window is about
-        # how long ago he last wrote there.
-        newest = max(at_company, key=lambda a: (str(a.sent_on or ""), a.id))
-        opens = reopens_on(newest.sent_on, window_days)
-        # No usable date means the window cannot be proven to have passed. Held
-        # back, with an empty `reopens_on` so the screen says so instead of
-        # printing a day it invented.
-        if not opens or _date(opens) > now:
-            return Decision(
-                verdict=COOLING_OFF,
-                application_id=newest.id,
-                position=newest.position,
-                sent_on=newest.sent_on,
-                reopens_on=opens,
-                corroborating_email=corroborating,
-            )
+    holding = holds_company(at_company, window_days=window_days, today=now)
+    if holding is not None:
+        return Decision(
+            verdict=COOLING_OFF,
+            application_id=holding.id,
+            position=holding.position,
+            sent_on=holding.sent_on,
+            reopens_on=reopens_on(holding.sent_on, window_days),
+            corroborating_email=corroborating,
+        )
 
     return Decision(verdict=ALLOW, corroborating_email=corroborating)
