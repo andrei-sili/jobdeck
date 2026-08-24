@@ -1591,3 +1591,71 @@ async def test_a_posting_with_nothing_staged_offers_no_path(
     await user.should_see("Mappe NICHT fertig")
     assert not any(isinstance(e, ui.button) and "⧉" in str(e.text)
                    for e in user.client.elements.values())
+
+
+async def test_the_held_back_pile_offers_a_way_out_and_it_works(
+        user: User, con, data_dir):
+    """The pile exists so a posting can still be reached. Before this the only
+    thing waiting there was the sentence explaining why it could not be — a
+    room with no door, which is the shape a review panel has already caught on
+    this screen once.
+
+    Driven in the rendered page rather than asserted on the step model: a step
+    that is never rendered, or rendered without a handler, leaves the model
+    test green and the button dead."""
+    from jobdeck import attempts
+
+    job_id = _posting(con, company="Beispiel GmbH")
+    db.add_bewerbung(con, {
+        "gesendet_am": (datetime.date.today()
+                        - datetime.timedelta(days=5)).isoformat(),
+        "firma": "Beispiel GmbH", "email": "", "kanal": "E-Mail",
+        "status": "Gesendet"})
+    con.commit()
+    await user.open("/")
+    select = next(iter(user.find(marker="view-select").elements))
+    select.set_value("firma_kontaktiert")
+    await asyncio.sleep(0.3)
+
+    # the press IS the confirmation: on this screen a button carries its own
+    # label and only ⏎ opens a dialog, because ⏎ moves down a list and the
+    # label under it changes with the row
+    user.find("Trotzdem bewerben", kind=ui.button).click()
+    await asyncio.sleep(0.5)
+
+    stored = con.execute(
+        "SELECT * FROM application_attempts WHERE job_id=?", (job_id,)
+    ).fetchone()
+    assert stored is not None, "nothing recorded the candidate's answer"
+    assert stored["override_confirmed_at"], "the confirmation left no evidence"
+    assert stored["state"] == attempts.RELEASED, (
+        "answering the hold must not claim the posting"
+    )
+    # …and the gate now agrees with the screen
+    assert attempts.decide_for_job(con, db.get_job(con, job_id)).allowed is True
+
+
+async def test_a_permanent_block_offers_no_way_out(user: User, con, data_dir):
+    """A second application to the very same position is not the candidate's
+    to overrule, so the press must not even be drawn."""
+    job_id = _posting(con, company="Beispiel GmbH")
+    title = db.get_job(con, job_id)["title"]
+    bew = db.add_bewerbung(con, {
+        "gesendet_am": (datetime.date.today()
+                        - datetime.timedelta(days=400)).isoformat(),
+        "firma": "Beispiel GmbH", "email": "", "kanal": "E-Mail",
+        "status": "Absage"})
+    con.execute(
+        "INSERT INTO application_attempts (idempotency_key, state, company,"
+        " company_key, position, channel, bewerbung_id, created_at, updated_at)"
+        " VALUES ('bewerbung:x', 'recorded', 'Beispiel GmbH', 'beispiel gmbh',"
+        " ?, 'E-Mail', ?, '2025-01-01', '2025-01-01')", (title, bew))
+    con.commit()
+
+    await user.open("/")
+    select = next(iter(user.find(marker="view-select").elements))
+    select.set_value("firma_kontaktiert")
+    await asyncio.sleep(0.3)
+
+    with pytest.raises(AssertionError):
+        user.find("Trotzdem bewerben", kind=ui.button)

@@ -1448,7 +1448,10 @@ def test_a_blocked_step_says_why_beside_itself():
 
 def test_an_application_at_the_firm_outranks_every_channel():
     """A company inside its cooling-off window cannot receive an application
-    yet — so nothing downstream may offer to start one, whatever the channel.
+    yet — so no step of applying may be live, whatever the channel.
+
+    Exactly one press IS offered, and it is not an application: the one that
+    answers the hold. Without it the held-back view is a room with no door.
 
     The reason names the day the hold lifts: the point of a window is that it
     ends, and a refusal that does not say when is indistinguishable from the
@@ -1456,7 +1459,8 @@ def test_an_application_at_the_firm_outranks_every_channel():
     already = _held()
     for channel in ("direct_email", "ats_form", ""):
         steps = jobs.apply_steps(_row(apply_channel=channel), already)
-        assert not any(s.enabled for s in steps)
+        live = [s for s in steps if s.enabled]
+        assert [s.key for s in live] == [jobs.STEP_ANYWAY]
         assert any("zurückgestellt" in s.reason for s in steps)
         assert any("11. August 2026" in s.reason for s in steps)
 
@@ -1541,11 +1545,13 @@ def test_a_form_posting_can_still_be_given_a_letter():
         steps = {s.key: s for s in jobs.apply_steps(_row(apply_channel=channel))}
         assert steps[jobs.STEP_START].enabled, channel
         assert "0,09 $" in steps[jobs.STEP_START].label, channel
-    # …and never where an application cannot happen
+    # …and never where an application cannot happen. Under a liftable hold the
+    # only live press answers the hold; STEP_START itself stays refused.
     assert not any(s.enabled for s in jobs.apply_steps(_row(status="applied")))
-    assert not any(s.enabled for s in jobs.apply_steps(
-        _row(apply_channel="ats_form"),
-        _held()))
+    held = {s.key: s for s in jobs.apply_steps(
+        _row(apply_channel="ats_form"), _held())}
+    assert held[jobs.STEP_START].enabled is False
+    assert held[jobs.STEP_ANYWAY].enabled is True
 
 
 def test_a_resolved_dead_end_is_described_the_same_way_everywhere():
@@ -1722,11 +1728,15 @@ def test_the_press_is_marked_done_by_the_stamp_not_by_the_documents():
 def test_where_no_application_can_happen_no_step_is_live(job, already):
     """Including "Formular öffnen": opening it MOVES the posting to `portal`,
     which is this app's record that an application has begun. Reading the
-    advert is still a press away in the triage row, and that changes nothing."""
+    advert is still a press away in the triage row, and that changes nothing.
+
+    A liftable hold is the one exception and has its own test: there the press
+    on offer answers the hold rather than starting an application."""
     steps = jobs.apply_steps(job, already)
     assert steps, "the posting offers nothing at all"
-    assert not any(s.enabled for s in steps)
-    assert all(s.reason for s in steps if not s.done)
+    assert not any(s.enabled for s in steps if s.key != jobs.STEP_ANYWAY)
+    assert all(s.reason for s in steps
+               if not s.done and s.key != jobs.STEP_ANYWAY)
 
 
 def test_the_step_to_press_is_the_first_that_is_neither_done_nor_refused():

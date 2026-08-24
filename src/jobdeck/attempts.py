@@ -112,6 +112,46 @@ def live_reservations(con: sqlite3.Connection) -> list[identity.Reservation]:
     ]
 
 
+def authorizations(con: sqlite3.Connection) -> set[int]:
+    """Postings the candidate has explicitly cleared to apply to anyway.
+
+    A standing authorization rather than a live claim, so it survives the
+    several presses an application takes: by e-mail the letter is written
+    first and sent minutes later, and a confirmation that expired in between
+    would refuse him at the last gate with no way to say yes again.
+
+    Stored on the attempt row as a confirmation stamp while the row itself
+    stays `released` — it authorizes, it does not reserve. That keeps "one
+    attempt per posting" exactly as strict: the row is still claimed by
+    whichever writer revives it first, inside `BEGIN IMMEDIATE`.
+    """
+    return {
+        row["job_id"]
+        for row in con.execute(
+            "SELECT job_id FROM application_attempts "
+            " WHERE override_confirmed_at <> '' AND job_id IS NOT NULL"
+        )
+    }
+
+
+def _lifted(decision: identity.Decision, authorized: bool) -> identity.Decision:
+    """A cooling-off hold the candidate has already answered is not a hold.
+
+    Only that one. A republication and a live reservation stand: one is a
+    mistake no confirmation makes reasonable, the other may already be
+    leaving.
+    """
+    if authorized and decision.verdict == identity.COOLING_OFF:
+        return identity.Decision(
+            verdict=identity.ALLOW,
+            application_id=decision.application_id,
+            position=decision.position,
+            sent_on=decision.sent_on,
+            corroborating_email=decision.corroborating_email,
+        )
+    return decision
+
+
 def _posting(job: sqlite3.Row | dict) -> identity.Posting:
     """A posting row as identity needs to see it.
 
@@ -141,14 +181,16 @@ def decide_for_job(
     Read-only, so screens can ask it as freely as gates do — and because both
     ask the same function, a screen cannot promise what the gate will refuse.
     """
-    return identity.decide(
-        _posting(job),
+    posting = _posting(job)
+    decision = identity.decide(
+        posting,
         applications(con),
         live_reservations(con),
         window_days=(
             cooldown_days(con) if window_days is None else window_days
         ),
     )
+    return _lifted(decision, posting.job_id in authorizations(con))
 
 
 def reserve(
@@ -180,7 +222,8 @@ def reserve(
     posting = _posting(job)
     key = key_for_job(posting.job_id)
     existing = con.execute(
-        "SELECT id, state FROM application_attempts WHERE idempotency_key=?",
+        "SELECT id, state, override_confirmed_at, override_evidence "
+        "  FROM application_attempts WHERE idempotency_key=?",
         (key,),
     ).fetchone()
     if existing is not None and existing["state"] != RELEASED:
@@ -196,6 +239,12 @@ def reserve(
 
     confirmed = now if override and decision.verdict == identity.COOLING_OFF else ""
     evidence = override_evidence if confirmed else ""
+    if existing is not None and not confirmed:
+        # A standing authorization is what let this reserve happen at all, and
+        # it is the evidence ADR 0010 requires the attempt to carry. Reviving
+        # the row must not wipe the confirmation that made reviving it legal.
+        confirmed = str(existing["override_confirmed_at"] or "")
+        evidence = str(existing["override_evidence"] or "")
     if existing is None:
         con.execute(
             """
@@ -300,6 +349,7 @@ def decisions_for_jobs(
     """
     ledger = applications(con)
     reservations = live_reservations(con)
+    cleared = authorizations(con)
     days = cooldown_days(con) if window_days is None else window_days
     found: dict[int, identity.Decision] = {}
     for job in jobs:
@@ -307,9 +357,57 @@ def decisions_for_jobs(
         own = job["bewerbung_id"] if "bewerbung_id" in keys else None
         visible = ([a for a in ledger if a.id != own] if own is not None
                    else ledger)
-        decision = identity.decide(
-            _posting(job), visible, reservations, window_days=days
+        decision = _lifted(
+            identity.decide(_posting(job), visible, reservations,
+                            window_days=days),
+            job["id"] in cleared,
         )
         if not decision.allowed:
             found[job["id"]] = decision
     return found
+
+
+def authorize(
+    con: sqlite3.Connection,
+    job: sqlite3.Row | dict,
+    evidence: str,
+    now: str,
+) -> tuple[bool, identity.Decision]:
+    """Record that the candidate wants to apply here despite the window.
+
+    MUST be called inside the caller's ``BEGIN IMMEDIATE``, like `reserve`:
+    the decision it is answering has to be the one still standing when the
+    stamp lands.
+
+    Refuses anything the window is not responsible for. A permanent block is
+    not the candidate's to overrule, and a live reservation is a message that
+    may already be leaving — waiting is the only answer to that one.
+    """
+    decision = decide_for_job(con, job)
+    if decision.verdict != identity.COOLING_OFF:
+        return False, decision
+    posting = _posting(job)
+    key = key_for_job(posting.job_id)
+    existing = con.execute(
+        "SELECT id FROM application_attempts WHERE idempotency_key=?", (key,)
+    ).fetchone()
+    if existing is None:
+        con.execute(
+            """
+            INSERT INTO application_attempts (
+                idempotency_key, state, company, company_key, position,
+                channel, job_id, override_confirmed_at, override_evidence,
+                created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)
+            """,
+            (key, RELEASED, posting.company, norm(posting.company),
+             posting.title, posting.job_id, now, evidence, now, now),
+        )
+    else:
+        con.execute(
+            "UPDATE application_attempts "
+            "   SET override_confirmed_at=?, override_evidence=?, updated_at=? "
+            " WHERE idempotency_key=?",
+            (now, evidence, now, key),
+        )
+    return True, decision

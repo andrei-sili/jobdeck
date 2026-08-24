@@ -390,3 +390,90 @@ def test_a_posting_keeps_its_single_attempt_even_after_the_board_retitles_it(con
     assert decision.reservation_key == key
     assert con.execute(
         "SELECT COUNT(*) FROM application_attempts").fetchone()[0] == 1
+
+
+# --------------------------------------------------------------------------
+# The standing authorization: "apply here anyway"
+# --------------------------------------------------------------------------
+def test_an_authorization_lifts_the_window_for_that_posting_only(con):
+    sent = (datetime.date.today() - datetime.timedelta(days=5)).isoformat()
+    _applied(con, position="AI & Backend Engineer", sent_on=sent)
+    cleared = _job(con, title="Software Engineer", external_id="a")
+    other = _job(con, title="Data Engineer", external_id="b")
+
+    ok, decision = attempts.authorize(con, cleared, "er will trotzdem", NOW)
+    con.commit()
+
+    assert ok is True and decision.verdict == identity.COOLING_OFF
+    assert attempts.decide_for_job(con, cleared).allowed is True
+    assert attempts.decide_for_job(con, other).verdict == identity.COOLING_OFF
+
+
+def test_an_authorization_survives_until_the_application_is_made(con):
+    """By e-mail the letter is written first and sent minutes later. A
+    confirmation that expired in between would refuse him at the last gate
+    with no way to say yes again."""
+    sent = (datetime.date.today() - datetime.timedelta(days=5)).isoformat()
+    _applied(con, position="AI & Backend Engineer", sent_on=sent)
+    job = _job(con, title="Software Engineer")
+    attempts.authorize(con, job, "er will trotzdem", NOW)
+    con.commit()
+
+    ok, _ = attempts.reserve(con, job, "E-Mail", now=NOW)
+
+    assert ok is True
+    row = con.execute("SELECT * FROM application_attempts WHERE job_id=?",
+                      (job["id"],)).fetchone()
+    assert row["state"] == attempts.RESERVED
+    assert row["override_confirmed_at"] == NOW
+    assert row["override_evidence"] == "er will trotzdem"
+
+
+def test_an_authorization_is_written_down_with_its_evidence(con):
+    sent = (datetime.date.today() - datetime.timedelta(days=5)).isoformat()
+    _applied(con, position="AI & Backend Engineer", sent_on=sent)
+    job = _job(con, title="Software Engineer")
+
+    attempts.authorize(con, job, "zuletzt am 19.08. beworben", NOW)
+    con.commit()
+
+    row = con.execute("SELECT * FROM application_attempts WHERE job_id=?",
+                      (job["id"],)).fetchone()
+    assert row["state"] == attempts.RELEASED, "it authorizes, it does not claim"
+    assert row["override_confirmed_at"] == NOW
+    assert row["override_evidence"] == "zuletzt am 19.08. beworben"
+    assert row["position"] == "Software Engineer"
+
+
+def test_nothing_can_be_authorized_that_the_window_did_not_refuse(con):
+    """A republication is not the candidate's to overrule, and a live
+    reservation may already be leaving."""
+    _applied(con, position="Software Engineer")
+    republication = _job(con, title="Software Engineer", external_id="a")
+    ok, decision = attempts.authorize(con, republication, "trotzdem", NOW)
+    assert ok is False and decision.verdict == identity.BLOCKED_REPUBLICATION
+    assert con.execute(
+        "SELECT COUNT(*) FROM application_attempts WHERE override_confirmed_at<>''"
+    ).fetchone()[0] == 0
+
+
+def test_a_free_company_needs_no_authorization(con):
+    job = _job(con)
+    ok, decision = attempts.authorize(con, job, "trotzdem", NOW)
+    assert ok is False and decision.verdict == identity.ALLOW
+
+
+def test_an_authorized_posting_leaves_the_held_pile_of_decisions(con):
+    """The screens read `decisions_for_jobs`, so an authorization has to reach
+    it too — otherwise the button unlocks and the warning stays."""
+    sent = (datetime.date.today() - datetime.timedelta(days=5)).isoformat()
+    _applied(con, position="AI & Backend Engineer", sent_on=sent)
+    cleared = _job(con, title="Software Engineer", external_id="a")
+    other = _job(con, title="Data Engineer", external_id="b")
+    attempts.authorize(con, cleared, "trotzdem", NOW)
+    con.commit()
+
+    found = attempts.decisions_for_jobs(con, [dict(cleared), dict(other)])
+
+    assert cleared["id"] not in found
+    assert found[other["id"]].verdict == identity.COOLING_OFF

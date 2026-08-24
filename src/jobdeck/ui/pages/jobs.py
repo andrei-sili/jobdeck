@@ -9,7 +9,15 @@ from dataclasses import dataclass
 from fastapi.responses import RedirectResponse
 from nicegui import app, run, ui
 
-from jobdeck import apply_channel, apply_form, attempts, config, db, freshness
+from jobdeck import (
+    apply_channel,
+    apply_form,
+    attempts,
+    config,
+    db,
+    freshness,
+    identity,
+)
 from jobdeck.ai import scoring
 from jobdeck.ai.drafting import clean_title
 from jobdeck.constants import DRAFT_DELIVERED
@@ -273,6 +281,10 @@ STEP_MAPPE = "mappe"
 STEP_SEND = "send"
 STEP_START = "start"
 STEP_RECORD = "record"
+# Not an act of applying: the one press that answers a hold this screen is
+# otherwise a dead end for. It stands FIRST, because nothing below it can
+# happen until it is answered.
+STEP_ANYWAY = "anyway"
 
 
 @dataclass(frozen=True)
@@ -316,6 +328,13 @@ def apply_steps(job: dict, already: dict | None = None) -> list[Step]:
     of five.
     """
     blocked = _blocking_reason(job, already)
+    # A cooling-off hold is the one refusal he can answer. Offering the answer
+    # HERE is what keeps the held-back view from being a room with no door:
+    # the pile exists so he can still reach a posting, and before this the
+    # only thing waiting for him there was the sentence explaining why he
+    # could not. Policy: `docs/adr/0010-company-cooling-off-window.md`.
+    liftable = bool(already is not None
+                    and already.verdict == identity.COOLING_OFF)
     draft_status = str(job.get("draft_status") or "")
     by_email = _by_email(job)
     # What may still be checked and sent from HERE. A draft that is sending or
@@ -329,6 +348,12 @@ def apply_steps(job: dict, already: dict | None = None) -> list[Step]:
     writing = (draft_status == "generating"
                and not drafting.claim_is_stale(job.get("draft_updated_at")))
     steps: list[Step] = []
+
+    if liftable:
+        steps.append(Step(
+            STEP_ANYWAY, "Trotzdem bewerben", enabled=True,
+            reason="",
+        ))
 
     if by_email:
         steps.append(Step(
@@ -837,6 +862,34 @@ def _signature() -> tuple:
 def _set_status(job_id: int, status: str):
     with db.db() as con:
         db.set_job_status(con, job_id, status)
+
+
+def _authorize_application(job_id: int) -> dict:
+    """Record the candidate's "apply here anyway" against a cooling-off hold.
+
+    A module-level def rather than the service call handed straight to
+    `run.io_bound`, for the reason the recorder beside it gives: the arity
+    rule only inspects targets defined in this file, and a TypeError raised in
+    a worker thread is one log line and a button that looks alive.
+    """
+    with db.db() as con:
+        con.execute("BEGIN IMMEDIATE")
+        job = db.get_job(con, job_id)
+        if job is None:
+            return {"ok": False, "error": "Diese Anzeige gibt es nicht mehr."}
+        ok, decision = attempts.authorize(
+            con, job,
+            f"trotz Frist bestätigt am {attempts.stamp()[:10]}",
+            attempts.stamp(),
+        )
+        if not ok:
+            con.rollback()
+            return {"ok": False,
+                    "error": helpers.hold_line(decision,
+                                               str(job["company"] or ""))
+                    or "Diese Firma ist gerade nicht zurückgestellt."}
+        con.commit()
+    return {"ok": True, "error": ""}
 
 
 def _record_application(job_id: int, kanal: str) -> dict:
@@ -1962,10 +2015,17 @@ async def jobs_page():
             that keeps `overlay.clear()` ahead of every await cannot know that,
             and it is right not to guess.
             """
-            if step.key == STEP_RECORD:
+            if step.key == STEP_ANYWAY:
+                heading = "Trotzdem bei dieser Firma bewerben?"
+                detail = (
+                    helpers.hold_line(applied.get(job["id"]),
+                                      str(job["company"] or ""))
+                    + " Deine Zusage wird bei dieser Anzeige vermerkt.")
+                go = "Ja, bewerben"
+            elif step.key == STEP_RECORD:
                 heading = "Bewerbung eintragen?"
-                detail = ("Eine Bewerbung pro Firma — danach ist diese Firma "
-                          "vergeben.")
+                detail = ("Danach ist diese Firma zurückgestellt, bis die "
+                          "Frist aus den Einstellungen abgelaufen ist.")
                 go = "Eintragen"
             elif step.key in (STEP_DRAFT, STEP_START):
                 heading = (f"Bewerbung schreiben? "
@@ -2000,6 +2060,29 @@ async def jobs_page():
                 await start_application(job, button)
             elif key == STEP_RECORD:
                 await confirm_applied(job)
+            elif key == STEP_ANYWAY:
+                await lift_the_hold(job)
+
+        async def lift_the_hold(job: dict) -> None:
+            """Write down that he wants this posting despite the window.
+
+            Nothing is applied for and nothing is spent — the steps below
+            simply become live, and the confirmation travels with the attempt
+            so the ledger can later say the hold was answered rather than
+            missed."""
+            # Cleared BEFORE the wait, never after: clearing afterwards
+            # destroys a dialog opened meanwhile, and one awaited on then
+            # never resolves at all.
+            overlay.clear()
+            result = await run.io_bound(_authorize_application, job["id"])
+            await refresh(force=True)
+            with overlay:
+                if not result["ok"]:
+                    say(result["error"], type="warning", multi_line=True)
+                    return
+                say(f"{job['company']} ist wieder frei — die Bewerbung kann "
+                    f"jetzt geschrieben werden.", type="positive",
+                    multi_line=True)
 
         async def build_mappe(job: dict, button) -> None:
             """The PDF he uploads to an employer's form."""
