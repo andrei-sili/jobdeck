@@ -573,7 +573,10 @@ async def test_the_cost_is_stated_before_the_spend_not_after(user: User, con,
     await asyncio.sleep(0.2)
 
     await user.should_see("profile.md von der KI lesen lassen?")
-    await user.should_see("halber Cent")
+    # The figure itself, not just "it costs something": the reading now spans
+    # every family in his profile rather than his competences alone, so what
+    # the button is about to spend has grown with it.
+    await user.should_see("zwei Cent")
     assert db.get_setting(con, "llm_calls", "0") == "0"
 
 

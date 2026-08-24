@@ -34,16 +34,69 @@ def ai_on(con):
 # --------------------------------------------------------------------------
 # The reading itself
 # --------------------------------------------------------------------------
-def test_the_proposal_keeps_the_pair_and_the_terms(monkeypatch):
+def test_the_proposal_keeps_the_pair_the_terms_and_where_it_was_read(
+        monkeypatch):
     monkeypatch.setattr(llm, "complete", lambda **kw: _result({"claims": [
-        {"fact": "FastAPI, PostgreSQL, Alembic",
-         "binding": "IHK-Abschlussprojekt", "terms": "FastAPI, Alembic"},
+        {"kind": "skill", "fact": "FastAPI, PostgreSQL, Alembic",
+         "binding": "IHK-Abschlussprojekt", "terms": "FastAPI, Alembic",
+         "source_ref": "Technische Kenntnisse"},
     ]}))
     claims, usage = ai_claims.extract_claims("irgendein Profil")
-    assert claims == [{"fact": "FastAPI, PostgreSQL, Alembic",
+    assert claims == [{"kind": "skill",
+                       "fact": "FastAPI, PostgreSQL, Alembic",
                        "binding": "IHK-Abschlussprojekt",
-                       "terms": "FastAPI, Alembic"}]
+                       "terms": "FastAPI, Alembic",
+                       "source_ref": "Technische Kenntnisse"}]
     assert usage.cost_usd == 0.004
+
+
+def _schema_kinds() -> list[str]:
+    return (ai_claims.CLAIMS_SCHEMA["properties"]["claims"]["items"]
+            ["properties"]["kind"]["enum"])
+
+
+def test_the_schema_offers_exactly_the_families_the_register_knows():
+    """Two lists of families is two places to add one and forget the other,
+    after which the model returns a family the register files as something
+    else without anyone noticing."""
+    assert _schema_kinds() == list(claims_lib.KINDS)
+
+
+def test_a_family_the_model_invents_is_filed_not_trusted(monkeypatch):
+    """Structured outputs constrain the enum, but the register is the thing
+    that has to stay findable: a row filed under a family no screen groups by
+    is a row he cannot answer."""
+    monkeypatch.setattr(llm, "complete", lambda **kw: _result({"claims": [
+        {"kind": "hobby", "fact": "Schach", "binding": "", "terms": "Schach",
+         "source_ref": "Stärken"},
+    ]}))
+    claims, _ = ai_claims.extract_claims("profil")
+    assert claims[0]["kind"] == "skill"
+
+
+def test_a_condition_is_never_bound_to_an_employer(monkeypatch):
+    """"Ab sofort verfügbar" bound to an employer reads as a promise made to
+    that employer, and the letter would repeat it as one."""
+    monkeypatch.setattr(llm, "complete", lambda **kw: _result({"claims": [
+        {"kind": "condition", "fact": "Ab sofort verfügbar",
+         "binding": "Beispiel GmbH", "terms": "ab sofort",
+         "source_ref": "Präferenzen"},
+        {"kind": "skill", "fact": "Django", "binding": "Praktikum",
+         "terms": "Django", "source_ref": "Technische Kenntnisse"},
+    ]}))
+    claims, _ = ai_claims.extract_claims("profil")
+    assert claims[0]["binding"] == ""
+    assert claims[1]["binding"] == "Praktikum", (
+        "the rule swallowed a binding that belongs to its fact")
+
+
+def test_a_runaway_provenance_string_cannot_grow_the_register(monkeypatch):
+    monkeypatch.setattr(llm, "complete", lambda **kw: _result({"claims": [
+        {"kind": "skill", "fact": "Django", "binding": "", "terms": "Django",
+         "source_ref": "x" * 5000},
+    ]}))
+    claims, _ = ai_claims.extract_claims("profil")
+    assert len(claims[0]["source_ref"]) == 120
 
 
 def test_an_entry_without_a_fact_is_dropped(monkeypatch):

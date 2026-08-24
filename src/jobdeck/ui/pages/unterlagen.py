@@ -656,8 +656,8 @@ async def unterlagen_page():
             with overlay, ui.dialog() as confirm, ui.card():
                 ui.label("profile.md von der KI lesen lassen?") \
                     .classes("font-bold")
-                ui.label("Ein Aufruf über deine profile.md, ungefähr ein "
-                         "halber Cent. Vorgeschlagen wird nur — gespeichert "
+                ui.label("Ein Aufruf über deine profile.md, ungefähr zwei "
+                         "Cent. Vorgeschlagen wird nur — gespeichert "
                          "wird, was du behältst.").classes("text-sm")
                 with ui.row().classes("justify-end gap-2 w-full"):
                     ui.button("Abbrechen",
@@ -706,8 +706,14 @@ async def unterlagen_page():
                                                                 "text-gray-500")
 
                 async def keep():
+                    # Every field the reading produced, not only the three the
+                    # register used to have: the family and the section it was
+                    # read from are the answer to "where does this come from",
+                    # and dropping them here would lose it silently.
                     chosen = [{"fact": c["fact"], "binding": c["binding"],
-                               "terms": c["terms"]}
+                               "terms": c["terms"], "kind": c.get("kind"),
+                               "source": "profile_md",
+                               "source_ref": c.get("source_ref", "")}
                               for box, c in boxes if box.value]
                     dialog.close()
                     written = await claims_service.accept(chosen)
