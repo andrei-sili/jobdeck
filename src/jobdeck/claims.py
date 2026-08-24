@@ -128,10 +128,29 @@ def provenance(claim) -> str:
     there is one: "aus profile.md" alone leaves him hunting through the file
     for the sentence he is being asked about.
     """
-    if str(claim["source"] or "") != "profile_md":
+    source = str(claim["source"] or "").strip()
+    if source == "user":
         return "von dir eingetragen"
+    if source != "profile_md":
+        # A source this version does not know cannot be reported as his word:
+        # "von dir eingetragen" is a statement that HE vouched for the row,
+        # and the one thing an unreadable value must never do is vouch.
+        return "Herkunft unbekannt"
     section = str(claim["source_ref"] or "").strip()
     return f"aus profile.md · {section}" if section else "aus profile.md"
+
+
+def describe_coverage(view: dict) -> str:
+    """The coverage line, in German that agrees with its own numbers.
+
+    "0 von 1 Abschnitten sind vertreten" is three disagreements in seven
+    words, on the sentence that is supposed to be the measurement.
+    """
+    covered, total = view["covered"], view["sections"]
+    unit = "Abschnitt" if total == 1 else "Abschnitten"
+    verb = "ist" if covered == 1 else "sind"
+    return (f"{covered} von {total} {unit} deiner profile.md "
+            f"{verb} im Register vertreten.")
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +206,9 @@ def coverage(sections: list[str], rows) -> dict:
     """
     covered = {_section_key(row["source_ref"]) for row in rows
                if normalise_state(row["state"]) == "confirmed"}
-    covered.discard("")
+    # No discard of "": `profile_sections` never yields an empty heading, so
+    # a hand-typed claim's empty provenance can match no section — and a
+    # guard that cannot fire is a guard nobody can test.
     missing = [name for name in sections if _section_key(name) not in covered]
     return {"sections": len(sections), "covered": len(sections) - len(missing),
             "missing": missing}

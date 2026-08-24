@@ -21,6 +21,7 @@ with it.
 import asyncio
 import dataclasses
 import logging
+import os
 import pathlib
 import tempfile
 
@@ -205,7 +206,10 @@ def _file_fingerprint(path: pathlib.Path | None) -> tuple:
         stat = path.stat()
     except OSError:
         return ("missing",)
-    return (stat.st_size, stat.st_mtime_ns)
+    # Readability, not only existence: a file whose mode stops it being read
+    # stats perfectly, so the screen would keep reporting what it could not
+    # read — and getting the mode back would change nothing it compares.
+    return (stat.st_size, stat.st_mtime_ns, os.access(path, os.R_OK))
 
 
 def signature(con, job_id: int | None) -> tuple:

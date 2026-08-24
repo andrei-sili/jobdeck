@@ -84,13 +84,15 @@ def _load() -> dict:
              "provenance": claims_lib.provenance(row)}
             for row in db.list_claims(con)
         ]
+        refused = [{**dict(row), "provenance": claims_lib.provenance(row)}
+                   for row in db.list_claims(con, states=("rejected",))]
         coverage = claims_lib.coverage(
             claims_lib.profile_sections(ai_profile.load_profile()), register)
         profiles = [dict(row) for row in db.list_profiles(con)]
         global_tags = db.get_setting(con, "global_hard_tags", "")
         stale_age = db.get_setting(con, "stale_age_days", "")
     return {"signature": signature, "mappe": mappe_view, "claims": register,
-            "coverage": coverage,
+            "coverage": coverage, "refused": refused,
             "letters": len(letters), "profiles": profiles,
             "global_hard_tags": global_tags, "stale_age_days": stale_age}
 
@@ -209,6 +211,10 @@ async def unterlagen_page():
         # would never resolve once the page rebuilt itself — and this page
         # rebuilds on a timer, so that can happen without anyone clicking.
         overlay = ui.column().classes("contents")
+        # Whether the refused pile is open. A view he opened is not DATA, so
+        # it stays out of the page signature — putting it there would make
+        # the watcher rebuild the screen underneath him every time he looked.
+        showing = {"refused": False}
 
         def say(message: str, **kwargs) -> None:
             """Tell the user something, from a slot no refresh can delete."""
@@ -599,6 +605,14 @@ async def unterlagen_page():
             overlay.clear()
             with overlay, ui.dialog() as dialog, ui.card().classes("w-96"):
                 ui.label("Erlaubnis").classes("font-bold")
+                # The family, first: it decides which heading the row appears
+                # under, and without it every hand-written entry was filed as
+                # a competence — so "Englisch, verhandlungssicher" stood under
+                # "Technische Kenntnisse", and a family the reading got wrong
+                # could not be corrected anywhere in the app.
+                family = ui.select(dict(claims_lib.KINDS), label="Was für eine",
+                                   value=claims_lib.normalise_kind(
+                                       data.get("kind"))).classes("w-full")
                 fact = ui.input("Was — z. B. Django & DRF",
                                 value=data.get("fact", "")).classes("w-full")
                 binding = ui.input("Wobei — das Projekt oder der Arbeitgeber",
@@ -616,7 +630,7 @@ async def unterlagen_page():
                         say("Ohne „Was“ ist es keine Erlaubnis", type="warning")
                         return
                     values = {"fact": fact.value, "binding": binding.value,
-                              "terms": terms.value}
+                              "terms": terms.value, "kind": family.value}
                     await run.io_bound(_save_claim, data.get("id"), values)
                     dialog.close()
                     await refresh()
@@ -679,18 +693,35 @@ async def unterlagen_page():
             if not result["ok"]:
                 say(result["error"], type="warning")
                 return
-            written, skipped = result["written"], result.get("skipped", 0)
+            written = result["written"]
+            waiting = result.get("waiting", 0)
+            answered = result.get("answered", 0)
+            # Say what each number IS. A row he has not answered and a row he
+            # has are opposite states, and reporting both as "beantwortet"
+            # tells him the register is finished when the shelf above it is
+            # still his to work through.
+            rest = []
+            if waiting:
+                rest.append(f"{waiting} warten schon auf dich")
+            if answered:
+                rest.append(f"{answered} hast du schon beantwortet")
+            tail = (" — " + " · ".join(rest)) if rest else ""
             if not written:
-                say("Nichts Neues gefunden"
-                    + (f" — {skipped} sind schon beantwortet" if skipped
-                       else ""))
+                say("Nichts Neues gefunden" + tail)
                 return
-            say(f"{written} Vorschläge warten auf dich", type="positive")
+            say(f"{claims_lib.count_proposals(written)} warten auf dich"
+                + tail, type="positive")
             await refresh()
 
         async def answer_claims(claim_ids, state, spoken):
             changed = await claims_service.answer(claim_ids, state)
-            say(f"{changed} {spoken}", type="positive")
+            if changed:
+                say(f"{changed} {spoken}", type="positive")
+            else:
+                # Green and "0 bestätigt" is a success message for nothing
+                # happening — which is what a second press on a row somebody
+                # else already answered looks like.
+                say("Schon beantwortet — nichts geändert")
             await refresh()
 
         def draw_claim_row(claim: dict, *, waiting: bool) -> None:
@@ -751,17 +782,15 @@ async def unterlagen_page():
             profile that nothing confirmed stands for is a part of himself
             that would silently drop out on the day the boundary moves.
             """
-            total, covered = view["sections"], view["covered"]
-            if not total:
+            if not view["sections"]:
                 return
-            ui.label(f"{covered} von {total} Abschnitten deiner profile.md "
-                     "sind im Register vertreten.").classes("jd-card-sub")
+            ui.label(claims_lib.describe_coverage(view)).classes("jd-card-sub")
             if view["missing"]:
                 ui.label("Noch nichts bestätigt aus: "
                          + " · ".join(view["missing"])).classes("jd-card-sub")
 
         def draw_claims(register: list[dict], letters: int,
-                        coverage: dict) -> None:
+                        coverage: dict, refused: list[dict]) -> None:
             waiting = [c for c in register if c["state"] == "proposed"]
             settled = [c for c in register if c["state"] == "confirmed"]
             with ui.column().classes("jd-card gap-3"):
@@ -772,7 +801,7 @@ async def unterlagen_page():
 
                 if waiting:
                     ui.label(f"{claims_lib.count_proposals(len(waiting))} aus "
-                             "profile.md — noch zählt keiner davon") \
+                             "profile.md — noch ist keiner davon bestätigt") \
                         .classes("jd-urgent-note")
                     for kind, label, rows in claims_lib.group_by_kind(waiting):
                         with ui.row().classes("items-center gap-2 w-full "
@@ -803,6 +832,41 @@ async def unterlagen_page():
                     ui.label(label).classes("jd-claim-family mt-2")
                     for claim in rows:
                         draw_claim_row(claim, waiting=False)
+
+                if refused:
+                    async def toggle_refused():
+                        showing["refused"] = not showing["refused"]
+                        await refresh()
+
+                    async def restore(claim: dict):
+                        await claims_service.restore(claim["id"])
+                        say("zurückgeholt — er wartet wieder auf dich",
+                            type="positive")
+                        await refresh()
+
+                    # A number under a list has to be a door. A pile that is
+                    # neither in a control nor behind a number is a pile
+                    # nobody can open, and this one holds facts he refused
+                    # with a single click on an icon beside its opposite.
+                    ui.button(
+                        f"{len(refused)} abgelehnt"
+                        + (" ausblenden" if showing["refused"] else " anzeigen"),
+                        on_click=toggle_refused).props("flat dense size=sm") \
+                        .mark("toggle-refused")
+                    if showing["refused"]:
+                        for claim in refused:
+                            with ui.element("div").classes("jd-claim"):
+                                with ui.column().classes("gap-0 min-w-0"):
+                                    ui.label(claims_lib.headline(claim)) \
+                                        .classes("jd-claim-fact")
+                                    ui.label(claim["provenance"]) \
+                                        .classes("jd-claim-source")
+                                ui.label("abgelehnt") \
+                                    .classes("jd-claim-count unknown")
+                                ui.button("Zurückholen",
+                                          on_click=lambda c=claim: restore(c)) \
+                                    .props("flat dense size=sm") \
+                                    .mark("restore-claim")
 
                 with ui.row().classes("gap-2 items-center"):
                     ui.button("Erlaubnis hinzufügen", icon="add",
@@ -1019,7 +1083,7 @@ async def unterlagen_page():
                 draw_mappe(view["mappe"])
                 draw_preview(view["mappe"])
                 draw_claims(view["claims"], view["letters"],
-                            view["coverage"])
+                            view["coverage"], view["refused"])
                 draw_profiles(view)
 
         with header:

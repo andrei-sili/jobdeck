@@ -382,7 +382,7 @@ def test_only_a_waiting_claim_can_be_answered(con):
     stamped = con.execute("SELECT confirmed_at FROM claims WHERE id=?",
                           (claim_id,)).fetchone()[0]
 
-    db.set_claim_state(con, claim_id, "rejected")
+    db.answer_claims(con, [claim_id], "rejected")
     con.commit()
 
     row = con.execute("SELECT * FROM claims WHERE id=?", (claim_id,)).fetchone()
@@ -390,7 +390,7 @@ def test_only_a_waiting_claim_can_be_answered(con):
     assert row["confirmed_at"] == stamped
     for refused in ("superseded", "proposed", "nonsense"):
         with pytest.raises(ValueError):
-            db.set_claim_state(con, claim_id, refused)
+            db.answer_claims(con, [claim_id], refused)
 
 
 def test_answering_a_proposal_records_which_answer_it_was(con):
@@ -398,8 +398,8 @@ def test_answering_a_proposal_records_which_answer_it_was(con):
     drop = db.add_claim(con, {"fact": "C#", "binding": ""})
     con.commit()
 
-    db.set_claim_state(con, keep, "confirmed")
-    db.set_claim_state(con, drop, "rejected")
+    db.answer_claims(con, [keep], "confirmed")
+    db.answer_claims(con, [drop], "rejected")
     con.commit()
 
     rows = {row["id"]: row for row in db.list_claims(con, states=claims.STATES)}
@@ -421,7 +421,7 @@ def test_the_register_shows_the_open_questions_and_hides_the_answered(con):
                                    "state": "confirmed"})
     rejected = db.add_claim(con, {"fact": "C++", "binding": ""})
     con.commit()
-    db.set_claim_state(con, rejected, "rejected")
+    db.answer_claims(con, [rejected], "rejected")
     con.commit()
 
     assert _ids(db.list_claims(con)) == [proposed, confirmed]
@@ -443,22 +443,29 @@ def test_the_screen_signature_sees_a_proposal_being_answered(con):
     con.commit()
     before = db.claims_signature(con)
 
-    db.set_claim_state(con, claim_id, "confirmed")
+    db.answer_claims(con, [claim_id], "confirmed")
     con.commit()
 
     assert db.claims_signature(con) != before
 
 
 def test_the_screen_signature_sees_a_claim_change_family(con):
+    """On a PROPOSAL, deliberately. Correcting a confirmed claim inserts a
+    row, so the count alone would move the signature and the test would pass
+    with the family left out of it entirely. A proposal is edited in place:
+    the family is then the only thing that changed."""
     claim_id = db.add_claim(con, {"fact": "Englisch B2", "binding": "",
-                                  "kind": "skill", "state": "confirmed"})
+                                  "kind": "skill"})
     con.commit()
     before = db.claims_signature(con)
+    rows_before = con.execute("SELECT COUNT(*) FROM claims").fetchone()[0]
 
     db.update_claim(con, claim_id, {"fact": "Englisch B2", "binding": "",
                                     "kind": "language"})
     con.commit()
 
+    assert con.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == (
+        rows_before), "the correction inserted a row; the count moved, not the family"
     assert db.claims_signature(con) != before
 
 
@@ -529,12 +536,24 @@ def test_a_section_is_matched_the_way_the_register_folds_everything_else():
     assert view["covered"] == 1
 
 
-def test_a_hand_typed_fact_stands_for_no_section():
-    """It has no provenance to point with, and an empty string must not
-    silently match the first section."""
-    view = claims.coverage(["Basisdaten", "Zertifikate"], [_row("")])
+def test_a_fact_that_points_nowhere_covers_nothing():
+    """A hand-typed claim has no section to point at, and a provenance that
+    names a section the file no longer has points at nothing either. Neither
+    may quietly stand for the first section, or for any section at all."""
+    view = claims.coverage(["Basisdaten", "Zertifikate"],
+                           [_row(""), _row("Ein alter Abschnitt")])
     assert view["covered"] == 0
     assert view["missing"] == ["Basisdaten", "Zertifikate"]
+
+
+def test_a_bulk_answer_with_nothing_to_answer_writes_nothing(con):
+    """The early return is what keeps an empty family button from building
+    "id IN ()", which sqlite refuses outright."""
+    db.add_claim(con, {"fact": "Django", "binding": ""})
+    con.commit()
+
+    assert db.answer_claims(con, [], "confirmed") == 0
+    assert db.list_claims(con)[0]["state"] == "proposed"
 
 
 def test_an_unreadable_profile_reads_as_empty_not_as_a_crash(data_dir):
@@ -561,9 +580,13 @@ def test_a_hand_typed_claim_says_so_and_an_imported_one_names_its_section():
     # A reading that lost its section still says it was a reading.
     assert claims.provenance(
         {"source": "profile_md", "source_ref": "  "}) == "aus profile.md"
-    # An unknown source is not silently promoted to "he said it".
+    # An unknown source is not silently promoted to "he said it": that
+    # sentence claims HE vouched for the row, and the one thing an unreadable
+    # value must never do is vouch.
     assert claims.provenance(
-        {"source": "", "source_ref": "Zertifikate"}) == "von dir eingetragen"
+        {"source": "", "source_ref": "Zertifikate"}) == "Herkunft unbekannt"
+    assert claims.provenance(
+        {"source": "irgendwas", "source_ref": ""}) == "Herkunft unbekannt"
 
 
 def test_the_grouping_keeps_the_family_order_and_drops_empty_families():
@@ -588,3 +611,29 @@ def test_one_proposal_does_not_read_as_several():
     assert claims.count_proposals(1) == "1 Vorschlag"
     assert claims.count_proposals(2) == "2 Vorschläge"
     assert claims.count_proposals(0) == "0 Vorschläge"
+
+
+def test_only_a_refusal_can_be_taken_back(con):
+    """A superseded row is the RECORD of a correction: putting it back would
+    resurrect wording he replaced, beside the wording that replaced it."""
+    refused = db.add_claim(con, {"fact": "C#", "binding": ""})
+    con.commit()
+    db.answer_claims(con, [refused], "rejected")
+    original = db.add_claim(con, {"fact": "Java", "binding": "Praktikum",
+                                  "state": "confirmed"})
+    con.commit()
+    db.update_claim(con, original, {"fact": "Java & Spring", "binding": ""})
+    confirmed = db.add_claim(con, {"fact": "Go", "binding": "",
+                                   "state": "confirmed"})
+    con.commit()
+
+    assert db.restore_claim(con, refused) == 1
+    assert db.restore_claim(con, original) == 0, "a superseded row came back"
+    assert db.restore_claim(con, confirmed) == 0
+    con.commit()
+
+    rows = {r["id"]: r for r in db.list_claims(con, states=claims.STATES)}
+    assert rows[refused]["state"] == "proposed"
+    assert rows[refused]["confirmed_at"] == "", (
+        "a restored claim kept a confirmation it never had")
+    assert rows[original]["state"] == "superseded"

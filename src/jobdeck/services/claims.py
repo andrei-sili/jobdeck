@@ -81,23 +81,32 @@ def _import() -> dict:
         return {"ok": False, "error": str(exc), "written": 0}
     _record_usage(usage)
 
-    written, skipped = 0, 0
+    written, waiting, answered = 0, 0, 0
     with db.db() as con:
         # Read inside the writing connection: the reading took seconds, and he
         # may have typed one of these in by hand while it ran.
-        known = {_key(row["fact"], row["binding"])
+        known = {_key(row["fact"], row["binding"]):
+                 claims_lib.normalise_state(row["state"])
                  for row in db.list_claims(con, states=claims_lib.STATES)}
         for claim in proposed:
             key = _key(claim["fact"], claim.get("binding", ""))
             if key in known:
-                skipped += 1
+                # A row he has NOT answered is not "already answered". Those
+                # two counts read identically and mean opposite things: one
+                # says the register is done, the other says the shelf above
+                # is still his to work through.
+                if known[key] == "proposed":
+                    waiting += 1
+                else:
+                    answered += 1
                 continue
-            known.add(key)
+            known[key] = "proposed"
             db.add_claim(con, {**claim, "source": "profile_md",
                                "state": "proposed"})
             written += 1
-    return {"ok": True, "error": "", "written": written, "skipped": skipped,
-            "cost_usd": usage.cost_usd}
+    return {"ok": True, "error": "", "written": written,
+            "waiting": waiting, "answered": answered,
+            "skipped": waiting + answered, "cost_usd": usage.cost_usd}
 
 
 async def import_from_profile() -> dict:
@@ -109,7 +118,8 @@ async def import_from_profile() -> dict:
     the same proposal, and paying twice for it is the whole failure mode.
     """
     if _lock.locked():
-        return {"ok": False, "written": 0, "skipped": 0, "cost_usd": 0.0,
+        return {"ok": False, "written": 0, "skipped": 0, "waiting": 0,
+                "answered": 0, "cost_usd": 0.0,
                 "error": "profile.md wird bereits gelesen"}
     async with _lock:
         return await asyncio.to_thread(_import)
@@ -123,3 +133,13 @@ def _answer(claim_ids: list[int], state: str) -> int:
 async def answer(claim_ids: list[int], state: str) -> int:
     """Confirm or refuse waiting proposals. Returns how many changed."""
     return await asyncio.to_thread(_answer, list(claim_ids), state)
+
+
+def _restore(claim_id: int) -> int:
+    with db.db() as con:
+        return db.restore_claim(con, claim_id)
+
+
+async def restore(claim_id: int) -> int:
+    """Put a refused claim back among the questions. Returns rows changed."""
+    return await asyncio.to_thread(_restore, claim_id)

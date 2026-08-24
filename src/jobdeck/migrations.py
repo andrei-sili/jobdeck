@@ -591,7 +591,12 @@ def _ensure_claim_fact_columns(con: sqlite3.Connection) -> None:
     existing = [row[1] for row in con.execute("PRAGMA table_info(claims)")]
     additions = {
         "kind": "TEXT NOT NULL DEFAULT 'skill'",
-        "state": "TEXT NOT NULL DEFAULT 'confirmed'",
+        # `proposed`, not `confirmed`: this DEFAULT outlives the migration
+        # and answers every future INSERT that omits the column, so it has to
+        # be the same fail-closed answer the repository gives. The rows that
+        # already existed are confirmed by the one-time UPDATE below, which
+        # is what the upgrade is actually for.
+        "state": "TEXT NOT NULL DEFAULT 'proposed'",
         "source": "TEXT NOT NULL DEFAULT 'user'",
         "source_ref": "TEXT NOT NULL DEFAULT ''",
         "supersedes_id": "INTEGER",
@@ -600,6 +605,10 @@ def _ensure_claim_fact_columns(con: sqlite3.Connection) -> None:
     for column, declaration in additions.items():
         if column not in existing:
             con.execute(f"ALTER TABLE claims ADD COLUMN {column} {declaration}")
+            if column == "state":
+                # Before v15 the only way into this table was the user typing
+                # a competence, so every row already here is his word.
+                con.execute("UPDATE claims SET state='confirmed'")
             if column == "confirmed_at":
                 con.execute(
                     "UPDATE claims SET confirmed_at=created_at "

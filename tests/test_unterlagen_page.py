@@ -319,7 +319,8 @@ async def test_a_proposal_does_not_stand_for_a_section(user: User, con,
 
     await user.open("/unterlagen")
 
-    await user.should_see("0 von 1 Abschnitten")
+    # Inflected: one section is "Abschnitt", and zero of them "sind".
+    await user.should_see("0 von 1 Abschnitt ")
     await user.should_see("Noch nichts bestätigt aus: Zertifikate")
 
 
@@ -598,7 +599,7 @@ async def test_a_reading_lands_as_proposals_that_count_for_nothing(
         await asyncio.sleep(0.4)
 
         await user.should_see("2 Vorschläge")
-        await user.should_see("noch zählt keiner davon")
+        await user.should_see("noch ist keiner davon bestätigt")
         # The proposals sit under a heading that does not contradict them.
         await user.should_not_see("Jede Zeile ist eine")
         # Where each came from, on the row itself — the question the register
@@ -1128,3 +1129,82 @@ async def test_a_waiting_proposal_carries_the_count_it_really_has(
 
     await user.should_see("in 1 Brief")
     await user.should_not_see("noch kein Wort davon")
+
+
+async def test_a_hand_written_entry_can_choose_and_change_its_family(
+        user: User, con, data_dir):
+    """Without a family control every hand-typed fact was filed as a
+    competence: "Englisch, verhandlungssicher" stood under "Technische
+    Kenntnisse", and seven of the eight families the register knows were
+    unreachable except through the AI reading — which could not be corrected
+    either, because the same dialog is the only edit path."""
+    from nicegui import ui as nicegui_ui
+    _posting(con)
+
+    await user.open("/unterlagen")
+    user.find("Erlaubnis hinzufügen").click()
+    await asyncio.sleep(0.2)
+
+    with user.client:
+        family = next(e for e in user.client.elements.values()
+                      if isinstance(e, nicegui_ui.select))
+        inputs = [e for e in user.client.elements.values()
+                  if isinstance(e, nicegui_ui.input)]
+    family.set_value("language")
+    inputs[0].set_value("Englisch, verhandlungssicher")
+    inputs[2].set_value("Englisch")
+    await asyncio.sleep(0.1)
+    user.find("Speichern").click()
+    await asyncio.sleep(0.4)
+
+    row = db.list_claims(con)[0]
+    assert row["kind"] == "language", "the family he chose was not stored"
+    assert row["state"] == "confirmed"
+    # The heading's capitals are CSS; the label itself is the German word.
+    await user.should_see("Sprachen")
+
+
+async def test_a_refused_claim_has_a_door_and_a_way_back(user: User, con,
+                                                         data_dir):
+    """Refusing is one click on an icon beside its identical opposite, and a
+    refused row leaves every view AND stops a later reading proposing it
+    again. Without a way back the cost of a mis-click is the fact itself,
+    discoverable only by paying for a second reading that reports nothing
+    new."""
+    _posting(con)
+    claim_id = db.add_claim(con, {"fact": "FastAPI, PostgreSQL", "terms": "FastAPI",
+                                  "binding": "IHK-Projekt",
+                                  "source": "profile_md",
+                                  "source_ref": "Technische Kenntnisse"})
+    con.commit()
+
+    await user.open("/unterlagen")
+    user.find(marker="reject-claim").click()
+    await asyncio.sleep(0.4)
+    await user.should_not_see("FastAPI, PostgreSQL")
+
+    # A number under a list has to be a door.
+    await user.should_see("1 abgelehnt")
+    user.find(marker="toggle-refused").click()
+    await asyncio.sleep(0.3)
+    await user.should_see("FastAPI, PostgreSQL")
+
+    user.find(marker="restore-claim").click()
+    await asyncio.sleep(0.4)
+
+    row = db.list_claims(con)[0]
+    assert row["id"] == claim_id and row["state"] == "proposed"
+    assert _marked(user, "confirm-claim"), "the restored row cannot be answered"
+
+
+async def test_the_refused_door_is_absent_when_nothing_was_refused(
+        user: User, con, data_dir):
+    _posting(con)
+    db.add_claim(con, {"fact": "Django", "binding": "Praktikum",
+                       "state": "confirmed"})
+    con.commit()
+
+    await user.open("/unterlagen")
+
+    assert _marked(user, "toggle-refused") == []
+    await user.should_not_see("abgelehnt")

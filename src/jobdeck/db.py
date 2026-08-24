@@ -532,34 +532,18 @@ def update_claim(
     })
 
 
-def set_claim_state(
-    con: sqlite3.Connection, claim_id: int, state: str
-) -> None:
-    """Answer a proposal. `confirmed` stamps the day he said so.
-
-    Only a claim awaiting an answer can be answered: re-confirming a
-    confirmed row would move its date without him touching it, and
-    `superseded` is written by a correction rather than by a button.
-    """
-    state = claims_lib.normalise_state(state)
-    if state not in ("confirmed", "rejected"):
-        raise ValueError(f"a claim cannot be set to {state!r}")
-    stamp = _now()
-    con.execute(
-        "UPDATE claims SET state=?, confirmed_at=?, updated_at=? "
-        "WHERE id=? AND state='proposed'",
-        (state, stamp if state == "confirmed" else "", stamp, claim_id),
-    )
-
-
 def answer_claims(
     con: sqlite3.Connection, claim_ids: list[int], state: str
 ) -> int:
-    """Answer several waiting proposals at once. Returns how many changed.
+    """Answer waiting proposals. Returns how many changed.
 
     One statement rather than a loop of them: confirming a family is one
     gesture, and a partial result would leave him looking at a heading whose
     count no longer matches what is under it.
+
+    Only a claim awaiting an answer can be answered: re-confirming a
+    confirmed row would move its date without him touching it, and
+    `superseded` is written by a correction rather than by a button.
     """
     state = claims_lib.normalise_state(state)
     if state not in ("confirmed", "rejected"):
@@ -573,6 +557,25 @@ def answer_claims(
         f"UPDATE claims SET state=?, confirmed_at=?, updated_at=? "
         f"WHERE state='proposed' AND id IN ({placeholders})",
         (state, stamp if state == "confirmed" else "", stamp, *ids),
+    )
+    return cur.rowcount
+
+
+def restore_claim(con: sqlite3.Connection, claim_id: int) -> int:
+    """Put a refused claim back among the questions. Returns rows changed.
+
+    Refusing is one click on an icon beside an identical one, and the refused
+    row leaves every view AND stops a later reading proposing it again — so
+    without this the cost of a mis-click is the fact itself, discoverable
+    only by paying for a second reading that then reports nothing new.
+
+    Only a refusal is restorable. A superseded row is the record of a
+    correction and putting it back would resurrect wording he replaced.
+    """
+    cur = con.execute(
+        "UPDATE claims SET state='proposed', confirmed_at='', updated_at=? "
+        "WHERE id=? AND state='rejected'",
+        (_now(), claim_id),
     )
     return cur.rowcount
 

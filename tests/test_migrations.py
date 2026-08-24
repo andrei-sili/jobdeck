@@ -1247,11 +1247,13 @@ def test_v15_backfills_the_confirmation_date_once_and_never_again(data_dir):
     con.commit()
     migrations.migrate(con)
 
-    con.execute("UPDATE claims SET confirmed_at='2026-08-24 12:00:00'")
+    # Emptied deliberately: with `confirmed_at` set, the UPDATE's own WHERE
+    # would protect the row and the test could not tell "inside the guard"
+    # from "outside it". Empty is the one value the backfill WOULD rewrite.
+    con.execute("UPDATE claims SET confirmed_at=''")
     con.commit()
     migrations.migrate(con)
 
-    assert con.execute("SELECT confirmed_at FROM claims").fetchone()[0] == (
-        "2026-08-24 12:00:00"
-    ), "a re-run of the migration reset his confirmation"
+    assert con.execute("SELECT confirmed_at FROM claims").fetchone()[0] == "", (
+        "the backfill ran again on a later start")
     con.close()

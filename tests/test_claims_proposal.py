@@ -99,6 +99,22 @@ def test_a_runaway_provenance_string_cannot_grow_the_register(monkeypatch):
     assert len(claims[0]["source_ref"]) == 120
 
 
+def test_one_press_can_never_write_more_than_the_bound(monkeypatch):
+    """The schema's maxItems is the model's constraint; this is ours. The
+    diff more than doubled the bound (24 to 60), and nothing else in the
+    Python limits how many rows one press puts in his register."""
+    flood = [{"kind": "skill", "fact": f"Fach {n}", "binding": "",
+              "terms": f"T{n}", "source_ref": "Technische Kenntnisse"}
+             for n in range(ai_claims.MAX_CLAIMS + 25)]
+    monkeypatch.setattr(llm, "complete",
+                        lambda **kw: _result({"claims": flood}))
+
+    claims, _ = ai_claims.extract_claims("profil")
+
+    assert len(claims) == ai_claims.MAX_CLAIMS
+    assert claims[0]["fact"] == "Fach 0"
+
+
 def test_an_entry_without_a_fact_is_dropped(monkeypatch):
     """An empty permission permits and forbids nothing, and its counter has
     no question to answer."""
@@ -278,7 +294,7 @@ async def test_a_claim_he_already_refused_is_not_offered_again(
     reading hands him back the same rows he has already said no to, and the
     shelf of proposals never empties."""
     refused = db.add_claim(con, {"fact": "C#", "binding": "Eigenprojekt"})
-    db.set_claim_state(con, refused, "rejected")
+    db.answer_claims(con, [refused], "rejected")
     con.commit()
     monkeypatch.setattr(llm, "complete", lambda **kw: _result({"claims": [
         {"kind": "skill", "fact": "C#", "binding": "Eigenprojekt",
@@ -372,3 +388,36 @@ async def test_a_confirmed_entry_is_immediately_countable(con, data_dir):
     counted = {r["fact"]: claims_lib.count_uses(r["terms"], letters)
                for r in db.list_claims(con, states=("confirmed",))}
     assert counted == {"FastAPI": 1, "Java": 0}
+
+
+async def test_the_reading_tells_a_waiting_row_from_an_answered_one(
+        con, data_dir, ai_on, profile_file, monkeypatch):
+    """Two counts that read identically and mean opposite things: one says
+    the register is done, the other says the shelf above it is still his to
+    work through. Reporting a waiting row as "already answered" is the
+    sentence that would stop him ever finishing the review."""
+    waiting = db.add_claim(con, {"fact": "Django", "binding": "Praktikum"})
+    answered = db.add_claim(con, {"fact": "FastAPI", "binding": "IHK",
+                                  "state": "confirmed"})
+    refused = db.add_claim(con, {"fact": "C#", "binding": ""})
+    con.commit()
+    db.answer_claims(con, [refused], "rejected")
+    con.commit()
+    assert waiting and answered
+
+    monkeypatch.setattr(llm, "complete", lambda **kw: _result({"claims": [
+        {"kind": "skill", "fact": "Django", "binding": "Praktikum",
+         "terms": "Django", "source_ref": "Technische Kenntnisse"},
+        {"kind": "skill", "fact": "FastAPI", "binding": "IHK",
+         "terms": "FastAPI", "source_ref": "Technische Kenntnisse"},
+        {"kind": "skill", "fact": "C#", "binding": "", "terms": "C#",
+         "source_ref": "Technische Kenntnisse"},
+        {"kind": "skill", "fact": "Rust", "binding": "", "terms": "Rust",
+         "source_ref": "Technische Kenntnisse"},
+    ]}))
+    result = await claims_service.import_from_profile()
+
+    assert result["written"] == 1
+    assert result["waiting"] == 1, "a row he has not answered was called answered"
+    assert result["answered"] == 2
+    assert result["skipped"] == 3
