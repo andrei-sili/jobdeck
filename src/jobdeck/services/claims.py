@@ -37,8 +37,14 @@ def _key(fact: str, binding: str) -> tuple[str, str]:
 
 
 def _existing_keys() -> set[tuple[str, str]]:
+    """Every answer already given, not only the ones on screen.
+
+    A rejected claim is an answer: offering it back at the next reading is
+    exactly what keeping the rejected row instead of deleting it prevents.
+    """
     with db.db() as con:
-        return {_key(row["fact"], row["binding"]) for row in db.list_claims(con)}
+        return {_key(row["fact"], row["binding"])
+                for row in db.list_claims(con, states=claims_lib.STATES)}
 
 
 def _record_usage(usage: llm.LLMResult) -> None:
@@ -111,7 +117,7 @@ async def propose_from_profile() -> dict:
 def _store(chosen: list[dict]) -> int:
     with db.db() as con:
         known = {_key(row["fact"], row["binding"])
-                 for row in db.list_claims(con)}
+                 for row in db.list_claims(con, states=claims_lib.STATES)}
         written = 0
         for claim in chosen:
             # Re-checked against the register as it is NOW: the proposal was
@@ -121,7 +127,10 @@ def _store(chosen: list[dict]) -> int:
             if key in known:
                 continue
             known.add(key)
-            db.add_claim(con, claim)
+            # Ticking a box in the proposal dialog IS his confirmation; the
+            # proposals that reach the register unanswered come from the
+            # import path, which says so itself.
+            db.add_claim(con, {**claim, "state": "confirmed"})
             written += 1
     return written
 

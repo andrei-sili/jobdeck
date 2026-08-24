@@ -154,7 +154,9 @@ def _adopt_folder(path: str) -> dict:
 def _save_claim(claim_id, values):
     with db.db() as con:
         if claim_id is None:
-            db.add_claim(con, values)
+            # Typed into the register's own form, so it is his word and needs
+            # no second confirmation. Every other way in leaves a proposal.
+            db.add_claim(con, {**values, "state": "confirmed"})
         else:
             db.update_claim(con, claim_id, values)
 
