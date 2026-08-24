@@ -477,3 +477,49 @@ def test_an_authorized_posting_leaves_the_held_pile_of_decisions(con):
 
     assert cleared["id"] not in found
     assert found[other["id"]].verdict == identity.COOLING_OFF
+
+
+def test_the_window_is_counted_from_the_last_contact_in_the_mailbox(con):
+    """A receipt that arrived long after the application moves the window.
+
+    Measured on a real corpus: a ledger row read as sent in June carried a
+    JOIN receipt from August, so the company was offered again thirteen days
+    after it had last been in touch."""
+    import datetime
+
+    bew = db.add_bewerbung(con, {"gesendet_am": "2026-06-12", "firma": "Beispiel GmbH",
+                                 "kanal": "Online-Portal", "status": "Absage"})
+    recent = (datetime.date.today() - datetime.timedelta(days=5)).isoformat()
+    db.add_email_log(con, {
+        "direction": "inbound", "from_addr": "no-reply@ats.example",
+        "subject": "Eingang deiner Bewerbung", "bewerbung_id": bew,
+        "classification": "eingang", "internal_date": f"{recent}T11:33:12"})
+    con.commit()
+    job = _job(con, title="Ganz andere Stelle")
+
+    decision = attempts.decide_for_job(con, job)
+
+    assert decision.verdict == identity.COOLING_OFF
+    assert decision.sent_on == "2026-06-12", "the ledger date stays the evidence"
+    assert decision.last_contact.startswith(recent)
+    # …and the list filter agrees, or the screen and the gate part company
+    held = {r[0] for r in con.execute(
+        f"SELECT id FROM jobs WHERE {db.APPLIED_FIRM_SQL}",
+        db.applied_firm_params(con))}
+    assert job["id"] in held
+
+
+def test_without_a_receipt_the_filter_still_counts_from_the_send_date(con):
+    import datetime
+
+    old = (datetime.date.today() - datetime.timedelta(days=90)).isoformat()
+    db.add_bewerbung(con, {"gesendet_am": old, "firma": "Beispiel GmbH",
+                           "kanal": "Online-Portal", "status": "Absage"})
+    con.commit()
+    job = _job(con, title="Ganz andere Stelle")
+
+    assert attempts.decide_for_job(con, job).verdict == identity.ALLOW
+    held = {r[0] for r in con.execute(
+        f"SELECT id FROM jobs WHERE {db.APPLIED_FIRM_SQL}",
+        db.applied_firm_params(con))}
+    assert job["id"] not in held

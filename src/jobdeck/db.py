@@ -589,6 +589,16 @@ _DRAFT_PDF_SQL = (
 )
 
 
+# When an employer was last in touch: a receipt they sent, or the day the
+# application went out when there was none. One definition, because the
+# silence rule counts from it too and two readings of "last contact" is how a
+# number on a screen and the rule beneath it drift apart.
+LAST_CONTACT_SQL = """COALESCE(
+    (SELECT MAX(e.internal_date) FROM email_log e
+      WHERE e.bewerbung_id = b.id AND e.direction = 'inbound'
+        AND e.classification = 'eingang'),
+    b.gesendet_am)"""
+
 # A posting at a company that is still inside its cooling-off window. Such a
 # posting cannot become an application yet, so it leaves the working list on
 # the same terms as a score-0 mismatch or an offline ad — counted beneath the
@@ -610,6 +620,11 @@ _DRAFT_PDF_SQL = (
 # real one when the window is switched off, which makes the whole arm false
 # rather than needing a second shape of the query.
 #
+# The date compared is the LAST CONTACT, not the day the application was
+# sent. A ledger row can be months old while the conversation is days old —
+# one real row read as sent in June had a receipt from August — and counting
+# from the send date then offers a company that answered last week.
+#
 # An application whose date is missing or unreadable sorts to that same far
 # future and therefore keeps holding: it cannot prove its window has passed,
 # and assuming it has would offer a company that may have been written to
@@ -621,11 +636,11 @@ _DRAFT_PDF_SQL = (
 # measured at 330 ms over a real corpus, and the inbox pays the filter three
 # times per page load. Uncorrelated, each side is folded once and matched
 # through an ephemeral index.
-APPLIED_FIRM_SQL = """(
+APPLIED_FIRM_SQL = f"""(
     jd_norm(jobs.company) <> '' AND jd_norm(jobs.company) IN (
         SELECT jd_norm(b.firma) FROM bewerbungen b
          WHERE jd_norm(b.firma) <> ''
-           AND COALESCE(NULLIF(SUBSTR(b.gesendet_am, 1, 10), ''),
+           AND COALESCE(NULLIF(SUBSTR({LAST_CONTACT_SQL}, 1, 10), ''),
                         '9999-12-31') > ?))"""
 
 # Beyond any date a posting or an application can carry, so "unknown" and
@@ -2247,12 +2262,6 @@ CLOCK_RESTARTING_CLASSIFICATIONS = ("eingang",)
 # drift: they already had, and on the real register thirteen of fifty-seven
 # open rows printed a number the rule did not use — one of them 69 days beside
 # a threshold of 60, and still open, with nothing on the page explaining why.
-LAST_CONTACT_SQL = """COALESCE(
-    (SELECT MAX(e.internal_date) FROM email_log e
-      WHERE e.bewerbung_id = b.id AND e.direction = 'inbound'
-        AND e.classification = 'eingang'),
-    b.gesendet_am)"""
-
 _SILENT_APPLICATIONS_SQL = """
 SELECT b.id, b.firma, b.status, b.gesendet_am, b.kanal,
        {last_contact} AS last_contact

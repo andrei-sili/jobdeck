@@ -26,7 +26,7 @@ from __future__ import annotations
 import datetime
 import sqlite3
 
-from jobdeck import identity, settings
+from jobdeck import db, identity, settings
 from jobdeck.dedupe import norm
 
 # States a row can hold. `released` is kept rather than deleted: "he started
@@ -45,11 +45,16 @@ DEFAULT_COOLDOWN_DAYS = identity.DEFAULT_COOLDOWN_DAYS
 # the attempt table only supplies the position it never stored. Read this way
 # round, dropping the new table degrades the gate to today's behaviour rather
 # than opening it.
+# `last_contact` comes from `db.LAST_CONTACT_SQL`, the one definition the
+# silence rule already counts from. Two definitions of "when was this employer
+# last in touch" is how the number on a screen and the rule beneath it drift
+# apart, and this project has paid for that twice.
 _APPLICATIONS_SQL = """
 SELECT b.id                            AS id,
        COALESCE(b.firma, '')           AS company,
        COALESCE(b.email, '')           AS email,
        COALESCE(b.gesendet_am, '')     AS sent_on,
+       {last_contact}                  AS last_contact,
        COALESCE((SELECT a.position FROM application_attempts a
                   WHERE a.bewerbung_id = b.id AND a.position <> ''
                   ORDER BY a.id LIMIT 1), '') AS position
@@ -90,8 +95,11 @@ def applications(con: sqlite3.Connection) -> list[identity.Application]:
         identity.Application(
             id=row["id"], company=row["company"], email=row["email"],
             position=row["position"], sent_on=row["sent_on"],
+            last_contact=str(row["last_contact"] or ""),
         )
-        for row in con.execute(_APPLICATIONS_SQL)
+        for row in con.execute(
+            _APPLICATIONS_SQL.format(last_contact=db.LAST_CONTACT_SQL)
+        )
     ]
 
 
@@ -165,12 +173,23 @@ def _posting(job: sqlite3.Row | dict) -> identity.Posting:
         return str((job[name] if name in keys else "") or "")
 
     job_id = job["id"] if "id" in keys else None
-    if job_id is None:
-        raise ValueError("a posting without an id cannot hold an attempt")
     return identity.Posting(
         company=field("company"), title=field("title"),
-        contact_email=field("contact_email"), job_id=int(job_id),
+        contact_email=field("contact_email"),
+        job_id=None if job_id is None else int(job_id),
     )
+
+
+def _key_of(posting: identity.Posting) -> str:
+    """The key a posting's attempt is filed under, or a refusal to invent one.
+
+    Discovery asks for a DECISION about a posting that has no row yet, which is
+    legitimate. Claiming one without a row is not: the key is what makes "one
+    attempt per posting" enforceable, and a made-up key enforces nothing.
+    """
+    if posting.job_id is None:
+        raise ValueError("a posting without an id cannot hold an attempt")
+    return key_for_job(posting.job_id)
 
 
 def decide_for_job(
@@ -191,6 +210,33 @@ def decide_for_job(
         ),
     )
     return _lifted(decision, posting.job_id in authorizations(con))
+
+
+def decide_for_posting(
+    con: sqlite3.Connection,
+    *,
+    company: str,
+    title: str = "",
+    contact_email: str = "",
+    window_days: int | None = None,
+) -> identity.Decision:
+    """What the policy says about a posting that is not stored yet.
+
+    Discovery needs this: a posting arriving from a board has no row, and the
+    decision determines whether it is filed away permanently or merely held
+    back. Asking the same function the gates ask is what keeps a posting from
+    being stamped `duplicate` for ever by a rule the rest of the app no longer
+    applies.
+    """
+    return identity.decide(
+        identity.Posting(company=company, title=title,
+                         contact_email=contact_email),
+        applications(con),
+        live_reservations(con),
+        window_days=(
+            cooldown_days(con) if window_days is None else window_days
+        ),
+    )
 
 
 def reserve(
@@ -220,7 +266,7 @@ def reserve(
             return False, decision
 
     posting = _posting(job)
-    key = key_for_job(posting.job_id)
+    key = _key_of(posting)
     existing = con.execute(
         "SELECT id, state, override_confirmed_at, override_evidence "
         "  FROM application_attempts WHERE idempotency_key=?",
@@ -387,7 +433,7 @@ def authorize(
     if decision.verdict != identity.COOLING_OFF:
         return False, decision
     posting = _posting(job)
-    key = key_for_job(posting.job_id)
+    key = _key_of(posting)
     existing = con.execute(
         "SELECT id FROM application_attempts WHERE idempotency_key=?", (key,)
     ).fetchone()

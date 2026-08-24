@@ -71,6 +71,16 @@ class Application:
     email: str = ""
     position: str = ""
     sent_on: str = ""
+    # When the employer was last in touch: a receipt they sent, or the day the
+    # application went out when there was none. The window is counted from
+    # HERE, not from `sent_on` — a ledger row can be months old while the
+    # conversation is days old, and then counting from the send date offers a
+    # company that answered last week.
+    last_contact: str = ""
+
+    @property
+    def anchor(self) -> str:
+        return str(self.last_contact or self.sent_on or "")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -106,6 +116,10 @@ class Decision:
     application_id: int | None = None
     position: str = ""
     sent_on: str = ""
+    # The date the window was actually counted from. Carried separately from
+    # `sent_on` so a screen can say "last contact on X" instead of claiming an
+    # application was made on a day the ledger does not hold.
+    last_contact: str = ""
     reopens_on: str = ""
     reservation_key: str = ""
     corroborating_email: bool = False
@@ -156,15 +170,16 @@ def holds_company(
     filter and the gate to the same statement instead of to two that merely
     resemble each other.
 
-    The most recent application decides: an older one at the same company has
-    already been superseded by it, and the window is about how long ago the
-    company was last written to.
+    The most recent contact decides: an older application at the same company
+    has already been superseded, and the window is about how long ago that
+    employer was last in touch — which is not always the day something was
+    sent to them.
     """
     now = today or datetime.date.today()
     if window_days <= WINDOW_OFF or not at_company:
         return None
-    newest = max(at_company, key=lambda a: (str(a.sent_on or ""), a.id))
-    opens = reopens_on(newest.sent_on, window_days)
+    newest = max(at_company, key=lambda a: (a.anchor, a.id))
+    opens = reopens_on(newest.anchor, window_days)
     # No usable date means the window cannot be proven to have passed. Held,
     # with an empty `reopens_on` so the screen says so instead of printing a
     # day it invented.
@@ -243,7 +258,8 @@ def decide(
             application_id=holding.id,
             position=holding.position,
             sent_on=holding.sent_on,
-            reopens_on=reopens_on(holding.sent_on, window_days),
+            last_contact=holding.anchor,
+            reopens_on=reopens_on(holding.anchor, window_days),
             corroborating_email=corroborating,
         )
 

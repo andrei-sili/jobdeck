@@ -16,7 +16,7 @@ TODAY = datetime.date(2026, 8, 24)
 
 def app(**kw) -> identity.Application:
     base = {"id": 1, "company": "Beispiel GmbH", "email": "", "position": "",
-            "sent_on": "2026-08-10"}
+            "sent_on": "2026-08-10", "last_contact": ""}
     return identity.Application(**{**base, **kw})
 
 
@@ -242,3 +242,44 @@ def test_reopens_on_is_empty_when_the_window_is_off():
 def test_reopens_on_counts_from_the_day_it_was_sent():
     assert identity.reopens_on("2026-08-10", 60) == "2026-10-09"
     assert identity.reopens_on("2026-08-10T14:30:00", 1) == "2026-08-11"
+
+
+# --------------------------------------------------------------------------
+# The window runs from the last contact, not from the day something was sent
+# --------------------------------------------------------------------------
+def test_a_later_contact_moves_the_window_past_the_send_date():
+    """A ledger row can be months old while the conversation is days old. One
+    real row read as sent in June carried a receipt from August, and counting
+    from the send date offered a company that had answered thirteen days
+    earlier."""
+    got = decide(posting(title="X"),
+                 [app(position="Y", sent_on="2026-06-12",
+                      last_contact="2026-08-11T11:33:12")])
+    assert got.verdict == identity.COOLING_OFF
+    assert got.sent_on == "2026-06-12", "the ledger date is still the evidence"
+    assert got.last_contact == "2026-08-11T11:33:12"
+    assert got.reopens_on == "2026-10-10", "sixty days from the CONTACT"
+
+
+def test_without_a_contact_the_send_date_is_the_anchor():
+    got = decide(posting(title="X"), [app(position="Y", sent_on="2026-08-10")])
+    assert got.reopens_on == "2026-10-09"
+    assert got.last_contact == "2026-08-10"
+
+
+def test_the_newest_contact_decides_not_the_newest_send():
+    """Two applications at one company: the one written to most recently holds
+    it, even when the other went out later."""
+    got = decide(posting(title="X"),
+                 [app(id=3, position="A", sent_on="2026-08-20",
+                      last_contact="2026-08-20"),
+                  app(id=4, position="B", sent_on="2026-01-01",
+                      last_contact="2026-08-23")])
+    assert got.application_id == 4
+    assert got.reopens_on == "2026-10-22"
+
+
+def test_a_contact_that_cannot_be_read_falls_back_to_the_send_date():
+    got = decide(posting(title="X"),
+                 [app(position="Y", sent_on="2026-08-10", last_contact="")])
+    assert got.reopens_on == "2026-10-09"

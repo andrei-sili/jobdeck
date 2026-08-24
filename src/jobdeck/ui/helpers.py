@@ -43,14 +43,28 @@ def hold_line(decision, company: str = "") -> str:
         return (f"⚠ Für {firma} läuft gerade eine Bewerbung — warte, bis sie "
                 f"durch ist.")
     if decision.verdict == identity.COOLING_OFF:
-        when = f" am {dates.iso_to_de(decision.sent_on)}" if decision.sent_on else ""
+        # The window runs from the LAST CONTACT, so that is the date the line
+        # has to name. Printing the send date beside a deadline derived from a
+        # different day gives two numbers that do not add up — a real row read
+        # "beworben am 12. Juni … zurückgestellt bis 10. Oktober", which is
+        # sixty days from neither.
+        sent = str(decision.sent_on or "")[:10]
+        anchor = str(decision.last_contact or "")[:10] or sent
+        if anchor and anchor != sent:
+            head = (f"⚠ Bei {firma} hattest du zuletzt am "
+                    f"{dates.iso_to_de(anchor)} Kontakt")
+        elif anchor:
+            head = (f"⚠ Bei {firma} hast du dich am "
+                    f"{dates.iso_to_de(anchor)} beworben")
+        else:
+            head = f"⚠ Bei {firma} hast du dich schon beworben"
         if decision.reopens_on:
             bis = (f" Diese Firma ist bis zum "
                    f"{dates.iso_to_de(decision.reopens_on)} zurückgestellt.")
         else:
             bis = (" Wann das war, steht nicht im Register — deshalb bleibt "
                    "die Firma zurückgestellt.")
-        return f"⚠ Bei {firma} hast du dich{when} beworben.{bis}"
+        return f"{head}.{bis}"
     return ""
 
 
