@@ -116,7 +116,16 @@ the position and the reservation. Rolling back is ceasing to read it.
 
 ## S2 — Candidate profile and verified facts
 
-**Status:** Next canonical slice.
+**Status:** Delivered in two parts. Part one — the structured, provenance-
+carrying fact store, the importer, and the review surface — is implemented
+alongside `profile.md`. Part two — moving the factual boundary so drafting
+selects only confirmed facts from a named profile version — is not started.
+
+The split exists because the acceptance criteria are not simultaneously
+satisfiable on an empty store: on the current corpus the register held no rows,
+so enforcing "only confirmed facts" before anything had been reviewed would
+have stopped drafting outright. Part one therefore runs in parallel and
+publishes the coverage measurement that decides when part two is safe.
 
 **Purpose:** Replace the free-form factual boundary with a structured,
 versioned candidate aggregate.
@@ -130,6 +139,12 @@ explicit compatibility importer for `profile.md`.
 **Acceptance criteria:** Drafting can select only confirmed facts from a named
 profile version; importing `profile.md` changes nothing until the candidate
 reviews it; historical applications retain their original version reference.
+
+Part one satisfies the second criterion: an import writes proposals only, and a
+proposal is invisible to every reader that asks what may be claimed. The first
+and third depend on profile versions and remain open. Schema v15 is additive on
+the existing claims table; families, verification state, provenance, and the
+correction chain are columns on it, and versions are additive again on top.
 
 **Validation:** Negative tests for unverified facts, correction/version tests,
 and deterministic provenance checks.

@@ -238,3 +238,407 @@ def test_a_letter_rewritten_to_the_same_length_still_moves_the_signature(con):
     assert db.claims_signature(con) != before, (
         "a same-length rewrite is invisible — the timestamp term is not "
         "load-bearing")
+
+
+# ---------------------------------------------------------------------------
+# The families and the verification state (schema v15)
+# ---------------------------------------------------------------------------
+def test_an_unreadable_state_is_never_read_as_confirmed():
+    """`confirmed` is the value that lets a fact into a letter.
+
+    Anything the column cannot be read as — an empty string, a typo, a state
+    from a future version rolled back onto this one — has to land on the
+    unverified side. Defaulting the other way would let a fact nobody vouched
+    for be claimed, which is the one thing this column exists to stop.
+    """
+    for raw in ("", None, "bestätigt", "CONFIRMED!", "verified", 7, "  "):
+        assert claims.normalise_state(raw) == "proposed"
+    for state in claims.STATES:
+        assert claims.normalise_state(state) == state
+    assert claims.normalise_state("  Confirmed ") == "confirmed"
+
+
+def test_an_unreadable_family_lands_on_the_strictest_one():
+    """Unknown becomes `skill` — what every row meant before v15, and the
+    family whose rule is tightest. Filing too strictly is one edit away;
+    filing too loosely is the weld the register exists to prevent."""
+    for raw in ("", None, "sprache", "Fähigkeit", 3):
+        assert claims.normalise_kind(raw) == "skill"
+    for kind in claims.KINDS:
+        assert claims.normalise_kind(kind.upper()) == kind
+
+
+def test_every_family_has_a_german_name_and_one_fixed_place():
+    """The screen groups by family, so the order has to be total and stable —
+    two renders that disagree would move a row under the reader."""
+    assert claims.DEFAULT_KIND in claims.KINDS
+    assert all(label.strip() for label in claims.KINDS.values())
+    assert len(set(claims.KINDS.values())) == len(claims.KINDS)
+    places = [claims.kind_order(kind) for kind in claims.KINDS]
+    assert places == sorted(places) == list(range(len(claims.KINDS)))
+    assert claims.kind_order("nonsense") == claims.kind_order("skill")
+    assert claims.kind_label("credential") == "Zertifikate"
+
+
+def test_an_answered_claim_stays_out_of_the_working_register():
+    """`rejected` and `superseded` are answers already given. Showing them in
+    the register would offer back exactly what he already refused or
+    replaced — and both are kept rather than deleted so a second import
+    cannot propose them again."""
+    assert set(claims.VISIBLE_STATES) == {"proposed", "confirmed"}
+    assert set(claims.VISIBLE_STATES) < set(claims.STATES)
+    assert "rejected" not in claims.VISIBLE_STATES
+    assert "superseded" not in claims.VISIBLE_STATES
+
+
+# ---------------------------------------------------------------------------
+# Storage: proposals, confirmation, correction (schema v15)
+# ---------------------------------------------------------------------------
+def _ids(rows):
+    return [row["id"] for row in rows]
+
+
+def test_a_claim_arrives_unverified_unless_the_caller_has_his_word(con):
+    """The dangerous direction is a reading that confirms itself.
+
+    Every path into the register except his own form is something READING
+    something — his profile today, a document tomorrow. If the repository
+    defaulted to `confirmed`, each new one of those would only have to forget
+    a keyword to put a fact nobody vouched for into a letter.
+    """
+    read = db.add_claim(con, {"fact": "FastAPI", "binding": "Abschlussprojekt"})
+    typed = db.add_claim(con, {"fact": "Django", "binding": "Praktikum",
+                               "state": "confirmed"})
+    con.commit()
+
+    rows = {row["id"]: row for row in db.list_claims(con)}
+    assert rows[read]["state"] == "proposed"
+    assert rows[read]["confirmed_at"] == "", (
+        "an unanswered claim carries a confirmation date")
+    assert rows[typed]["state"] == "confirmed"
+    assert rows[typed]["confirmed_at"], "his own entry was not stamped"
+
+
+def test_correcting_a_confirmed_claim_keeps_what_older_letters_could_say(con):
+    """A correction is a new row; the old one is kept as `superseded`.
+
+    Letters already written were allowed to say what the old row said. A
+    register that edited itself in place would make yesterday's letter look
+    like it broke a rule that did not exist when it was written.
+    """
+    original = db.add_claim(con, {
+        "fact": "Java", "binding": "Praktikum", "terms": "Java",
+        "kind": "skill", "state": "confirmed", "source": "profile_md",
+        "source_ref": "Technische Kenntnisse"})
+    con.commit()
+
+    corrected = db.update_claim(con, original, {
+        "fact": "Java & Spring Boot", "binding": "Eigenprojekt",
+        "terms": "Java, Spring Boot"})
+    con.commit()
+
+    assert corrected != original, "the correction overwrote the old row"
+    old = con.execute("SELECT * FROM claims WHERE id=?", (original,)).fetchone()
+    new = con.execute("SELECT * FROM claims WHERE id=?", (corrected,)).fetchone()
+    assert old["state"] == "superseded"
+    assert old["fact"] == "Java" and old["binding"] == "Praktikum"
+    assert new["state"] == "confirmed" and new["supersedes_id"] == original
+    assert new["binding"] == "Eigenprojekt"
+    assert new["sort_order"] == old["sort_order"], (
+        "the correction jumped to the end of the register")
+    # Provenance is carried through UNCHANGED. It answers "where was this
+    # read", not "who typed this wording" — who vouched for it is answered by
+    # `confirmed`. Rewriting it to "user" here would also make the answer
+    # depend on state he cannot see: editing a PROPOSAL keeps its origin, so
+    # a confirmed claim losing it would flip the line under the row for no
+    # observable reason, and drop the section it stood for from coverage.
+    assert new["source"] == "profile_md"
+    assert new["source_ref"] == "Technische Kenntnisse"
+    assert claims.provenance(new) == claims.provenance(old)
+    assert _ids(db.list_claims(con)) == [corrected], (
+        "the replaced row is still in the working register")
+
+
+def test_correcting_a_proposal_edits_it_in_place(con):
+    """A proposal is not history — nobody ever vouched for it. Superseding
+    proposals would bury the corrections that do matter under rows that were
+    never permissions."""
+    claim_id = db.add_claim(con, {"fact": "Rdis", "binding": "JobDeck"})
+    con.commit()
+
+    same = db.update_claim(con, claim_id, {"fact": "Redis",
+                                           "binding": "JobDeck"})
+    con.commit()
+
+    assert same == claim_id
+    rows = db.list_claims(con)
+    assert len(rows) == 1 and rows[0]["fact"] == "Redis"
+    assert rows[0]["state"] == "proposed", "editing a proposal confirmed it"
+    assert con.execute(
+        "SELECT COUNT(*) FROM claims WHERE state='superseded'").fetchone()[0] == 0
+
+
+def test_only_a_waiting_claim_can_be_answered(con):
+    """Re-confirming a confirmed row would move its date without him touching
+    it, and `superseded` is written by a correction, never by a button."""
+    claim_id = db.add_claim(con, {"fact": "Docker", "binding": "JobDeck",
+                                  "state": "confirmed"})
+    con.commit()
+    stamped = con.execute("SELECT confirmed_at FROM claims WHERE id=?",
+                          (claim_id,)).fetchone()[0]
+
+    db.answer_claims(con, [claim_id], "rejected")
+    con.commit()
+
+    row = con.execute("SELECT * FROM claims WHERE id=?", (claim_id,)).fetchone()
+    assert row["state"] == "confirmed", "an answered claim was answered again"
+    assert row["confirmed_at"] == stamped
+    for refused in ("superseded", "proposed", "nonsense"):
+        with pytest.raises(ValueError):
+            db.answer_claims(con, [claim_id], refused)
+
+
+def test_answering_a_proposal_records_which_answer_it_was(con):
+    keep = db.add_claim(con, {"fact": "Kubernetes", "binding": "Eigenprojekt"})
+    drop = db.add_claim(con, {"fact": "C#", "binding": ""})
+    con.commit()
+
+    db.answer_claims(con, [keep], "confirmed")
+    db.answer_claims(con, [drop], "rejected")
+    con.commit()
+
+    rows = {row["id"]: row for row in db.list_claims(con, states=claims.STATES)}
+    assert rows[keep]["state"] == "confirmed" and rows[keep]["confirmed_at"]
+    assert rows[drop]["state"] == "rejected"
+    assert rows[drop]["confirmed_at"] == "", (
+        "a refusal was stamped as a confirmation")
+    assert _ids(db.list_claims(con)) == [keep], (
+        "a refused claim is still offered in the register")
+
+
+def test_the_register_shows_the_open_questions_and_hides_the_answered(con):
+    """`rejected` and `superseded` are answers already given. They are kept
+    rather than deleted so a second reading of the profile cannot offer back
+    what he has already refused — which only works if the caller that asks
+    "is this known" sees them."""
+    proposed = db.add_claim(con, {"fact": "Go", "binding": ""})
+    confirmed = db.add_claim(con, {"fact": "Python", "binding": "",
+                                   "state": "confirmed"})
+    rejected = db.add_claim(con, {"fact": "C++", "binding": ""})
+    con.commit()
+    db.answer_claims(con, [rejected], "rejected")
+    con.commit()
+
+    assert _ids(db.list_claims(con)) == [proposed, confirmed]
+    assert _ids(db.list_claims(con, states=claims.STATES)) == [
+        proposed, confirmed, rejected]
+    assert _ids(db.list_claims(con, states=("rejected",))) == [rejected]
+    assert db.list_claims(con, states=()) == []
+
+
+def test_the_screen_signature_sees_a_proposal_being_answered(con):
+    """The state is the only thing an answer changes.
+
+    A signature blind to it would leave the shelf of waiting proposals on
+    screen after he had emptied it — the failure this app has already had to
+    fix once, when a loader handed the watcher fewer facts than the watcher
+    compared.
+    """
+    claim_id = db.add_claim(con, {"fact": "Terraform", "binding": ""})
+    con.commit()
+    before = db.claims_signature(con)
+
+    db.answer_claims(con, [claim_id], "confirmed")
+    con.commit()
+
+    assert db.claims_signature(con) != before
+
+
+def test_the_screen_signature_sees_a_claim_change_family(con):
+    """On a PROPOSAL, deliberately. Correcting a confirmed claim inserts a
+    row, so the count alone would move the signature and the test would pass
+    with the family left out of it entirely. A proposal is edited in place:
+    the family is then the only thing that changed."""
+    claim_id = db.add_claim(con, {"fact": "Englisch B2", "binding": "",
+                                  "kind": "skill"})
+    con.commit()
+    before = db.claims_signature(con)
+    rows_before = con.execute("SELECT COUNT(*) FROM claims").fetchone()[0]
+
+    db.update_claim(con, claim_id, {"fact": "Englisch B2", "binding": "",
+                                    "kind": "language"})
+    con.commit()
+
+    assert con.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == (
+        rows_before), "the correction inserted a row; the count moved, not the family"
+    assert db.claims_signature(con) != before
+
+
+# ---------------------------------------------------------------------------
+# What the register does not yet hold
+# ---------------------------------------------------------------------------
+PROFILE = """\
+# Profil — Beispiel
+## Basisdaten
+Wohnort, Telefon
+## Technische Kenntnisse
+Python, Django
+### Vertiefung
+Mehr davon
+## Zertifikate
+Ein Zertifikat
+"""
+
+
+def test_the_sections_are_read_in_the_order_he_wrote_them():
+    assert claims.profile_sections(PROFILE) == [
+        "Basisdaten", "Technische Kenntnisse", "Vertiefung", "Zertifikate"]
+
+
+def test_the_files_own_title_is_not_a_section():
+    """A single '#' names the document — his reads "Profil — <sein Name>".
+    Counting it made the measurement list his own name among the things
+    nothing stands for, and made it one that could never be complete."""
+    assert claims.profile_sections("# Profil — Beispiel\n## Basisdaten\n") == [
+        "Basisdaten"]
+
+
+def test_two_sections_with_one_name_collapse():
+    """A provenance string carries the NAME, so two sections sharing one
+    cannot be told apart by it — counting them separately would report a
+    coverage gap nothing could ever close."""
+    assert claims.profile_sections(
+        "## Zertifikate\na\n## zertifikate\nb\n") == ["Zertifikate"]
+
+
+def test_a_file_without_headings_has_nothing_to_measure():
+    assert claims.profile_sections("nur Fließtext\nund noch eine Zeile") == []
+    assert claims.profile_sections("") == []
+
+
+def _row(source_ref, state="confirmed"):
+    return {"source_ref": source_ref, "state": state}
+
+
+def test_only_a_confirmed_fact_stands_for_a_section():
+    """A proposal standing for a section would make the register look ready
+    the moment it was read — the one moment nobody has checked it."""
+    sections = claims.profile_sections(PROFILE)
+    view = claims.coverage(sections, [
+        _row("Technische Kenntnisse"),
+        _row("Zertifikate", state="proposed"),
+        _row("Basisdaten", state="rejected"),
+    ])
+    assert view["sections"] == 4
+    assert view["covered"] == 1
+    assert view["missing"] == ["Basisdaten", "Vertiefung", "Zertifikate"]
+
+
+def test_a_section_is_matched_the_way_the_register_folds_everything_else():
+    view = claims.coverage(["Technische Kenntnisse"],
+                           [_row("  technische   kenntnisse ")])
+    assert view["missing"] == []
+    assert view["covered"] == 1
+
+
+def test_a_fact_that_points_nowhere_covers_nothing():
+    """A hand-typed claim has no section to point at, and a provenance that
+    names a section the file no longer has points at nothing either. Neither
+    may quietly stand for the first section, or for any section at all."""
+    view = claims.coverage(["Basisdaten", "Zertifikate"],
+                           [_row(""), _row("Ein alter Abschnitt")])
+    assert view["covered"] == 0
+    assert view["missing"] == ["Basisdaten", "Zertifikate"]
+
+
+def test_a_bulk_answer_with_nothing_to_answer_writes_nothing(con):
+    """The early return is what keeps an empty family button from building
+    "id IN ()", which sqlite refuses outright."""
+    db.add_claim(con, {"fact": "Django", "binding": ""})
+    con.commit()
+
+    assert db.answer_claims(con, [], "confirmed") == 0
+    assert db.list_claims(con)[0]["state"] == "proposed"
+
+
+def test_an_unreadable_profile_reads_as_empty_not_as_a_crash(data_dir):
+    """The Unterlagen screen measures this file on every render. A directory
+    left in its place — or a mode that stops it being read — would blank a
+    whole page rather than be reported, which is the shape that once took
+    every screen down at once."""
+    from jobdeck import config
+    from jobdeck.ai import profile as ai_profile
+
+    config.PROFILE_PATH.mkdir(parents=True, exist_ok=True)
+    assert ai_profile.load_profile() == ""
+    assert claims.profile_sections(ai_profile.load_profile()) == []
+
+
+def test_a_hand_typed_claim_says_so_and_an_imported_one_names_its_section():
+    """"Who said so" is the question the register has to answer about
+    anything it holds, and the two answers must not read alike."""
+    assert claims.provenance(
+        {"source": "user", "source_ref": ""}) == "von dir eingetragen"
+    assert claims.provenance(
+        {"source": "profile_md", "source_ref": "Zertifikate"}
+    ) == "aus profile.md · Zertifikate"
+    # A reading that lost its section still says it was a reading.
+    assert claims.provenance(
+        {"source": "profile_md", "source_ref": "  "}) == "aus profile.md"
+    # An unknown source is not silently promoted to "he said it": that
+    # sentence claims HE vouched for the row, and the one thing an unreadable
+    # value must never do is vouch.
+    assert claims.provenance(
+        {"source": "", "source_ref": "Zertifikate"}) == "Herkunft unbekannt"
+    assert claims.provenance(
+        {"source": "irgendwas", "source_ref": ""}) == "Herkunft unbekannt"
+
+
+def test_the_grouping_keeps_the_family_order_and_drops_empty_families():
+    rows = [{"kind": "condition", "fact": "a"}, {"kind": "skill", "fact": "b"},
+            {"kind": "condition", "fact": "c"}, {"kind": "nonsense",
+                                                 "fact": "d"}]
+    grouped = claims.group_by_kind(rows)
+
+    assert [kind for kind, _label, _rows in grouped] == ["skill", "condition"]
+    assert [label for _kind, label, _rows in grouped] == [
+        "Technische Kenntnisse", "Rahmenbedingungen"]
+    # Rows keep the register's own order beneath their heading, and the
+    # unreadable family joined the strictest one rather than vanishing.
+    assert [r["fact"] for r in grouped[0][2]] == ["b", "d"]
+    assert [r["fact"] for r in grouped[1][2]] == ["a", "c"]
+    assert claims.group_by_kind([]) == []
+
+
+def test_one_proposal_does_not_read_as_several():
+    """German inflects; a screen that does not is a screen that looks
+    machine-written."""
+    assert claims.count_proposals(1) == "1 Vorschlag"
+    assert claims.count_proposals(2) == "2 Vorschläge"
+    assert claims.count_proposals(0) == "0 Vorschläge"
+
+
+def test_only_a_refusal_can_be_taken_back(con):
+    """A superseded row is the RECORD of a correction: putting it back would
+    resurrect wording he replaced, beside the wording that replaced it."""
+    refused = db.add_claim(con, {"fact": "C#", "binding": ""})
+    con.commit()
+    db.answer_claims(con, [refused], "rejected")
+    original = db.add_claim(con, {"fact": "Java", "binding": "Praktikum",
+                                  "state": "confirmed"})
+    con.commit()
+    db.update_claim(con, original, {"fact": "Java & Spring", "binding": ""})
+    confirmed = db.add_claim(con, {"fact": "Go", "binding": "",
+                                   "state": "confirmed"})
+    con.commit()
+
+    assert db.restore_claim(con, refused) == 1
+    assert db.restore_claim(con, original) == 0, "a superseded row came back"
+    assert db.restore_claim(con, confirmed) == 0
+    con.commit()
+
+    rows = {r["id"]: r for r in db.list_claims(con, states=claims.STATES)}
+    assert rows[refused]["state"] == "proposed"
+    assert rows[refused]["confirmed_at"] == "", (
+        "a restored claim kept a confirmation it never had")
+    assert rows[original]["state"] == "superseded"

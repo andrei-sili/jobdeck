@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from jobdeck import apply_channel, backup, config, dates, freshness, identity, migrations
+from jobdeck import claims as claims_lib
 from jobdeck import settings as app_settings
 from jobdeck.constants import (
     BEANTWORTET_STATUS,
@@ -428,42 +429,161 @@ def mark_profile_polled(
 
 
 # --------------------------------------------------------------------------
-# Claims — what a letter is allowed to claim (schema v9)
+# Claims — what a letter may use about the candidate (schema v9, v15)
 # --------------------------------------------------------------------------
-def list_claims(con: sqlite3.Connection) -> list[sqlite3.Row]:
+def list_claims(
+    con: sqlite3.Connection, states: tuple[str, ...] | None = None
+) -> list[sqlite3.Row]:
     """The register in the order it is read. `id` breaks ties so two claims
-    given the same rank never swap places between two renders."""
+    given the same rank never swap places between two renders.
+
+    Defaults to the two states the register works in. A caller that is
+    deciding whether something is ALREADY KNOWN must pass every state
+    instead: a fact he rejected is known, and offering it back is what
+    keeping the rejected row prevents.
+
+    The family is deliberately not part of the ORDER BY. Its order is a
+    domain fact that lives in the pure module beside the labels, and a second
+    copy of it in SQL is a second place for the two to disagree.
+    """
+    states = tuple(states) if states is not None else claims_lib.VISIBLE_STATES
+    if not states:
+        return []
+    placeholders = ",".join("?" * len(states))
     return con.execute(
-        "SELECT * FROM claims ORDER BY sort_order, id").fetchall()
+        f"SELECT * FROM claims WHERE state IN ({placeholders}) "
+        "ORDER BY sort_order, id", states).fetchall()
 
 
 def add_claim(con: sqlite3.Connection, values: dict) -> int:
-    """Append a permission. A new row sorts after every existing one unless
-    the caller places it, so adding never reorders what is already there."""
+    """Append a claim. A new row sorts after every existing one unless the
+    caller places it, so adding never reorders what is already there.
+
+    An unstated state is `proposed`, not `confirmed`. The caller that has his
+    word — the register's own form — says so; every other way in is a reading
+    of something, and a reading that silently confirmed itself is the failure
+    ADR 0006 exists to prevent.
+    """
     order = values.get("sort_order")
     if order is None:
         order = (con.execute(
             "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM claims"
         ).fetchone()[0])
     stamp = _now()
+    state = claims_lib.normalise_state(values.get("state") or "proposed")
     cur = con.execute(
         """
-        INSERT INTO claims (fact, binding, terms, sort_order, created_at,
-                            updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO claims (fact, binding, terms, sort_order, kind, state,
+                            source, source_ref, supersedes_id, confirmed_at,
+                            created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (values["fact"].strip(), values.get("binding", "").strip(),
-         values.get("terms", "").strip(), int(order), stamp, stamp),
+         values.get("terms", "").strip(), int(order),
+         claims_lib.normalise_kind(values.get("kind")), state,
+         (values.get("source") or "user").strip(),
+         (values.get("source_ref") or "").strip(),
+         values.get("supersedes_id"),
+         stamp if state == "confirmed" else "", stamp, stamp),
     )
     return cur.lastrowid
 
 
-def update_claim(con: sqlite3.Connection, claim_id: int, values: dict) -> None:
-    con.execute(
-        "UPDATE claims SET fact=?, binding=?, terms=?, updated_at=? WHERE id=?",
-        (values["fact"].strip(), values.get("binding", "").strip(),
-         values.get("terms", "").strip(), _now(), claim_id),
+def update_claim(
+    con: sqlite3.Connection, claim_id: int, values: dict
+) -> int | None:
+    """Correct a claim. Returns the id that carries it afterwards.
+
+    A CONFIRMED claim is not edited in place: the correction is a new row and
+    the old one is kept as `superseded`. Letters already written were allowed
+    to say what the old row said, and a register that rewrites itself would
+    make yesterday's letter look like it broke a rule that did not exist yet.
+
+    A PROPOSED claim is edited in place — a proposal is not history, and
+    filling the register with superseded rows nobody ever vouched for would
+    bury the corrections that do matter.
+    """
+    row = con.execute("SELECT * FROM claims WHERE id=?", (claim_id,)).fetchone()
+    if row is None:
+        return None
+    fields = {
+        "fact": values["fact"].strip(),
+        "binding": values.get("binding", "").strip(),
+        "terms": values.get("terms", "").strip(),
+        "kind": claims_lib.normalise_kind(
+            values.get("kind", row["kind"])),
+    }
+    if claims_lib.normalise_state(row["state"]) != "confirmed":
+        con.execute(
+            "UPDATE claims SET fact=?, binding=?, terms=?, kind=?, "
+            "updated_at=? WHERE id=?",
+            (*fields.values(), _now(), claim_id),
+        )
+        return claim_id
+    con.execute("UPDATE claims SET state='superseded', updated_at=? WHERE id=?",
+                (_now(), claim_id))
+    return add_claim(con, {
+        **fields,
+        # Where the fact came from is carried through UNCHANGED. Provenance
+        # answers "where was this read", not "who typed this wording" — the
+        # question of who vouched for it is answered by `confirmed`. Setting
+        # it to `user` here also made the answer depend on state he cannot
+        # see: editing a proposal keeps its origin, so editing a confirmed
+        # claim losing it would flip the line under the row for no reason he
+        # could observe, and drop the section it stood for from the coverage
+        # measurement.
+        "state": "confirmed", "source": row["source"],
+        "source_ref": row["source_ref"],
+        "sort_order": row["sort_order"], "supersedes_id": claim_id,
+    })
+
+
+def answer_claims(
+    con: sqlite3.Connection, claim_ids: list[int], state: str
+) -> int:
+    """Answer waiting proposals. Returns how many changed.
+
+    One statement rather than a loop of them: confirming a family is one
+    gesture, and a partial result would leave him looking at a heading whose
+    count no longer matches what is under it.
+
+    Only a claim awaiting an answer can be answered: re-confirming a
+    confirmed row would move its date without him touching it, and
+    `superseded` is written by a correction rather than by a button.
+    """
+    state = claims_lib.normalise_state(state)
+    if state not in ("confirmed", "rejected"):
+        raise ValueError(f"a claim cannot be set to {state!r}")
+    ids = [int(claim_id) for claim_id in claim_ids]
+    if not ids:
+        return 0
+    stamp = _now()
+    placeholders = ",".join("?" * len(ids))
+    cur = con.execute(
+        f"UPDATE claims SET state=?, confirmed_at=?, updated_at=? "
+        f"WHERE state='proposed' AND id IN ({placeholders})",
+        (state, stamp if state == "confirmed" else "", stamp, *ids),
     )
+    return cur.rowcount
+
+
+def restore_claim(con: sqlite3.Connection, claim_id: int) -> int:
+    """Put a refused claim back among the questions. Returns rows changed.
+
+    Refusing is one click on an icon beside an identical one, and the refused
+    row leaves every view AND stops a later reading proposing it again — so
+    without this the cost of a mis-click is the fact itself, discoverable
+    only by paying for a second reading that then reports nothing new.
+
+    Only a refusal is restorable. A superseded row is the record of a
+    correction and putting it back would resurrect wording he replaced.
+    """
+    cur = con.execute(
+        "UPDATE claims SET state='proposed', confirmed_at='', updated_at=? "
+        "WHERE id=? AND state='rejected'",
+        (_now(), claim_id),
+    )
+    return cur.rowcount
 
 
 def delete_claim(con: sqlite3.Connection, claim_id: int) -> None:
@@ -500,7 +620,12 @@ def claims_signature(con: sqlite3.Connection) -> tuple:
     """
     return tuple(con.execute(
         "SELECT (SELECT COUNT(*) FROM claims), "
-        "(SELECT GROUP_CONCAT(fact || '|' || binding || '|' || terms, '§') "
+        # kind and state ride in the same string as the wording: confirming a
+        # proposal changes nothing else about the row, and a signature that
+        # could not see it would leave the shelf of waiting proposals on
+        # screen after he had emptied it.
+        "(SELECT GROUP_CONCAT(fact || '|' || binding || '|' || terms || '|' "
+        "                     || kind || '|' || state, '§') "
         " FROM (SELECT * FROM claims ORDER BY sort_order, id)), "
         "(SELECT COUNT(*) FROM drafts WHERE TRIM(anschreiben_body) <> ''), "
         "(SELECT COALESCE(SUM(LENGTH(anschreiben_body)), 0) FROM drafts), "

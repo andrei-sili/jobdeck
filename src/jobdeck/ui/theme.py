@@ -323,6 +323,14 @@ body { background: var(--paper); color: var(--ink); font-family: var(--jd-sans);
                   white-space:nowrap; }
 .jd-claim-count.never { color: var(--warn); }
 .jd-claim-count.unknown { color: var(--ink-4); }
+/* The family a row belongs to. A heading inside a card, so it is quieter than
+   the card's own title — it separates, it does not announce. */
+.jd-claim-family { font:600 11px/1.4 var(--jd-sans); letter-spacing:.04em;
+                   color: var(--ink-3); text-transform:uppercase; }
+/* Where the row came from. Under the fact rather than beside it: the fact is
+   what he reads, and the provenance is what he checks when he doubts it. */
+.jd-claim-source { font:400 11px/1.4 var(--jd-sans); color: var(--ink-4);
+                   padding-bottom:8px; }
 """
 
 

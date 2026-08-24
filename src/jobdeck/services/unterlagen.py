@@ -21,6 +21,7 @@ with it.
 import asyncio
 import dataclasses
 import logging
+import os
 import pathlib
 import tempfile
 
@@ -205,7 +206,10 @@ def _file_fingerprint(path: pathlib.Path | None) -> tuple:
         stat = path.stat()
     except OSError:
         return ("missing",)
-    return (stat.st_size, stat.st_mtime_ns)
+    # Readability, not only existence: a file whose mode stops it being read
+    # stats perfectly, so the screen would keep reporting what it could not
+    # read — and getting the mode back would change nothing it compares.
+    return (stat.st_size, stat.st_mtime_ns, os.access(path, os.R_OK))
 
 
 def signature(con, job_id: int | None) -> tuple:
@@ -226,6 +230,10 @@ def signature(con, job_id: int | None) -> tuple:
         # CONTENTS are facts on disk that no table and no setting can see.
         _file_fingerprint(config.user_path(template)),
         _file_fingerprint(specimen_path()),
+        # The same reasoning, for the file the coverage line measures: he
+        # edits profile.md outside this app, and the screen would go on
+        # naming sections he had renamed or filled.
+        _file_fingerprint(config.PROFILE_PATH),
     )
 
 

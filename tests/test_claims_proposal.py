@@ -34,16 +34,85 @@ def ai_on(con):
 # --------------------------------------------------------------------------
 # The reading itself
 # --------------------------------------------------------------------------
-def test_the_proposal_keeps_the_pair_and_the_terms(monkeypatch):
+def test_the_proposal_keeps_the_pair_the_terms_and_where_it_was_read(
+        monkeypatch):
     monkeypatch.setattr(llm, "complete", lambda **kw: _result({"claims": [
-        {"fact": "FastAPI, PostgreSQL, Alembic",
-         "binding": "IHK-Abschlussprojekt", "terms": "FastAPI, Alembic"},
+        {"kind": "skill", "fact": "FastAPI, PostgreSQL, Alembic",
+         "binding": "IHK-Abschlussprojekt", "terms": "FastAPI, Alembic",
+         "source_ref": "Technische Kenntnisse"},
     ]}))
     claims, usage = ai_claims.extract_claims("irgendein Profil")
-    assert claims == [{"fact": "FastAPI, PostgreSQL, Alembic",
+    assert claims == [{"kind": "skill",
+                       "fact": "FastAPI, PostgreSQL, Alembic",
                        "binding": "IHK-Abschlussprojekt",
-                       "terms": "FastAPI, Alembic"}]
+                       "terms": "FastAPI, Alembic",
+                       "source_ref": "Technische Kenntnisse"}]
     assert usage.cost_usd == 0.004
+
+
+def _schema_kinds() -> list[str]:
+    return (ai_claims.CLAIMS_SCHEMA["properties"]["claims"]["items"]
+            ["properties"]["kind"]["enum"])
+
+
+def test_the_schema_offers_exactly_the_families_the_register_knows():
+    """Two lists of families is two places to add one and forget the other,
+    after which the model returns a family the register files as something
+    else without anyone noticing."""
+    assert _schema_kinds() == list(claims_lib.KINDS)
+
+
+def test_a_family_the_model_invents_is_filed_not_trusted(monkeypatch):
+    """Structured outputs constrain the enum, but the register is the thing
+    that has to stay findable: a row filed under a family no screen groups by
+    is a row he cannot answer."""
+    monkeypatch.setattr(llm, "complete", lambda **kw: _result({"claims": [
+        {"kind": "hobby", "fact": "Schach", "binding": "", "terms": "Schach",
+         "source_ref": "Stärken"},
+    ]}))
+    claims, _ = ai_claims.extract_claims("profil")
+    assert claims[0]["kind"] == "skill"
+
+
+def test_a_condition_is_never_bound_to_an_employer(monkeypatch):
+    """"Ab sofort verfügbar" bound to an employer reads as a promise made to
+    that employer, and the letter would repeat it as one."""
+    monkeypatch.setattr(llm, "complete", lambda **kw: _result({"claims": [
+        {"kind": "condition", "fact": "Ab sofort verfügbar",
+         "binding": "Beispiel GmbH", "terms": "ab sofort",
+         "source_ref": "Präferenzen"},
+        {"kind": "skill", "fact": "Django", "binding": "Praktikum",
+         "terms": "Django", "source_ref": "Technische Kenntnisse"},
+    ]}))
+    claims, _ = ai_claims.extract_claims("profil")
+    assert claims[0]["binding"] == ""
+    assert claims[1]["binding"] == "Praktikum", (
+        "the rule swallowed a binding that belongs to its fact")
+
+
+def test_a_runaway_provenance_string_cannot_grow_the_register(monkeypatch):
+    monkeypatch.setattr(llm, "complete", lambda **kw: _result({"claims": [
+        {"kind": "skill", "fact": "Django", "binding": "", "terms": "Django",
+         "source_ref": "x" * 5000},
+    ]}))
+    claims, _ = ai_claims.extract_claims("profil")
+    assert len(claims[0]["source_ref"]) == 120
+
+
+def test_one_press_can_never_write_more_than_the_bound(monkeypatch):
+    """The schema's maxItems is the model's constraint; this is ours. The
+    diff more than doubled the bound (24 to 60), and nothing else in the
+    Python limits how many rows one press puts in his register."""
+    flood = [{"kind": "skill", "fact": f"Fach {n}", "binding": "",
+              "terms": f"T{n}", "source_ref": "Technische Kenntnisse"}
+             for n in range(ai_claims.MAX_CLAIMS + 25)]
+    monkeypatch.setattr(llm, "complete",
+                        lambda **kw: _result({"claims": flood}))
+
+    claims, _ = ai_claims.extract_claims("profil")
+
+    assert len(claims) == ai_claims.MAX_CLAIMS
+    assert claims[0]["fact"] == "Fach 0"
 
 
 def test_an_entry_without_a_fact_is_dropped(monkeypatch):
@@ -94,11 +163,11 @@ async def test_nothing_is_sent_while_the_ai_switch_is_off(con, data_dir,
         raise AssertionError("the API was called with the AI switch off")
 
     monkeypatch.setattr(llm, "complete", explode)
-    result = await claims_service.propose_from_profile()
+    result = await claims_service.import_from_profile()
 
     assert result["ok"] is False
     assert "ausgeschaltet" in result["error"]
-    assert result["claims"] == []
+    assert result["written"] == 0
 
 
 async def test_an_empty_profile_is_refused_before_any_call(con, data_dir, ai_on,
@@ -107,7 +176,7 @@ async def test_an_empty_profile_is_refused_before_any_call(con, data_dir, ai_on,
         raise AssertionError("nothing to read, but the API was called")
 
     monkeypatch.setattr(llm, "complete", explode)
-    result = await claims_service.propose_from_profile()
+    result = await claims_service.import_from_profile()
 
     assert result["ok"] is False
     assert "profile.md" in result["error"]
@@ -125,11 +194,11 @@ async def test_a_missing_api_key_answers_instead_of_vanishing(
         raise llm.LLMNotConfigured("ANTHROPIC_API_KEY is not set")
 
     monkeypatch.setattr(llm, "complete", no_key)
-    result = await claims_service.propose_from_profile()
+    result = await claims_service.import_from_profile()
 
     assert result["ok"] is False
     assert "Schlüssel" in result["error"]
-    assert result["claims"] == []
+    assert result["written"] == 0
 
 
 async def test_a_second_press_while_one_reading_runs_is_refused(
@@ -147,10 +216,10 @@ async def test_a_second_press_while_one_reading_runs_is_refused(
         return _result({"claims": []})
 
     monkeypatch.setattr(llm, "complete", slow)
-    first = asyncio.create_task(claims_service.propose_from_profile())
+    first = asyncio.create_task(claims_service.import_from_profile())
     await asyncio.sleep(0.05)
 
-    second = await claims_service.propose_from_profile()
+    second = await claims_service.import_from_profile()
     assert second["ok"] is False
     assert "bereits" in second["error"]
 
@@ -159,20 +228,31 @@ async def test_a_second_press_while_one_reading_runs_is_refused(
 
 
 # --------------------------------------------------------------------------
-# Proposing, and what it costs
+# Reading, and what it costs
 # --------------------------------------------------------------------------
-async def test_a_proposal_writes_nothing_but_the_meter(con, data_dir, ai_on,
-                                                       profile_file,
-                                                       monkeypatch):
-    monkeypatch.setattr(llm, "complete", lambda **kw: _result({"claims": [
-        {"fact": "FastAPI", "binding": "IHK-Projekt", "terms": "FastAPI"},
-    ]}))
-    result = await claims_service.propose_from_profile()
+async def test_a_reading_writes_proposals_and_confirms_nothing(
+        con, data_dir, ai_on, profile_file, monkeypatch):
+    """The reading now LANDS in the register — as proposals.
 
-    assert result["ok"] is True
-    assert [c["fact"] for c in result["claims"]] == ["FastAPI"]
-    assert result["claims"][0]["headline"] == "FastAPI — IHK-Projekt"
-    assert db.list_claims(con) == [], "a proposal reached the register"
+    It used to hand its result to a dialog and keep nothing, so a closed
+    window threw away a call he had paid for. What must stay true is the
+    other half: none of it counts. A proposal is visible, answerable, and
+    invisible to everything that asks what a letter may claim.
+    """
+    monkeypatch.setattr(llm, "complete", lambda **kw: _result({"claims": [
+        {"kind": "skill", "fact": "FastAPI", "binding": "IHK-Projekt",
+         "terms": "FastAPI", "source_ref": "Technische Kenntnisse"},
+    ]}))
+    result = await claims_service.import_from_profile()
+
+    assert result["ok"] is True and result["written"] == 1
+    row = db.list_claims(con)[0]
+    assert row["state"] == "proposed"
+    assert row["source"] == "profile_md"
+    assert row["source_ref"] == "Technische Kenntnisse"
+    assert row["confirmed_at"] == ""
+    assert db.list_claims(con, states=("confirmed",)) == [], (
+        "a reading confirmed its own proposal")
     assert db.get_setting(con, "llm_calls", "0") == "1"
     assert float(db.get_setting(con, "llm_cost_usd", "0")) == pytest.approx(0.004)
 
@@ -183,82 +263,176 @@ async def test_a_failed_call_is_still_metered(con, data_dir, ai_on,
                         lambda **kw: llm.LLMResult(
                             text="{}", input_tokens=900, output_tokens=3,
                             cost_usd=0.002, model="claude-haiku-4-5"))
-    result = await claims_service.propose_from_profile()
+    result = await claims_service.import_from_profile()
 
     assert result["ok"] is False
     assert float(db.get_setting(con, "llm_cost_usd", "0")) == pytest.approx(0.002)
+    assert db.list_claims(con, states=claims_lib.STATES) == []
 
 
-async def test_what_the_register_already_holds_is_not_proposed_again(
+async def test_what_the_register_already_holds_is_not_read_in_again(
         con, data_dir, ai_on, profile_file, monkeypatch):
     """A second row saying the same thing would split its counter in two."""
-    db.add_claim(con, {"fact": "FastAPI", "binding": "IHK-Projekt"})
+    db.add_claim(con, {"fact": "FastAPI", "binding": "IHK-Projekt",
+                       "state": "confirmed"})
     con.commit()
     monkeypatch.setattr(llm, "complete", lambda **kw: _result({"claims": [
-        {"fact": "fastapi", "binding": "  IHK-Projekt ", "terms": "FastAPI"},
-        {"fact": "Django", "binding": "Praktikum", "terms": "Django"},
+        {"kind": "skill", "fact": "fastapi", "binding": "  IHK-Projekt ",
+         "terms": "FastAPI", "source_ref": "Technische Kenntnisse"},
+        {"kind": "skill", "fact": "Django", "binding": "Praktikum",
+         "terms": "Django", "source_ref": "Technische Kenntnisse"},
     ]}))
-    result = await claims_service.propose_from_profile()
+    result = await claims_service.import_from_profile()
 
-    assert [c["fact"] for c in result["claims"]] == ["Django"]
-    assert result["skipped"] == 1
+    assert result["written"] == 1 and result["skipped"] == 1
+    assert [r["fact"] for r in db.list_claims(con)] == ["FastAPI", "Django"]
+
+
+async def test_a_claim_he_already_refused_is_not_offered_again(
+        con, data_dir, ai_on, profile_file, monkeypatch):
+    """The reason a refusal is kept rather than deleted. Without it, every
+    reading hands him back the same rows he has already said no to, and the
+    shelf of proposals never empties."""
+    refused = db.add_claim(con, {"fact": "C#", "binding": "Eigenprojekt"})
+    db.answer_claims(con, [refused], "rejected")
+    con.commit()
+    monkeypatch.setattr(llm, "complete", lambda **kw: _result({"claims": [
+        {"kind": "skill", "fact": "C#", "binding": "Eigenprojekt",
+         "terms": "C#", "source_ref": "Technische Kenntnisse"},
+    ]}))
+    result = await claims_service.import_from_profile()
+
+    assert result["written"] == 0 and result["skipped"] == 1
+    assert db.list_claims(con) == []
 
 
 async def test_one_competence_at_two_projects_stays_two_permissions(
         con, data_dir, ai_on, profile_file, monkeypatch):
     """Collapsing them is exactly the weld the register exists to prevent."""
-    db.add_claim(con, {"fact": "Python", "binding": "Praktikum"})
+    db.add_claim(con, {"fact": "Python", "binding": "Praktikum",
+                       "state": "confirmed"})
     con.commit()
     monkeypatch.setattr(llm, "complete", lambda **kw: _result({"claims": [
-        {"fact": "Python", "binding": "Eigenprojekt", "terms": "Python"},
+        {"kind": "skill", "fact": "Python", "binding": "Eigenprojekt",
+         "terms": "Python", "source_ref": "Technische Kenntnisse"},
     ]}))
-    result = await claims_service.propose_from_profile()
+    result = await claims_service.import_from_profile()
 
-    assert [c["binding"] for c in result["claims"]] == ["Eigenprojekt"]
-    assert result["skipped"] == 0
+    assert result["written"] == 1
+    assert [r["binding"] for r in db.list_claims(con)] == [
+        "Praktikum", "Eigenprojekt"]
 
 
 # --------------------------------------------------------------------------
-# Confirming
+# Answering
 # --------------------------------------------------------------------------
-async def test_only_what_he_keeps_is_written(con, data_dir):
-    written = await claims_service.accept([
-        {"fact": "FastAPI", "binding": "IHK-Projekt", "terms": "FastAPI"},
-    ])
-    assert written == 1
-    rows = db.list_claims(con)
-    assert [(r["fact"], r["terms"]) for r in rows] == [("FastAPI", "FastAPI")]
-
-
-async def test_accepting_re_checks_the_register_as_it_is_now(con, data_dir):
-    """The proposal was made before he read it; he may have typed one of these
-    in by hand in the meantime, in another tab."""
-    proposal = [{"fact": "FastAPI", "binding": "IHK-Projekt", "terms": "FastAPI"},
-                {"fact": "Django", "binding": "Praktikum", "terms": "Django"}]
-    db.add_claim(con, {"fact": "FastAPI", "binding": "IHK-Projekt"})
+async def test_answering_confirms_only_what_he_pointed_at(con, data_dir):
+    keep = db.add_claim(con, {"fact": "FastAPI", "binding": "IHK-Projekt",
+                              "terms": "FastAPI"})
+    leave = db.add_claim(con, {"fact": "Django", "binding": "Praktikum"})
     con.commit()
 
-    written = await claims_service.accept(proposal)
+    changed = await claims_service.answer([keep], "confirmed")
 
-    assert written == 1
-    assert [r["fact"] for r in db.list_claims(con)] == ["FastAPI", "Django"]
+    assert changed == 1
+    rows = {r["id"]: r["state"] for r in db.list_claims(con)}
+    assert rows[keep] == "confirmed"
+    assert rows[leave] == "proposed", "answering one answered another"
 
 
-async def test_the_stored_entries_are_immediately_countable(con, data_dir):
+async def test_a_whole_family_is_answered_in_one_gesture(con, data_dir):
+    """Fifty rows across eight families is why the shelf has a button per
+    family. A partial result would leave a heading whose count no longer
+    matches what is under it."""
+    ids = [db.add_claim(con, {"fact": f"Fach {n}", "binding": "Praktikum",
+                              "kind": "experience"}) for n in range(4)]
+    con.commit()
+
+    changed = await claims_service.answer(ids, "confirmed")
+
+    assert changed == 4
+    assert all(r["state"] == "confirmed" for r in db.list_claims(con))
+
+
+async def test_answering_an_already_answered_claim_changes_nothing(con,
+                                                                   data_dir):
+    """Re-confirming would move a confirmation date he never touched."""
+    claim_id = db.add_claim(con, {"fact": "FastAPI", "binding": "IHK-Projekt",
+                                  "state": "confirmed"})
+    con.commit()
+    stamped = db.list_claims(con)[0]["confirmed_at"]
+
+    changed = await claims_service.answer([claim_id], "rejected")
+
+    assert changed == 0
+    row = db.list_claims(con)[0]
+    assert row["state"] == "confirmed" and row["confirmed_at"] == stamped
+
+
+async def test_a_confirmed_entry_is_immediately_countable(con, data_dir):
     """The point of the terms: the register can measure itself the moment it
     is filled, rather than after the next letter is written."""
     job_id = db.insert_job_if_new(con, {
         "source": "stub", "external_id": "e1", "title": "t", "company": "c"})
     db.upsert_draft(con, job_id, {"status": "ready",
                                   "anschreiben_body": "… FastAPI …"})
+    ids = [db.add_claim(con, {"fact": "FastAPI", "binding": "IHK-Projekt",
+                              "terms": "FastAPI"}),
+           db.add_claim(con, {"fact": "Java", "binding": "Eigenprojekt",
+                              "terms": "Spring Boot"})]
     con.commit()
 
-    await claims_service.accept([
-        {"fact": "FastAPI", "binding": "IHK-Projekt", "terms": "FastAPI"},
-        {"fact": "Java", "binding": "Eigenprojekt", "terms": "Spring Boot"},
-    ])
+    await claims_service.answer(ids, "confirmed")
 
     letters = db.letter_bodies(con)
     counted = {r["fact"]: claims_lib.count_uses(r["terms"], letters)
-               for r in db.list_claims(con)}
+               for r in db.list_claims(con, states=("confirmed",))}
     assert counted == {"FastAPI": 1, "Java": 0}
+
+
+async def test_the_reading_tells_a_waiting_row_from_an_answered_one(
+        con, data_dir, ai_on, profile_file, monkeypatch):
+    """Two counts that read identically and mean opposite things: one says
+    the register is done, the other says the shelf above it is still his to
+    work through. Reporting a waiting row as "already answered" is the
+    sentence that would stop him ever finishing the review."""
+    waiting = db.add_claim(con, {"fact": "Django", "binding": "Praktikum"})
+    answered = db.add_claim(con, {"fact": "FastAPI", "binding": "IHK",
+                                  "state": "confirmed"})
+    refused = db.add_claim(con, {"fact": "C#", "binding": ""})
+    con.commit()
+    db.answer_claims(con, [refused], "rejected")
+    con.commit()
+    assert waiting and answered
+
+    monkeypatch.setattr(llm, "complete", lambda **kw: _result({"claims": [
+        {"kind": "skill", "fact": "Django", "binding": "Praktikum",
+         "terms": "Django", "source_ref": "Technische Kenntnisse"},
+        {"kind": "skill", "fact": "FastAPI", "binding": "IHK",
+         "terms": "FastAPI", "source_ref": "Technische Kenntnisse"},
+        {"kind": "skill", "fact": "C#", "binding": "", "terms": "C#",
+         "source_ref": "Technische Kenntnisse"},
+        {"kind": "skill", "fact": "Rust", "binding": "", "terms": "Rust",
+         "source_ref": "Technische Kenntnisse"},
+    ]}))
+    result = await claims_service.import_from_profile()
+
+    assert result["written"] == 1
+    assert result["waiting"] == 1, "a row he has not answered was called answered"
+    assert result["answered"] == 2
+    assert result["skipped"] == 3
+
+
+async def test_the_reading_names_what_it_cost(con, data_dir, ai_on,
+                                              profile_file, monkeypatch):
+    """Every model call in this app names its price. The dialog this flow
+    replaced printed the figure; a spend the app makes and then does not name
+    is the one thing the meter exists to prevent."""
+    monkeypatch.setattr(llm, "complete",
+                        lambda **kw: _result({"claims": []}, cost=0.0182))
+
+    result = await claims_service.import_from_profile()
+
+    assert result["ok"] is True and result["written"] == 0
+    assert result["cost_usd"] == pytest.approx(0.0182), (
+        "a reading that found nothing still cost him a call")

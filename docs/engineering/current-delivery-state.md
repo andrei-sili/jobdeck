@@ -57,7 +57,7 @@ processes sharing a database.
 | Search profiles | Keywords, location, radius, sources, hard tags, soft preferences, strictness, polling interval, and optional auto-send are persisted. |
 | Match scoring | Opt-in Anthropic scoring stores a score, one text reason, and extracted contact fields. |
 | Drafting | On-demand Anthropic drafting produces an Anschreiben and e-mail body from the free-form profile and the selected posting. |
-| Candidate claims register | Anthropic can propose claim entries from `profile.md`; the candidate can add selected entries to the local claims register. |
+| Candidate claims register | Anthropic reads claim entries from `profile.md` across eight families (experience, project, skill, education, credential, language, strength, condition). Entries are stored as proposals carrying their source section, and are confirmed or refused by the candidate one row or one family at a time. A confirmed entry is corrected by supersession; a refused one is retained so a later reading cannot offer it again. |
 | Anlagen | Local PDF upload, readability checks, ordering, removal to a recovery folder, and merge into a Mappe. |
 | PDF generation | A local HTML template is rendered through Chrome and merged with Anlagen. Size-aware compression is available. |
 | E-mail sending | Gmail OAuth, preview/edit, explicit approval state, test mode, real-send switch, daily cap, and ambiguous-outcome recovery. |
@@ -79,12 +79,17 @@ handling in core workflows.
 
 ## Partial or disconnected capabilities
 
-- `profile.md` is the factual input for scoring and drafting, but is unstructured,
-  unversioned, and not explicitly marked verified.
+- `profile.md` remains the factual input for scoring and drafting. The claims
+  register now holds structured, provenance-carrying, candidate-confirmed facts
+  beside it, but the register is not yet versioned and drafting does not read
+  it. The Unterlagen screen states which sections of `profile.md` no confirmed
+  fact stands for, which is the measurement that decides when the boundary can
+  move.
 - Applicant contact and form values are stored separately in `app_settings`, so
   the current system does not have one candidate aggregate.
 - The claims register does not constrain drafting or sending. Factual grounding
-  is instruction-based rather than deterministically enforced.
+  is instruction-based rather than deterministically enforced. The register
+  states this on screen so the guarantee is not assumed.
 - Match persistence contains only one score and one free-text reason, without a
   structured dimension breakdown, uncertainty, or candidate feedback model.
 - Cross-source deduplication does not model source observations, fingerprints,

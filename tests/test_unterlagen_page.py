@@ -255,9 +255,9 @@ async def test_the_register_counts_the_letters_that_claimed_each_permission(
     job_id = _posting(con)
     _letter(con, job_id, "… FastAPI und PostgreSQL im Abschlussprojekt …")
     db.add_claim(con, {"fact": "FastAPI, PostgreSQL", "binding": "IHK-Projekt",
-                       "terms": "FastAPI"})
+                       "terms": "FastAPI", "state": "confirmed"})
     db.add_claim(con, {"fact": "Java & Spring Boot", "binding": "Eigenprojekt",
-                       "terms": "Spring Boot"})
+                       "terms": "Spring Boot", "state": "confirmed"})
     con.commit()
 
     await user.open("/unterlagen")
@@ -275,12 +275,53 @@ async def test_a_permission_with_no_terms_says_it_cannot_be_counted(
     showing "noch nie" for the first invites deleting a live permission."""
     job_id = _posting(con)
     _letter(con, job_id, "… Django im Praktikum …")
-    db.add_claim(con, {"fact": "Django & DRF", "binding": "Praktikum"})
+    db.add_claim(con, {"fact": "Django & DRF", "binding": "Praktikum",
+                       "state": "confirmed"})
     con.commit()
 
     await user.open("/unterlagen")
 
     await user.should_see("nicht zählbar")
+
+
+async def test_the_screen_names_what_the_register_does_not_yet_stand_for(
+        user: User, con, data_dir):
+    """The measurement that decides when the register may replace profile.md
+    as the factual boundary. A section nothing confirmed stands for is a part
+    of himself a letter drawing only on confirmed facts would drop."""
+    from jobdeck import config
+    _posting(con)
+    config.PROFILE_PATH.write_text(
+        "## Technische Kenntnisse\nPython\n## Zertifikate\nEins\n",
+        encoding="utf-8")
+    db.add_claim(con, {"fact": "Python", "binding": "Eigenprojekt",
+                       "terms": "Python", "state": "confirmed",
+                       "source": "profile_md",
+                       "source_ref": "Technische Kenntnisse"})
+    con.commit()
+
+    await user.open("/unterlagen")
+
+    await user.should_see("1 von 2 Abschnitten")
+    await user.should_see("Noch nichts bestätigt aus: Zertifikate")
+
+
+async def test_a_proposal_does_not_stand_for_a_section(user: User, con,
+                                                       data_dir):
+    """Otherwise the register looks ready the moment it is read — the one
+    moment nobody has checked it."""
+    from jobdeck import config
+    _posting(con)
+    config.PROFILE_PATH.write_text("## Zertifikate\nEins\n", encoding="utf-8")
+    db.add_claim(con, {"fact": "IHK", "binding": "", "source": "profile_md",
+                       "source_ref": "Zertifikate"})
+    con.commit()
+
+    await user.open("/unterlagen")
+
+    # Inflected: one section is "Abschnitt", and zero of them "sind".
+    await user.should_see("0 von 1 Abschnitt ")
+    await user.should_see("Noch nichts bestätigt aus: Zertifikate")
 
 
 async def test_the_register_says_it_does_not_yet_constrain_the_prompt(
@@ -345,7 +386,10 @@ async def test_reading_the_profile_is_refused_while_the_ai_switch_is_off(
 
 async def test_deleting_a_permission_asks_first(user: User, con, data_dir):
     _posting(con)
-    claim_id = db.add_claim(con, {"fact": "Java", "binding": "Eigenprojekt"})
+    # Confirmed: deleting is what he does to a permission he has vouched for.
+    # A proposal is refused instead, which keeps the row.
+    claim_id = db.add_claim(con, {"fact": "Java", "binding": "Eigenprojekt",
+                                  "state": "confirmed"})
     con.commit()
 
     await user.open("/unterlagen")
@@ -520,46 +564,80 @@ async def test_a_shrunk_mappe_says_so_in_german(user: User, con, data_dir):
 # --------------------------------------------------------------------------
 # The consent boundary on the AI proposal
 # --------------------------------------------------------------------------
-async def test_only_the_ticked_proposals_are_written(user: User, con, data_dir):
-    """The checkbox IS the consent boundary of this feature: the register
-    exists to stop a real skill being bound to the wrong employer, and the
-    proposal is a model's guess at those bindings. Nothing drove this path."""
+async def test_a_reading_lands_as_proposals_that_count_for_nothing(
+        user: User, con, data_dir):
+    """The consent boundary of this feature, and where it moved to.
+
+    It used to be a dialog of checkboxes: tick, press Übernehmen, and what
+    was ticked became a permission. Nothing survived a closed window — a
+    reading he had paid for was simply gone. Now the reading lands, visibly,
+    as rows that count for nothing until he answers each one.
+    """
     from jobdeck.services import claims as claims_service
     _posting(con)
 
-    async def propose():
-        return {"ok": True, "error": "", "skipped": 0, "cost_usd": 0.004,
-                "claims": [
-                    {"fact": "FastAPI", "binding": "IHK-Projekt",
-                     "terms": "FastAPI", "headline": "FastAPI — IHK-Projekt"},
-                    {"fact": "Kotlin", "binding": "Praktikum",
-                     "terms": "Kotlin", "headline": "Kotlin — Praktikum"},
-                ]}
+    async def read():
+        db.add_claim(con, {"fact": "FastAPI", "binding": "IHK-Projekt",
+                           "terms": "FastAPI", "kind": "skill",
+                           "source": "profile_md",
+                           "source_ref": "Technische Kenntnisse"})
+        db.add_claim(con, {"fact": "Kotlin", "binding": "Praktikum",
+                           "terms": "Kotlin", "kind": "skill",
+                           "source": "profile_md",
+                           "source_ref": "Technische Kenntnisse"})
+        con.commit()
+        return {"ok": True, "error": "", "written": 2, "skipped": 0,
+                "cost_usd": 0.02}
 
-    saved = claims_service.propose_from_profile
-    claims_service.propose_from_profile = propose
+    saved = claims_service.import_from_profile
+    claims_service.import_from_profile = read
     try:
         await user.open("/unterlagen")
         user.find(marker="propose-claims").click()
         await asyncio.sleep(0.2)
         user.find(marker="confirm-propose").click()
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.4)
 
-        await user.should_see("Vorschlag aus profile.md")
-        boxes = [e for e in user.client.elements.values()
-                 if isinstance(e, ui.checkbox)]
-        assert len(boxes) == 2, "the proposal did not render one row each"
-        wrong = next(b for b in boxes if "Kotlin" in (b.text or ""))
-        wrong.set_value(False)   # he unticks the one welded to the wrong project
-        await asyncio.sleep(0.1)
+        await user.should_see("2 Vorschläge")
+        await user.should_see("noch ist keiner davon bestätigt")
+        # The proposals sit under a heading that does not contradict them.
+        await user.should_not_see("Jede Zeile ist eine")
+        # Where each came from, on the row itself — the question the register
+        # has to answer about anything it holds.
+        await user.should_see("aus profile.md · Technische Kenntnisse")
+        assert db.list_claims(con, states=("confirmed",)) == [], (
+            "a reading confirmed itself")
 
-        user.find(marker="accept-claims").click()
+        # He refuses the one welded to the wrong employer, keeps the other.
+        rejects = _marked(user, "reject-claim")
+        assert len(rejects) == 2, "a proposal rendered without a way to refuse"
+        assert len(_marked(user, "confirm-claim")) == 2
+        user.find(marker="confirm-family-skill").click()
         await asyncio.sleep(0.4)
     finally:
-        claims_service.propose_from_profile = saved
+        claims_service.import_from_profile = saved
 
-    assert [r["fact"] for r in db.list_claims(con)] == ["FastAPI"], \
-        "an unticked proposal was written into the register anyway"
+    assert sorted(r["fact"] for r in db.list_claims(con, states=("confirmed",))
+                  ) == ["FastAPI", "Kotlin"]
+
+
+async def test_a_refused_proposal_leaves_the_register_and_stays_refused(
+        user: User, con, data_dir):
+    """Refusing is an answer, and the register keeps it — otherwise the next
+    reading of the profile offers back exactly what he just said no to."""
+    _posting(con)
+    db.add_claim(con, {"fact": "C#", "binding": "Eigenprojekt", "terms": "C#",
+                       "source": "profile_md", "source_ref": "Kenntnisse"})
+    con.commit()
+
+    await user.open("/unterlagen")
+    user.find(marker="reject-claim").click()
+    await asyncio.sleep(0.4)
+
+    await user.should_not_see("C#")
+    rows = db.list_claims(con, states=("rejected",))
+    assert [r["fact"] for r in rows] == ["C#"]
+    assert rows[0]["confirmed_at"] == "", "a refusal was stamped as consent"
 
 
 async def test_the_cost_is_stated_before_the_spend_not_after(user: User, con,
@@ -573,7 +651,10 @@ async def test_the_cost_is_stated_before_the_spend_not_after(user: User, con,
     await asyncio.sleep(0.2)
 
     await user.should_see("profile.md von der KI lesen lassen?")
-    await user.should_see("halber Cent")
+    # The figure itself, not just "it costs something": the reading now spans
+    # every family in his profile rather than his competences alone, so what
+    # the button is about to spend has grown with it.
+    await user.should_see("zwei Cent")
     assert db.get_setting(con, "llm_calls", "0") == "0"
 
 
@@ -1025,3 +1106,131 @@ async def test_the_drop_zone_is_wired_the_one_way_that_does_not_race(
         "a per-file handler runs unordered against the batch handler"
     assert uploader._begin_upload_handlers, \
         "without this the screen is only held still AFTER the transfer"
+
+
+async def test_a_waiting_proposal_carries_the_count_it_really_has(
+        user: User, con, data_dir):
+    """It used to read "noch kein Wort davon" — a count nobody performed.
+
+    Found by driving the real screen: one fact said that while it waited and
+    "in 50 Briefen" one click later, with nothing about the letters having
+    changed. A proposal is read out of the profile the letters are ALREADY
+    written from, so how often they claim it is both true and the strongest
+    reason to confirm it.
+    """
+    job_id = _posting(con)
+    _letter(con, job_id, "… FastAPI im Abschlussprojekt …")
+    db.add_claim(con, {"fact": "FastAPI", "binding": "IHK-Projekt",
+                       "terms": "FastAPI", "source": "profile_md",
+                       "source_ref": "Technische Kenntnisse"})
+    con.commit()
+
+    await user.open("/unterlagen")
+
+    await user.should_see("in 1 Brief")
+    await user.should_not_see("noch kein Wort davon")
+
+
+async def test_a_hand_written_entry_can_choose_and_change_its_family(
+        user: User, con, data_dir):
+    """Without a family control every hand-typed fact was filed as a
+    competence: "Englisch, verhandlungssicher" stood under "Technische
+    Kenntnisse", and seven of the eight families the register knows were
+    unreachable except through the AI reading — which could not be corrected
+    either, because the same dialog is the only edit path."""
+    from nicegui import ui as nicegui_ui
+    _posting(con)
+
+    await user.open("/unterlagen")
+    user.find("Erlaubnis hinzufügen").click()
+    await asyncio.sleep(0.2)
+
+    with user.client:
+        family = next(e for e in user.client.elements.values()
+                      if isinstance(e, nicegui_ui.select))
+        inputs = [e for e in user.client.elements.values()
+                  if isinstance(e, nicegui_ui.input)]
+    family.set_value("language")
+    inputs[0].set_value("Englisch, verhandlungssicher")
+    inputs[2].set_value("Englisch")
+    await asyncio.sleep(0.1)
+    user.find("Speichern").click()
+    await asyncio.sleep(0.4)
+
+    row = db.list_claims(con)[0]
+    assert row["kind"] == "language", "the family he chose was not stored"
+    assert row["state"] == "confirmed"
+    # The heading's capitals are CSS; the label itself is the German word.
+    await user.should_see("Sprachen")
+
+
+async def test_a_refused_claim_has_a_door_and_a_way_back(user: User, con,
+                                                         data_dir):
+    """Refusing is one click on an icon beside its identical opposite, and a
+    refused row leaves every view AND stops a later reading proposing it
+    again. Without a way back the cost of a mis-click is the fact itself,
+    discoverable only by paying for a second reading that reports nothing
+    new."""
+    _posting(con)
+    claim_id = db.add_claim(con, {"fact": "FastAPI, PostgreSQL", "terms": "FastAPI",
+                                  "binding": "IHK-Projekt",
+                                  "source": "profile_md",
+                                  "source_ref": "Technische Kenntnisse"})
+    con.commit()
+
+    await user.open("/unterlagen")
+    user.find(marker="reject-claim").click()
+    await asyncio.sleep(0.4)
+    await user.should_not_see("FastAPI, PostgreSQL")
+
+    # A number under a list has to be a door.
+    await user.should_see("1 abgelehnt")
+    user.find(marker="toggle-refused").click()
+    await asyncio.sleep(0.3)
+    await user.should_see("FastAPI, PostgreSQL")
+
+    user.find(marker="restore-claim").click()
+    await asyncio.sleep(0.4)
+
+    row = db.list_claims(con)[0]
+    assert row["id"] == claim_id and row["state"] == "proposed"
+    assert _marked(user, "confirm-claim"), "the restored row cannot be answered"
+
+
+async def test_the_refused_door_is_absent_when_nothing_was_refused(
+        user: User, con, data_dir):
+    _posting(con)
+    db.add_claim(con, {"fact": "Django", "binding": "Praktikum",
+                       "state": "confirmed"})
+    con.commit()
+
+    await user.open("/unterlagen")
+
+    assert _marked(user, "toggle-refused") == []
+    await user.should_not_see("abgelehnt")
+
+
+async def test_the_screen_names_what_the_reading_cost(user: User, con,
+                                                      data_dir):
+    """Even when it found nothing. The confirmation states the price before
+    the spend; this states it after, which is what the app's meter promises
+    for every call it makes."""
+    from jobdeck.services import claims as claims_service
+    _posting(con)
+
+    async def read():
+        return {"ok": True, "error": "", "written": 0, "waiting": 0,
+                "answered": 0, "skipped": 0, "cost_usd": 0.0182}
+
+    saved = claims_service.import_from_profile
+    claims_service.import_from_profile = read
+    try:
+        await user.open("/unterlagen")
+        user.find(marker="propose-claims").click()
+        await asyncio.sleep(0.2)
+        user.find(marker="confirm-propose").click()
+        await asyncio.sleep(0.4)
+
+        await user.should_see("0.0182 $")
+    finally:
+        claims_service.import_from_profile = saved

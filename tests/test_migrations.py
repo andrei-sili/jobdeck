@@ -1070,7 +1070,11 @@ def test_v13_becomes_v14_without_touching_a_posting_or_the_ledger(data_dir):
 
     migrations.migrate(con)
 
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 14
+    # The current version, not the literal 14: the property under test is
+    # "an upgrade never rewrites the corpus", which every later slice
+    # inherits — see the v12 test for the same reasoning.
+    assert con.execute("PRAGMA user_version").fetchone()[0] == (
+        migrations.SCHEMA_VERSION)
     assert _corpus_hash(con) == before, "the upgrade touched a posting"
     assert [tuple(r) for r in con.execute("SELECT * FROM bewerbungen")] == (
         ledger_before
@@ -1119,4 +1123,137 @@ def test_v14_survives_a_pre_v7_jobs_table_without_the_link_column(tmp_path):
     assert row["position"] == ""
     assert row["job_id"] is None
     assert row["company_key"] == "alt gmbh"
+    con.close()
+
+
+def _legacy_register_row(con, fact="Django & DRF", binding="Praktikum"):
+    """A register row exactly as schema v9 wrote it — no v15 columns."""
+    con.execute(
+        "INSERT INTO claims (fact, binding, terms, sort_order, created_at, "
+        "updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (fact, binding, "Django, DRF", 1, "2026-07-01 09:00:00",
+         "2026-07-01 09:00:00"),
+    )
+    con.commit()
+
+
+def _drop_v15_columns(con):
+    """Rebuild `claims` in its pre-v15 shape, preserving the rows.
+
+    SQLite before 3.35 cannot DROP COLUMN and the shipped table is small, so
+    the test recreates it the way v9 did rather than assuming the interpreter's
+    SQLite is new enough to undo the ALTERs.
+    """
+    rows = con.execute(
+        "SELECT fact, binding, terms, sort_order, created_at, updated_at "
+        "FROM claims ORDER BY id").fetchall()
+    con.execute("DROP TABLE claims")
+    con.execute(
+        """
+        CREATE TABLE claims (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            fact       TEXT NOT NULL,
+            binding    TEXT NOT NULL DEFAULT '',
+            terms      TEXT NOT NULL DEFAULT '',
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    con.executemany(
+        "INSERT INTO claims (fact, binding, terms, sort_order, created_at, "
+        "updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        [tuple(r) for r in rows],
+    )
+    con.commit()
+
+
+def test_v15_reads_an_existing_register_row_as_his_own_confirmed_skill(data_dir):
+    """The defaults must state what a pre-v15 row already meant.
+
+    Before v15 the register held only competences and the only way in was the
+    user typing one. So an existing row is a CONFIRMED skill he wrote himself,
+    and `confirmed_at` is the day he wrote it — not the day of the upgrade,
+    which would date his confirmation to a migration he never ran by hand.
+    """
+    from jobdeck import db, migrations
+
+    con = db.connect()
+    migrations.migrate(con)
+    _legacy_register_row(con)
+    _drop_v15_columns(con)
+    con.execute("PRAGMA user_version = 14")
+    con.commit()
+
+    migrations.migrate(con)
+
+    row = con.execute("SELECT * FROM claims").fetchone()
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert row["kind"] == "skill"
+    assert row["state"] == "confirmed"
+    assert row["source"] == "user"
+    assert row["source_ref"] == ""
+    assert row["supersedes_id"] is None
+    assert row["confirmed_at"] == "2026-07-01 09:00:00"
+    assert row["fact"] == "Django & DRF" and row["binding"] == "Praktikum"
+    con.close()
+
+
+def test_v14_becomes_v15_without_touching_a_posting_or_the_ledger(data_dir):
+    """Additive: six columns on one table we own. The legacy ledger keeps its
+    exact shape, which is what makes the rollback "stop reading the new
+    columns" instead of a migration back."""
+    from jobdeck import db, migrations
+
+    con = db.connect()
+    migrations.migrate(con)
+    _seed_ledger_for_attempts(con)
+    _legacy_register_row(con)
+    _drop_v15_columns(con)
+    con.execute("PRAGMA user_version = 14")
+    con.commit()
+    before = _corpus_hash(con)
+    ledger_before = [tuple(r) for r in con.execute("SELECT * FROM bewerbungen")]
+    columns_before = [r[1] for r in con.execute("PRAGMA table_info(bewerbungen)")]
+
+    migrations.migrate(con)
+
+    assert _corpus_hash(con) == before, "the upgrade touched a posting"
+    assert [tuple(r) for r in con.execute("SELECT * FROM bewerbungen")] == (
+        ledger_before
+    )
+    assert [r[1] for r in con.execute("PRAGMA table_info(bewerbungen)")] == (
+        columns_before
+    ), "the legacy ledger gained a column"
+    con.close()
+
+
+def test_v15_backfills_the_confirmation_date_once_and_never_again(data_dir):
+    """The guard runs on every start; the backfill must not.
+
+    `confirmed_at` is a value the user can change later by re-confirming a
+    corrected fact. A backfill that ran on every start would drag it back to
+    `created_at` at the next launch — the same failure the v11 letter backfill
+    had to be version-gated against.
+    """
+    from jobdeck import db, migrations
+
+    con = db.connect()
+    migrations.migrate(con)
+    _legacy_register_row(con)
+    _drop_v15_columns(con)
+    con.execute("PRAGMA user_version = 14")
+    con.commit()
+    migrations.migrate(con)
+
+    # Emptied deliberately: with `confirmed_at` set, the UPDATE's own WHERE
+    # would protect the row and the test could not tell "inside the guard"
+    # from "outside it". Empty is the one value the backfill WOULD rewrite.
+    con.execute("UPDATE claims SET confirmed_at=''")
+    con.commit()
+    migrations.migrate(con)
+
+    assert con.execute("SELECT confirmed_at FROM claims").fetchone()[0] == "", (
+        "the backfill ran again on a later start")
     con.close()
