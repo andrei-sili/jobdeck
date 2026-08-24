@@ -480,8 +480,15 @@ Ein Zertifikat
 
 def test_the_sections_are_read_in_the_order_he_wrote_them():
     assert claims.profile_sections(PROFILE) == [
-        "Profil — Beispiel", "Basisdaten", "Technische Kenntnisse",
-        "Vertiefung", "Zertifikate"]
+        "Basisdaten", "Technische Kenntnisse", "Vertiefung", "Zertifikate"]
+
+
+def test_the_files_own_title_is_not_a_section():
+    """A single '#' names the document — his reads "Profil — <sein Name>".
+    Counting it made the measurement list his own name among the things
+    nothing stands for, and made it one that could never be complete."""
+    assert claims.profile_sections("# Profil — Beispiel\n## Basisdaten\n") == [
+        "Basisdaten"]
 
 
 def test_two_sections_with_one_name_collapse():
@@ -510,10 +517,9 @@ def test_only_a_confirmed_fact_stands_for_a_section():
         _row("Zertifikate", state="proposed"),
         _row("Basisdaten", state="rejected"),
     ])
-    assert view["sections"] == 5
+    assert view["sections"] == 4
     assert view["covered"] == 1
-    assert view["missing"] == ["Profil — Beispiel", "Basisdaten",
-                               "Vertiefung", "Zertifikate"]
+    assert view["missing"] == ["Basisdaten", "Vertiefung", "Zertifikate"]
 
 
 def test_a_section_is_matched_the_way_the_register_folds_everything_else():

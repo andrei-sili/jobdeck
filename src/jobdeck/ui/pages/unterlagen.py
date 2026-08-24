@@ -693,7 +693,7 @@ async def unterlagen_page():
             say(f"{changed} {spoken}", type="positive")
             await refresh()
 
-        def draw_claim_row(claim: dict, *, counted: bool) -> None:
+        def draw_claim_row(claim: dict, *, waiting: bool) -> None:
             with ui.element("div").classes("jd-claim"):
                 # Two labels rather than one span of markup: the text is
                 # the user's own, but a screen that renders stored text
@@ -707,19 +707,19 @@ async def unterlagen_page():
                             ui.label(f"— {claim['binding']}") \
                                 .classes("jd-claim-bind")
                     ui.label(claim["provenance"]).classes("jd-claim-source")
-                if counted:
-                    tone = ("never" if claim["uses"] == 0 else
-                            "unknown" if claim["uses"] is None else "")
-                    ui.label(claims_lib.describe_uses(claim["uses"])) \
-                        .classes(f"jd-claim-count {tone}")
-                else:
-                    # A proposal has never been in a letter, so a counter
-                    # here would read "noch nie" — which is true of every
-                    # proposal and says nothing about this one.
-                    ui.label("noch kein Wort davon") \
-                        .classes("jd-claim-count unknown")
+                # The same counter on both sides of the shelf. A proposal
+                # was read out of the profile the letters were ALREADY being
+                # written from, so "this is in 50 of your letters" is both
+                # true and the strongest reason to confirm it. Printing
+                # anything else here states a count nobody performed — the
+                # first draw said "noch kein Wort davon" beside a fact that
+                # turned out to stand in fifty.
+                tone = ("never" if claim["uses"] == 0 else
+                        "unknown" if claim["uses"] is None else "")
+                ui.label(claims_lib.describe_uses(claim["uses"])) \
+                    .classes(f"jd-claim-count {tone}")
                 with ui.row().classes("gap-0 items-center no-wrap"):
-                    if not counted:
+                    if waiting:
                         ui.button(
                             icon="check",
                             on_click=lambda c=claim: answer_claims(
@@ -735,7 +735,7 @@ async def unterlagen_page():
                     ui.button(icon="edit",
                               on_click=lambda c=claim: claim_dialog(c)) \
                         .props("flat round dense size=sm")
-                    if counted:
+                    if not waiting:
                         ui.button(
                             icon="delete",
                             on_click=lambda c=claim: delete_claim(c)) \
@@ -787,16 +787,22 @@ async def unterlagen_page():
                                 .props("flat dense size=sm") \
                                 .mark(f"confirm-family-{kind}")
                         for claim in rows:
-                            draw_claim_row(claim, counted=False)
+                            draw_claim_row(claim, waiting=True)
 
                 if not settled:
-                    ui.label("Noch keine Erlaubnis bestätigt. Jede Zeile ist "
-                             "eine: ein Können und das eine Projekt, an dem es "
-                             "hängt.").classes("jd-note")
+                    # Two different states, and the wrong sentence in the
+                    # second one reads as a contradiction: "jede Zeile ist
+                    # eine" printed underneath eleven visible lines.
+                    ui.label(
+                        "Noch nichts bestätigt — die Vorschläge oben warten "
+                        "auf dich." if waiting else
+                        "Noch keine Erlaubnis eingetragen. Jede Zeile ist "
+                        "eine: ein Können und das eine Projekt, an dem es "
+                        "hängt.").classes("jd-note")
                 for _kind, label, rows in claims_lib.group_by_kind(settled):
                     ui.label(label).classes("jd-claim-family mt-2")
                     for claim in rows:
-                        draw_claim_row(claim, counted=True)
+                        draw_claim_row(claim, waiting=False)
 
                 with ui.row().classes("gap-2 items-center"):
                     ui.button("Erlaubnis hinzufügen", icon="add",

@@ -599,6 +599,8 @@ async def test_a_reading_lands_as_proposals_that_count_for_nothing(
 
         await user.should_see("2 Vorschläge")
         await user.should_see("noch zählt keiner davon")
+        # The proposals sit under a heading that does not contradict them.
+        await user.should_not_see("Jede Zeile ist eine")
         # Where each came from, on the row itself — the question the register
         # has to answer about anything it holds.
         await user.should_see("aus profile.md · Technische Kenntnisse")
@@ -1103,3 +1105,26 @@ async def test_the_drop_zone_is_wired_the_one_way_that_does_not_race(
         "a per-file handler runs unordered against the batch handler"
     assert uploader._begin_upload_handlers, \
         "without this the screen is only held still AFTER the transfer"
+
+
+async def test_a_waiting_proposal_carries_the_count_it_really_has(
+        user: User, con, data_dir):
+    """It used to read "noch kein Wort davon" — a count nobody performed.
+
+    Found by driving the real screen: one fact said that while it waited and
+    "in 50 Briefen" one click later, with nothing about the letters having
+    changed. A proposal is read out of the profile the letters are ALREADY
+    written from, so how often they claim it is both true and the strongest
+    reason to confirm it.
+    """
+    job_id = _posting(con)
+    _letter(con, job_id, "… FastAPI im Abschlussprojekt …")
+    db.add_claim(con, {"fact": "FastAPI", "binding": "IHK-Projekt",
+                       "terms": "FastAPI", "source": "profile_md",
+                       "source_ref": "Technische Kenntnisse"})
+    con.commit()
+
+    await user.open("/unterlagen")
+
+    await user.should_see("in 1 Brief")
+    await user.should_not_see("noch kein Wort davon")

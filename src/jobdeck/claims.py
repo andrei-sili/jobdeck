@@ -160,7 +160,11 @@ def profile_sections(text: str) -> list[str]:
     headings = []
     for line in (text or "").splitlines():
         stripped = line.strip()
-        if not stripped.startswith("#"):
+        # '##' and deeper. A single '#' names the FILE — his is "Profil —
+        # <his name>" — and counting it as a section puts his own name on a
+        # list of things nothing stands for, in a measurement that could
+        # then never be complete.
+        if not stripped.startswith("##"):
             continue
         heading = stripped.lstrip("#").strip()
         if heading and _section_key(heading) not in seen:
