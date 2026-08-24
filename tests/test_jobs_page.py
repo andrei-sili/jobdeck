@@ -1978,3 +1978,91 @@ def test_the_page_records_the_very_signature_the_watcher_compares(con, data_dir)
     db.set_setting(con, jobs.MIN_SCORE_SETTING, "60")
     con.commit()
     assert jobs._signature() != recorded
+
+
+def test_a_posting_that_repeats_an_applied_position_leaves_the_working_list(
+        con, data_dir):
+    """It can never become a second application, so it goes where every other
+    posting that cannot goes — counted beneath the list, one click away, never
+    deleted. Before this it stayed in the list with every button dead, taking
+    a slot it could not use."""
+    from jobdeck import db
+    from jobdeck.ui.pages import jobs as jobs_page
+
+    bew = db.add_bewerbung(con, {"gesendet_am": "2026-01-05", "firma": "Beispiel GmbH",
+                                 "kanal": "E-Mail", "status": "Absage"})
+    con.execute(
+        "INSERT INTO application_attempts (idempotency_key, state, company,"
+        " company_key, position, channel, bewerbung_id, created_at, updated_at)"
+        " VALUES ('bewerbung:x', 'recorded', 'Beispiel GmbH', 'beispiel gmbh',"
+        " 'Software Developer: Python', 'E-Mail', ?, '2026-01-05', '2026-01-05')",
+        (bew,))
+    repeat = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "repost", "title": "Software Developer: Python",
+        "company": "Beispiel GmbH", "url": "https://e.example/1"})
+    other = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "other", "title": "Ganz andere Stelle",
+        "company": "Beispiel GmbH", "url": "https://e.example/2"})
+    con.commit()
+
+    # UNGROUPED on purpose: `list_job_groups` returns one row per company, so
+    # a grouped assertion would pass because the sibling represented the
+    # company — not because the filter hid anything.
+    working = next(v for v in jobs_page.VIEWS if v.key == "offen")
+    rows = db.list_jobs(con, status=working.status, limit=100,
+                        **working.filters)
+    assert repeat not in {r["id"] for r in rows}
+    # …and the company's window is long past, so it is THIS rule hiding it
+    assert other in {r["id"] for r in rows}
+    assert db.count_republication_jobs(con, "new") == 1
+
+    pile = next(v for v in jobs_page.VIEWS if v.key == "gleiche_stelle")
+    shown = db.list_jobs(con, status=pile.status, limit=100, **pile.filters)
+    assert {r["id"] for r in shown} == {repeat}, "the door has to open onto it"
+
+
+def test_the_republication_filter_agrees_with_the_rule_on_every_shape(
+        con, data_dir):
+    """`db.REPUBLICATION_SQL` is a SECOND implementation of
+    `identity.republication_of` — it runs where the paging and the counts do.
+    Pinned equal over a generated corpus rather than argued about."""
+    from jobdeck import attempts, db, identity
+    from jobdeck.dedupe import norm
+
+    firms = ["Müller GmbH", "MÜLLER  GmbH", "Müller AG", "a.b® GmbH", "a.b GmbH",
+             "", "   "]
+    titles = ["Python Dev", "python  dev ", "PYTHON DEV", "Senior Python Dev",
+              "", "   ", "Entwickler (m/w/d)"]
+    ledger = [("Müller GmbH", "Python Dev"), ("a.b® GmbH", "Entwickler (m/w/d)"),
+              ("Müller AG", ""), ("", "Python Dev")]
+    for firma, position in ledger:
+        bew = db.add_bewerbung(con, {"gesendet_am": "2026-01-05", "firma": firma,
+                                     "kanal": "E-Mail", "status": "Absage"})
+        con.execute(
+            "INSERT INTO application_attempts (idempotency_key, state, company,"
+            " company_key, position, channel, bewerbung_id, created_at, updated_at)"
+            " VALUES (?, 'recorded', ?, ?, ?, 'E-Mail', ?, '2026-01-05','2026-01-05')",
+            (f"bewerbung:{bew}", firma, norm(firma), position, bew))
+    for index, (firma, title) in enumerate([(f, t) for f in firms for t in titles]):
+        db.insert_job_if_new(con, {
+            "source": "stub", "external_id": f"r{index}", "title": title,
+            "company": firma, "url": f"https://e.example/{index}"})
+    con.commit()
+
+    applications = attempts.applications(con)
+    by_sql = {r[0] for r in con.execute(
+        f"SELECT id FROM jobs WHERE {db.REPUBLICATION_SQL}")}
+    by_rule = set()
+    for job in con.execute("SELECT * FROM jobs"):
+        key = norm(job["company"])
+        if not key:
+            continue
+        at_company = [a for a in applications if norm(a.company) == key]
+        if identity.republication_of(at_company, job["title"]) is not None:
+            by_rule.add(job["id"])
+
+    assert by_sql == by_rule, (
+        f"SQL-only: {sorted(by_sql - by_rule)}, rule-only: {sorted(by_rule - by_sql)}")
+    assert by_rule, "the corpus produced no matches — the check would be vacuous"
+    assert by_rule != {j[0] for j in con.execute("SELECT id FROM jobs")}, \
+        "everything matched — the check would pass on a filter that never hides"

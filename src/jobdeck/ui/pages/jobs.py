@@ -68,12 +68,14 @@ DESCRIPTION_LIMIT = 40_000
 # what it does with each pile. A screen that computed its filters in the handler
 # is a screen whose printed total can disagree with its own rows.
 _WORKING = {"mismatches": "exclude", "gone": "exclude", "applied": "exclude",
-            "old": "exclude", "hidden": "exclude"}
+            "old": "exclude", "hidden": "exclude",
+            "republication": "exclude"}
 # "Everything" still means everything he has not put out of sight: a hidden
 # company is his standing decision, not a property of the posting, so only the
 # view that exists to review those decisions asks for them.
 _EVERYTHING = {"mismatches": "include", "gone": "include", "applied": "include",
-               "old": "include", "hidden": "exclude"}
+               "old": "include", "hidden": "exclude",
+               "republication": "include"}
 
 
 @dataclass(frozen=True)
@@ -123,6 +125,10 @@ VIEWS = (
          "Keine Firma ist gerade zurückgestellt."),
     View("doppelt", "Doppelt", "duplicate", _EVERYTHING,
          "Keine Anzeige wurde als Doppelte einer Bewerbung erkannt."),
+    View("gleiche_stelle", "Gleiche Stelle", "new",
+         {**_EVERYTHING, "republication": "only"},
+         "Keine Anzeige wiederholt eine Stelle, auf die du dich schon "
+         "beworben hast."),
     # Nothing is deleted, only moved into a view with a name. This is that
     # view — and it is the only one that asks for hidden companies, so the
     # word "everything" everywhere else keeps meaning "everything you have not
@@ -230,6 +236,11 @@ def hidden_parts(view: View, counts: dict, stale_age_days: int,
          (f"älter als {stale_age_days} Tage", f"älter als {stale_age_days} Tage"),
          f"Anzeige älter als {stale_age_days} Tage",
          f"Anzeigen älter als {stale_age_days} Tage"),
+        ("republication", "republication", "gleiche_stelle",
+         ("auf eine Stelle, auf die du dich schon beworben hast",
+          "auf Stellen, auf die du dich schon beworben hast"),
+         "Anzeige wiederholt eine Stelle, auf die du dich schon beworben hast",
+         "Anzeigen wiederholen Stellen, auf die du dich schon beworben hast"),
         ("hidden", "hidden", "ausgeblendet",
          ("bei einer ausgeblendeten Firma", "bei ausgeblendeten Firmen"),
          "Anzeige bei einer ausgeblendeten Firma",
@@ -617,6 +628,7 @@ def _load_jobs(view_key: str, page: int, search: str = "",
                 "mismatches": db.count_mismatches(con, view.status),
                 "dead": db.count_gone_jobs(con, view.status),
                 "applied_firm": db.count_applied_firm_jobs(con, view.status),
+                "republication": db.count_republication_jobs(con, view.status),
                 "old": db.count_old_jobs(con, view.status, stale_age_days),
                 # What the landing view's own filter hides, counted in the same
                 # unit as the list it labels: the difference between this view

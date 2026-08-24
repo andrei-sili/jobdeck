@@ -154,6 +154,30 @@ def reopens_on(sent_on: object, window_days: int) -> str:
     return (day + datetime.timedelta(days=window_days)).isoformat()
 
 
+def republication_of(
+    at_company: list[Application], title: str
+) -> Application | None:
+    """The application this posting would be a second copy of, or None.
+
+    Separate from `decide` for the same reason `holds_company` is: the SQL
+    filter that decides whether a posting is LISTED asks exactly this, while
+    `decide` also weighs a window and a live reservation. Two questions, one
+    rule, so a differential test can pin the filter and the gate to the same
+    statement instead of to two that merely resemble each other.
+
+    Both titles must be non-empty. Two postings with no title are not the same
+    role, they are two rows that failed to store one — and an application whose
+    position is unknown may never be read as proof that a posting repeats it.
+    """
+    key = norm(title)
+    if not key:
+        return None
+    for application in at_company:
+        if norm(application.position) == key:
+            return application
+    return None
+
+
 def holds_company(
     at_company: list[Application],
     *,
@@ -207,7 +231,6 @@ def decide(
     now = today or datetime.date.today()
     company_key = norm(posting.company)
     email_key = norm(posting.contact_email)
-    title_key = norm(posting.title)
 
     # A blank company is missing information, not an employer — the same
     # reading `_COMPANY_KEY_SQL` already takes, where such a posting gets a key
@@ -222,15 +245,14 @@ def decide(
     # the employer's repost of it. `title_key` must be non-empty on both sides
     # — two postings with no title are not the same role, they are two rows
     # that failed to store one.
-    if title_key:
-        for application in at_company:
-            if norm(application.position) == title_key:
-                return Decision(
-                    verdict=BLOCKED_REPUBLICATION,
-                    application_id=application.id,
-                    position=application.position,
-                    sent_on=application.sent_on,
-                )
+    repeat = republication_of(at_company, posting.title)
+    if repeat is not None:
+        return Decision(
+            verdict=BLOCKED_REPUBLICATION,
+            application_id=repeat.id,
+            position=repeat.position,
+            sent_on=repeat.sent_on,
+        )
 
     for reservation in reservations:
         if norm(reservation.company) == company_key:

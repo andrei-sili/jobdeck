@@ -383,12 +383,17 @@ async def test_every_posting_is_still_reachable_from_the_screen(user: User, con,
                                                                 data_dir):
     """The rule this change could quietly break: nothing is ever deleted, so
     every posting has to be findable — and a view that is neither in the
-    control nor behind a number is a view he cannot open."""
+    control nor behind a number is a view he cannot open.
+
+    Every pile is given one posting on purpose: the question is whether each
+    view has a way in AT ALL, not whether it has one today. A pile added
+    without a door fails here, which is how the `gleiche_stelle` pile was
+    caught before it shipped."""
     reachable = set(jobs.MAIN_VIEW_KEYS)
     for view in jobs.VIEWS:
         parts = jobs.hidden_parts(
             view, {"mismatches": 1, "dead": 1, "applied_firm": 1, "old": 1,
-                   "hidden": 1, "read": 1}, 45)
+                   "hidden": 1, "read": 1, "republication": 1}, 45)
         reachable.update(p["view"] for p in parts if p["view"])
 
     missing = {v.key for v in jobs.VIEWS} - reachable

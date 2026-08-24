@@ -669,6 +669,37 @@ def applied_firm_params(con: sqlite3.Connection) -> tuple[str]:
     return (held_since,)
 
 
+# The same position at the same company as an application already in the
+# ledger — the employer's repost of the very advert that produced it, or an
+# identical opening. It can never become a second application, so it leaves the
+# working list on the same terms as a score-0 mismatch: counted beneath the
+# list, one click away, never deleted. Unlike the cooling-off pile it never
+# comes back, because waiting changes nothing about it.
+#
+# The SQL mirror of `identity.republication_of`, pinned equal to it by a
+# differential test. Both sides require a non-empty company AND a non-empty
+# position: two rows that failed to store a title are not the same role.
+#
+# Those two emptiness checks are REDUNDANT with each other, deliberately, and
+# a mutation of either one alone survives the suite: an empty title cannot
+# equal a non-empty position, and vice versa. Removing BOTH does change the
+# answer, and the differential test catches that. Defence in depth, not a hole
+# in the tests — the same shape as the two guards in `resolve_email`.
+#
+# One composite key rather than a correlated EXISTS, for the reason the filter
+# above gives — a correlated form calls the `jd_norm` Python callback once per
+# (posting, application) pair. `char(31)` is the unit separator, which `norm`
+# cannot leave in a value: it collapses every whitespace run to a space and
+# drops the invisible categories, so no company name and no title can carry
+# one and fake a match across the join.
+REPUBLICATION_SQL = """(
+    jd_norm(jobs.company) <> '' AND jd_norm(jobs.title) <> ''
+    AND jd_norm(jobs.company) || char(31) || jd_norm(jobs.title) IN (
+        SELECT jd_norm(b.firma) || char(31) || jd_norm(a.position)
+          FROM application_attempts a
+          JOIN bewerbungen b ON b.id = a.bewerbung_id
+         WHERE a.position <> '' AND jd_norm(b.firma) <> ''))"""
+
 # A posting at a company he has hidden. Written as an UNCORRELATED IN, like
 # the gate above and for the same measured reason: the natural EXISTS form
 # calls the jd_norm Python callback once per (posting, company) pair, which
@@ -731,7 +762,7 @@ def _job_filters(
     bookmarked: str = "include", opened: str = "include",
     in_progress: str = "include", search: str = "",
     keep_ids: tuple[int, ...] = (), hidden: str = "include",
-    min_score: int = 0,
+    min_score: int = 0, republication: str = "include",
 ) -> tuple[list[str], list]:
     """WHERE fragments + bound values shared by the list and the count, so a
     page can never be filtered differently from the total printed beside it.
@@ -746,7 +777,8 @@ def _job_filters(
     for name, value in (("mismatches", mismatches), ("gone", gone),
                         ("applied", applied), ("old", old),
                         ("bookmarked", bookmarked), ("opened", opened),
-                        ("in_progress", in_progress), ("hidden", hidden)):
+                        ("in_progress", in_progress), ("hidden", hidden),
+                        ("republication", republication)):
         if value not in ("include", "exclude", "only"):
             raise ValueError(f"{name}={value!r}: expected include/exclude/only")
     where, params = [], []
@@ -767,6 +799,14 @@ def _job_filters(
     elif applied == "only":
         where.append(APPLIED_FIRM_SQL)
         params.extend(applied_firm_params(con))
+    # Its own pile, not folded into the one above: that one is a company held
+    # back until a day it names, this one is a position that is finished. A
+    # single count covering both would print "zurückgestellt" over rows that
+    # are never coming back.
+    if republication == "exclude":
+        where.append(f"NOT ({REPUBLICATION_SQL})")
+    elif republication == "only":
+        where.append(REPUBLICATION_SQL)
     # His decision, not a fact about the posting — but unlike "kein Interesse"
     # it is about the COMPANY, so it keeps reaching postings that did not exist
     # when he pressed. That is the whole point: he pressed three times on one
@@ -937,6 +977,7 @@ def list_job_groups(
     search: str = "",
     keep_ids: tuple[int, ...] = (),
     hidden: str = "include",
+    republication: str = "include",
     min_score: int = 0,
     sort: str = DEFAULT_LIST_ORDER,
     offset: int = 0,
@@ -952,7 +993,7 @@ def list_job_groups(
     where, params = _job_filters(con, status, mismatches, gone, applied, old,
                                  stale_age_days, bookmarked, opened,
                                  in_progress, search, keep_ids, hidden,
-                                 min_score)
+                                 min_score, republication)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     order = list_order_sql(sort, grouped=True)
     return con.execute(
@@ -977,6 +1018,7 @@ def count_job_groups(
     search: str = "",
     keep_ids: tuple[int, ...] = (),
     hidden: str = "include",
+    republication: str = "include",
     min_score: int = 0,
     sort: str = DEFAULT_LIST_ORDER,
 ) -> int:
@@ -984,7 +1026,7 @@ def count_job_groups(
     where, params = _job_filters(con, status, mismatches, gone, applied, old,
                                  stale_age_days, bookmarked, opened,
                                  in_progress, search, keep_ids, hidden,
-                                 min_score)
+                                 min_score, republication)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     return con.execute(
         f"{_ranked_jobs_cte(where_sql)}"
@@ -1011,6 +1053,7 @@ def list_company_siblings(
     search: str = "",
     keep_ids: tuple[int, ...] = (),
     hidden: str = "include",
+    republication: str = "include",
     min_score: int = 0,
     sort: str = DEFAULT_LIST_ORDER,
     per_company: int = SIBLINGS_PER_COMPANY,
@@ -1026,7 +1069,7 @@ def list_company_siblings(
     where, params = _job_filters(con, status, mismatches, gone, applied, old,
                                  stale_age_days, bookmarked, opened,
                                  in_progress, search, keep_ids, hidden,
-                                 min_score)
+                                 min_score, republication)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     placeholders = ",".join("?" * len(company_keys))
     return con.execute(
@@ -1053,6 +1096,7 @@ def count_jobs(
     search: str = "",
     keep_ids: tuple[int, ...] = (),
     hidden: str = "include",
+    republication: str = "include",
     min_score: int = 0,
     sort: str = DEFAULT_LIST_ORDER,
 ) -> int:
@@ -1061,7 +1105,7 @@ def count_jobs(
     where, params = _job_filters(con, status, mismatches, gone, applied, old,
                                  stale_age_days, bookmarked, opened,
                                  in_progress, search, keep_ids, hidden,
-                                 min_score)
+                                 min_score, republication)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     return con.execute(
         f"SELECT COUNT(*) FROM jobs{where_sql}", params
@@ -1083,6 +1127,7 @@ def list_jobs(
     search: str = "",
     keep_ids: tuple[int, ...] = (),
     hidden: str = "include",
+    republication: str = "include",
     min_score: int = 0,
     sort: str = DEFAULT_LIST_ORDER,
     offset: int = 0,
@@ -1095,7 +1140,7 @@ def list_jobs(
     where, params = _job_filters(con, status, mismatches, gone, applied, old,
                                  stale_age_days, bookmarked, opened,
                                  in_progress, search, keep_ids, hidden,
-                                 min_score)
+                                 min_score, republication)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     # The age-adjusted score is SELECTED as well as ordered on, so the number
     # the UI prints is the very number that decided the row's position — two
@@ -1637,6 +1682,18 @@ def count_drafts_created_today(con: sqlite3.Connection) -> int:
 def count_gone_jobs(con: sqlite3.Connection, status: str | None = None) -> int:
     """How many postings the liveness filter would hide for this inbox view."""
     sql = f"SELECT COUNT(*) FROM jobs WHERE {GONE_SQL}"
+    params: tuple = ()
+    if status:
+        sql += " AND status=?"
+        params = (status,)
+    return con.execute(sql, params).fetchone()[0]
+
+
+def count_republication_jobs(
+    con: sqlite3.Connection, status: str | None = None
+) -> int:
+    """How many postings repeat a position that already has an application."""
+    sql = f"SELECT COUNT(*) FROM jobs WHERE {REPUBLICATION_SQL}"
     params: tuple = ()
     if status:
         sql += " AND status=?"

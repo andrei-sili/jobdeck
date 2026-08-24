@@ -135,9 +135,10 @@ Discovery applies the same decision: only a permanent refusal stores a posting
 as `duplicate`, while a company merely inside its window is stored as `new` and
 hidden by the read-time filter, so waiting the window out returns it.
 
-A republication already stored before its application was made stays visible in
-the working list once the company's window passes, with every action refused
-and the reason stated. On a real corpus this affects no posting today. A
+A posting that repeats a position an application already exists for leaves the
+working list whether or not it was stored before that application. It is
+counted beneath the list and reachable through its own view, like every other
+pile, and unlike the cooling-off pile it never returns. A
 shared contact address is carried on the decision as corroborating evidence and
 never refuses on its own.
 
