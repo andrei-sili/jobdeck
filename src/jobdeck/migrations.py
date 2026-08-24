@@ -10,8 +10,9 @@ import pathlib
 import sqlite3
 
 from jobdeck import constants, dates
+from jobdeck.dedupe import norm
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 # Legacy table, exactly as the previous tracker created it.
 BEWERBUNGEN_SQL = """
@@ -198,6 +199,52 @@ CREATE TABLE IF NOT EXISTS claims (
 -- rows PRESENT, so releasing the newest hidden company and hiding another
 -- lands on the same number — the exact pair the undo bar produces, and the
 -- screen would stay pruned.
+-- One attempt to apply for one posting (schema v14). The table the identity
+-- policy is enforced on, and deliberately NOT a column on `bewerbungen`: the
+-- legacy ledger keeps its exact shape, so a rollback is "stop reading this
+-- table" rather than a migration back.
+--
+-- `idempotency_key` is the integrity boundary, not the process-local lock that
+-- guarded this before. A reservation inserted inside BEGIN IMMEDIATE is
+-- visible to every other connection the moment it commits, so the e-mail path
+-- holding one is seen by the form path — which is precisely the window a
+-- Gmail call leaves open today, and long enough to have produced two
+-- applications at one company.
+--
+-- `state` is one of:
+--   reserved  a path is mid-flight and nothing else may claim this posting;
+--   recorded  an application exists, and `bewerbung_id` points at it;
+--   released  the attempt ended without an application. Kept, not deleted,
+--             because "he started here and stopped" is evidence too, and a
+--             deleted row cannot explain why a key was once taken.
+--
+-- `company_key` is stored rather than derived at read time. `jd_norm` is a
+-- Python callback, and the measured cost of making SQLite call it once per
+-- (posting, application) pair was 330 ms against 6 ms — paid on every page.
+--
+-- `position` is empty when the ledger cannot say which role was applied for.
+-- Empty means UNKNOWN and never "no position": the decision module may not
+-- read it as proof that a posting is a different role.
+CREATE TABLE IF NOT EXISTS application_attempts (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    idempotency_key       TEXT NOT NULL UNIQUE,
+    state                 TEXT NOT NULL,
+    company               TEXT NOT NULL DEFAULT '',
+    company_key           TEXT NOT NULL DEFAULT '',
+    position              TEXT NOT NULL DEFAULT '',
+    channel               TEXT NOT NULL DEFAULT '',
+    job_id                INTEGER REFERENCES jobs(id),
+    bewerbung_id          INTEGER REFERENCES bewerbungen(id),
+    override_confirmed_at TEXT NOT NULL DEFAULT '',
+    override_evidence     TEXT NOT NULL DEFAULT '',
+    created_at            TEXT NOT NULL,
+    updated_at            TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_attempts_state ON application_attempts(state);
+CREATE INDEX IF NOT EXISTS idx_attempts_company ON application_attempts(company_key);
+CREATE INDEX IF NOT EXISTS idx_attempts_bewerbung
+    ON application_attempts(bewerbung_id);
+
 CREATE TABLE IF NOT EXISTS hidden_companies (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     company_key TEXT NOT NULL UNIQUE,
@@ -528,6 +575,83 @@ def _ensure_draft_columns(con: sqlite3.Connection) -> None:
         )
 
 
+def _attempt_records_for_existing_applications(con: sqlite3.Connection) -> None:
+    """Give every application already in the ledger the attempt that made it.
+
+    ONCE, at the upgrade to v14. Running it on every start would re-create a
+    row for an attempt deliberately released, and would fight the live writers
+    for the same key.
+
+    The position comes from the posting that became the application, which is
+    the only place it was ever recorded — `bewerbungen` has no such column and
+    is not being given one. Where no posting is linked the position stays
+    empty, which the decision module reads as UNKNOWN rather than as proof of
+    a different role: on his corpus that is 44 of 131 rows, and guessing for
+    them would put words in the ledger's mouth.
+
+    The key prefers the posting, so a later attempt for that same posting
+    meets this row and is refused by the UNIQUE constraint rather than
+    creating a second application for it. MIN(id) makes the choice
+    deterministic if a database somehow links two postings to one
+    application — his links exactly one each, verified before writing this.
+
+    `company_key` is folded HERE, in Python, by the same `norm` the gate and
+    the grouping use. Calling SQLite's `jd_norm` instead would read well and
+    be wrong twice: `migrate` also runs on connections that never registered
+    it, and a second folding rule is exactly the drift that lets a filter
+    disagree with the gate it mirrors.
+    """
+    # A hand-built legacy `jobs` table can predate the link column. Then no
+    # application HAS a linked posting, so every attempt is keyed by its
+    # ledger row and its position stays unknown — which is the truth for such
+    # a database, not a fallback. Two whole statements rather than one built
+    # from fragments: this file's rule is that SQL is never assembled, and a
+    # structural exception is how that rule starts eroding.
+    LEDGER_SQL = """
+        SELECT b.id, COALESCE(b.firma, '') AS firma,
+               COALESCE(b.kanal, '') AS kanal,
+               COALESCE(b.created_at, b.gesendet_am, '') AS at,
+               (SELECT MIN(j.id) FROM jobs j WHERE j.bewerbung_id = b.id) AS job_id,
+               (SELECT j.title FROM jobs j WHERE j.bewerbung_id = b.id
+                 ORDER BY j.id LIMIT 1) AS title
+          FROM bewerbungen b
+    """
+    UNLINKED_LEDGER_SQL = """
+        SELECT b.id, COALESCE(b.firma, '') AS firma,
+               COALESCE(b.kanal, '') AS kanal,
+               COALESCE(b.created_at, b.gesendet_am, '') AS at,
+               NULL AS job_id, NULL AS title
+          FROM bewerbungen b
+    """
+    linked = any(
+        row[1] == "bewerbung_id" for row in con.execute("PRAGMA table_info(jobs)")
+    )
+    rows = con.execute(LEDGER_SQL if linked else UNLINKED_LEDGER_SQL).fetchall()
+    con.executemany(
+        """
+        INSERT OR IGNORE INTO application_attempts (
+            idempotency_key, state, company, company_key, position, channel,
+            job_id, bewerbung_id, created_at, updated_at)
+        VALUES (?, 'recorded', ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                f"job:{row['job_id']}" if row["job_id"] is not None
+                else f"bewerbung:{row['id']}",
+                row["firma"],
+                norm(row["firma"]),
+                row["title"] or "",
+                row["kanal"],
+                row["job_id"],
+                row["id"],
+                row["at"],
+                row["at"],
+            )
+            for row in rows
+        ],
+    )
+
+
 def migrate(con: sqlite3.Connection) -> None:
     """Bring the database to the current schema. Safe to run repeatedly."""
     version = con.execute("PRAGMA user_version").fetchone()[0]
@@ -545,6 +669,8 @@ def migrate(con: sqlite3.Connection) -> None:
     _ensure_email_log_columns(con)
     _backfill_published_on(con)
     _backfill_application_documents(con)
+    if version < 14:
+        _attempt_records_for_existing_applications(con)
     if version < 11:
         # ONCE, at the upgrade — see the function's own docstring: 'ready' is a
         # state a draft returns to, so a backfill that ran every start would
