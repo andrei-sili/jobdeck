@@ -1,0 +1,219 @@
+"""Whether an application may be made for a posting, and why not.
+
+One decision point, consulted by every path that can create an application —
+the e-mail send, the form recorder, the manual entry — and by the screens that
+have to explain themselves. Two copies of this rule would let a screen say one
+thing while the gate does another, which is the failure this module exists to
+make impossible.
+
+The policy is `docs/adr/0010-company-cooling-off-window.md`, which supersedes
+the "warn and confirm on another position" arm of ADR 0002. In short:
+
+* a republication of a posting that already became an application is blocked
+  for good — applying twice to the same position is a mistake no window makes
+  reasonable;
+* any other posting at a company written to inside the cooling-off window is
+  held back until the window passes, then returns on its own;
+* a shared contact address is corroborating evidence and never an identity of
+  its own, so it can annotate a decision but never make one.
+
+The module is pure: plain records in, one decision out. It holds no SQL and no
+wording, so the identity corpus can drive it directly and both the SQLite
+filter and the UI can be checked against the same answers.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import datetime
+
+from jobdeck.dedupe import norm
+
+# Nothing known about this company stands in the way.
+ALLOW = "allow"
+# The same position at the same company already went out. Permanent: the
+# window is about not crowding an employer, not about forgetting what was
+# sent.
+BLOCKED_REPUBLICATION = "blocked_republication"
+# An application to this company is recent enough that another one now would
+# arrive on top of it. Temporary, and the decision carries the day it lifts.
+COOLING_OFF = "cooling_off"
+# Another path is mid-flight for this company right now. Not a policy verdict
+# at all — a live reservation, held only for the seconds a provider call takes.
+RESERVED = "reserved"
+
+# 0 switches the window off entirely, the same way `silence_closes_after_days`
+# does, and so does any value below it: a hand-edited negative means "stop
+# holding companies back" far more plausibly than it means any number of days.
+# Nothing is transmitted by a posting becoming visible, so the widening this
+# allows is a listing, never a send.
+WINDOW_OFF = 0
+
+
+@dataclasses.dataclass(frozen=True)
+class Application:
+    """One row of the ledger, as identity needs to see it.
+
+    `position` is empty when the ledger cannot say which role was applied
+    for — 44 of his 131 rows, because they were recorded by hand or their
+    posting is gone. Empty means UNKNOWN, never "no position": a decision may
+    not treat it as proof that this is a different role.
+    """
+
+    id: int
+    company: str
+    email: str = ""
+    position: str = ""
+    sent_on: str = ""
+
+
+@dataclasses.dataclass(frozen=True)
+class Reservation:
+    """A live claim on a company, held by whichever path is mid-flight."""
+
+    key: str
+    company: str
+    channel: str = ""
+    job_id: int | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class Posting:
+    """The posting being judged."""
+
+    company: str
+    title: str = ""
+    contact_email: str = ""
+    job_id: int | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class Decision:
+    """A verdict that carries the evidence it was reached on.
+
+    ADR 0002 requires identity decisions to retain evidence and confidence,
+    so a screen can say WHICH application stands in the way and WHEN it stops
+    doing so rather than only that something does.
+    """
+
+    verdict: str
+    application_id: int | None = None
+    position: str = ""
+    sent_on: str = ""
+    reopens_on: str = ""
+    reservation_key: str = ""
+    corroborating_email: bool = False
+
+    @property
+    def allowed(self) -> bool:
+        return self.verdict == ALLOW
+
+    @property
+    def permanent(self) -> bool:
+        """True when waiting cannot change the answer."""
+        return self.verdict == BLOCKED_REPUBLICATION
+
+
+def _date(raw: object) -> datetime.date | None:
+    try:
+        return datetime.date.fromisoformat(str(raw or "")[:10])
+    except ValueError:
+        return None
+
+
+def reopens_on(sent_on: object, window_days: int) -> str:
+    """The first day a company written to on `sent_on` is offered again.
+
+    Empty when the ledger row carries no usable date. That is not cosmetic:
+    an undated application cannot prove its window has passed, so the caller
+    must keep holding the company back rather than assume it is free.
+    """
+    day = _date(sent_on)
+    if day is None or window_days <= WINDOW_OFF:
+        return ""
+    return (day + datetime.timedelta(days=window_days)).isoformat()
+
+
+def decide(
+    posting: Posting,
+    applications: list[Application],
+    reservations: list[Reservation] = (),
+    *,
+    window_days: int,
+    today: datetime.date | None = None,
+) -> Decision:
+    """Judge one posting against the ledger and the live reservations.
+
+    Order matters and is not arbitrary. A republication is checked first
+    because it is the only permanent answer, so a company that is also inside
+    its window must still be told the honest reason. Reservations come next:
+    they are about this instant rather than about policy, and a caller holding
+    one must not be told a story about days. The window is last.
+    """
+    now = today or datetime.date.today()
+    company_key = norm(posting.company)
+    email_key = norm(posting.contact_email)
+    title_key = norm(posting.title)
+
+    # A blank company is missing information, not an employer — the same
+    # reading `_COMPANY_KEY_SQL` already takes, where such a posting gets a key
+    # of its own. Without this every unnamed posting would collide with every
+    # other one and with any ledger row whose company failed to store.
+    if not company_key:
+        return Decision(verdict=ALLOW)
+
+    at_company = [a for a in applications if norm(a.company) == company_key]
+
+    # Same company AND same position: this posting is the one already sent, or
+    # the employer's repost of it. `title_key` must be non-empty on both sides
+    # — two postings with no title are not the same role, they are two rows
+    # that failed to store one.
+    if title_key:
+        for application in at_company:
+            if norm(application.position) == title_key:
+                return Decision(
+                    verdict=BLOCKED_REPUBLICATION,
+                    application_id=application.id,
+                    position=application.position,
+                    sent_on=application.sent_on,
+                )
+
+    for reservation in reservations:
+        if norm(reservation.company) == company_key:
+            return Decision(
+                verdict=RESERVED, reservation_key=reservation.key
+            )
+
+    # An address shared with a ledger row is worth showing — an ATS mailbox
+    # serving two employers, a recruiter fronting for one — but ADR 0002 is
+    # explicit that it can never be the identity itself. It rides along on the
+    # decision and changes no verdict.
+    corroborating = bool(
+        email_key
+        and any(
+            norm(a.email) == email_key
+            for a in applications
+            if norm(a.company) != company_key
+        )
+    )
+
+    if window_days > WINDOW_OFF and at_company:
+        # The most recent application decides: an older one at the same
+        # company has already been superseded by it, and the window is about
+        # how long ago he last wrote there.
+        newest = max(at_company, key=lambda a: (str(a.sent_on or ""), a.id))
+        opens = reopens_on(newest.sent_on, window_days)
+        # No usable date means the window cannot be proven to have passed. Held
+        # back, with an empty `reopens_on` so the screen says so instead of
+        # printing a day it invented.
+        if not opens or _date(opens) > now:
+            return Decision(
+                verdict=COOLING_OFF,
+                application_id=newest.id,
+                position=newest.position,
+                sent_on=newest.sent_on,
+                reopens_on=opens,
+                corroborating_email=corroborating,
+            )
+
+    return Decision(verdict=ALLOW, corroborating_email=corroborating)
