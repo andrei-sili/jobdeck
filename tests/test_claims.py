@@ -460,3 +460,85 @@ def test_the_screen_signature_sees_a_claim_change_family(con):
     con.commit()
 
     assert db.claims_signature(con) != before
+
+
+# ---------------------------------------------------------------------------
+# What the register does not yet hold
+# ---------------------------------------------------------------------------
+PROFILE = """\
+# Profil — Beispiel
+## Basisdaten
+Wohnort, Telefon
+## Technische Kenntnisse
+Python, Django
+### Vertiefung
+Mehr davon
+## Zertifikate
+Ein Zertifikat
+"""
+
+
+def test_the_sections_are_read_in_the_order_he_wrote_them():
+    assert claims.profile_sections(PROFILE) == [
+        "Profil — Beispiel", "Basisdaten", "Technische Kenntnisse",
+        "Vertiefung", "Zertifikate"]
+
+
+def test_two_sections_with_one_name_collapse():
+    """A provenance string carries the NAME, so two sections sharing one
+    cannot be told apart by it — counting them separately would report a
+    coverage gap nothing could ever close."""
+    assert claims.profile_sections(
+        "## Zertifikate\na\n## zertifikate\nb\n") == ["Zertifikate"]
+
+
+def test_a_file_without_headings_has_nothing_to_measure():
+    assert claims.profile_sections("nur Fließtext\nund noch eine Zeile") == []
+    assert claims.profile_sections("") == []
+
+
+def _row(source_ref, state="confirmed"):
+    return {"source_ref": source_ref, "state": state}
+
+
+def test_only_a_confirmed_fact_stands_for_a_section():
+    """A proposal standing for a section would make the register look ready
+    the moment it was read — the one moment nobody has checked it."""
+    sections = claims.profile_sections(PROFILE)
+    view = claims.coverage(sections, [
+        _row("Technische Kenntnisse"),
+        _row("Zertifikate", state="proposed"),
+        _row("Basisdaten", state="rejected"),
+    ])
+    assert view["sections"] == 5
+    assert view["covered"] == 1
+    assert view["missing"] == ["Profil — Beispiel", "Basisdaten",
+                               "Vertiefung", "Zertifikate"]
+
+
+def test_a_section_is_matched_the_way_the_register_folds_everything_else():
+    view = claims.coverage(["Technische Kenntnisse"],
+                           [_row("  technische   kenntnisse ")])
+    assert view["missing"] == []
+    assert view["covered"] == 1
+
+
+def test_a_hand_typed_fact_stands_for_no_section():
+    """It has no provenance to point with, and an empty string must not
+    silently match the first section."""
+    view = claims.coverage(["Basisdaten", "Zertifikate"], [_row("")])
+    assert view["covered"] == 0
+    assert view["missing"] == ["Basisdaten", "Zertifikate"]
+
+
+def test_an_unreadable_profile_reads_as_empty_not_as_a_crash(data_dir):
+    """The Unterlagen screen measures this file on every render. A directory
+    left in its place — or a mode that stops it being read — would blank a
+    whole page rather than be reported, which is the shape that once took
+    every screen down at once."""
+    from jobdeck import config
+    from jobdeck.ai import profile as ai_profile
+
+    config.PROFILE_PATH.mkdir(parents=True, exist_ok=True)
+    assert ai_profile.load_profile() == ""
+    assert claims.profile_sections(ai_profile.load_profile()) == []

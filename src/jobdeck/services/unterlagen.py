@@ -226,6 +226,10 @@ def signature(con, job_id: int | None) -> tuple:
         # CONTENTS are facts on disk that no table and no setting can see.
         _file_fingerprint(config.user_path(template)),
         _file_fingerprint(specimen_path()),
+        # The same reasoning, for the file the coverage line measures: he
+        # edits profile.md outside this app, and the screen would go on
+        # naming sections he had renamed or filled.
+        _file_fingerprint(config.PROFILE_PATH),
     )
 
 

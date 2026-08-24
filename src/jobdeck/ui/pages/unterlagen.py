@@ -19,6 +19,7 @@ from nicegui import app, run, ui
 
 from jobdeck import claims as claims_lib
 from jobdeck import config, db, freshness
+from jobdeck.ai import profile as ai_profile
 from jobdeck.services import anlagen as anlagen_service
 from jobdeck.services import claims as claims_service
 from jobdeck.services import polling
@@ -83,10 +84,13 @@ def _load() -> dict:
              "provenance": claims_lib.provenance(row)}
             for row in db.list_claims(con)
         ]
+        coverage = claims_lib.coverage(
+            claims_lib.profile_sections(ai_profile.load_profile()), register)
         profiles = [dict(row) for row in db.list_profiles(con)]
         global_tags = db.get_setting(con, "global_hard_tags", "")
         stale_age = db.get_setting(con, "stale_age_days", "")
     return {"signature": signature, "mappe": mappe_view, "claims": register,
+            "coverage": coverage,
             "letters": len(letters), "profiles": profiles,
             "global_hard_tags": global_tags, "stale_age_days": stale_age}
 
@@ -739,7 +743,25 @@ async def unterlagen_page():
                                    "color=negative") \
                             .mark("delete-claim")
 
-        def draw_claims(register: list[dict], letters: int) -> None:
+        def draw_coverage(view: dict) -> None:
+            """What a letter drawing only on confirmed facts could not say.
+
+            The register is not the factual boundary yet, and this is the
+            measurement that decides when it may become one. A section of his
+            profile that nothing confirmed stands for is a part of himself
+            that would silently drop out on the day the boundary moves.
+            """
+            total, covered = view["sections"], view["covered"]
+            if not total:
+                return
+            ui.label(f"{covered} von {total} Abschnitten deiner profile.md "
+                     "sind im Register vertreten.").classes("jd-card-sub")
+            if view["missing"]:
+                ui.label("Noch nichts bestätigt aus: "
+                         + " · ".join(view["missing"])).classes("jd-card-sub")
+
+        def draw_claims(register: list[dict], letters: int,
+                        coverage: dict) -> None:
             waiting = [c for c in register if c["state"] == "proposed"]
             settled = [c for c in register if c["state"] == "confirmed"]
             with ui.column().classes("jd-card gap-3"):
@@ -793,6 +815,7 @@ async def unterlagen_page():
                          "Briefe wirklich behauptet haben. Was die KI "
                          "behaupten DARF, steht weiterhin in profile.md.") \
                     .classes("jd-card-sub")
+                draw_coverage(coverage)
 
         # ------------------------------------------------------------------
         # 4. The search profile
@@ -989,7 +1012,8 @@ async def unterlagen_page():
                          "bauen darf.").classes("jd-card-sub")
                 draw_mappe(view["mappe"])
                 draw_preview(view["mappe"])
-                draw_claims(view["claims"], view["letters"])
+                draw_claims(view["claims"], view["letters"],
+                            view["coverage"])
                 draw_profiles(view)
 
         with header:

@@ -134,6 +134,61 @@ def provenance(claim) -> str:
     return f"aus profile.md · {section}" if section else "aus profile.md"
 
 
+# ---------------------------------------------------------------------------
+# What the register does NOT yet hold
+# ---------------------------------------------------------------------------
+def _section_key(name: object) -> str:
+    """How two section names are compared: folded, and whitespace collapsed.
+
+    `fold` alone leaves runs of spaces intact, and the provenance string is
+    copied out of the file by a model — a doubled space between two words
+    would report a gap that does not exist, which is the one direction this
+    measurement must not be wrong in.
+    """
+    return " ".join(fold(str(name or "")).split())
+
+
+def profile_sections(text: str) -> list[str]:
+    """The headings of profile.md, in file order, without their '#'.
+
+    The section is the unit because it is the unit HE wrote in, and it is
+    what a claim's provenance names. Duplicated headings collapse: two
+    sections with one name cannot be told apart by a provenance string that
+    only carries the name.
+    """
+    seen: set[str] = set()
+    headings = []
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("#"):
+            continue
+        heading = stripped.lstrip("#").strip()
+        if heading and _section_key(heading) not in seen:
+            seen.add(_section_key(heading))
+            headings.append(heading)
+    return headings
+
+
+def coverage(sections: list[str], rows) -> dict:
+    """Which parts of the profile a confirmed fact already stands for.
+
+    This is the measurement that decides WHEN the register may replace
+    profile.md as the factual boundary, rather than a guess that it is ready.
+    A section nothing confirmed points at is a part of himself that a letter
+    drawing only on confirmed facts would not be able to mention.
+
+    Only confirmed rows count. A proposal standing for a section would make
+    the register look ready the moment it was read, which is the one moment
+    nobody has checked it.
+    """
+    covered = {_section_key(row["source_ref"]) for row in rows
+               if normalise_state(row["state"]) == "confirmed"}
+    covered.discard("")
+    missing = [name for name in sections if _section_key(name) not in covered]
+    return {"sections": len(sections), "covered": len(sections) - len(missing),
+            "missing": missing}
+
+
 # Where a claim's match terms may be separated. A term may contain spaces
 # ("Spring Boot"), so a space is deliberately NOT a separator.
 _TERM_SEPARATORS = (",", "\n", ";")

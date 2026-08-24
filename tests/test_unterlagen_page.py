@@ -284,6 +284,45 @@ async def test_a_permission_with_no_terms_says_it_cannot_be_counted(
     await user.should_see("nicht zählbar")
 
 
+async def test_the_screen_names_what_the_register_does_not_yet_stand_for(
+        user: User, con, data_dir):
+    """The measurement that decides when the register may replace profile.md
+    as the factual boundary. A section nothing confirmed stands for is a part
+    of himself a letter drawing only on confirmed facts would drop."""
+    from jobdeck import config
+    _posting(con)
+    config.PROFILE_PATH.write_text(
+        "## Technische Kenntnisse\nPython\n## Zertifikate\nEins\n",
+        encoding="utf-8")
+    db.add_claim(con, {"fact": "Python", "binding": "Eigenprojekt",
+                       "terms": "Python", "state": "confirmed",
+                       "source": "profile_md",
+                       "source_ref": "Technische Kenntnisse"})
+    con.commit()
+
+    await user.open("/unterlagen")
+
+    await user.should_see("1 von 2 Abschnitten")
+    await user.should_see("Noch nichts bestätigt aus: Zertifikate")
+
+
+async def test_a_proposal_does_not_stand_for_a_section(user: User, con,
+                                                       data_dir):
+    """Otherwise the register looks ready the moment it is read — the one
+    moment nobody has checked it."""
+    from jobdeck import config
+    _posting(con)
+    config.PROFILE_PATH.write_text("## Zertifikate\nEins\n", encoding="utf-8")
+    db.add_claim(con, {"fact": "IHK", "binding": "", "source": "profile_md",
+                       "source_ref": "Zertifikate"})
+    con.commit()
+
+    await user.open("/unterlagen")
+
+    await user.should_see("0 von 1 Abschnitten")
+    await user.should_see("Noch nichts bestätigt aus: Zertifikate")
+
+
 async def test_the_register_says_it_does_not_yet_constrain_the_prompt(
         user: User, con, data_dir):
     """The mirror-first decision, pinned. The drafting prompt still reads
