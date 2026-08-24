@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from jobdeck import config, db, gmail
+from jobdeck import attempts, config, db, gmail
 from jobdeck.services import send
 
 TEST_INBOX = "inbox@test.example"
@@ -303,8 +303,8 @@ def test_claim_applies_the_duplicate_gate_to_the_mode_it_resolved(
     con, data_dir, tmp_path
 ):
     """A test→real flip inside the claim window must not slip past the
-    duplicate-company gate: the mode and everything it decides are one
-    atomic decision."""
+    identity gate: the mode and everything it decides are one atomic
+    decision."""
     job_id = _insert_job(con)
     _ready_draft(con, job_id, pdf_path=_pdf(tmp_path))
     db.add_bewerbung(con, {"firma": "Firma GmbH", "email": "hr@firma.de",
@@ -313,7 +313,7 @@ def test_claim_applies_the_duplicate_gate_to_the_mode_it_resolved(
     snapshot = dict(db.get_draft_by_job(con, job_id))
 
     error, _, _ = send._claim(job_id, snapshot, None)
-    assert "already applied at this company" in error
+    assert "applied at this company recently" in error
     assert db.get_draft_by_job(con, job_id)["status"] == "ready"
 
     # the same draft is still rehearsable — a test send is not an application
@@ -333,7 +333,7 @@ async def test_duplicate_company_blocks_real_send_only(
 
     _settings(con, real_send_enabled="1")
     result = await send.send_draft(job_id)
-    assert not result["ok"] and "already applied" in result["error"]
+    assert not result["ok"] and "applied at this company recently" in result["error"]
 
     _settings(con, real_send_enabled="0", test_recipient=TEST_INBOX)
     result = await send.send_draft(job_id)  # test sends don't care
@@ -855,3 +855,174 @@ async def test_a_staffing_firm_s_application_records_no_borrowed_address(
     draft = db.get_draft_by_job(con, job_id)
     bewerbung = db.get_bewerbung(con, draft["bewerbung_id"])
     assert (bewerbung["strasse"], bewerbung["plz_ort"]) == ("", "")
+
+
+# -- the identity gate on the send path ---------------------------------------
+async def test_the_company_opens_again_once_the_window_has_passed(
+    con, gmail_connected, sent_messages, tmp_path
+):
+    """His rule: an employer written to recently is left alone, and then the
+    hold lifts on its own instead of lasting for ever."""
+    import datetime
+
+    job_id = _insert_job(con)
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path))
+    long_ago = (datetime.date.today() - datetime.timedelta(days=61)).isoformat()
+    db.add_bewerbung(con, {"firma": "Firma GmbH", "email": "hr@firma.de",
+                           "gesendet_am": long_ago, "status": "Absage"})
+    con.commit()
+    _settings(con, real_send_enabled="1")
+
+    result = await send.send_draft(job_id)
+
+    assert result["ok"], result["error"]
+
+
+async def test_a_recent_application_names_the_day_the_company_reopens(
+    con, gmail_connected, tmp_path, monkeypatch
+):
+    import datetime
+
+    monkeypatch.setattr(gmail, "send_message", _must_not_send)
+    job_id = _insert_job(con)
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path))
+    recent = (datetime.date.today() - datetime.timedelta(days=10)).isoformat()
+    db.add_bewerbung(con, {"firma": "Firma GmbH", "email": "hr@firma.de",
+                           "gesendet_am": recent, "status": "Gesendet"})
+    con.commit()
+    _settings(con, real_send_enabled="1")
+
+    result = await send.send_draft(job_id)
+
+    reopens = (datetime.date.fromisoformat(recent)
+               + datetime.timedelta(days=60)).isoformat()
+    assert not result["ok"]
+    assert recent in result["error"] and reopens in result["error"]
+
+
+async def test_a_real_send_turns_its_reservation_into_the_record(
+    con, gmail_connected, sent_messages, tmp_path
+):
+    job_id = _insert_job(con)
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path))
+    _settings(con, real_send_enabled="1")
+
+    result = await send.send_draft(job_id)
+
+    assert result["ok"], result["error"]
+    row = con.execute(
+        "SELECT * FROM application_attempts WHERE idempotency_key=?",
+        (attempts.key_for_job(job_id),)).fetchone()
+    assert row["state"] == attempts.RECORDED
+    assert row["bewerbung_id"] == con.execute(
+        "SELECT id FROM bewerbungen ORDER BY id DESC LIMIT 1").fetchone()[0]
+    assert row["channel"] == "E-Mail" and row["position"] == "Python Dev"
+
+
+async def test_a_refused_send_leaves_no_reservation_behind(
+    con, gmail_connected, tmp_path, monkeypatch
+):
+    """Every gate above the reservation returns without a send, so a claim
+    taken before one of them would hide the company behind an attempt that
+    never happened."""
+    monkeypatch.setattr(gmail, "send_message", _must_not_send)
+    job_id = _insert_job(con)
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path))
+    _settings(con, real_send_enabled="1")
+
+    result = await send.send_draft(job_id, expect={"recipient_shown": "nope@x.de"})
+
+    assert not result["ok"] and "recipient changed" in result["error"]
+    assert con.execute(
+        "SELECT COUNT(*) FROM application_attempts").fetchone()[0] == 0
+
+
+async def test_a_failed_send_hands_the_company_back(
+    con, gmail_connected, tmp_path, monkeypatch
+):
+    def refuse(_message):
+        raise gmail.GmailError("refused by Gmail")
+
+    monkeypatch.setattr(gmail, "send_message", refuse)
+    job_id = _insert_job(con)
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path))
+    _settings(con, real_send_enabled="1")
+
+    result = await send.send_draft(job_id)
+
+    assert not result["ok"]
+    assert con.execute(
+        "SELECT state FROM application_attempts").fetchone()[0] == attempts.RELEASED
+
+
+async def test_an_uncertain_send_keeps_holding_the_company(
+    con, gmail_connected, tmp_path, monkeypatch
+):
+    """The message may already be in the employer's inbox. Freeing the company
+    now is how a second copy gets written."""
+    def lose_the_answer(_message):
+        raise gmail.GmailUncertain("connection dropped")
+
+    monkeypatch.setattr(gmail, "send_message", lose_the_answer)
+    job_id = _insert_job(con)
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path))
+    _settings(con, real_send_enabled="1")
+
+    result = await send.send_draft(job_id)
+
+    assert not result["ok"] and "may or may not" in result["error"]
+    assert con.execute(
+        "SELECT state FROM application_attempts").fetchone()[0] == attempts.RESERVED
+
+
+def test_discarding_a_draft_hands_the_company_back(con, data_dir, tmp_path):
+    job_id = _insert_job(con)
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path))
+    with db.db() as own:
+        own.execute("BEGIN IMMEDIATE")
+        attempts.reserve(own, db.get_job(own, job_id), "E-Mail",
+                         now=attempts.stamp())
+
+    send.discard(job_id)
+
+    with db.db() as own:
+        assert own.execute(
+            "SELECT state FROM application_attempts").fetchone()[0] == (
+            attempts.RELEASED)
+
+
+def test_resolving_a_stuck_send_as_sent_records_its_attempt(
+    con, data_dir, tmp_path
+):
+    job_id = _insert_job(con)
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path), status="sending")
+    with db.db() as own:
+        own.execute("BEGIN IMMEDIATE")
+        attempts.reserve(own, db.get_job(own, job_id), "E-Mail",
+                         now=attempts.stamp())
+
+    result = send.resolve_sending(job_id, assume_sent=True)
+
+    assert result["ok"], result["error"]
+    with db.db() as own:
+        row = own.execute("SELECT * FROM application_attempts").fetchone()
+        assert row["state"] == attempts.RECORDED
+        assert row["bewerbung_id"] is not None
+
+
+def test_resolving_a_stuck_send_as_not_sent_hands_the_company_back(
+    con, data_dir, tmp_path
+):
+    job_id = _insert_job(con)
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path), status="sending")
+    with db.db() as own:
+        own.execute("BEGIN IMMEDIATE")
+        attempts.reserve(own, db.get_job(own, job_id), "E-Mail",
+                         now=attempts.stamp())
+
+    send.resolve_sending(job_id, assume_sent=False)
+
+    with db.db() as own:
+        assert own.execute(
+            "SELECT state FROM application_attempts").fetchone()[0] == (
+            attempts.RELEASED)

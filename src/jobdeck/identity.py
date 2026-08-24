@@ -55,9 +55,9 @@ class Application:
     """One row of the ledger, as identity needs to see it.
 
     `position` is empty when the ledger cannot say which role was applied
-    for — 44 of his 131 rows, because they were recorded by hand or their
-    posting is gone. Empty means UNKNOWN, never "no position": a decision may
-    not treat it as proof that this is a different role.
+    for — in a real corpus, 44 of 131 rows, because they were recorded by hand
+    or their posting is gone. Empty means UNKNOWN, never "no position": a
+    decision may not treat it as proof that this is a different role.
     """
 
     id: int

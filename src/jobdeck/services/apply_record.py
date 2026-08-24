@@ -21,7 +21,7 @@ is about to hold someone else's Bewerbung.
 import logging
 import pathlib
 
-from jobdeck import db
+from jobdeck import attempts, db
 from jobdeck.services import upload
 from jobdeck.services.mappe import MAPPE_COMPLETE
 
@@ -63,44 +63,68 @@ def _file_letter(con, draft, bewerbung_id: int) -> None:
     db.file_draft(con, draft["id"], bewerbung_id)
 
 
-def record_form_application(job_id: int, source: str = SOURCE_HAND) -> dict:
+def record_form_application(job_id: int, source: str = SOURCE_HAND,
+                            override: bool = False) -> dict:
     """Write the application for a posting whose form he filled in.
 
     The named entry point for the form path — the Läuft strip presses it, and
     the Eingangsbestätigung reader will press it too once replies are read.
     """
-    return record_application(job_id, KANAL_FORM, source)
+    return record_application(job_id, KANAL_FORM, source, override=override)
 
 
 def record_application(job_id: int, kanal: str,
-                       source: str = SOURCE_HAND) -> dict:
+                       source: str = SOURCE_HAND,
+                       override: bool = False) -> dict:
     """Write an application he made himself, whichever way it went.
 
-    Returns `{"ok", "bewerbung_id", "company", "duplicate", "undo"}`. The
-    refusing application is handed back as a row rather than as a sentence:
-    `ui.helpers.applied_line` owns that wording so every screen says it the
+    Returns `{"ok", "bewerbung_id", "company", "duplicate", "decision",
+    "undo"}`. The refusing application is handed back as a row rather than as
+    a sentence: `ui.helpers` owns that wording so every screen says it the
     same way, and a service that imported the UI to build one string would
     invert the dependency for no gain.
 
-    `undo` is False when the duplicate gate refused: `db.apply_job` has ALREADY
-    marked the posting a duplicate and pointed it at the existing application
-    before returning None, so there is no earlier state an undo could restore
-    and offering one would restore a state that never existed.
+    `override` is the candidate's recorded "apply anyway" from the pile of
+    companies currently being left alone. It lifts a cooling-off window and
+    nothing else.
+
+    `undo` is False when the gate refused: nothing was written, so there is no
+    earlier state an undo could restore and offering one would restore a state
+    that never existed.
     """
     with db.db() as con:
-        # BEGIN IMMEDIATE, because `apply_job` reads the duplicate gate and
-        # then writes: two callers interleaving between those two steps both
-        # pass a gate that is meant to admit exactly one, and a company ends
-        # up with two applications. That was theoretical while only a press
+        # BEGIN IMMEDIATE, because the decision and the claim have to be one
+        # atomic step: two callers interleaving between them both pass a gate
+        # meant to admit exactly one. That was theoretical while only a press
         # could record — since replies are read, a background thread records
         # too, and it runs precisely when he is working in the app.
         con.execute("BEGIN IMMEDIATE")
         job = db.get_job(con, job_id)
         if job is None:
             return {"ok": False, "bewerbung_id": None, "company": "",
-                    "duplicate": None, "undo": False}
+                    "duplicate": None, "decision": None, "undo": False}
         company = str(job["company"] or "")
         previous_status = str(job["status"] or "new")
+        now = attempts.stamp()
+        reserved, decision = attempts.reserve(
+            con, job, kanal, override=override,
+            override_evidence=f"recorded by hand from the held-back pile ({source})",
+            now=now,
+        )
+        if not reserved:
+            blocking = (
+                db.get_bewerbung(con, decision.application_id)
+                if decision.application_id is not None else None
+            )
+            # Only a PERMANENT refusal files the posting away. A cooling-off
+            # window is temporary, and writing it as the status `duplicate`
+            # would mean waiting it out never brings the posting back.
+            if decision.permanent and blocking is not None:
+                db.mark_duplicate_of(con, job_id, blocking["id"])
+            con.commit()
+            return {"ok": False, "bewerbung_id": None, "company": company,
+                    "duplicate": dict(blocking) if blocking is not None else None,
+                    "decision": decision, "undo": False}
         draft = db.get_draft_by_job(con, job_id)
         # the archive under output/job_<id>/, not the staged link
         dokument = str((draft["pdf_path"] if draft is not None else "") or "")
@@ -108,11 +132,10 @@ def record_application(job_id: int, kanal: str,
                                     dokument=dokument,
                                     notiz_extra=f"{kanal} ({source})")
         if bewerbung_id is None:
-            dup = db.find_duplicate_bewerbung(con, company, job["contact_email"])
-            con.commit()   # apply_job already marked the posting a duplicate
+            con.rollback()
             return {"ok": False, "bewerbung_id": None, "company": company,
-                    "duplicate": dict(dup) if dup is not None else None,
-                    "undo": False}
+                    "duplicate": None, "decision": None, "undo": False}
+        attempts.record(con, attempts.key_for_job(job_id), bewerbung_id, now)
         # The letter is closed by it: the register can show which text belongs
         # to this company, and — the part that was costing him — the
         # Postausgang stops offering to e-mail a letter whose application is
@@ -125,7 +148,7 @@ def record_application(job_id: int, kanal: str,
     log.info("recorded form application for job %s (%s) as bewerbung %s",
              job_id, source, bewerbung_id)
     return {"ok": True, "bewerbung_id": bewerbung_id, "company": company,
-            "duplicate": None, "undo": True,
+            "duplicate": None, "decision": decision, "undo": True,
             "previous_status": previous_status}
 
 
@@ -153,6 +176,10 @@ def undo(job_id: int, bewerbung_id: int, previous_status: str) -> None:
     try:
         with db.db() as con:
             con.execute("BEGIN IMMEDIATE")
+            # BEFORE the ledger row goes: `application_attempts.bewerbung_id`
+            # is a foreign key into it, so clearing the pointer afterwards is
+            # too late. The attempt was never one, so the company is free.
+            attempts.unrecord(con, bewerbung_id, attempts.stamp())
             db.unrecord_application(con, job_id, bewerbung_id, previous_status)
             if staged is not None:
                 db.set_upload(con, job_id, str(staged), MAPPE_COMPLETE)

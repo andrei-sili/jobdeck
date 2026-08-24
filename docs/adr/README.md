@@ -35,7 +35,7 @@ requires a new ADR and reciprocal supersession links.
 | ADR | Status | Decision |
 | --- | --- | --- |
 | [0001](0001-local-first-runtime-boundary.md) | Accepted | Local-first, single-user, loopback-only runtime boundary. |
-| [0002](0002-application-identity-and-duplicate-policy.md) | Accepted | Posting, position, company, and contact identity rules. |
+| [0002](0002-application-identity-and-duplicate-policy.md) | Accepted | Posting, position, company, and contact identity rules. The different-position rule is superseded by 0010. |
 | [0003](0003-candidate-controlled-send-policy.md) | Accepted | Explicit approval before every application can be transmitted. |
 | [0004](0004-assisted-application-form-boundary.md) | Accepted | Candidate-triggered form support with preview and controlled submit. |
 | [0005](0005-job-specific-application-documents.md) | Accepted | Versioned, job-specific documents and immutable submission manifests. |
@@ -43,3 +43,4 @@ requires a new ADR and reciprocal supersession links.
 | [0007](0007-retention-backup-and-erasure.md) | Accepted | Active-data erasure and finite, protected backup retention. |
 | [0008](0008-ux-navigation-direction.md) | Accepted | Six-area navigation direction without pixel-level prescription. |
 | [0009](0009-canonical-documentation-ownership.md) | Accepted | Tracked, project-owned canonical documentation. |
+| [0010](0010-company-cooling-off-window.md) | Accepted | A company is left alone for a configurable window after an application. |

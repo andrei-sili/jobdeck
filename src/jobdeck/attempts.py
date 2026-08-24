@@ -23,6 +23,7 @@ or the window it closes simply moves.
 
 from __future__ import annotations
 
+import datetime
 import sqlite3
 
 from jobdeck import identity, settings
@@ -58,6 +59,11 @@ SELECT idempotency_key AS key, company, channel, job_id
   FROM application_attempts
  WHERE state = 'reserved'
 """
+
+
+def stamp() -> str:
+    """The timestamp format the rest of the database already uses."""
+    return datetime.datetime.now().isoformat(timespec="seconds")
 
 
 def key_for_job(job_id: int) -> str:
@@ -160,9 +166,9 @@ def reserve(
     window this exists to close.
 
     `override` is the candidate's recorded "apply anyway" during a cooling-off
-    window. It can lift a window and nothing else: a republication and a live
-    reservation are not his to overrule — one is a mistake he cannot want, the
-    other is a send already in flight.
+    window. It lifts a window and nothing else: a republication is a mistake
+    no confirmation makes reasonable, and a live reservation may already be
+    leaving.
     """
     decision = decide_for_job(con, job, window_days=window_days)
     if not decision.allowed:

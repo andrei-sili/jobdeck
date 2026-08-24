@@ -11,7 +11,7 @@ import pathlib
 
 import pytest
 
-from jobdeck import db
+from jobdeck import attempts, db
 from jobdeck.services import apply_record, upload
 
 
@@ -133,8 +133,10 @@ def test_the_undo_removes_every_write_the_recording_made(con, data_dir):
     job = db.get_job(con, job_id)
     assert job["status"] == "new"
     assert job["bewerbung_id"] is None
-    # and the company is free again — the whole point of undoing
-    assert db.find_duplicate_bewerbung(con, "Formular GmbH", "") is None
+    # and the company is free again — the whole point of undoing. Asked
+    # through the decision point every gate and screen uses, so this cannot
+    # pass while the thing that actually refuses says otherwise.
+    assert attempts.decide_for_job(con, db.get_job(con, job_id)).allowed is True
 
 
 def test_the_undo_restores_what_the_posting_actually_was(con, data_dir):

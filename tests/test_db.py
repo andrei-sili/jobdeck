@@ -77,12 +77,35 @@ def test_apply_job_creates_application_and_links(con):
     assert app["kanal"] == "Online-Portal"
 
 
-def test_apply_job_blocks_duplicates(con):
+def test_apply_job_writes_without_asking_whether_it_may(con):
+    """A writer, not a gate. Whether an application may be made is decided by
+    `identity` and claimed by `attempts` before this runs — see
+    `tests/test_attempts.py` and `docs/adr/0010-company-cooling-off-window.md`.
+    The rule used to live here, which put a product decision in the SQL layer
+    and wrote a temporary hold as the permanent status `duplicate`."""
     _add_app(con, firma="Neue Firma GmbH", email="")
     job_id = _add_job(con)
-    assert db.apply_job(con, job_id, kanal="E-Mail") is None
+
+    bewerbung_id = db.apply_job(con, job_id, kanal="E-Mail")
+
+    assert bewerbung_id is not None
+    assert db.get_job(con, job_id)["status"] == "applied"
+
+
+def test_apply_job_reports_a_posting_that_is_gone(con):
+    assert db.apply_job(con, 9999, kanal="E-Mail") is None
+
+
+def test_marking_a_duplicate_points_the_posting_at_the_application(con):
+    """Reserved for a PERMANENT refusal: a temporary hold written as this
+    status would mean waiting it out never brings the posting back."""
+    blocking = _add_app(con, firma="Neue Firma GmbH", email="")
+    job_id = _add_job(con)
+
+    db.mark_duplicate_of(con, job_id, blocking)
+
     job = db.get_job(con, job_id)
-    assert job["status"] == "duplicate" and job["duplicate_of"] is not None
+    assert job["status"] == "duplicate" and job["duplicate_of"] == blocking
 
 
 def test_settings_roundtrip(con):

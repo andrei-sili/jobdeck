@@ -8,6 +8,7 @@ right, nothing asks it again".
 """
 
 import asyncio
+import datetime
 import sys
 
 import pytest
@@ -1348,9 +1349,12 @@ async def test_a_recorded_application_can_be_taken_straight_back(
 
 async def test_a_refused_application_offers_no_undo_at_all(
         user: User, con, data_dir):
-    """The duplicate gate marks the posting a duplicate and points it at the
-    blocking application BEFORE refusing, so there is no earlier state an undo
-    could restore — offering one would restore a state that never existed."""
+    """Nothing was written, so there is no earlier state an undo could restore
+    — offering one would restore a state that never existed.
+
+    And the posting stays `new`: the hold is a window, not a verdict, so
+    filing it as `duplicate` would mean waiting the window out never brings it
+    back. See `docs/adr/0010-company-cooling-off-window.md`."""
     job_id = _posting(con)
     db.mark_form_opened(con, job_id)
     con.commit()
@@ -1358,8 +1362,9 @@ async def test_a_refused_application_offers_no_undo_at_all(
     await user.should_see("Beispiel GmbH")
     # the blocking application lands AFTER the row is on screen — a send from
     # another tab, which is exactly when he would press this by mistake
-    db.add_bewerbung(con, {"gesendet_am": "2026-06-12", "firma": "Beispiel GmbH",
-                           "kanal": "E-Mail", "status": "Absage"})
+    recent = (datetime.date.today() - datetime.timedelta(days=3)).isoformat()
+    db.add_bewerbung(con, {"gesendet_am": recent, "firma": "Beispiel GmbH",
+                           "kanal": "E-Mail", "status": "Gesendet"})
     con.commit()
 
     user.find("Abgeschickt", kind=ui.button).click()
@@ -1367,7 +1372,7 @@ async def test_a_refused_application_offers_no_undo_at_all(
 
     await user.should_see("bereits beworben")
     assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 1
-    assert db.get_job(con, job_id)["status"] == "duplicate"
+    assert db.get_job(con, job_id)["status"] == "new"
     with pytest.raises(AssertionError):
         user.find("Rückgängig", kind=ui.button)
 

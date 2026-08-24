@@ -586,14 +586,15 @@ def _attempt_records_for_existing_applications(con: sqlite3.Connection) -> None:
     the only place it was ever recorded — `bewerbungen` has no such column and
     is not being given one. Where no posting is linked the position stays
     empty, which the decision module reads as UNKNOWN rather than as proof of
-    a different role: on his corpus that is 44 of 131 rows, and guessing for
-    them would put words in the ledger's mouth.
+    a different role: in a real corpus that is 44 of 131 rows, and guessing
+    for them would put words in the ledger's mouth.
 
     The key prefers the posting, so a later attempt for that same posting
     meets this row and is refused by the UNIQUE constraint rather than
     creating a second application for it. MIN(id) makes the choice
     deterministic if a database somehow links two postings to one
-    application — his links exactly one each, verified before writing this.
+    application — a real corpus links exactly one each, verified before
+    writing this.
 
     `company_key` is folded HERE, in Python, by the same `norm` the gate and
     the grouping use. Calling SQLite's `jd_norm` instead would read well and

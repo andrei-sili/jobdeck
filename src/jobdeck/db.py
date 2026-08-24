@@ -28,7 +28,7 @@ from jobdeck.constants import (
     OFFENE_STATUS,
     STATUS_RANK,
 )
-from jobdeck.dedupe import find_duplicate_bewerbung, norm
+from jobdeck.dedupe import norm
 
 log = logging.getLogger(__name__)
 
@@ -141,6 +141,15 @@ def bootstrap() -> backup.BackupResult | None:
         recovered = upload.recover_interrupted_undos(con)
         if recovered:
             log.info("upload: removed %s interrupted undo artifacts", recovered)
+        # Beside it, and for the same reason: a reservation whose process died
+        # would hide an employer for good. Evidence-driven — a draft still in
+        # `sending` IS a live claim and keeps its company held for him to
+        # resolve, which is the existing rule for a stuck send, not a new one.
+        from jobdeck import attempts
+
+        freed = attempts.reconcile_interrupted(con, _now())
+        if freed:
+            log.info("identity: released %s interrupted reservations", freed)
         # Self-healing, like the published_on backfill beside it: derived from
         # data the row already holds, so it is idempotent and a posting whose
         # e-mail was harvested before this rule existed stops looking like a
@@ -248,6 +257,14 @@ def delete_bewerbung(con: sqlite3.Connection, row_id: int) -> None:
     )
     con.execute(
         "UPDATE jobs SET duplicate_of=NULL WHERE duplicate_of=?", (row_id,)
+    )
+    # `application_attempts.bewerbung_id` is another foreign key into the row
+    # about to go, and the attempt behind a deleted application was never one:
+    # the company is free again.
+    con.execute(
+        "UPDATE application_attempts SET state='released', bewerbung_id=NULL,"
+        " updated_at=? WHERE bewerbung_id=?",
+        (_now(), row_id),
     )
     con.execute("DELETE FROM bewerbungen WHERE id=?", (row_id,))
 
@@ -2400,15 +2417,18 @@ def apply_job(
     dokument: str = "",
     notiz_extra: str = "",
 ) -> int | None:
-    """Record an application for a job posting. Returns the bewerbung id,
-    or None if a duplicate application blocks it."""
+    """Write the application for a posting. Returns the bewerbung id, or None
+    if the posting is gone.
+
+    A writer, not a gate. Whether an application MAY be made is decided by
+    `identity` and claimed by `attempts`, inside the caller's transaction and
+    before any of this runs — see
+    `docs/adr/0010-company-cooling-off-window.md`. The rule used to live here,
+    which meant the SQL layer owned a product decision and a temporary hold
+    was written as the permanent status `duplicate`.
+    """
     job = get_job(con, job_id)
     if job is None:
-        return None
-    dup = find_duplicate_bewerbung(con, job["company"], job["contact_email"])
-    if dup is not None:
-        set_job_status(con, job_id, "duplicate")
-        con.execute("UPDATE jobs SET duplicate_of=? WHERE id=?", (dup["id"], job_id))
         return None
     notiz = job["url"]
     if notiz_extra:
@@ -2427,6 +2447,19 @@ def apply_job(
     )
     set_job_status(con, job_id, "applied", bewerbung_id=bewerbung_id)
     return bewerbung_id
+
+
+def mark_duplicate_of(
+    con: sqlite3.Connection, job_id: int, bewerbung_id: int
+) -> None:
+    """File a posting as the duplicate of an application that already exists.
+
+    Only for a PERMANENT refusal. A cooling-off window is temporary and must
+    leave the posting `new`, or waiting it out would never bring it back — the
+    read-time filter hides it meanwhile.
+    """
+    set_job_status(con, job_id, "duplicate")
+    con.execute("UPDATE jobs SET duplicate_of=? WHERE id=?", (bewerbung_id, job_id))
 
 
 def unrecord_application(
