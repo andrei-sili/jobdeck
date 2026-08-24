@@ -421,3 +421,18 @@ async def test_the_reading_tells_a_waiting_row_from_an_answered_one(
     assert result["waiting"] == 1, "a row he has not answered was called answered"
     assert result["answered"] == 2
     assert result["skipped"] == 3
+
+
+async def test_the_reading_names_what_it_cost(con, data_dir, ai_on,
+                                              profile_file, monkeypatch):
+    """Every model call in this app names its price. The dialog this flow
+    replaced printed the figure; a spend the app makes and then does not name
+    is the one thing the meter exists to prevent."""
+    monkeypatch.setattr(llm, "complete",
+                        lambda **kw: _result({"claims": []}, cost=0.0182))
+
+    result = await claims_service.import_from_profile()
+
+    assert result["ok"] is True and result["written"] == 0
+    assert result["cost_usd"] == pytest.approx(0.0182), (
+        "a reading that found nothing still cost him a call")

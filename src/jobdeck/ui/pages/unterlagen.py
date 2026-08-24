@@ -705,12 +705,17 @@ async def unterlagen_page():
                 rest.append(f"{waiting} warten schon auf dich")
             if answered:
                 rest.append(f"{answered} hast du schon beantwortet")
+            # What it cost, every time — including the reading that found
+            # nothing. The dialog this replaced printed the figure, and a
+            # spend the app makes and then does not name is the one thing
+            # the meter exists to prevent.
+            spent = f" · {result.get('cost_usd', 0.0):.4f} $"
             tail = (" — " + " · ".join(rest)) if rest else ""
             if not written:
-                say("Nichts Neues gefunden" + tail)
+                say("Nichts Neues gefunden" + tail + spent)
                 return
             say(f"{claims_lib.count_proposals(written)} warten auf dich"
-                + tail, type="positive")
+                + tail + spent, type="positive")
             await refresh()
 
         async def answer_claims(claim_ids, state, spoken):

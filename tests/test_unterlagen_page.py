@@ -1208,3 +1208,29 @@ async def test_the_refused_door_is_absent_when_nothing_was_refused(
 
     assert _marked(user, "toggle-refused") == []
     await user.should_not_see("abgelehnt")
+
+
+async def test_the_screen_names_what_the_reading_cost(user: User, con,
+                                                      data_dir):
+    """Even when it found nothing. The confirmation states the price before
+    the spend; this states it after, which is what the app's meter promises
+    for every call it makes."""
+    from jobdeck.services import claims as claims_service
+    _posting(con)
+
+    async def read():
+        return {"ok": True, "error": "", "written": 0, "waiting": 0,
+                "answered": 0, "skipped": 0, "cost_usd": 0.0182}
+
+    saved = claims_service.import_from_profile
+    claims_service.import_from_profile = read
+    try:
+        await user.open("/unterlagen")
+        user.find(marker="propose-claims").click()
+        await asyncio.sleep(0.2)
+        user.find(marker="confirm-propose").click()
+        await asyncio.sleep(0.4)
+
+        await user.should_see("0.0182 $")
+    finally:
+        claims_service.import_from_profile = saved

@@ -524,10 +524,16 @@ def update_claim(
                 (_now(), claim_id))
     return add_claim(con, {
         **fields,
-        # His correction, so the wording is his — while `source_ref` keeps
-        # naming where the fact was first read, which is what provenance is
-        # being asked and is not changed by his editing the sentence.
-        "state": "confirmed", "source": "user", "source_ref": row["source_ref"],
+        # Where the fact came from is carried through UNCHANGED. Provenance
+        # answers "where was this read", not "who typed this wording" — the
+        # question of who vouched for it is answered by `confirmed`. Setting
+        # it to `user` here also made the answer depend on state he cannot
+        # see: editing a proposal keeps its origin, so editing a confirmed
+        # claim losing it would flip the line under the row for no reason he
+        # could observe, and drop the section it stood for from the coverage
+        # measurement.
+        "state": "confirmed", "source": row["source"],
+        "source_ref": row["source_ref"],
         "sort_order": row["sort_order"], "supersedes_id": claim_id,
     })
 

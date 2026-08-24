@@ -346,10 +346,15 @@ def test_correcting_a_confirmed_claim_keeps_what_older_letters_could_say(con):
     assert new["binding"] == "Eigenprojekt"
     assert new["sort_order"] == old["sort_order"], (
         "the correction jumped to the end of the register")
-    # Provenance: the wording is his now, but where it was first read is not
-    # changed by his editing the sentence.
-    assert new["source"] == "user"
+    # Provenance is carried through UNCHANGED. It answers "where was this
+    # read", not "who typed this wording" — who vouched for it is answered by
+    # `confirmed`. Rewriting it to "user" here would also make the answer
+    # depend on state he cannot see: editing a PROPOSAL keeps its origin, so
+    # a confirmed claim losing it would flip the line under the row for no
+    # observable reason, and drop the section it stood for from coverage.
+    assert new["source"] == "profile_md"
     assert new["source_ref"] == "Technische Kenntnisse"
+    assert claims.provenance(new) == claims.provenance(old)
     assert _ids(db.list_claims(con)) == [corrected], (
         "the replaced row is still in the working register")
 
