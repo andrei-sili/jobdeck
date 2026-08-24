@@ -37,7 +37,9 @@ wrong was not that they were hidden; it was that hiding them was permanent.
 An application to a company opens a **cooling-off window** on that company.
 
 - The window length is a candidate setting, default 60 days, counted from the
-  date of the application. A value of zero switches the rule off.
+  last contact with that employer: the most recent receipt they sent, or the
+  date of the application when there was none. A value of zero switches the
+  rule off.
 - While the window runs, other postings at that company are held back from the
   working list. They are counted beneath it and reachable through their own
   view. Nothing is deleted and no status is written: the hold is a read-time

@@ -118,8 +118,10 @@ handling in core workflows.
 ## Current application identity
 
 An application opens a cooling-off window on its company. The window is a
-candidate setting (`company_cooldown_days`, default 60) counted from the
-application date. While it runs, other postings at that company leave the
+candidate setting (`company_cooldown_days`, default 60) counted from the last
+contact with that employer — the most recent receipt they sent, or the
+application date when there was none, which is the same anchor the silence
+rule uses. While it runs, other postings at that company leave the
 working list, are counted beneath it, and remain reachable through their own
 view; when it passes they return without any action. Nothing is deleted and no
 posting status is written for a temporary hold. The candidate can apply during
@@ -128,7 +130,14 @@ its evidence. See
 [`ADR 0010`](../adr/0010-company-cooling-off-window.md).
 
 A posting at the same company with the same normalized position is treated as a
-republication and refused permanently; that refusal offers no override. A
+republication and refused permanently; that refusal offers no override.
+Discovery applies the same decision: only a permanent refusal stores a posting
+as `duplicate`, while a company merely inside its window is stored as `new` and
+hidden by the read-time filter, so waiting the window out returns it.
+
+A republication already stored before its application was made stays visible in
+the working list once the company's window passes, with every action refused
+and the reason stated. On a real corpus this affects no posting today. A
 shared contact address is carried on the decision as corroborating evidence and
 never refuses on its own.
 

@@ -120,7 +120,8 @@ the review queue. Do not retry blindly.
 
 After an application, the employer is left alone for a configurable period.
 Settings holds the value (`company_cooldown_days`, default 60 days, counted
-from the application date; `0` switches the rule off). While the window runs,
+from the last contact with that employer — a receipt they sent, or the
+application date when there was none; `0` switches the rule off). While the window runs,
 other postings at that company leave the working list, are counted beneath it,
 and stay reachable through their own view — nothing is deleted and no posting
 status is written. When the window passes they return by themselves.
