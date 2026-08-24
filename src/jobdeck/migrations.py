@@ -12,7 +12,7 @@ import sqlite3
 from jobdeck import constants, dates
 from jobdeck.dedupe import norm
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 # Legacy table, exactly as the previous tracker created it.
 BEWERBUNGEN_SQL = """
@@ -575,6 +575,38 @@ def _ensure_draft_columns(con: sqlite3.Connection) -> None:
         )
 
 
+def _ensure_claim_fact_columns(con: sqlite3.Connection) -> None:
+    """The register becomes the candidate-fact store (schema v15, additive).
+
+    Every column defaults to what a row already in this table means, so no
+    backfill decides anything: before v15 the register held only competences,
+    and the only way in was the user typing one — so an existing row is a
+    CONFIRMED skill he wrote himself. Reading those defaults as anything else
+    would invent a verification he never gave.
+
+    `confirmed_at` is the one value the default cannot state, so it is filled
+    from `created_at` inside the guard — which runs exactly once, on the ALTER
+    that adds the column.
+    """
+    existing = [row[1] for row in con.execute("PRAGMA table_info(claims)")]
+    additions = {
+        "kind": "TEXT NOT NULL DEFAULT 'skill'",
+        "state": "TEXT NOT NULL DEFAULT 'confirmed'",
+        "source": "TEXT NOT NULL DEFAULT 'user'",
+        "source_ref": "TEXT NOT NULL DEFAULT ''",
+        "supersedes_id": "INTEGER",
+        "confirmed_at": "TEXT NOT NULL DEFAULT ''",
+    }
+    for column, declaration in additions.items():
+        if column not in existing:
+            con.execute(f"ALTER TABLE claims ADD COLUMN {column} {declaration}")
+            if column == "confirmed_at":
+                con.execute(
+                    "UPDATE claims SET confirmed_at=created_at "
+                    "WHERE confirmed_at=''"
+                )
+
+
 def _attempt_records_for_existing_applications(con: sqlite3.Connection) -> None:
     """Give every application already in the ledger the attempt that made it.
 
@@ -668,6 +700,7 @@ def migrate(con: sqlite3.Connection) -> None:
     _ensure_form_flow_columns(con)
     _ensure_draft_columns(con)
     _ensure_email_log_columns(con)
+    _ensure_claim_fact_columns(con)
     _backfill_published_on(con)
     _backfill_application_documents(con)
     if version < 14:

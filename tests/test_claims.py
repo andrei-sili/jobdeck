@@ -238,3 +238,54 @@ def test_a_letter_rewritten_to_the_same_length_still_moves_the_signature(con):
     assert db.claims_signature(con) != before, (
         "a same-length rewrite is invisible — the timestamp term is not "
         "load-bearing")
+
+
+# ---------------------------------------------------------------------------
+# The families and the verification state (schema v15)
+# ---------------------------------------------------------------------------
+def test_an_unreadable_state_is_never_read_as_confirmed():
+    """`confirmed` is the value that lets a fact into a letter.
+
+    Anything the column cannot be read as — an empty string, a typo, a state
+    from a future version rolled back onto this one — has to land on the
+    unverified side. Defaulting the other way would let a fact nobody vouched
+    for be claimed, which is the one thing this column exists to stop.
+    """
+    for raw in ("", None, "bestätigt", "CONFIRMED!", "verified", 7, "  "):
+        assert claims.normalise_state(raw) == "proposed"
+    for state in claims.STATES:
+        assert claims.normalise_state(state) == state
+    assert claims.normalise_state("  Confirmed ") == "confirmed"
+
+
+def test_an_unreadable_family_lands_on_the_strictest_one():
+    """Unknown becomes `skill` — what every row meant before v15, and the
+    family whose rule is tightest. Filing too strictly is one edit away;
+    filing too loosely is the weld the register exists to prevent."""
+    for raw in ("", None, "sprache", "Fähigkeit", 3):
+        assert claims.normalise_kind(raw) == "skill"
+    for kind in claims.KINDS:
+        assert claims.normalise_kind(kind.upper()) == kind
+
+
+def test_every_family_has_a_german_name_and_one_fixed_place():
+    """The screen groups by family, so the order has to be total and stable —
+    two renders that disagree would move a row under the reader."""
+    assert claims.DEFAULT_KIND in claims.KINDS
+    assert all(label.strip() for label in claims.KINDS.values())
+    assert len(set(claims.KINDS.values())) == len(claims.KINDS)
+    places = [claims.kind_order(kind) for kind in claims.KINDS]
+    assert places == sorted(places) == list(range(len(claims.KINDS)))
+    assert claims.kind_order("nonsense") == claims.kind_order("skill")
+    assert claims.kind_label("credential") == "Zertifikate"
+
+
+def test_an_answered_claim_stays_out_of_the_working_register():
+    """`rejected` and `superseded` are answers already given. Showing them in
+    the register would offer back exactly what he already refused or
+    replaced — and both are kept rather than deleted so a second import
+    cannot propose them again."""
+    assert set(claims.VISIBLE_STATES) == {"proposed", "confirmed"}
+    assert set(claims.VISIBLE_STATES) < set(claims.STATES)
+    assert "rejected" not in claims.VISIBLE_STATES
+    assert "superseded" not in claims.VISIBLE_STATES

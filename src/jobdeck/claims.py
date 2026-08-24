@@ -1,9 +1,15 @@
-"""The register of what a letter is allowed to claim, and how often it did.
+"""The register of what a letter may use about the candidate, and how often.
 
-One claim is a permission: a competence or credential bound to the ONE
-project or employer it belongs to. The failure mode this exists to make
-visible is not an invented skill — it is a real skill welded to the wrong
-project, which reads perfectly and is a lie an interviewer will find.
+One claim is a permission: a fact bound to the ONE project, employer or
+qualification it belongs to. The failure mode this exists to make visible is
+not an invented skill — it is a real skill welded to the wrong project, which
+reads perfectly and is a lie an interviewer will find.
+
+Since schema v15 a claim also carries the FAMILY it belongs to, where it came
+from, and whether the candidate has confirmed it. A fact a model read out of
+his profile is a proposal until he says otherwise: the register is the list of
+things a letter may say about him, and a reading of his own file is not
+authority for that.
 
 Everything here is pure: given the same rows and the same letters it says
 the same thing, which is what makes the counters testable without a database
@@ -11,6 +17,82 @@ and without the LLM that wrote the letters.
 """
 
 from jobdeck.dedupe import fold
+
+# ---------------------------------------------------------------------------
+# The families a claim can belong to (schema v15)
+# ---------------------------------------------------------------------------
+# One key per family the target architecture names for the candidate
+# aggregate. They are kept as a flat vocabulary on one table rather than a
+# table per family: the families differ in what they MEAN, not in what the
+# register does with them, and nothing yet queries one family in a way the
+# others cannot answer. A family that earns its own columns can be given them
+# additively later.
+#
+# Read in the order a German application states them: what he did, then what
+# he can, then what proves it, then the terms he works under.
+KINDS: dict[str, str] = {
+    "experience": "Praxiserfahrung",
+    "project": "Projekte",
+    "skill": "Technische Kenntnisse",
+    "education": "Bildungsweg",
+    "credential": "Zertifikate",
+    "language": "Sprachen",
+    "strength": "Stärken",
+    "condition": "Rahmenbedingungen",
+}
+
+DEFAULT_KIND = "skill"
+
+# ---------------------------------------------------------------------------
+# Verification state (schema v15)
+# ---------------------------------------------------------------------------
+# `proposed`  — read out of the profile, not yet his word. Never usable.
+# `confirmed` — he said this may be claimed.
+# `rejected`  — he said it may not. Kept, not deleted, so a second import does
+#               not offer back everything he has already refused.
+# `superseded`— replaced by a correction. Kept so a correction can never
+#               rewrite what an already-written letter was allowed to say.
+STATES = ("proposed", "confirmed", "rejected", "superseded")
+
+#: The states the register itself shows. `rejected` and `superseded` are the
+#: two answers that are already given, so they stay out of the working view.
+VISIBLE_STATES = ("proposed", "confirmed")
+
+SOURCES = ("user", "profile_md")
+
+
+def normalise_kind(raw: object) -> str:
+    """The family key for `raw`, falling back to the strictest family.
+
+    Anything unrecognised becomes a skill: that is what every row in this
+    table meant before v15, and it is the family whose rule is tightest (a
+    competence may appear only at the one project it is bound to). Filing a
+    fact too strictly is visible on the screen and one edit away; filing it
+    too loosely is the weld the register exists to prevent.
+    """
+    key = str(raw or "").strip().lower()
+    return key if key in KINDS else DEFAULT_KIND
+
+
+def kind_label(raw: object) -> str:
+    """The family's name, in the German the screen prints."""
+    return KINDS[normalise_kind(raw)]
+
+
+def kind_order(raw: object) -> int:
+    """Where the family sorts, so two renders never disagree."""
+    return list(KINDS).index(normalise_kind(raw))
+
+
+def normalise_state(raw: object) -> str:
+    """The verification state for `raw`, defaulting to the unverified one.
+
+    An unreadable state must never read as `confirmed`: that is the value
+    that would let a fact nobody vouched for into a letter.
+    """
+    key = str(raw or "").strip().lower()
+    return key if key in STATES else "proposed"
+
 
 # Where a claim's match terms may be separated. A term may contain spaces
 # ("Spring Boot"), so a space is deliberately NOT a separator.
