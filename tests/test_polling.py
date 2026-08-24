@@ -60,16 +60,67 @@ async def test_poll_profile_stores_new_jobs(con, profile, monkeypatch):
     assert prof["last_polled_at"]
 
 
-async def test_poll_profile_marks_already_applied_companies(con, profile, monkeypatch):
-    db.add_bewerbung(con, {"firma": "Firma A", "status": "Gesendet"})
+async def test_discovery_files_away_a_repost_of_a_position_already_applied_to(
+        con, profile, monkeypatch):
+    """Permanent, so filing it away permanently is honest — the same position
+    at the same company can never become a second application."""
+    bew = db.add_bewerbung(con, {"firma": "Firma A", "status": "Gesendet",
+                                 "gesendet_am": "2026-08-01"})
+    con.execute(
+        "INSERT INTO application_attempts (idempotency_key, state, company,"
+        " company_key, position, channel, bewerbung_id, created_at, updated_at)"
+        " VALUES ('bewerbung:x', 'recorded', 'Firma A', 'firma a', 'Python Dev',"
+        " 'E-Mail', ?, '2026-08-01', '2026-08-01')", (bew,))
     con.commit()
     stub = StubSource("stub", [_posting()])
     monkeypatch.setattr(polling, "get_sources", lambda client: {"stub": stub})
 
     counters = await polling.poll_profile(profile)
+
     assert counters["duplicate"] == 1
     job = db.list_jobs(con)[0]
-    assert job["status"] == "duplicate" and job["duplicate_of"] is not None
+    assert job["status"] == "duplicate" and job["duplicate_of"] == bew
+
+
+async def test_discovery_stores_a_held_company_as_new_not_as_a_duplicate(
+        con, profile, monkeypatch):
+    """A cooling-off window is temporary, and filing a posting away at
+    discovery is not. Stamping `duplicate` here would mean waiting the window
+    out never brings the posting back — which is the whole point of it having
+    an end. The read-time filter hides it meanwhile."""
+    db.add_bewerbung(con, {"firma": "Firma A", "status": "Gesendet",
+                           "gesendet_am": "2026-08-01"})
+    con.commit()
+    stub = StubSource("stub", [_posting(title="Ganz andere Stelle")])
+    monkeypatch.setattr(polling, "get_sources", lambda client: {"stub": stub})
+
+    counters = await polling.poll_profile(profile)
+
+    assert counters["duplicate"] == 0 and counters["new"] == 1
+    job = db.list_jobs(con)[0]
+    assert job["status"] == "new" and job["duplicate_of"] is None
+    # …and it is hidden from the working list while the window runs
+    hidden = {r[0] for r in con.execute(
+        f"SELECT id FROM jobs WHERE {db.APPLIED_FIRM_SQL}",
+        db.applied_firm_params(con))}
+    assert job["id"] in hidden
+
+
+async def test_discovery_does_not_file_away_a_company_a_shared_address_names(
+        con, profile, monkeypatch):
+    """One ATS mailbox can serve two employers. ADR 0002 keeps an address as
+    evidence and never as an identity, and discovery used to file a posting
+    away for ever on that alone."""
+    db.add_bewerbung(con, {"firma": "Ganz andere GmbH", "email": "hr@firma-a.de",
+                           "status": "Gesendet", "gesendet_am": "2026-08-01"})
+    con.commit()
+    stub = StubSource("stub", [_posting(company="Firma A")])
+    monkeypatch.setattr(polling, "get_sources", lambda client: {"stub": stub})
+
+    counters = await polling.poll_profile(profile)
+
+    assert counters["new"] == 1
+    assert db.list_jobs(con)[0]["status"] == "new"
 
 
 async def test_poll_profile_skips_cross_source_duplicates(con, profile, monkeypatch):

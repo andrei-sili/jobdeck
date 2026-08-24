@@ -8,6 +8,7 @@ right, nothing asks it again".
 """
 
 import asyncio
+import datetime
 import sys
 
 import pytest
@@ -817,8 +818,11 @@ async def test_a_refused_action_renders_disabled_and_says_why(
     deleted with the suite green, and the only rendered string that could have
     caught it is produced by reader_notes as well."""
     _posting(con, company="Beispiel GmbH")
-    db.add_bewerbung(con, {"gesendet_am": "2026-06-12", "firma": "Beispiel GmbH",
-                           "email": "", "kanal": "E-Mail", "status": "Absage"})
+    db.add_bewerbung(con, {
+        "gesendet_am": (datetime.date.today()
+                        - datetime.timedelta(days=5)).isoformat(),
+        "firma": "Beispiel GmbH", "email": "", "kanal": "E-Mail",
+        "status": "Absage"})
     con.commit()
     await user.open("/")
     select = next(iter(user.find(marker="view-select").elements))
@@ -834,7 +838,7 @@ async def test_a_refused_action_renders_disabled_and_says_why(
     assert all(not b.enabled for b in steps), \
         "an application that cannot happen is offered as a live button"
     reasons = _classed(user, "jd-reason")
-    assert reasons and any("bereits beworben" in r.text for r in reasons)
+    assert reasons and any("zurückgestellt" in r.text for r in reasons)
 
 
 async def test_the_warnings_stand_above_the_advert_on_the_screen(
@@ -1237,7 +1241,7 @@ async def test_an_application_landing_while_the_editor_is_open_reaches_the_confi
     await asyncio.sleep(0.4)
 
     await user.should_see("Diese Bewerbung abschicken?")
-    await user.should_see("bereits beworben")
+    await user.should_see("zurückgestellt")
 
 
 async def test_the_way_back_is_on_screen_the_second_after_the_form_opens(
@@ -1348,9 +1352,12 @@ async def test_a_recorded_application_can_be_taken_straight_back(
 
 async def test_a_refused_application_offers_no_undo_at_all(
         user: User, con, data_dir):
-    """The duplicate gate marks the posting a duplicate and points it at the
-    blocking application BEFORE refusing, so there is no earlier state an undo
-    could restore — offering one would restore a state that never existed."""
+    """Nothing was written, so there is no earlier state an undo could restore
+    — offering one would restore a state that never existed.
+
+    And the posting stays `new`: the hold is a window, not a verdict, so
+    filing it as `duplicate` would mean waiting the window out never brings it
+    back. See `docs/adr/0010-company-cooling-off-window.md`."""
     job_id = _posting(con)
     db.mark_form_opened(con, job_id)
     con.commit()
@@ -1358,16 +1365,17 @@ async def test_a_refused_application_offers_no_undo_at_all(
     await user.should_see("Beispiel GmbH")
     # the blocking application lands AFTER the row is on screen — a send from
     # another tab, which is exactly when he would press this by mistake
-    db.add_bewerbung(con, {"gesendet_am": "2026-06-12", "firma": "Beispiel GmbH",
-                           "kanal": "E-Mail", "status": "Absage"})
+    recent = (datetime.date.today() - datetime.timedelta(days=3)).isoformat()
+    db.add_bewerbung(con, {"gesendet_am": recent, "firma": "Beispiel GmbH",
+                           "kanal": "E-Mail", "status": "Gesendet"})
     con.commit()
 
     user.find("Abgeschickt", kind=ui.button).click()
     await asyncio.sleep(0.4)
 
-    await user.should_see("bereits beworben")
+    await user.should_see("zurückgestellt")
     assert con.execute("SELECT COUNT(*) FROM bewerbungen").fetchone()[0] == 1
-    assert db.get_job(con, job_id)["status"] == "duplicate"
+    assert db.get_job(con, job_id)["status"] == "new"
     with pytest.raises(AssertionError):
         user.find("Rückgängig", kind=ui.button)
 
@@ -1583,3 +1591,71 @@ async def test_a_posting_with_nothing_staged_offers_no_path(
     await user.should_see("Mappe NICHT fertig")
     assert not any(isinstance(e, ui.button) and "⧉" in str(e.text)
                    for e in user.client.elements.values())
+
+
+async def test_the_held_back_pile_offers_a_way_out_and_it_works(
+        user: User, con, data_dir):
+    """The pile exists so a posting can still be reached. Before this the only
+    thing waiting there was the sentence explaining why it could not be — a
+    room with no door, which is the shape a review panel has already caught on
+    this screen once.
+
+    Driven in the rendered page rather than asserted on the step model: a step
+    that is never rendered, or rendered without a handler, leaves the model
+    test green and the button dead."""
+    from jobdeck import attempts
+
+    job_id = _posting(con, company="Beispiel GmbH")
+    db.add_bewerbung(con, {
+        "gesendet_am": (datetime.date.today()
+                        - datetime.timedelta(days=5)).isoformat(),
+        "firma": "Beispiel GmbH", "email": "", "kanal": "E-Mail",
+        "status": "Gesendet"})
+    con.commit()
+    await user.open("/")
+    select = next(iter(user.find(marker="view-select").elements))
+    select.set_value("firma_kontaktiert")
+    await asyncio.sleep(0.3)
+
+    # the press IS the confirmation: on this screen a button carries its own
+    # label and only ⏎ opens a dialog, because ⏎ moves down a list and the
+    # label under it changes with the row
+    user.find("Trotzdem bewerben", kind=ui.button).click()
+    await asyncio.sleep(0.5)
+
+    stored = con.execute(
+        "SELECT * FROM application_attempts WHERE job_id=?", (job_id,)
+    ).fetchone()
+    assert stored is not None, "nothing recorded the candidate's answer"
+    assert stored["override_confirmed_at"], "the confirmation left no evidence"
+    assert stored["state"] == attempts.RELEASED, (
+        "answering the hold must not claim the posting"
+    )
+    # …and the gate now agrees with the screen
+    assert attempts.decide_for_job(con, db.get_job(con, job_id)).allowed is True
+
+
+async def test_a_permanent_block_offers_no_way_out(user: User, con, data_dir):
+    """A second application to the very same position is not the candidate's
+    to overrule, so the press must not even be drawn."""
+    job_id = _posting(con, company="Beispiel GmbH")
+    title = db.get_job(con, job_id)["title"]
+    bew = db.add_bewerbung(con, {
+        "gesendet_am": (datetime.date.today()
+                        - datetime.timedelta(days=400)).isoformat(),
+        "firma": "Beispiel GmbH", "email": "", "kanal": "E-Mail",
+        "status": "Absage"})
+    con.execute(
+        "INSERT INTO application_attempts (idempotency_key, state, company,"
+        " company_key, position, channel, bewerbung_id, created_at, updated_at)"
+        " VALUES ('bewerbung:x', 'recorded', 'Beispiel GmbH', 'beispiel gmbh',"
+        " ?, 'E-Mail', ?, '2025-01-01', '2025-01-01')", (title, bew))
+    con.commit()
+
+    await user.open("/")
+    select = next(iter(user.find(marker="view-select").elements))
+    select.set_value("firma_kontaktiert")
+    await asyncio.sleep(0.3)
+
+    with pytest.raises(AssertionError):
+        user.find("Trotzdem bewerben", kind=ui.button)

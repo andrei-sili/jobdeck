@@ -28,14 +28,13 @@ import datetime
 import logging
 import pathlib
 
-from jobdeck import db, gmail, templates
+from jobdeck import attempts, db, gmail, identity, templates
 from jobdeck import settings as app_settings
 from jobdeck.constants import (
     DEFAULT_DAILY_CAP,
     EMAIL_OUTBOUND,
     EMAIL_OUTBOUND_TEST,
 )
-from jobdeck.dedupe import find_duplicate_bewerbung
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +46,28 @@ SNIPPET_CHARS = 120
 # earlier approval (or a pre-send snapshot) describe a different e-mail.
 CONTENT_FIELDS = ("updated_at", "recipient", "betreff", "email_body",
                   "anschreiben_body", "pdf_path")
+
+
+def identity_refusal(decision) -> str:
+    """Why this posting may not be applied to, in one user-readable line.
+
+    English, like every other refusal this module returns. The screens have
+    their own German wording in `ui.helpers`; what must not be duplicated is
+    the RULE, and both read the same `identity.Decision` rather than asking
+    the database a second question of their own.
+    """
+    if decision.verdict == identity.BLOCKED_REPUBLICATION:
+        return ("this position at this company already has an application — "
+                "see Applications")
+    if decision.verdict == identity.RESERVED:
+        return ("another application to this company is being sent right now "
+                "— wait for it to finish")
+    if decision.verdict == identity.COOLING_OFF:
+        when = f" (last on {decision.sent_on})" if decision.sent_on else ""
+        until = (f", offered again from {decision.reopens_on}"
+                 if decision.reopens_on else "")
+        return f"you applied at this company recently{when}{until}"
+    return ""
 
 
 def _error(message: str, kind: str = "draft") -> dict:
@@ -159,16 +180,9 @@ def _claim(job_id: int, snapshot: dict, expect: dict | None) -> tuple[str, str, 
         if not gmail.is_plausible_address(recipient):
             return (f"'{recipient}' does not look like a valid e-mail address "
                     f"— fix the recipient"), "", test_mode
-        if not test_mode:
-            if db.count_outbound_for_draft(con, current["id"]):
-                return ("this draft already has a recorded send — check "
-                        "Applications"), "", test_mode
-            job = db.get_job(con, job_id)
-            if job is not None and find_duplicate_bewerbung(
-                con, job["company"], recipient
-            ) is not None:
-                return ("you already applied at this company — see "
-                        "Applications before sending again"), "", test_mode
+        if not test_mode and db.count_outbound_for_draft(con, current["id"]):
+            return ("this draft already has a recorded send — check "
+                    "Applications"), "", test_mode
         if any(current[field] != snapshot[field] for field in CONTENT_FIELDS):
             return ("the draft changed while preparing the send — review it "
                     "again"), "", test_mode
@@ -176,6 +190,21 @@ def _claim(job_id: int, snapshot: dict, expect: dict | None) -> tuple[str, str, 
             mismatch = expectation_mismatch(expect, current, recipient, test_mode)
             if mismatch:
                 return mismatch, "", test_mode
+        if not test_mode:
+            job = db.get_job(con, job_id)
+            if job is None:
+                return "the posting disappeared — refresh the queue", "", test_mode
+            # LAST, and in THIS transaction. Last because every refusal above
+            # returns without a send, and a reservation taken before one of
+            # them would hide the company behind an attempt that never
+            # happened. In this transaction because it has to land beside the
+            # status change it guards — splitting them is exactly what left a
+            # company open for the seconds a Gmail call takes.
+            reserved, decision = attempts.reserve(
+                con, job, "E-Mail", now=attempts.stamp()
+            )
+            if not reserved:
+                return identity_refusal(decision), "", test_mode
         db.claim_for_send(con, current["id"], test_mode)
         return "", recipient, test_mode
 
@@ -193,6 +222,10 @@ def _release(job_id: int, status: str, error: str = "") -> bool:
                         "releasing it", job_id)
             return False
         db.upsert_draft(con, job_id, {"status": status, "error": error})
+        # The company is free again in the same transaction that frees the
+        # draft. A reservation outliving its claim would hide an employer
+        # behind a send that is over.
+        attempts.release(con, attempts.key_for_job(job_id), attempts.stamp())
         return True
 
 
@@ -250,6 +283,8 @@ def _record_real_send(draft: dict, job: dict, settings: dict, recipient: str,
                 "WHERE draft_id=? AND gmail_message_id IS NULL",
                 (message_id, thread_id, draft["id"]),
             )
+            attempts.release(con, attempts.key_for_job(job["id"]),
+                             attempts.stamp())
             return ("this send was already recorded manually — the existing "
                     "application record stands")
         # add_bewerbung, not apply_job: the duplicate gate ran before the
@@ -280,6 +315,8 @@ def _record_real_send(draft: dict, job: dict, settings: dict, recipient: str,
             "bewerbung_id": bewerbung_id,
         })
         db.record_send(con, draft["id"], message_id, thread_id, bewerbung_id)
+        attempts.record(con, attempts.key_for_job(job["id"]), bewerbung_id,
+                        attempts.stamp())
         return ""
 
 
@@ -329,11 +366,9 @@ def _send_draft(job_id: int, expect: dict | None = None) -> dict:
                       kind="global" if preview_test_mode else "draft")
     if not preview_test_mode:
         with db.db() as con:
-            dup = find_duplicate_bewerbung(con, job["company"],
-                                           preview_recipient)
-        if dup is not None:
-            return _error("you already applied at this company — see "
-                          "Applications before sending again")
+            decision = attempts.decide_for_job(con, job)
+        if not decision.allowed:
+            return _error(identity_refusal(decision))
     cap = app_settings.parse_int(
         settings["daily_send_cap"], int(DEFAULT_DAILY_CAP), minimum=0
     )
@@ -427,6 +462,9 @@ def _transition(job_id: int, target: str, allowed_from: tuple[str, ...],
                 f"cannot move a draft from '{draft['status']}' to '{target}'"
             )
         db.upsert_draft(con, job_id, {"status": target, "error": error_note})
+        if target != "sending":
+            attempts.release(con, attempts.key_for_job(job_id),
+                             attempts.stamp())
         row = db.get_draft_by_job(con, job_id)
         return {"ok": True, "error": "", "kind": "", "test_mode": False,
                 "recipient": "", "draft": dict(row)}
@@ -524,6 +562,8 @@ def resolve_sending(job_id: int, assume_sent: bool) -> dict:
             "matched_by": "manual_resolution",
         })
         db.record_send(con, draft["id"], "", "", bewerbung_id)
+        attempts.record(con, attempts.key_for_job(job_id), bewerbung_id,
+                        attempts.stamp())
         row = db.get_draft_by_job(con, job_id)
         return {"ok": True, "error": "", "kind": "", "test_mode": False,
                 "recipient": draft["recipient"], "draft": dict(row)}

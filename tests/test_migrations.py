@@ -871,10 +871,12 @@ def _corpus_hash(con) -> str:
     return hashlib.md5(repr([tuple(r) for r in rows]).encode()).hexdigest()
 
 
-def test_v12_becomes_v13_without_touching_a_posting(data_dir):
-    """Strictly additive: one table, no backfill. On his corpus the run must
-    leave 1167 postings byte-identical, which is the promise the first start
-    after a merge has to keep."""
+def test_an_upgrade_from_v12_never_touches_a_posting(data_dir):
+    """Strictly additive. On his corpus a v12 run must leave 1167 postings
+    byte-identical, which is the promise the first start after a merge has to
+    keep. Pinned to the CURRENT version rather than to a literal, because the
+    property being asserted is "no upgrade rewrites the corpus" — every later
+    slice inherits it instead of editing this line."""
     from jobdeck import db, migrations
 
     con = db.connect()
@@ -899,12 +901,16 @@ def test_v12_becomes_v13_without_touching_a_posting(data_dir):
 
     migrations.migrate(con)
 
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 13
+    assert con.execute("PRAGMA user_version").fetchone()[0] == (
+        migrations.SCHEMA_VERSION
+    )
     assert _corpus_hash(con) == before, "the upgrade touched a posting"
     assert con.execute("SELECT COUNT(*) FROM hidden_companies").fetchone()[0] == 0
     # …and running it again is a no-op
     migrations.migrate(con)
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 13
+    assert con.execute("PRAGMA user_version").fetchone()[0] == (
+        migrations.SCHEMA_VERSION
+    )
     assert _corpus_hash(con) == before
     con.close()
 
@@ -927,4 +933,190 @@ def test_the_hidden_table_hands_out_a_number_that_never_repeats(data_dir):
 
     assert con.execute(
         "SELECT MAX(id) FROM hidden_companies").fetchone()[0] > highest
+    con.close()
+
+
+# --------------------------------------------------------------------------
+# v14 — every application in the ledger gets the attempt that made it
+# --------------------------------------------------------------------------
+def _seed_ledger_for_attempts(con):
+    """Three applications: two with a linked posting, one recorded by hand."""
+    from jobdeck import db
+
+    by_post = db.add_bewerbung(con, {
+        "gesendet_am": "2026-08-10", "firma": "Beispiel GmbH", "kanal": "Online-Portal",
+        "status": "Gesendet"})
+    second = db.add_bewerbung(con, {
+        "gesendet_am": "2026-07-01", "firma": "Müller & Co", "kanal": "E-Mail",
+        "status": "Absage"})
+    by_hand = db.add_bewerbung(con, {
+        "gesendet_am": "2026-06-12", "firma": "Handarbeit GmbH",
+        "kanal": "Online-Portal", "status": "Absage"})
+    jobs = {}
+    for key, (bew, title) in {
+        "beispiel": (by_post, "AI & Backend Engineer"),
+        "mueller": (second, "Python Entwickler (m/w/d)"),
+    }.items():
+        job_id = db.insert_job_if_new(con, {
+            "source": "stub", "external_id": key, "title": title,
+            "company": "Beispiel GmbH" if key == "beispiel" else "Müller & Co",
+            "url": "https://example.invalid/1"})
+        db.set_job_status(con, job_id, "applied", bewerbung_id=bew)
+        jobs[key] = job_id
+    con.commit()
+    return by_post, second, by_hand, jobs
+
+
+def test_v14_gives_every_recorded_application_an_attempt(data_dir):
+    from jobdeck import db, migrations
+
+    con = db.connect()
+    migrations.migrate(con)
+    by_post, second, by_hand, jobs = _seed_ledger_for_attempts(con)
+    con.execute("PRAGMA user_version = 13")
+    con.execute("DELETE FROM application_attempts")
+    con.commit()
+
+    migrations.migrate(con)
+
+    rows = {
+        row["bewerbung_id"]: dict(row)
+        for row in con.execute("SELECT * FROM application_attempts")
+    }
+    assert set(rows) == {by_post, second, by_hand}
+    assert all(row["state"] == "recorded" for row in rows.values())
+    # The position is the posting's title, and it is the ONLY place it exists.
+    assert rows[by_post]["position"] == "AI & Backend Engineer"
+    assert rows[by_post]["idempotency_key"] == f"job:{jobs['beispiel']}"
+    assert rows[by_post]["job_id"] == jobs["beispiel"]
+    assert rows[by_post]["channel"] == "Online-Portal"
+    # Recorded by hand: no posting, so no position. Empty means UNKNOWN.
+    assert rows[by_hand]["position"] == ""
+    assert rows[by_hand]["job_id"] is None
+    assert rows[by_hand]["idempotency_key"] == f"bewerbung:{by_hand}"
+    con.close()
+
+
+def test_v14_folds_the_company_key_exactly_like_the_gate(data_dir):
+    """A second folding rule is how a filter starts disagreeing with the gate
+    it mirrors, so the stored key must equal `dedupe.norm` and not merely
+    resemble it."""
+    from jobdeck import db, migrations
+    from jobdeck.dedupe import norm
+
+    con = db.connect()
+    migrations.migrate(con)
+    bew = db.add_bewerbung(con, {
+        "gesendet_am": "2026-08-10", "firma": "Beispiel® GmbH",
+        "kanal": "E-Mail", "status": "Gesendet"})
+    con.execute("PRAGMA user_version = 13")
+    con.execute("DELETE FROM application_attempts")
+    con.commit()
+
+    migrations.migrate(con)
+
+    stored = con.execute(
+        "SELECT company_key, company FROM application_attempts WHERE bewerbung_id=?",
+        (bew,)).fetchone()
+    assert stored["company_key"] == norm("Beispiel® GmbH") == "beispiel gmbh"
+    # The readable spelling survives too — a screen cannot show the key.
+    assert stored["company"] == "Beispiel® GmbH"
+    con.close()
+
+
+def test_v14_runs_once_and_never_resurrects_a_released_attempt(data_dir):
+    """Version-gated on purpose. A backfill on every start would re-create the
+    row for an attempt deliberately released and fight the live writers for
+    its key."""
+    from jobdeck import db, migrations
+
+    con = db.connect()
+    migrations.migrate(con)
+    by_post, _second, _by_hand, _jobs = _seed_ledger_for_attempts(con)
+    con.execute("PRAGMA user_version = 13")
+    con.execute("DELETE FROM application_attempts")
+    con.commit()
+    migrations.migrate(con)
+    con.execute(
+        "UPDATE application_attempts SET state='released' WHERE bewerbung_id=?",
+        (by_post,))
+    con.commit()
+
+    migrations.migrate(con)   # a later ordinary start
+
+    assert con.execute(
+        "SELECT state FROM application_attempts WHERE bewerbung_id=?",
+        (by_post,)).fetchone()["state"] == "released"
+    assert con.execute(
+        "SELECT COUNT(*) FROM application_attempts").fetchone()[0] == 3
+    con.close()
+
+
+def test_v13_becomes_v14_without_touching_a_posting_or_the_ledger(data_dir):
+    """Additive: one table, and every write lands in it. The legacy ledger
+    keeps its exact shape, which is what makes the rollback "stop reading the
+    new table" instead of a migration back."""
+    from jobdeck import db, migrations
+
+    con = db.connect()
+    migrations.migrate(con)
+    _seed_ledger_for_attempts(con)
+    con.execute("PRAGMA user_version = 13")
+    con.execute("DROP TABLE IF EXISTS application_attempts")
+    con.commit()
+    before = _corpus_hash(con)
+    ledger_before = [tuple(r) for r in con.execute("SELECT * FROM bewerbungen")]
+    columns_before = [r[1] for r in con.execute("PRAGMA table_info(bewerbungen)")]
+
+    migrations.migrate(con)
+
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 14
+    assert _corpus_hash(con) == before, "the upgrade touched a posting"
+    assert [tuple(r) for r in con.execute("SELECT * FROM bewerbungen")] == (
+        ledger_before
+    )
+    assert [r[1] for r in con.execute("PRAGMA table_info(bewerbungen)")] == (
+        columns_before
+    ), "the legacy ledger gained a column"
+    con.close()
+
+
+def test_v14_survives_a_pre_v7_jobs_table_without_the_link_column(tmp_path):
+    """A jobs table from before the link column exists in the wild only as the
+    partial shape the earlier migration tests build. Then no application HAS a
+    linked posting, so every attempt is keyed by its ledger row with an
+    unknown position — the truth for such a database, not a fallback."""
+    path = tmp_path / "v6.db"
+    con = sqlite3.connect(path)
+    con.row_factory = sqlite3.Row
+    con.executescript(
+        """
+        CREATE TABLE jobs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            source      TEXT NOT NULL,
+            external_id TEXT NOT NULL,
+            company     TEXT NOT NULL DEFAULT '',
+            fetched_at  TEXT NOT NULL,
+            status      TEXT NOT NULL DEFAULT 'new',
+            UNIQUE (source, external_id)
+        );
+        CREATE TABLE bewerbungen (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, gesendet_am TEXT, firma TEXT,
+            ansprechpartner TEXT, strasse TEXT, plz_ort TEXT, kanal TEXT,
+            status TEXT, notiz TEXT, created_at TEXT
+        );
+        INSERT INTO bewerbungen (gesendet_am, firma, kanal, status, created_at)
+             VALUES ('2026-06-12', 'Alt GmbH', 'E-Mail', 'Absage', '2026-06-12');
+        """
+    )
+    con.execute("PRAGMA user_version = 6")
+    con.commit()
+
+    migrations.migrate(con)
+
+    row = con.execute("SELECT * FROM application_attempts").fetchone()
+    assert row["idempotency_key"] == "bewerbung:1"
+    assert row["position"] == ""
+    assert row["job_id"] is None
+    assert row["company_key"] == "alt gmbh"
     con.close()

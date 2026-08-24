@@ -14,8 +14,7 @@ import pathlib
 
 from nicegui import run, ui
 
-from jobdeck import db
-from jobdeck.dedupe import duplicates_for_jobs
+from jobdeck import attempts, db
 from jobdeck.services import mappe, send
 from jobdeck.ui import helpers
 from jobdeck.ui.helpers import open_in_system
@@ -78,7 +77,7 @@ def applied_at_this_company(job_id: int) -> dict | None:
         job = db.get_job(con, job_id)
         if job is None:
             return None
-        return duplicates_for_jobs(con, [dict(job)]).get(job_id)
+        return attempts.decisions_for_jobs(con, [dict(job)]).get(job_id)
 
 
 def open_editor(row: dict, *, overlay, say, on_change) -> None:
@@ -238,7 +237,7 @@ def open_editor(row: dict, *, overlay, say, on_change) -> None:
                 # the press. The gate inside the claim would refuse it a second
                 # later, but the point of this line is that he sees it first.
                 if already:
-                    ui.label(helpers.applied_line(already)) \
+                    ui.label(helpers.hold_line(already, current.get("job_company", ""))) \
                         .classes("text-sm font-bold text-amber-700")
                 ui.label(f"Betreff: {current['betreff']}") \
                     .classes("text-sm")

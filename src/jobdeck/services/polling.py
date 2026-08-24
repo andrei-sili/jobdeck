@@ -13,8 +13,8 @@ import logging
 
 import httpx
 
-from jobdeck import db
-from jobdeck.dedupe import find_duplicate_bewerbung, find_duplicate_job
+from jobdeck import attempts, db
+from jobdeck.dedupe import find_duplicate_job
 from jobdeck.sources import get_sources
 from jobdeck.sources.base import JobPosting, SearchQuery, SourceUnavailable
 
@@ -68,11 +68,20 @@ def _profile_due(profile, now: datetime.datetime) -> bool:
 
 def _store_posting(profile_id: int, posting: JobPosting) -> str:
     """Insert one posting with duplicate handling. Returns the outcome:
-    'new', 'duplicate' (already applied at this company), or 'known'."""
+    'new', 'duplicate' (this position already has an application), or
+    'known'."""
     with db.db() as con:
         if find_duplicate_job(con, posting.company, posting.title):
             return "known"  # same job already arrived through another source
-        dup = find_duplicate_bewerbung(con, posting.company, posting.contact_email)
+        # The SAME decision every gate and screen asks. Filing a posting away
+        # at discovery is permanent, so only a permanent refusal may do it: a
+        # company merely inside its cooling-off window must arrive as `new`
+        # and be hidden at read time, or waiting the window out would never
+        # bring it back. See `docs/adr/0010-company-cooling-off-window.md`.
+        decision = attempts.decide_for_posting(
+            con, company=posting.company, title=posting.title,
+            contact_email=posting.contact_email,
+        )
         values = {
             "profile_id": profile_id,
             "source": posting.source,
@@ -86,14 +95,14 @@ def _store_posting(profile_id: int, posting: JobPosting) -> str:
             "contact_email": posting.contact_email,
             "published_at": posting.published_at,
         }
-        if dup is not None:
+        if decision.permanent and decision.application_id is not None:
             values["status"] = "duplicate"
-            values["duplicate_of"] = dup["id"]
+            values["duplicate_of"] = decision.application_id
         job_id = db.insert_job_if_new(con, values)
         if job_id is None:
             return "known"
         db.set_job_facts(con, job_id, posting.facts)
-        return "duplicate" if dup is not None else "new"
+        return "duplicate" if values.get("status") == "duplicate" else "new"
 
 
 async def poll_profile(profile) -> dict[str, int]:

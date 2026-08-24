@@ -4,7 +4,7 @@ import asyncio
 
 from nicegui import run, ui
 
-from jobdeck import apply_form, backup, config, db, freshness, gmail
+from jobdeck import apply_form, backup, config, db, freshness, gmail, identity
 from jobdeck import settings as app_settings
 from jobdeck.constants import DEFAULT_SILENCE_CLOSES_DAYS
 from jobdeck.services import (
@@ -37,6 +37,12 @@ def _get_settings():
             # actually be used instead of raising out of the page that is the
             # only place to fix it.
             "silence_closes_after_days": silence.configured_days(con),
+            # Same reason: read through the typed accessor the gate uses, so
+            # the field shows the window that will actually be applied.
+            "company_cooldown_days": app_settings.integer(
+                con, identity.COOLDOWN_SETTING,
+                identity.DEFAULT_COOLDOWN_DAYS, minimum=0,
+            ),
             "daily_draft_cap": db.daily_draft_cap(con),
             "drafts_today": db.count_drafts_today(con),
             "ai_enabled": db.ai_enabled(con),
@@ -254,6 +260,17 @@ async def settings_page():
                 "mit. Meldet sich die Firma doch noch, überschreibt ihre "
                 "Antwort den Eintrag von selbst. 0 schaltet die Regel ab."
             ).classes("text-xs text-gray-500")
+            cooldown_days = ui.number(
+                "Firma nach einer Bewerbung zurückstellen für (Tage)",
+                value=settings["company_cooldown_days"],
+                min=0, max=365).classes("w-64")
+            ui.label(
+                "So lange erscheinen weitere Stellen dieser Firma nicht in "
+                "der Arbeitsliste — sie werden darunter gezählt, sind einen "
+                "Klick entfernt und kommen danach von selbst zurück. Auf "
+                "dieselbe Stelle bewirbst du dich nie ein zweites Mal, egal "
+                "wie lange du wartest. 0 schaltet die Regel ab."
+            ).classes("text-xs text-gray-500")
 
             async def save():
                 await run.io_bound(_set_setting, "follow_up_days",
@@ -272,6 +289,11 @@ async def settings_page():
                     str(max(0, int(silence_days.value
                                    if silence_days.value is not None
                                    else DEFAULT_SILENCE_CLOSES_DAYS))))
+                await run.io_bound(
+                    _set_setting, identity.COOLDOWN_SETTING,
+                    str(max(0, int(cooldown_days.value
+                                   if cooldown_days.value is not None
+                                   else identity.DEFAULT_COOLDOWN_DAYS))))
                 ui.notify("Saved", type="positive")
 
             ui.button("Save", on_click=save).mark("save-tunables")

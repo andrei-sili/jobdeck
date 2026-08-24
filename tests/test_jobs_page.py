@@ -16,6 +16,17 @@ from jobdeck.ui.helpers import openable_url, posting_markdown
 from jobdeck.ui.pages import jobs
 
 
+def _held(sent_on="2026-06-12", reopens_on="2026-08-11", position=""):
+    """The decision the screens now receive: a company inside its window."""
+    from jobdeck import identity
+
+    return identity.Decision(
+        verdict=identity.COOLING_OFF, application_id=1, position=position,
+        sent_on=sent_on, reopens_on=reopens_on,
+    )
+
+
+
 def drafting_module():
     from jobdeck.services import drafting
     return drafting
@@ -303,10 +314,10 @@ _COUNTS = {"mismatches": 129, "dead": 58, "applied_firm": 30, "old": 12}
 @pytest.mark.parametrize("view_key, counts, expected", [
     ("offen", _COUNTS,
      "129 passen nicht · 58 offline · "
-     "30 bei schon beworbenen Firmen · 12 älter als 45 Tage"),
+     "30 bei zurückgestellten Firmen · 12 älter als 45 Tage"),
     # …and every one of those four can be ONE
     ("offen", {"mismatches": 1, "dead": 1, "applied_firm": 1, "old": 1},
-     "1 passt nicht · 1 offline · 1 bei einer schon beworbenen Firma · "
+     "1 passt nicht · 1 offline · 1 bei einer zurückgestellten Firma · "
      "1 älter als 45 Tage"),
     ("offen", {**_COUNTS, "mismatches": 0, "applied_firm": 0, "old": 0},
      "58 offline"),
@@ -314,7 +325,7 @@ _COUNTS = {"mismatches": 129, "dead": 58, "applied_firm": 30, "old": 12}
     # a pile view INCLUDES the other piles, so it must not claim to hide them —
     # the label is derived from the filters the query really used
     ("firma_kontaktiert", _COUNTS,
-     "30 Stellen bei Firmen, bei denen du dich schon beworben hast"),
+     "30 Stellen bei Firmen, die gerade zurückgestellt sind"),
     ("passt_nicht", _COUNTS, "129 Anzeigen verletzen eine harte Anforderung"),
     ("offline", _COUNTS, "58 Anzeigen sind offline"),
     ("alt", _COUNTS, "12 Anzeigen älter als 45 Tage"),
@@ -325,7 +336,7 @@ _COUNTS = {"mismatches": 129, "dead": 58, "applied_firm": 30, "old": 12}
     ("passt_nicht", {**_COUNTS, "mismatches": 1},
      "1 Anzeige verletzt eine harte Anforderung"),
     ("firma_kontaktiert", {**_COUNTS, "applied_firm": 1},
-     "1 Stelle bei einer Firma, bei der du dich schon beworben hast"),
+     "1 Stelle bei einer Firma, die gerade zurückgestellt ist"),
     # a view of what he set aside himself hides nothing at all
     ("vorgemerkt", _COUNTS, ""),
     ("in_arbeit", _COUNTS, ""),
@@ -1023,22 +1034,43 @@ def test_nothing_the_user_sees_is_built_on_a_slot_a_refresh_just_deleted():
     assert hosted, "nothing is hosted — the rule would pass on an empty tail"
 
 
-def test_the_sql_filter_agrees_with_the_gate_on_every_shape(con, data_dir):
-    """`db.APPLIED_FIRM_SQL` is a SECOND implementation of _first_match — it has
-    to run where the paging and the counts do. Two hand-written copies of one
-    rule drift, and this one decides whether a posting is shown at all, so the
-    two are pinned equal over a generated corpus rather than argued about."""
-    from jobdeck import db
-    from jobdeck.dedupe import _BEWERBUNGEN_SQL, _first_match
+def test_the_sql_filter_agrees_with_the_rule_on_every_shape(con, data_dir):
+    """`db.APPLIED_FIRM_SQL` is a SECOND implementation of
+    `identity.holds_company` — it has to run where the paging and the counts
+    do. Two hand-written copies of one rule drift, and this one decides
+    whether a posting is shown at all, so the two are pinned equal over a
+    generated corpus rather than argued about.
+
+    Pinned against `holds_company` rather than against `decide`: the filter
+    answers "is this company still held", while the gate also refuses a
+    republication whose company is long free. One rule, two questions."""
+    import datetime
+
+    from jobdeck import db, identity
+
+    today = datetime.date.today()
+
+    def ago(days):
+        return (today - datetime.timedelta(days=days)).isoformat()
 
     firms = ["Müller GmbH", "MÜLLER  GmbH", "müller gmbh ", "Müller AG",
              "a.b® GmbH", "a.b GmbH", "ab GmbH", "180° GmbH", "180 GmbH",
              "ACME™", "ACME", "", "   ", "Ⓐ GmbH", "Ⓑ GmbH", "Beispiel\xadGmbH"]
     mails = ["", "jobs@mueller.de", "JOBS@MUELLER.DE", "  ",
-             "bewerbung^x@a.de", "bewerbungx@a.de", "hr@andere.de"]
-    for firma, email in [("Müller GmbH", "jobs@mueller.de"), ("ACME AG", ""),
-                         ("", "hr@andere.de"), ("  ", "  ")]:
-        db.add_bewerbung(con, {"gesendet_am": "2026-06-10", "firma": firma,
+             "bewerbung^x@a.de", "hr@andere.de"]
+    # dates on both sides of the window, plus the two that cannot be read
+    ledger = [
+        ("Müller GmbH", "jobs@mueller.de", ago(3)),      # deep inside
+        ("Müller AG", "", ago(59)),                      # the last held day
+        ("a.b® GmbH", "", ago(60)),                      # the day it reopens
+        ("ACME™", "", ago(400)),                         # long free
+        ("180° GmbH", "", ""),                           # no date at all
+        ("Ⓐ GmbH", "", "irgendwann"),                    # unreadable
+        ("", "hr@andere.de", ago(1)),                    # no company
+        ("   ", "  ", ago(1)),                           # blank company
+    ]
+    for firma, email, sent in ledger:
+        db.add_bewerbung(con, {"gesendet_am": sent, "firma": firma,
                                "email": email, "kanal": "E-Mail",
                                "status": "Gesendet"})
     for index, (firma, email) in enumerate(
@@ -1049,16 +1081,68 @@ def test_the_sql_filter_agrees_with_the_gate_on_every_shape(con, data_dir):
             "url": f"https://e.example/{index}"})
     con.commit()
 
-    rows = con.execute(_BEWERBUNGEN_SQL).fetchall()
+    from jobdeck import attempts
+    from jobdeck.dedupe import norm
+
+    applications = attempts.applications(con)
     by_sql = {r[0] for r in con.execute(
-        f"SELECT id FROM jobs WHERE {db.APPLIED_FIRM_SQL}")}
-    by_gate = {j["id"] for j in con.execute("SELECT * FROM jobs")
-               if _first_match(rows, j["company"], j["contact_email"])}
-    assert by_sql == by_gate, (
-        f"SQL-only: {sorted(by_sql - by_gate)}, gate-only: {sorted(by_gate - by_sql)}")
-    assert by_gate, "the corpus produced no matches — the check would be vacuous"
-    assert by_gate != {j[0] for j in con.execute("SELECT id FROM jobs")}, \
+        f"SELECT id FROM jobs WHERE {db.APPLIED_FIRM_SQL}",
+        db.applied_firm_params(con))}
+    by_rule = set()
+    for job in con.execute("SELECT * FROM jobs"):
+        key = norm(job["company"])
+        if not key:
+            continue
+        at_company = [a for a in applications if norm(a.company) == key]
+        if identity.holds_company(
+                at_company, window_days=identity.DEFAULT_COOLDOWN_DAYS,
+                today=today) is not None:
+            by_rule.add(job["id"])
+
+    assert by_sql == by_rule, (
+        f"SQL-only: {sorted(by_sql - by_rule)}, rule-only: {sorted(by_rule - by_sql)}")
+    assert by_rule, "the corpus produced no matches — the check would be vacuous"
+    assert by_rule != {j[0] for j in con.execute("SELECT id FROM jobs")}, \
         "everything matched — the check would pass on a filter that never hides"
+
+
+def test_the_sql_filter_hides_nothing_once_the_window_is_off(con, data_dir):
+    from jobdeck import db
+    db.add_bewerbung(con, {"gesendet_am": "2026-08-24", "firma": "Müller GmbH",
+                           "email": "", "kanal": "E-Mail", "status": "Gesendet"})
+    db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "x", "title": "Dev",
+        "company": "Müller GmbH", "url": "https://e.example/1"})
+    db.set_setting(con, "company_cooldown_days", "0")
+    con.commit()
+
+    hidden = {r[0] for r in con.execute(
+        f"SELECT id FROM jobs WHERE {db.APPLIED_FIRM_SQL}",
+        db.applied_firm_params(con))}
+
+    assert hidden == set()
+
+
+def test_a_shared_contact_address_no_longer_hides_another_companys_posting(con,
+                                                                data_dir):
+    """ADR 0002 keeps an address as evidence and never as an identity. One ATS
+    mailbox serving two employers used to hide the second one's postings
+    behind the first one's application."""
+    from jobdeck import db
+    db.add_bewerbung(con, {"gesendet_am": "2026-08-24", "firma": "Erste GmbH",
+                           "email": "jobs@ats.example", "kanal": "E-Mail",
+                           "status": "Gesendet"})
+    job_id = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "x", "title": "Dev",
+        "company": "Zweite GmbH", "contact_email": "jobs@ats.example",
+        "url": "https://e.example/1"})
+    con.commit()
+
+    hidden = {r[0] for r in con.execute(
+        f"SELECT id FROM jobs WHERE {db.APPLIED_FIRM_SQL}",
+        db.applied_firm_params(con))}
+
+    assert job_id not in hidden
 
 
 # ---------------------------------------------------------------------------
@@ -1363,14 +1447,22 @@ def test_a_blocked_step_says_why_beside_itself():
 
 
 def test_an_application_at_the_firm_outranks_every_channel():
-    """A posting at a company he has already written to can never become an
-    application — so nothing downstream may offer to start one."""
-    already = {"firma": "Eine GmbH", "gesendet_am": "2026-06-12",
-               "status": "Absage"}
+    """A company inside its cooling-off window cannot receive an application
+    yet — so no step of applying may be live, whatever the channel.
+
+    Exactly one press IS offered, and it is not an application: the one that
+    answers the hold. Without it the held-back view is a room with no door.
+
+    The reason names the day the hold lifts: the point of a window is that it
+    ends, and a refusal that does not say when is indistinguishable from the
+    permanent one this replaced."""
+    already = _held()
     for channel in ("direct_email", "ats_form", ""):
         steps = jobs.apply_steps(_row(apply_channel=channel), already)
-        assert not any(s.enabled for s in steps)
-        assert any("bereits beworben" in s.reason for s in steps)
+        live = [s for s in steps if s.enabled]
+        assert [s.key for s in live] == [jobs.STEP_ANYWAY]
+        assert any("zurückgestellt" in s.reason for s in steps)
+        assert any("11. August 2026" in s.reason for s in steps)
 
 
 # --------------------------------------------------------------------------
@@ -1420,11 +1512,10 @@ def test_the_facts_block_states_an_absence_rather_than_dropping_the_row():
 def test_the_warnings_stand_above_the_advert_worst_first():
     job = {"liveness": "gone", "liveness_checked_at": "2026-08-01T09:00:00",
            "temp_agency": 1, "draft_status": None, "draft_updated_at": None}
-    already = {"firma": "Eine GmbH", "gesendet_am": "2026-06-12",
-               "status": "Absage"}
+    already = _held()
     notes = jobs.reader_notes(job, already)
     assert [kind for _, kind in notes] == ["danger", "danger", "warn"]
-    assert "bereits beworben" in notes[0][0]
+    assert "zurückgestellt" in notes[0][0]
     assert "offline" in notes[1][0]
     assert "Arbeitnehmerüberlassung" in notes[2][0]
 
@@ -1454,11 +1545,13 @@ def test_a_form_posting_can_still_be_given_a_letter():
         steps = {s.key: s for s in jobs.apply_steps(_row(apply_channel=channel))}
         assert steps[jobs.STEP_START].enabled, channel
         assert "0,09 $" in steps[jobs.STEP_START].label, channel
-    # …and never where an application cannot happen
+    # …and never where an application cannot happen. Under a liftable hold the
+    # only live press answers the hold; STEP_START itself stays refused.
     assert not any(s.enabled for s in jobs.apply_steps(_row(status="applied")))
-    assert not any(s.enabled for s in jobs.apply_steps(
-        _row(apply_channel="ats_form"),
-        {"firma": "Eine GmbH", "gesendet_am": "2026-06-12", "status": "Absage"}))
+    held = {s.key: s for s in jobs.apply_steps(
+        _row(apply_channel="ats_form"), _held())}
+    assert held[jobs.STEP_START].enabled is False
+    assert held[jobs.STEP_ANYWAY].enabled is True
 
 
 def test_a_resolved_dead_end_is_described_the_same_way_everywhere():
@@ -1630,16 +1723,20 @@ def test_the_press_is_marked_done_by_the_stamp_not_by_the_documents():
     (_row(status="duplicate", apply_channel="ats_form"), None),
     (_row(status="skipped", apply_channel="ats_form"), None),
     (_row(apply_channel="ats_form", url="https://firma.de/x"),
-     {"firma": "Eine GmbH", "gesendet_am": "2026-06-12", "status": "Absage"}),
+     _held()),
 ])
 def test_where_no_application_can_happen_no_step_is_live(job, already):
     """Including "Formular öffnen": opening it MOVES the posting to `portal`,
     which is this app's record that an application has begun. Reading the
-    advert is still a press away in the triage row, and that changes nothing."""
+    advert is still a press away in the triage row, and that changes nothing.
+
+    A liftable hold is the one exception and has its own test: there the press
+    on offer answers the hold rather than starting an application."""
     steps = jobs.apply_steps(job, already)
     assert steps, "the posting offers nothing at all"
-    assert not any(s.enabled for s in steps)
-    assert all(s.reason for s in steps if not s.done)
+    assert not any(s.enabled for s in steps if s.key != jobs.STEP_ANYWAY)
+    assert all(s.reason for s in steps
+               if not s.done and s.key != jobs.STEP_ANYWAY)
 
 
 def test_the_step_to_press_is_the_first_that_is_neither_done_nor_refused():
@@ -1881,3 +1978,91 @@ def test_the_page_records_the_very_signature_the_watcher_compares(con, data_dir)
     db.set_setting(con, jobs.MIN_SCORE_SETTING, "60")
     con.commit()
     assert jobs._signature() != recorded
+
+
+def test_a_posting_that_repeats_an_applied_position_leaves_the_working_list(
+        con, data_dir):
+    """It can never become a second application, so it goes where every other
+    posting that cannot goes — counted beneath the list, one click away, never
+    deleted. Before this it stayed in the list with every button dead, taking
+    a slot it could not use."""
+    from jobdeck import db
+    from jobdeck.ui.pages import jobs as jobs_page
+
+    bew = db.add_bewerbung(con, {"gesendet_am": "2026-01-05", "firma": "Beispiel GmbH",
+                                 "kanal": "E-Mail", "status": "Absage"})
+    con.execute(
+        "INSERT INTO application_attempts (idempotency_key, state, company,"
+        " company_key, position, channel, bewerbung_id, created_at, updated_at)"
+        " VALUES ('bewerbung:x', 'recorded', 'Beispiel GmbH', 'beispiel gmbh',"
+        " 'Software Developer: Python', 'E-Mail', ?, '2026-01-05', '2026-01-05')",
+        (bew,))
+    repeat = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "repost", "title": "Software Developer: Python",
+        "company": "Beispiel GmbH", "url": "https://e.example/1"})
+    other = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "other", "title": "Ganz andere Stelle",
+        "company": "Beispiel GmbH", "url": "https://e.example/2"})
+    con.commit()
+
+    # UNGROUPED on purpose: `list_job_groups` returns one row per company, so
+    # a grouped assertion would pass because the sibling represented the
+    # company — not because the filter hid anything.
+    working = next(v for v in jobs_page.VIEWS if v.key == "offen")
+    rows = db.list_jobs(con, status=working.status, limit=100,
+                        **working.filters)
+    assert repeat not in {r["id"] for r in rows}
+    # …and the company's window is long past, so it is THIS rule hiding it
+    assert other in {r["id"] for r in rows}
+    assert db.count_republication_jobs(con, "new") == 1
+
+    pile = next(v for v in jobs_page.VIEWS if v.key == "gleiche_stelle")
+    shown = db.list_jobs(con, status=pile.status, limit=100, **pile.filters)
+    assert {r["id"] for r in shown} == {repeat}, "the door has to open onto it"
+
+
+def test_the_republication_filter_agrees_with_the_rule_on_every_shape(
+        con, data_dir):
+    """`db.REPUBLICATION_SQL` is a SECOND implementation of
+    `identity.republication_of` — it runs where the paging and the counts do.
+    Pinned equal over a generated corpus rather than argued about."""
+    from jobdeck import attempts, db, identity
+    from jobdeck.dedupe import norm
+
+    firms = ["Müller GmbH", "MÜLLER  GmbH", "Müller AG", "a.b® GmbH", "a.b GmbH",
+             "", "   "]
+    titles = ["Python Dev", "python  dev ", "PYTHON DEV", "Senior Python Dev",
+              "", "   ", "Entwickler (m/w/d)"]
+    ledger = [("Müller GmbH", "Python Dev"), ("a.b® GmbH", "Entwickler (m/w/d)"),
+              ("Müller AG", ""), ("", "Python Dev")]
+    for firma, position in ledger:
+        bew = db.add_bewerbung(con, {"gesendet_am": "2026-01-05", "firma": firma,
+                                     "kanal": "E-Mail", "status": "Absage"})
+        con.execute(
+            "INSERT INTO application_attempts (idempotency_key, state, company,"
+            " company_key, position, channel, bewerbung_id, created_at, updated_at)"
+            " VALUES (?, 'recorded', ?, ?, ?, 'E-Mail', ?, '2026-01-05','2026-01-05')",
+            (f"bewerbung:{bew}", firma, norm(firma), position, bew))
+    for index, (firma, title) in enumerate([(f, t) for f in firms for t in titles]):
+        db.insert_job_if_new(con, {
+            "source": "stub", "external_id": f"r{index}", "title": title,
+            "company": firma, "url": f"https://e.example/{index}"})
+    con.commit()
+
+    applications = attempts.applications(con)
+    by_sql = {r[0] for r in con.execute(
+        f"SELECT id FROM jobs WHERE {db.REPUBLICATION_SQL}")}
+    by_rule = set()
+    for job in con.execute("SELECT * FROM jobs"):
+        key = norm(job["company"])
+        if not key:
+            continue
+        at_company = [a for a in applications if norm(a.company) == key]
+        if identity.republication_of(at_company, job["title"]) is not None:
+            by_rule.add(job["id"])
+
+    assert by_sql == by_rule, (
+        f"SQL-only: {sorted(by_sql - by_rule)}, rule-only: {sorted(by_rule - by_sql)}")
+    assert by_rule, "the corpus produced no matches — the check would be vacuous"
+    assert by_rule != {j[0] for j in con.execute("SELECT id FROM jobs")}, \
+        "everything matched — the check would pass on a filter that never hides"

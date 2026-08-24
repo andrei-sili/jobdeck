@@ -12,7 +12,7 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-from jobdeck import apply_channel, backup, config, dates, freshness, migrations
+from jobdeck import apply_channel, backup, config, dates, freshness, identity, migrations
 from jobdeck import settings as app_settings
 from jobdeck.constants import (
     BEANTWORTET_STATUS,
@@ -28,7 +28,7 @@ from jobdeck.constants import (
     OFFENE_STATUS,
     STATUS_RANK,
 )
-from jobdeck.dedupe import find_duplicate_bewerbung, norm
+from jobdeck.dedupe import norm
 
 log = logging.getLogger(__name__)
 
@@ -141,6 +141,15 @@ def bootstrap() -> backup.BackupResult | None:
         recovered = upload.recover_interrupted_undos(con)
         if recovered:
             log.info("upload: removed %s interrupted undo artifacts", recovered)
+        # Beside it, and for the same reason: a reservation whose process died
+        # would hide an employer for good. Evidence-driven — a draft still in
+        # `sending` IS a live claim and keeps its company held for him to
+        # resolve, which is the existing rule for a stuck send, not a new one.
+        from jobdeck import attempts
+
+        freed = attempts.reconcile_interrupted(con, _now())
+        if freed:
+            log.info("identity: released %s interrupted reservations", freed)
         # Self-healing, like the published_on backfill beside it: derived from
         # data the row already holds, so it is idempotent and a posting whose
         # e-mail was harvested before this rule existed stops looking like a
@@ -248,6 +257,14 @@ def delete_bewerbung(con: sqlite3.Connection, row_id: int) -> None:
     )
     con.execute(
         "UPDATE jobs SET duplicate_of=NULL WHERE duplicate_of=?", (row_id,)
+    )
+    # `application_attempts.bewerbung_id` is another foreign key into the row
+    # about to go, and the attempt behind a deleted application was never one:
+    # the company is free again.
+    con.execute(
+        "UPDATE application_attempts SET state='released', bewerbung_id=NULL,"
+        " updated_at=? WHERE bewerbung_id=?",
+        (_now(), row_id),
     )
     con.execute("DELETE FROM bewerbungen WHERE id=?", (row_id,))
 
@@ -572,25 +589,116 @@ _DRAFT_PDF_SQL = (
 )
 
 
-# A posting at a company an application already went to. Only ONE application
-# per company is possible, so such a posting can never become one — the same
-# kind of fact as a score-0 mismatch or an offline ad, and hidden on the same
-# terms. It is the SQL mirror of dedupe._first_match (company OR contact
-# e-mail, each arm requiring the posting's own field to be non-empty), because
-# the filter has to run where the paging and the counts do. A differential
-# test pins the two equal over a generated corpus — two hand-written copies of
-# one rule drift, and this one decides whether he sees a posting at all.
-# Written as two UNCORRELATED IN-subqueries on purpose. The obvious
+# When an employer was last in touch: a receipt they sent, or the day the
+# application went out when there was none. One definition, because the
+# silence rule counts from it too and two readings of "last contact" is how a
+# number on a screen and the rule beneath it drift apart.
+LAST_CONTACT_SQL = """COALESCE(
+    (SELECT MAX(e.internal_date) FROM email_log e
+      WHERE e.bewerbung_id = b.id AND e.direction = 'inbound'
+        AND e.classification = 'eingang'),
+    b.gesendet_am)"""
+
+# A posting at a company that is still inside its cooling-off window. Such a
+# posting cannot become an application yet, so it leaves the working list on
+# the same terms as a score-0 mismatch or an offline ad — counted beneath the
+# list, one click away, never deleted, and back on its own once the window
+# passes. Policy: `docs/adr/0010-company-cooling-off-window.md`.
+#
+# The SQL mirror of `identity.decide`'s cooling-off arm, because the filter has
+# to run where the paging and the counts do. A differential test pins the two
+# equal over a generated corpus — two hand-written copies of one rule drift,
+# and this one decides whether a posting is seen at all.
+#
+# The contact-address arm this filter used to carry is gone. ADR 0002 keeps a
+# shared address as evidence and never as an identity, and a mailbox serving
+# two employers would otherwise hide the second one's postings behind the
+# first one's application.
+#
+# One bound parameter: the day on or before which an application stops holding
+# its company. `applied_firm_params` derives it, and returns a date beyond any
+# real one when the window is switched off, which makes the whole arm false
+# rather than needing a second shape of the query.
+#
+# The date compared is the LAST CONTACT, not the day the application was
+# sent. A ledger row can be months old while the conversation is days old —
+# one real row read as sent in June had a receipt from August — and counting
+# from the send date then offers a company that answered last week.
+#
+# An application whose date is missing or unreadable sorts to that same far
+# future and therefore keeps holding: it cannot prove its window has passed,
+# and assuming it has would offer a company that may have been written to
+# yesterday. The Python rule reads it the same way.
+#
+# Written as an UNCORRELATED IN-subquery on purpose. The obvious
 # `EXISTS (... WHERE jd_norm(b.firma) = jd_norm(jobs.company))` makes SQLite
 # call jd_norm — a Python callback — once per (posting, application) pair:
-# measured at 330 ms over the real corpus, and the inbox pays the filter three
-# times per page (count, list, siblings). Uncorrelated, each side is folded
-# once and matched through an ephemeral index.
-APPLIED_FIRM_SQL = """(
-    (jd_norm(jobs.company) <> '' AND jd_norm(jobs.company) IN (
-        SELECT jd_norm(b.firma) FROM bewerbungen b WHERE jd_norm(b.firma) <> ''))
- OR (jd_norm(jobs.contact_email) <> '' AND jd_norm(jobs.contact_email) IN (
-        SELECT jd_norm(b.email) FROM bewerbungen b WHERE jd_norm(b.email) <> '')))"""
+# measured at 330 ms over a real corpus, and the inbox pays the filter three
+# times per page load. Uncorrelated, each side is folded once and matched
+# through an ephemeral index.
+APPLIED_FIRM_SQL = f"""(
+    jd_norm(jobs.company) <> '' AND jd_norm(jobs.company) IN (
+        SELECT jd_norm(b.firma) FROM bewerbungen b
+         WHERE jd_norm(b.firma) <> ''
+           AND COALESCE(NULLIF(SUBSTR({LAST_CONTACT_SQL}, 1, 10), ''),
+                        '9999-12-31') > ?))"""
+
+# Beyond any date a posting or an application can carry, so "unknown" and
+# "the window is off" are both expressed as a comparison instead of as a
+# second query shape.
+_FAR_FUTURE = "9999-12-31"
+
+
+def applied_firm_params(con: sqlite3.Connection) -> tuple[str]:
+    """The bindings `APPLIED_FIRM_SQL` needs, derived from the setting.
+
+    With the window switched off every application is compared against the far
+    future, so none of them holds and the filter hides nothing — which is what
+    switching the rule off has to mean.
+    """
+    days = app_settings.integer(
+        con, identity.COOLDOWN_SETTING, identity.DEFAULT_COOLDOWN_DAYS,
+        minimum=0,
+    )
+    if days <= identity.WINDOW_OFF:
+        held_since = _FAR_FUTURE
+    else:
+        held_since = (
+            datetime.date.today() - datetime.timedelta(days=days)
+        ).isoformat()
+    return (held_since,)
+
+
+# The same position at the same company as an application already in the
+# ledger — the employer's repost of the very advert that produced it, or an
+# identical opening. It can never become a second application, so it leaves the
+# working list on the same terms as a score-0 mismatch: counted beneath the
+# list, one click away, never deleted. Unlike the cooling-off pile it never
+# comes back, because waiting changes nothing about it.
+#
+# The SQL mirror of `identity.republication_of`, pinned equal to it by a
+# differential test. Both sides require a non-empty company AND a non-empty
+# position: two rows that failed to store a title are not the same role.
+#
+# Those two emptiness checks are REDUNDANT with each other, deliberately, and
+# a mutation of either one alone survives the suite: an empty title cannot
+# equal a non-empty position, and vice versa. Removing BOTH does change the
+# answer, and the differential test catches that. Defence in depth, not a hole
+# in the tests — the same shape as the two guards in `resolve_email`.
+#
+# One composite key rather than a correlated EXISTS, for the reason the filter
+# above gives — a correlated form calls the `jd_norm` Python callback once per
+# (posting, application) pair. `char(31)` is the unit separator, which `norm`
+# cannot leave in a value: it collapses every whitespace run to a space and
+# drops the invisible categories, so no company name and no title can carry
+# one and fake a match across the join.
+REPUBLICATION_SQL = """(
+    jd_norm(jobs.company) <> '' AND jd_norm(jobs.title) <> ''
+    AND jd_norm(jobs.company) || char(31) || jd_norm(jobs.title) IN (
+        SELECT jd_norm(b.firma) || char(31) || jd_norm(a.position)
+          FROM application_attempts a
+          JOIN bewerbungen b ON b.id = a.bewerbung_id
+         WHERE a.position <> '' AND jd_norm(b.firma) <> ''))"""
 
 # A posting at a company he has hidden. Written as an UNCORRELATED IN, like
 # the gate above and for the same measured reason: the natural EXISTS form
@@ -648,15 +756,20 @@ _IN_PROGRESS_SQL = (
 
 
 def _job_filters(
+    con: sqlite3.Connection,
     status: str | None, mismatches: str, gone: str, applied: str = "include",
     old: str = "include", stale_age_days: int = freshness.DEFAULT_STALE_AGE_DAYS,
     bookmarked: str = "include", opened: str = "include",
     in_progress: str = "include", search: str = "",
     keep_ids: tuple[int, ...] = (), hidden: str = "include",
-    min_score: int = 0,
+    min_score: int = 0, republication: str = "include",
 ) -> tuple[list[str], list]:
     """WHERE fragments + bound values shared by the list and the count, so a
     page can never be filtered differently from the total printed beside it.
+
+    Takes the connection only to derive the cooling-off cutoff once, here,
+    rather than in each of the five callers — five derivations of one date is
+    five chances for the list and the count beside it to disagree.
 
     An unrecognised filter value raises rather than being ignored: silently
     falling through would SHOW a pile the caller asked to hide, and a hidden
@@ -664,7 +777,8 @@ def _job_filters(
     for name, value in (("mismatches", mismatches), ("gone", gone),
                         ("applied", applied), ("old", old),
                         ("bookmarked", bookmarked), ("opened", opened),
-                        ("in_progress", in_progress), ("hidden", hidden)):
+                        ("in_progress", in_progress), ("hidden", hidden),
+                        ("republication", republication)):
         if value not in ("include", "exclude", "only"):
             raise ValueError(f"{name}={value!r}: expected include/exclude/only")
     where, params = [], []
@@ -681,8 +795,18 @@ def _job_filters(
         where.append(GONE_SQL)
     if applied == "exclude":
         where.append(f"NOT ({APPLIED_FIRM_SQL})")
+        params.extend(applied_firm_params(con))
     elif applied == "only":
         where.append(APPLIED_FIRM_SQL)
+        params.extend(applied_firm_params(con))
+    # Its own pile, not folded into the one above: that one is a company held
+    # back until a day it names, this one is a position that is finished. A
+    # single count covering both would print "zurückgestellt" over rows that
+    # are never coming back.
+    if republication == "exclude":
+        where.append(f"NOT ({REPUBLICATION_SQL})")
+    elif republication == "only":
+        where.append(REPUBLICATION_SQL)
     # His decision, not a fact about the posting — but unlike "kein Interesse"
     # it is about the COMPANY, so it keeps reaching postings that did not exist
     # when he pressed. That is the whole point: he pressed three times on one
@@ -853,6 +977,7 @@ def list_job_groups(
     search: str = "",
     keep_ids: tuple[int, ...] = (),
     hidden: str = "include",
+    republication: str = "include",
     min_score: int = 0,
     sort: str = DEFAULT_LIST_ORDER,
     offset: int = 0,
@@ -865,10 +990,10 @@ def list_job_groups(
     BETWEEN companies, "newest first" means the company's newest advert — not
     the date of whichever advert represents it, or a company that posted today
     would sort at thirty days because its strongest advert is that old."""
-    where, params = _job_filters(status, mismatches, gone, applied, old,
+    where, params = _job_filters(con, status, mismatches, gone, applied, old,
                                  stale_age_days, bookmarked, opened,
                                  in_progress, search, keep_ids, hidden,
-                                 min_score)
+                                 min_score, republication)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     order = list_order_sql(sort, grouped=True)
     return con.execute(
@@ -893,14 +1018,15 @@ def count_job_groups(
     search: str = "",
     keep_ids: tuple[int, ...] = (),
     hidden: str = "include",
+    republication: str = "include",
     min_score: int = 0,
     sort: str = DEFAULT_LIST_ORDER,
 ) -> int:
     """How many companies the grouped view holds."""
-    where, params = _job_filters(status, mismatches, gone, applied, old,
+    where, params = _job_filters(con, status, mismatches, gone, applied, old,
                                  stale_age_days, bookmarked, opened,
                                  in_progress, search, keep_ids, hidden,
-                                 min_score)
+                                 min_score, republication)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     return con.execute(
         f"{_ranked_jobs_cte(where_sql)}"
@@ -927,6 +1053,7 @@ def list_company_siblings(
     search: str = "",
     keep_ids: tuple[int, ...] = (),
     hidden: str = "include",
+    republication: str = "include",
     min_score: int = 0,
     sort: str = DEFAULT_LIST_ORDER,
     per_company: int = SIBLINGS_PER_COMPANY,
@@ -939,10 +1066,10 @@ def list_company_siblings(
     are."""
     if not company_keys:
         return []
-    where, params = _job_filters(status, mismatches, gone, applied, old,
+    where, params = _job_filters(con, status, mismatches, gone, applied, old,
                                  stale_age_days, bookmarked, opened,
                                  in_progress, search, keep_ids, hidden,
-                                 min_score)
+                                 min_score, republication)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     placeholders = ",".join("?" * len(company_keys))
     return con.execute(
@@ -969,15 +1096,16 @@ def count_jobs(
     search: str = "",
     keep_ids: tuple[int, ...] = (),
     hidden: str = "include",
+    republication: str = "include",
     min_score: int = 0,
     sort: str = DEFAULT_LIST_ORDER,
 ) -> int:
     """How many postings a `list_jobs` call with the same filters would have,
     ignoring its page limit — the total a paged view has to print."""
-    where, params = _job_filters(status, mismatches, gone, applied, old,
+    where, params = _job_filters(con, status, mismatches, gone, applied, old,
                                  stale_age_days, bookmarked, opened,
                                  in_progress, search, keep_ids, hidden,
-                                 min_score)
+                                 min_score, republication)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     return con.execute(
         f"SELECT COUNT(*) FROM jobs{where_sql}", params
@@ -999,6 +1127,7 @@ def list_jobs(
     search: str = "",
     keep_ids: tuple[int, ...] = (),
     hidden: str = "include",
+    republication: str = "include",
     min_score: int = 0,
     sort: str = DEFAULT_LIST_ORDER,
     offset: int = 0,
@@ -1008,10 +1137,10 @@ def list_jobs(
     (just the hidden pile — keeps mismatches reachable regardless of how
     many better-scored rows fill the page limit). `gone` takes the same three
     values over postings whose ad the source says is no longer there."""
-    where, params = _job_filters(status, mismatches, gone, applied, old,
+    where, params = _job_filters(con, status, mismatches, gone, applied, old,
                                  stale_age_days, bookmarked, opened,
                                  in_progress, search, keep_ids, hidden,
-                                 min_score)
+                                 min_score, republication)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     # The age-adjusted score is SELECTED as well as ordered on, so the number
     # the UI prints is the very number that decided the row's position — two
@@ -1444,7 +1573,7 @@ def jobs_to_prepare(
          LIMIT ?
         """,
         (min_score, max_age_days, 1 if include_forms else 0,
-         *PREPARED_DRAFT_STATUS, limit),
+         *PREPARED_DRAFT_STATUS, *applied_firm_params(con), limit),
     ).fetchall()
 
 
@@ -1560,13 +1689,25 @@ def count_gone_jobs(con: sqlite3.Connection, status: str | None = None) -> int:
     return con.execute(sql, params).fetchone()[0]
 
 
-def count_applied_firm_jobs(con: sqlite3.Connection, status: str | None = None) -> int:
-    """How many postings the already-applied filter would hide for this view."""
-    sql = f"SELECT COUNT(*) FROM jobs WHERE {APPLIED_FIRM_SQL}"
+def count_republication_jobs(
+    con: sqlite3.Connection, status: str | None = None
+) -> int:
+    """How many postings repeat a position that already has an application."""
+    sql = f"SELECT COUNT(*) FROM jobs WHERE {REPUBLICATION_SQL}"
     params: tuple = ()
     if status:
         sql += " AND status=?"
         params = (status,)
+    return con.execute(sql, params).fetchone()[0]
+
+
+def count_applied_firm_jobs(con: sqlite3.Connection, status: str | None = None) -> int:
+    """How many postings the already-applied filter would hide for this view."""
+    sql = f"SELECT COUNT(*) FROM jobs WHERE {APPLIED_FIRM_SQL}"
+    params: tuple = applied_firm_params(con)
+    if status:
+        sql += " AND status=?"
+        params = (*params, status)
     return con.execute(sql, params).fetchone()[0]
 
 
@@ -2178,12 +2319,6 @@ CLOCK_RESTARTING_CLASSIFICATIONS = ("eingang",)
 # drift: they already had, and on the real register thirteen of fifty-seven
 # open rows printed a number the rule did not use — one of them 69 days beside
 # a threshold of 60, and still open, with nothing on the page explaining why.
-LAST_CONTACT_SQL = """COALESCE(
-    (SELECT MAX(e.internal_date) FROM email_log e
-      WHERE e.bewerbung_id = b.id AND e.direction = 'inbound'
-        AND e.classification = 'eingang'),
-    b.gesendet_am)"""
-
 _SILENT_APPLICATIONS_SQL = """
 SELECT b.id, b.firma, b.status, b.gesendet_am, b.kanal,
        {last_contact} AS last_contact
@@ -2400,15 +2535,18 @@ def apply_job(
     dokument: str = "",
     notiz_extra: str = "",
 ) -> int | None:
-    """Record an application for a job posting. Returns the bewerbung id,
-    or None if a duplicate application blocks it."""
+    """Write the application for a posting. Returns the bewerbung id, or None
+    if the posting is gone.
+
+    A writer, not a gate. Whether an application MAY be made is decided by
+    `identity` and claimed by `attempts`, inside the caller's transaction and
+    before any of this runs — see
+    `docs/adr/0010-company-cooling-off-window.md`. The rule used to live here,
+    which meant the SQL layer owned a product decision and a temporary hold
+    was written as the permanent status `duplicate`.
+    """
     job = get_job(con, job_id)
     if job is None:
-        return None
-    dup = find_duplicate_bewerbung(con, job["company"], job["contact_email"])
-    if dup is not None:
-        set_job_status(con, job_id, "duplicate")
-        con.execute("UPDATE jobs SET duplicate_of=? WHERE id=?", (dup["id"], job_id))
         return None
     notiz = job["url"]
     if notiz_extra:
@@ -2427,6 +2565,19 @@ def apply_job(
     )
     set_job_status(con, job_id, "applied", bewerbung_id=bewerbung_id)
     return bewerbung_id
+
+
+def mark_duplicate_of(
+    con: sqlite3.Connection, job_id: int, bewerbung_id: int
+) -> None:
+    """File a posting as the duplicate of an application that already exists.
+
+    Only for a PERMANENT refusal. A cooling-off window is temporary and must
+    leave the posting `new`, or waiting it out would never bring it back — the
+    read-time filter hides it meanwhile.
+    """
+    set_job_status(con, job_id, "duplicate")
+    con.execute("UPDATE jobs SET duplicate_of=? WHERE id=?", (bewerbung_id, job_id))
 
 
 def unrecord_application(

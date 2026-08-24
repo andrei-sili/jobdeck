@@ -9,11 +9,19 @@ from dataclasses import dataclass
 from fastapi.responses import RedirectResponse
 from nicegui import app, run, ui
 
-from jobdeck import apply_channel, apply_form, config, db, freshness
+from jobdeck import (
+    apply_channel,
+    apply_form,
+    attempts,
+    config,
+    db,
+    freshness,
+    identity,
+)
 from jobdeck.ai import scoring
 from jobdeck.ai.drafting import clean_title
 from jobdeck.constants import DRAFT_DELIVERED
-from jobdeck.dedupe import duplicates_for_jobs, norm
+from jobdeck.dedupe import norm
 from jobdeck.services import (
     apply_record,
     apply_resolve,
@@ -60,12 +68,14 @@ DESCRIPTION_LIMIT = 40_000
 # what it does with each pile. A screen that computed its filters in the handler
 # is a screen whose printed total can disagree with its own rows.
 _WORKING = {"mismatches": "exclude", "gone": "exclude", "applied": "exclude",
-            "old": "exclude", "hidden": "exclude"}
+            "old": "exclude", "hidden": "exclude",
+            "republication": "exclude"}
 # "Everything" still means everything he has not put out of sight: a hidden
 # company is his standing decision, not a property of the posting, so only the
 # view that exists to review those decisions asks for them.
 _EVERYTHING = {"mismatches": "include", "gone": "include", "applied": "include",
-               "old": "include", "hidden": "exclude"}
+               "old": "include", "hidden": "exclude",
+               "republication": "include"}
 
 
 @dataclass(frozen=True)
@@ -110,11 +120,15 @@ VIEWS = (
          "Keine alten Anzeigen — alles in der Arbeitsliste ist frisch."),
     View("offline", "Offline", "new", {**_EVERYTHING, "gone": "only"},
          "Keine tote Anzeige — alles Geprüfte steht noch online."),
-    View("firma_kontaktiert", "Firma schon kontaktiert", "new",
+    View("firma_kontaktiert", "Firma zurückgestellt", "new",
          {**_EVERYTHING, "applied": "only"},
-         "Keine Stelle bei einer Firma, bei der du dich schon beworben hast."),
+         "Keine Firma ist gerade zurückgestellt."),
     View("doppelt", "Doppelt", "duplicate", _EVERYTHING,
          "Keine Anzeige wurde als Doppelte einer Bewerbung erkannt."),
+    View("gleiche_stelle", "Gleiche Stelle", "new",
+         {**_EVERYTHING, "republication": "only"},
+         "Keine Anzeige wiederholt eine Stelle, auf die du dich schon "
+         "beworben hast."),
     # Nothing is deleted, only moved into a view with a name. This is that
     # view — and it is the only one that asks for hidden companies, so the
     # word "everything" everywhere else keeps meaning "everything you have not
@@ -215,13 +229,18 @@ def hidden_parts(view: View, counts: dict, stale_age_days: int,
         ("gone", "dead", "offline", ("offline", "offline"),
          "Anzeige ist offline", "Anzeigen sind offline"),
         ("applied", "applied_firm", "firma_kontaktiert",
-         ("bei einer schon beworbenen Firma", "bei schon beworbenen Firmen"),
-         "Stelle bei einer Firma, bei der du dich schon beworben hast",
-         "Stellen bei Firmen, bei denen du dich schon beworben hast"),
+         ("bei einer zurückgestellten Firma", "bei zurückgestellten Firmen"),
+         "Stelle bei einer Firma, die gerade zurückgestellt ist",
+         "Stellen bei Firmen, die gerade zurückgestellt sind"),
         ("old", "old", "alt",
          (f"älter als {stale_age_days} Tage", f"älter als {stale_age_days} Tage"),
          f"Anzeige älter als {stale_age_days} Tage",
          f"Anzeigen älter als {stale_age_days} Tage"),
+        ("republication", "republication", "gleiche_stelle",
+         ("auf eine Stelle, auf die du dich schon beworben hast",
+          "auf Stellen, auf die du dich schon beworben hast"),
+         "Anzeige wiederholt eine Stelle, auf die du dich schon beworben hast",
+         "Anzeigen wiederholen Stellen, auf die du dich schon beworben hast"),
         ("hidden", "hidden", "ausgeblendet",
          ("bei einer ausgeblendeten Firma", "bei ausgeblendeten Firmen"),
          "Anzeige bei einer ausgeblendeten Firma",
@@ -273,6 +292,10 @@ STEP_MAPPE = "mappe"
 STEP_SEND = "send"
 STEP_START = "start"
 STEP_RECORD = "record"
+# Not an act of applying: the one press that answers a hold this screen is
+# otherwise a dead end for. It stands FIRST, because nothing below it can
+# happen until it is answered.
+STEP_ANYWAY = "anyway"
 
 
 @dataclass(frozen=True)
@@ -293,7 +316,7 @@ def _blocking_reason(job: dict, already: dict | None) -> str:
     if status == "applied":
         return "Diese Anzeige ist schon als Bewerbung eingetragen."
     if already:
-        return helpers.applied_line(already)
+        return helpers.hold_line(already, str(job.get("company") or ""))
     if status == "duplicate":
         return ("Diese Anzeige gehört zu einer Firma, bei der schon eine "
                 "Bewerbung liegt.")
@@ -316,6 +339,13 @@ def apply_steps(job: dict, already: dict | None = None) -> list[Step]:
     of five.
     """
     blocked = _blocking_reason(job, already)
+    # A cooling-off hold is the one refusal he can answer. Offering the answer
+    # HERE is what keeps the held-back view from being a room with no door:
+    # the pile exists so he can still reach a posting, and before this the
+    # only thing waiting for him there was the sentence explaining why he
+    # could not. Policy: `docs/adr/0010-company-cooling-off-window.md`.
+    liftable = bool(already is not None
+                    and already.verdict == identity.COOLING_OFF)
     draft_status = str(job.get("draft_status") or "")
     by_email = _by_email(job)
     # What may still be checked and sent from HERE. A draft that is sending or
@@ -329,6 +359,12 @@ def apply_steps(job: dict, already: dict | None = None) -> list[Step]:
     writing = (draft_status == "generating"
                and not drafting.claim_is_stale(job.get("draft_updated_at")))
     steps: list[Step] = []
+
+    if liftable:
+        steps.append(Step(
+            STEP_ANYWAY, "Trotzdem bewerben", enabled=True,
+            reason="",
+        ))
 
     if by_email:
         steps.append(Step(
@@ -580,7 +616,7 @@ def _load_jobs(view_key: str, page: int, search: str = "",
         return {
             "signature": signature,
             "view": view,
-            "applied": duplicates_for_jobs(con, on_screen),
+            "applied": attempts.decisions_for_jobs(con, on_screen),
             "rows": rows,
             "siblings": siblings,
             # Read outside every filter on purpose: an application under way is
@@ -592,6 +628,7 @@ def _load_jobs(view_key: str, page: int, search: str = "",
                 "mismatches": db.count_mismatches(con, view.status),
                 "dead": db.count_gone_jobs(con, view.status),
                 "applied_firm": db.count_applied_firm_jobs(con, view.status),
+                "republication": db.count_republication_jobs(con, view.status),
                 "old": db.count_old_jobs(con, view.status, stale_age_days),
                 # What the landing view's own filter hides, counted in the same
                 # unit as the list it labels: the difference between this view
@@ -837,6 +874,34 @@ def _signature() -> tuple:
 def _set_status(job_id: int, status: str):
     with db.db() as con:
         db.set_job_status(con, job_id, status)
+
+
+def _authorize_application(job_id: int) -> dict:
+    """Record the candidate's "apply here anyway" against a cooling-off hold.
+
+    A module-level def rather than the service call handed straight to
+    `run.io_bound`, for the reason the recorder beside it gives: the arity
+    rule only inspects targets defined in this file, and a TypeError raised in
+    a worker thread is one log line and a button that looks alive.
+    """
+    with db.db() as con:
+        con.execute("BEGIN IMMEDIATE")
+        job = db.get_job(con, job_id)
+        if job is None:
+            return {"ok": False, "error": "Diese Anzeige gibt es nicht mehr."}
+        ok, decision = attempts.authorize(
+            con, job,
+            f"trotz Frist bestätigt am {attempts.stamp()[:10]}",
+            attempts.stamp(),
+        )
+        if not ok:
+            con.rollback()
+            return {"ok": False,
+                    "error": helpers.hold_line(decision,
+                                               str(job["company"] or ""))
+                    or "Diese Firma ist gerade nicht zurückgestellt."}
+        con.commit()
+    return {"ok": True, "error": ""}
 
 
 def _record_application(job_id: int, kanal: str) -> dict:
@@ -1088,7 +1153,8 @@ def reader_notes(job: dict, already: dict | None) -> list[tuple[str, str]]:
     prose."""
     notes = []
     if already:
-        notes.append((helpers.applied_line(already), "danger"))
+        notes.append((helpers.hold_line(already, str(job.get("company") or "")),
+                      "danger"))
     if job.get("liveness") == liveness.LIVENESS_GONE:
         checked = str(job.get("liveness_checked_at") or "")[:10]
         notes.append((f"⚠ Anzeige offline — beim letzten Abruf am {checked} "
@@ -1961,10 +2027,17 @@ async def jobs_page():
             that keeps `overlay.clear()` ahead of every await cannot know that,
             and it is right not to guess.
             """
-            if step.key == STEP_RECORD:
+            if step.key == STEP_ANYWAY:
+                heading = "Trotzdem bei dieser Firma bewerben?"
+                detail = (
+                    helpers.hold_line(applied.get(job["id"]),
+                                      str(job["company"] or ""))
+                    + " Deine Zusage wird bei dieser Anzeige vermerkt.")
+                go = "Ja, bewerben"
+            elif step.key == STEP_RECORD:
                 heading = "Bewerbung eintragen?"
-                detail = ("Eine Bewerbung pro Firma — danach ist diese Firma "
-                          "vergeben.")
+                detail = ("Danach ist diese Firma zurückgestellt, bis die "
+                          "Frist aus den Einstellungen abgelaufen ist.")
                 go = "Eintragen"
             elif step.key in (STEP_DRAFT, STEP_START):
                 heading = (f"Bewerbung schreiben? "
@@ -1999,6 +2072,29 @@ async def jobs_page():
                 await start_application(job, button)
             elif key == STEP_RECORD:
                 await confirm_applied(job)
+            elif key == STEP_ANYWAY:
+                await lift_the_hold(job)
+
+        async def lift_the_hold(job: dict) -> None:
+            """Write down that he wants this posting despite the window.
+
+            Nothing is applied for and nothing is spent — the steps below
+            simply become live, and the confirmation travels with the attempt
+            so the ledger can later say the hold was answered rather than
+            missed."""
+            # Cleared BEFORE the wait, never after: clearing afterwards
+            # destroys a dialog opened meanwhile, and one awaited on then
+            # never resolves at all.
+            overlay.clear()
+            result = await run.io_bound(_authorize_application, job["id"])
+            await refresh(force=True)
+            with overlay:
+                if not result["ok"]:
+                    say(result["error"], type="warning", multi_line=True)
+                    return
+                say(f"{job['company']} ist wieder frei — die Bewerbung kann "
+                    f"jetzt geschrieben werden.", type="positive",
+                    multi_line=True)
 
         async def build_mappe(job: dict, button) -> None:
             """The PDF he uploads to an employer's form."""
@@ -2534,9 +2630,9 @@ async def jobs_page():
             result = await run.io_bound(_record_application, job["id"], kanal)
             await refresh(force=True)
             if not result["ok"]:
-                blocking = result["duplicate"]
-                say(helpers.applied_line(blocking) if blocking else
-                    "Diese Anzeige gibt es nicht mehr.",
+                line = helpers.hold_line(result.get("decision"),
+                                         result.get("company", ""))
+                say(line or "Diese Anzeige gibt es nicht mehr.",
                     type="warning", multi_line=True)
                 return
             with overlay:
