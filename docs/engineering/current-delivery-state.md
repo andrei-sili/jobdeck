@@ -2,7 +2,7 @@
 status: current
 owner: Engineering Lead
 scope: Behavior and limitations verified in the current JobDeck implementation.
-last_verified: 2026-08-23
+last_verified: 2026-08-24
 supersedes: []
 superseded_by: null
 related_adrs:
@@ -13,6 +13,7 @@ related_adrs:
   - ../adr/0005-job-specific-application-documents.md
   - ../adr/0006-candidate-facts-and-external-ai-processing.md
   - ../adr/0007-retention-backup-and-erasure.md
+  - ../adr/0010-company-cooling-off-window.md
 ---
 
 # Current delivery state
@@ -65,6 +66,8 @@ processes sharing a database.
 | Reply tracking | Gmail history polling, deterministic and optional Anthropic classification, matching, review, Gmail labels, and status history. |
 | Application register | Applications, status changes, inbound/outbound message metadata, and selected reply bodies are stored locally. |
 | Backups | Existing databases receive a verified SQLite recovery snapshot before startup migration. Creation failures stop migration and are reported explicitly; snapshots are rotated while retaining the best valid copy. |
+| Application identity | One decision function is consulted by every gate and every screen that explains a refusal. It returns a verdict with its evidence: a republication, a company inside its cooling-off window, or a live reservation. |
+| Attempt integrity | Every path that can create an application takes a persistent reservation, keyed per posting with a `UNIQUE` constraint, inside the same transaction as the state change it guards. Reservations left by an interrupted process are released at startup from evidence. |
 
 Application undo prepares a deterministic staged artifact before changing the
 ledger, commits all database changes together, and compensates ordinary
@@ -85,7 +88,9 @@ handling in core workflows.
 - Match persistence contains only one score and one free-text reason, without a
   structured dimension breakdown, uncertainty, or candidate feedback model.
 - Cross-source deduplication does not model source observations, fingerprints,
-  or republications and discards alternate provenance.
+  or republications and discards alternate provenance. Republication is
+  therefore recognized only by an exact normalized company and title match, not
+  by a posting fingerprint.
 - Known postings are not refreshed when the same source identifier is observed
   again.
 - The application register stores paths and mutable draft fields rather than an
@@ -100,22 +105,46 @@ handling in core workflows.
 - CV or existing Bewerbungsmappe import, extraction, and review.
 - Structured and versioned candidate profiles and documents.
 - Document classification and job-specific attachment selection.
-- Persistent job fingerprints and republication relationships.
+- Persistent job fingerprints and canonical posting relationships.
 - Structured match explanations and feedback-driven recommendations.
 - Semantic ATS field mapping, candidate-triggered autofill, answer provenance,
   controlled submit, and submission receipts.
-- Immutable application attempts and submitted-artifact manifests.
+- Submitted-artifact manifests. Application attempts are persistent and carry
+  idempotency keys, but the artifacts they reference are still mutable paths.
 - Complete retention, export, erasure, and consent records.
 - Authentication, object ownership, tenant isolation, and multi-user operation.
 - A provider-neutral language-model interface and append-only processing ledger.
 
 ## Current application identity
 
-The current duplicate gate treats a matching company or contact address as an
-existing application. Cross-source jobs are compared using normalized company
-and title. These rules do not yet implement the accepted identity policy for a
-different position at the same company, and a demonstrated cross-channel race
-can create two application rows while a Gmail send is in flight.
+An application opens a cooling-off window on its company. The window is a
+candidate setting (`company_cooldown_days`, default 60) counted from the
+application date. While it runs, other postings at that company leave the
+working list, are counted beneath it, and remain reachable through their own
+view; when it passes they return without any action. Nothing is deleted and no
+posting status is written for a temporary hold. The candidate can apply during
+the window from that view, and the confirmation is stored on the attempt with
+its evidence. See
+[`ADR 0010`](../adr/0010-company-cooling-off-window.md).
+
+A posting at the same company with the same normalized position is treated as a
+republication and refused permanently; that refusal offers no override. A
+shared contact address is carried on the decision as corroborating evidence and
+never refuses on its own.
+
+Every write path — e-mail send, form recording, manual recording — takes a
+persistent reservation before acting, inside the transaction that performs the
+state change. The reservation is a row with a `UNIQUE` idempotency key, so the
+refusal holds across connections for the whole time a provider call is in
+flight. Two concurrent operations for one company admit exactly one attempt;
+this is exercised by a thread race rather than argued. The previously
+documented cross-channel race is closed.
+
+The legacy `bewerbungen` ledger keeps its exact shape and remains the source of
+truth for whether an application exists; the attempt table supplies the position
+it never stored. Positions are known for applications whose posting is still
+linked, and absent otherwise; an absent position is read as unknown and never
+as proof that a posting is a different role.
 
 ## Current document behavior
 

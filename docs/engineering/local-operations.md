@@ -2,7 +2,7 @@
 status: current
 owner: Engineering Lead
 scope: Installation, local data, credentials, external processing, backup, restore, and runtime security.
-last_verified: 2026-08-23
+last_verified: 2026-08-24
 supersedes: []
 superseded_by: null
 related_adrs:
@@ -10,6 +10,7 @@ related_adrs:
   - ../adr/0003-candidate-controlled-send-policy.md
   - ../adr/0006-candidate-facts-and-external-ai-processing.md
   - ../adr/0007-retention-backup-and-erasure.md
+  - ../adr/0010-company-cooling-off-window.md
 ---
 
 # Local operations
@@ -114,6 +115,23 @@ profile has auto-send enabled.
 If Gmail may have accepted a message but the response was lost, JobDeck leaves
 the draft in `sending`. Check the Gmail Sent folder and resolve the attempt in
 the review queue. Do not retry blindly.
+
+## Company cooling-off window
+
+After an application, the employer is left alone for a configurable period.
+Settings holds the value (`company_cooldown_days`, default 60 days, counted
+from the application date; `0` switches the rule off). While the window runs,
+other postings at that company leave the working list, are counted beneath it,
+and stay reachable through their own view — nothing is deleted and no posting
+status is written. When the window passes they return by themselves.
+
+Applying during the window is possible from that view and requires an explicit
+confirmation, which is stored with the attempt. A posting at the same company
+with the same position is a republication and is refused permanently; that
+refusal offers no override.
+
+An application whose date is missing or unreadable keeps its company held and
+says so on screen, because the window cannot be proven to have passed.
 
 ## Backups and restore
 

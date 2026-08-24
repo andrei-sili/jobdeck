@@ -2,7 +2,7 @@
 status: proposed
 owner: Engineering Lead
 scope: Incremental transition from the verified implementation to the accepted product direction.
-last_verified: 2026-08-23
+last_verified: 2026-08-24
 supersedes: []
 superseded_by: null
 related_adrs:
@@ -14,6 +14,7 @@ related_adrs:
   - ../adr/0006-candidate-facts-and-external-ai-processing.md
   - ../adr/0007-retention-backup-and-erasure.md
   - ../adr/0008-ux-navigation-direction.md
+  - ../adr/0010-company-cooling-off-window.md
 ---
 
 # Refactoring roadmap
@@ -79,25 +80,43 @@ result types and settings accessors are fully adopted.
 
 ## S1 — Application identity and attempt integrity
 
+**Status:** Implemented, with one scope item deferred and one acceptance
+criterion superseded by an accepted decision.
+
 **Purpose:** Enforce one identity policy across e-mail, form, and manual paths.
 
-**Scope:** Canonical posting relationships, company/position identity,
-persistent reservations, application attempts, idempotency keys, and candidate
-override evidence for another role at the same company.
+**Scope:** Company/position identity, persistent reservations, application
+attempts, idempotency keys, and recorded candidate override evidence.
 
 **Dependencies:** S0 transaction and migration reliability.
 
 **Acceptance criteria:** Concurrent e-mail and manual/form operations admit one
-attempt for the same posting; republications are blocked; another position at
-the same company warns and proceeds only after recorded confirmation.
+attempt for the same posting; republications are blocked; a company written to
+recently is held back for a configurable window and returns by itself, and the
+candidate can apply during it after a recorded confirmation.
 
-**Validation:** Thread/process concurrency tests, provider-uncertainty tests,
-and an identity corpus covering spelling variants, reposts, and distinct roles.
+The third criterion originally read "another position at the same company warns
+and proceeds only after recorded confirmation".
+[`ADR 0010`](../adr/0010-company-cooling-off-window.md) replaced that rule with
+the cooling-off window and supersedes the corresponding decision in ADR 0002.
 
-**Rollback:** Retain legacy `bewerbungen` reads while writing the new attempt
-records in parallel until reconciliation is verified.
+**Deferred to S4:** canonical posting relationships. Republication is currently
+recognized by an exact normalized company and title match, not by a posting
+fingerprint or source-observation record, which is the subject of that slice.
+
+**Validation:** Delivered as a thread race admitting exactly one attempt, an
+identity corpus over spelling variants, reposts, distinct roles and unusable
+dates, provider-uncertainty tests over the send path, and a differential test
+pinning the SQL list filter to the same rule the gate applies. Schema v14 is
+additive and was exercised against a copy of a real corpus.
+
+**Rollback:** The legacy `bewerbungen` ledger is unchanged and remains the
+source of truth for whether an application exists; the new table only supplies
+the position and the reservation. Rolling back is ceasing to read it.
 
 ## S2 — Candidate profile and verified facts
+
+**Status:** Next canonical slice.
 
 **Purpose:** Replace the free-form factual boundary with a structured,
 versioned candidate aggregate.

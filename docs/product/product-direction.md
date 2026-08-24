@@ -2,7 +2,7 @@
 status: accepted
 owner: Product Owner
 scope: Target product behavior, candidate control, product boundaries, and non-goals.
-last_verified: 2026-08-23
+last_verified: 2026-08-24
 supersedes: []
 superseded_by: null
 related_adrs:
@@ -14,6 +14,7 @@ related_adrs:
   - ../adr/0006-candidate-facts-and-external-ai-processing.md
   - ../adr/0007-retention-backup-and-erasure.md
   - ../adr/0008-ux-navigation-direction.md
+  - ../adr/0010-company-cooling-off-window.md
 ---
 
 # Product direction
@@ -72,8 +73,10 @@ The candidate sees the explanation and can provide feedback.
 
 The same posting or a republication of it is a duplicate and must be blocked.
 The same company and the same position is blocked by default or treated as a
-duplicate. A different position at the same company produces a warning and may
-continue after candidate confirmation. A contact address alone does not define
+duplicate. An application also opens a cooling-off window on its company: other
+positions there are held back for a configurable period and return by
+themselves once it passes. The candidate can apply during that period after an
+explicit, recorded confirmation. A contact address alone does not define
 application identity.
 
 Application attempts use persistent idempotency and concurrency controls. The
