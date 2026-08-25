@@ -720,10 +720,26 @@ _DRAFT_PDF_SQL = (
 # application went out when there was none. One definition, because the
 # silence rule counts from it too and two readings of "last contact" is how a
 # number on a screen and the rule beneath it drift apart.
+#
+# A receipt cannot predate the application it acknowledges, and one that does
+# is not evidence about it. A real ledger holds the case: an unrelated
+# notification from a job board's own mail system, dated six weeks BEFORE an
+# application went out, attached itself to it — that employer's posting came
+# from the board, so the board's domain authorized the receipt. The row then
+# read "wartet 49 T" six days after it was sent, and the closing rule — which
+# counts from here — would have filed it as "Keine Antwort" seventeen days
+# after it went out. The cooling-off window counts from here too, so the same
+# reading releases a company early.
+#
+# The guard is not a patch over that mismatch: it is a property of the anchor
+# itself, and it holds however the mail arrived. An application with no send
+# date rules nothing out, which is the honest degradation - there is nothing
+# to compare against.
 LAST_CONTACT_SQL = """COALESCE(
     (SELECT MAX(e.internal_date) FROM email_log e
       WHERE e.bewerbung_id = b.id AND e.direction = 'inbound'
-        AND e.classification = 'eingang'),
+        AND e.classification = 'eingang'
+        AND (b.gesendet_am = '' OR e.internal_date >= b.gesendet_am)),
     b.gesendet_am)"""
 
 # A posting at a company that is still inside its cooling-off window. Such a
