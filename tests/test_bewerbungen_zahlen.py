@@ -108,9 +108,9 @@ def test_too_few_answers_state_nothing_at_all():
     screen whose whole value is that its numbers are honest may not print a
     figure it cannot stand behind."""
     few = [("2026-08-01", "2026-08-05")] * (register.ENOUGH_FOR_A_TIME - 1)
-    assert register.answer_time(few) == ("", "")
+    assert register.answer_time(few, len(few)) == ("", "")
     enough = [("2026-08-01", "2026-08-05")] * register.ENOUGH_FOR_A_TIME
-    assert register.answer_time(enough)[0] != ""
+    assert register.answer_time(enough, len(enough))[0] != ""
 
 
 def test_the_sentence_says_the_middle_and_the_slowest():
@@ -118,11 +118,45 @@ def test_the_sentence_says_the_middle_and_the_slowest():
     months drags a mean past anything he has experienced, and the question
     this answers is when to stop expecting one."""
     pairs = [("2026-08-01", "2026-08-05")] * 8 + [("2026-08-01", "2026-10-01")]
-    sentence, over = register.answer_time(pairs)
+    sentence, over = register.answer_time(pairs, 9)
     assert sentence == ("Im Median kam eine Antwort nach 4 Tagen, "
                         "die langsamste nach 61 Tagen.")
-    assert over.startswith("Gemessen an 9 Antworten")
-    assert "Eingangsbestätigungen zählen nicht mit" in over
+    assert over == ("Gemessen an 9 der 9 beantworteten Bewerbungen — "
+                    "Eingangsbestätigungen zählen nicht mit.")
+
+
+def test_the_median_is_the_middle_and_not_the_smallest():
+    """Every corpus in these tests used to be degenerate — median == min ==
+    max — so `median → min` passed the whole suite and the headline figure of
+    the sentence was pinned by nothing. A realistic spread would then have
+    printed "nach einem Tag" where the middle is fourteen."""
+    spread = [1, 1, 2, 3, 14, 20, 30, 40, 61]
+    pairs = [("2026-08-01",
+              (datetime.date(2026, 8, 1) + datetime.timedelta(days=d)).isoformat())
+             for d in spread]
+    assert register.answer_time(pairs, len(pairs))[0] == (
+        "Im Median kam eine Antwort nach 14 Tagen, die langsamste nach 61 Tagen.")
+
+
+def test_the_middle_is_rounded_and_not_floored():
+    """`int()` floors, and it floors in the flattering direction every time:
+    a median of 4.5 days printed as 4 understates the wait on the one card
+    whose whole claim is that its figures are honest."""
+    pairs = [("2026-08-01",
+              (datetime.date(2026, 8, 1) + datetime.timedelta(days=d)).isoformat())
+             for d in (1, 2, 3, 4, 5, 6, 7, 60)]
+    assert "nach 5 Tagen" in register.answer_time(pairs, len(pairs))[0]
+
+
+def test_the_line_names_the_population_it_actually_measured():
+    """Two numbers that are easy to conflate and mean different things: how
+    many applications the register calls answered, and how many of those
+    carried a readable answer mail. A row he marked "Absage" by hand carries
+    no mail at all, and 44 of his rows predate this app."""
+    pairs = [("2026-08-01", "2026-08-05")] * 8 + [("", "2026-08-05")] * 3
+    _, over = register.answer_time(pairs, 20)
+    assert over == ("Gemessen an 8 der 20 beantworteten Bewerbungen — bei den "
+                    "übrigen 12 kam die Antwort nicht per E-Mail an.")
 
 
 @pytest.mark.parametrize("gap, expected", [
@@ -138,25 +172,72 @@ def test_the_german_inflects_and_drops_a_clause_that_repeats_itself(
     sent = datetime.date(2026, 8, 1)
     pairs = [(sent.isoformat(), (sent + datetime.timedelta(days=gap)).isoformat())] \
         * register.ENOUGH_FOR_A_TIME
-    assert register.answer_time(pairs)[0] == expected
+    assert register.answer_time(pairs, len(pairs))[0] == expected
 
 
 # ---------------------------------------------------------------------------
 # Which clock the aggregate reads
 # ---------------------------------------------------------------------------
-def _answered(con, *, firma, sent, arrived, classification):
+def _answered(con, *, firma, sent, arrived, classification,
+              status="Absage", needs_review=0, message="m"):
+    """An application and one reply to it.
+
+    `status` defaults to an ANSWERED one because that is what the aggregate
+    measures over — the register's own verdict, not the classifier's. The
+    parameter exists so a test can build the other shape too: a reply
+    classified and parked on the review shelf while the application is still
+    open."""
     row_id = db.add_bewerbung(con, {
         "gesendet_am": sent, "firma": firma, "kanal": "E-Mail",
-        "status": "Gesendet", "email": "hr@example.invalid",
+        "status": status, "email": "hr@example.invalid",
     })
     db.add_email_log(con, {
-        "direction": "inbound", "gmail_message_id": f"m{row_id}",
+        "direction": "inbound", "gmail_message_id": f"{message}{row_id}",
         "gmail_thread_id": f"t{row_id}", "from_addr": "hr@example.invalid",
         "internal_date": arrived, "bewerbung_id": row_id,
-        "classification": classification,
+        "classification": classification, "needs_review": needs_review,
     })
     con.commit()
     return row_id
+
+
+def test_a_reply_still_on_the_review_shelf_is_not_measured(con):
+    """The panel's critical finding, as a test.
+
+    A reply is CLASSIFIED the moment it is ingested; its status is written
+    only when the verdict was safe enough. A name-arm match, an address
+    without DMARC, or a rank the anti-downgrade guard refused all leave the
+    mail classified with the application still open. The aggregate counted
+    those, so the card printed "beantwortet 0" and, four lines lower,
+    "Gemessen an 9 Antworten" — nine answers under a figure that had just
+    sworn none arrived."""
+    for n in range(9):
+        _answered(con, firma=f"Ungeprüfte GmbH {n}", sent="2026-08-01",
+                  arrived="2026-08-06T09:00:00", classification="absage",
+                  status="Gesendet", needs_review=1, message=f"s{n}")
+
+    apps = [dict(r) for r in db.list_bewerbungen(con)]
+    beantwortet = {s.key: s for s in register.ledger(
+        {"apps": apps, "applied": 0})}["beantwortet"].count
+    assert beantwortet == 0, "the register calls none of them answered"
+    assert register.answer_days(db.answer_delays(con)) == []
+    assert register.answer_time(db.answer_delays(con), beantwortet) == ("", "")
+
+
+def test_an_undated_reply_does_not_take_its_application_with_it(con):
+    """`internal_date` is TEXT defaulting to '', and '' sorts before every ISO
+    date. Under MIN() one undated decision shadowed every dated sibling, and
+    because '' cannot be parsed the whole application then left the statistic
+    — silently, and only for the applications that got TWO replies."""
+    row_id = _answered(con, firma="Zweimal GmbH", sent="2026-08-01",
+                       arrived="", classification="absage", message="undated")
+    db.add_email_log(con, {
+        "direction": "inbound", "gmail_message_id": "dated",
+        "internal_date": "2026-08-15T09:00:00", "bewerbung_id": row_id,
+        "classification": "absage",
+    })
+    con.commit()
+    assert register.answer_days(db.answer_delays(con)) == [14]
 
 
 def test_a_receipt_is_not_an_answer(con):

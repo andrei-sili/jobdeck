@@ -18,6 +18,7 @@ Two honesty rules govern this module, both forced by his real register:
 """
 
 import datetime
+import math
 import statistics
 from dataclasses import dataclass
 
@@ -192,25 +193,44 @@ def answer_days(pairs: list[tuple[str, str]]) -> list[int]:
     return sorted(days)
 
 
-def answer_time(pairs: list[tuple[str, str]]) -> tuple[str, str]:
+def answer_time(pairs: list[tuple[str, str]],
+                answered: int) -> tuple[str, str]:
     """(the sentence, what it was measured over) — ('', '') when too few.
 
     The middle and the slowest, not the average: one reply after two months
     drags a mean far past anything he has actually experienced, and the
     question this answers is "how long before I stop expecting one".
+
+    `answered` is the figure directly above on the card, and it is required
+    rather than defaulted: a caller that did not have to state it is a caller
+    that can print a sample larger than the population it is drawn from. The second line
+    relates the sample to it rather than naming a bare population, because
+    the two can never be equal: an application he marked "Absage" by hand
+    carries no mail at all, and 44 of the rows in his register predate this
+    app. Saying "N Antworten" also counted the wrong noun — the query groups
+    by application, so N is applications, and the sentence said replies.
     """
     days = answer_days(pairs)
     if len(days) < ENOUGH_FOR_A_TIME:
         return "", ""
-    middle, slowest = int(statistics.median(days)), days[-1]
+    # Round half UP, not int() and not round(). Truncation floors the median
+    # of an even-sized sample, and it floors it in the flattering direction
+    # every time; Python's round() breaks a tie to even, which on integer day
+    # counts is a tie half the time and flatters on half of those. A wait is
+    # reported long rather than short, on the card whose whole claim is that
+    # its figures are honest.
+    middle, slowest = math.floor(statistics.median(days) + 0.5), days[-1]
     sentence = f"Im Median kam eine Antwort {_after_days(middle)}"
     # Only when it says something new. With every measured answer the same
     # age, "die langsamste nach 4 Tagen" repeats the clause before it — and a
     # sentence that states one fact twice is one a reader starts skimming.
     sentence += (f", die langsamste {_after_days(slowest)}."
                  if slowest != middle else ".")
-    over = (f"Gemessen an {len(days)} Antworten, die per E-Mail ankamen — "
-            f"Eingangsbestätigungen zählen nicht mit.")
+    rest = max(0, answered - len(days))
+    over = (f"Gemessen an {len(days)} der {answered} beantworteten "
+            f"Bewerbungen" +
+            (f" — bei den übrigen {rest} kam die Antwort nicht per E-Mail an."
+             if rest else " — Eingangsbestätigungen zählen nicht mit."))
     return sentence, over
 
 

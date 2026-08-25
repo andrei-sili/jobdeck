@@ -255,7 +255,9 @@ async def bewerbungen_page():
                         # see, over two real numbers drawn as though they were
                         # the aside.
                         _funnel_row(step, dim=True)
-                sentence, over = register.answer_time(view["answer_delays"])
+                answered = {s.key: s for s in register.ledger(view)}
+                sentence, over = register.answer_time(
+                    view["answer_delays"], answered["beantwortet"].count)
                 if sentence:
                     ui.label(sentence).classes("jd-note mt-2")
                     ui.label(over).classes("jd-meta")

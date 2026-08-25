@@ -3007,8 +3007,25 @@ def answer_delays(con: sqlite3.Connection) -> list[tuple[str, str]]:
     Only a decision counts (`DECISION_CLASSIFICATIONS`): an Eingangs-
     bestätigung is a robot answering the same hour, and its median of nought
     days would report a promptness nobody showed.
+
+    And only an application the register itself calls ANSWERED. A reply is
+    classified the moment it is ingested, but its status is written only when
+    the verdict was safe enough — a name-arm match, an address without DMARC
+    or a rank the anti-downgrade guard refused all leave the mail on the
+    review shelf with its classification set and the application still open.
+    Without this arm the card printed "beantwortet 0" and, four lines lower,
+    "Gemessen an 9 Antworten": nine answers measured under a figure that had
+    just sworn none arrived. The sample is a subset of the line above it now,
+    which is the only relation a reader can be expected to hold.
+
+    An undated mail is excluded rather than aggregated. `internal_date` is
+    TEXT defaulting to '', and '' sorts before every ISO date — so one
+    undated decision shadowed every dated sibling under MIN() and took the
+    whole application out of the statistic instead of just itself.
     """
     places = ",".join("?" * len(DECISION_CLASSIFICATIONS))
+    answered = tuple(sorted(BEANTWORTET_STATUS))
+    status_places = ",".join("?" * len(answered))
     rows = con.execute(
         f"""
         SELECT b.gesendet_am AS sent, MIN(e.internal_date) AS answered
@@ -3016,9 +3033,11 @@ def answer_delays(con: sqlite3.Connection) -> list[tuple[str, str]]:
           JOIN email_log e ON e.bewerbung_id = b.id
          WHERE e.direction = 'inbound'
            AND e.classification IN ({places})
+           AND e.internal_date <> ''
+           AND b.status IN ({status_places})
          GROUP BY b.id
         """,
-        DECISION_CLASSIFICATIONS,
+        (*DECISION_CLASSIFICATIONS, *answered),
     ).fetchall()
     return [(str(row["sent"] or ""), str(row["answered"] or "")) for row in rows]
 
