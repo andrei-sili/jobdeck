@@ -99,3 +99,18 @@ def test_days_since():
     assert days_since((today - datetime.timedelta(days=14)).isoformat()) == 14
     assert days_since("invalid") is None
     assert days_since("") is None
+
+
+def test_days_since_counts_from_the_day_it_is_given():
+    """A caller that owns a clock has to be able to hand it over.
+
+    The rail promises the same numbers for the same input and could not keep
+    that promise while this read `date.today()` unconditionally: a fixed date
+    in a test aged past the follow-up threshold on its own, and the suite went
+    red on a day no code had changed."""
+    assert days_since("2026-08-11", datetime.date(2026, 8, 12)) == 1
+    assert days_since("2026-08-11", datetime.date(2026, 8, 25)) == 14
+    # Still valid input, still a stated answer: a date after the given day
+    # counts backwards rather than raising.
+    assert days_since("2026-08-11", datetime.date(2026, 8, 10)) == -1
+    assert days_since("invalid", datetime.date(2026, 8, 12)) is None

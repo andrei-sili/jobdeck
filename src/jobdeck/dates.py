@@ -153,11 +153,19 @@ def posting_date_iso(raw) -> str:
     return parsed.isoformat() if parsed is not None else ""
 
 
-def days_since(iso_str: str) -> int | None:
-    """Days elapsed since the given ISO date; None if the date is invalid."""
+def days_since(iso_str: str, today: datetime.date | None = None) -> int | None:
+    """Days elapsed since the given ISO date; None if the date is invalid.
+
+    `today` is injectable because one caller is required to be pure: the rail
+    takes a clock and promises the same numbers for the same input, and a
+    hidden `date.today()` in here broke that promise without saying so. The
+    cost was a suite that went red on a day nobody changed any code — a test
+    pinned an application at a fixed date and the wall clock walked it past
+    the follow-up threshold by itself.
+    """
     try:
         d = datetime.date.fromisoformat((iso_str or "").strip())
-        return (datetime.date.today() - d).days
+        return ((today or datetime.date.today()) - d).days
     except (ValueError, AttributeError):
         return None
 
