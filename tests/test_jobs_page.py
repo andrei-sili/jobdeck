@@ -1469,20 +1469,47 @@ def test_an_application_at_the_firm_outranks_every_channel():
 # What a row and a reader state
 # --------------------------------------------------------------------------
 @pytest.mark.parametrize("job, expected", [
-    ({"age_days": 34, "apply_channel": "", "source": "jooble"},
+    ({"match_score": 72, "age_days": 34, "apply_channel": "", "source": "jooble"},
      "34 T · Kanal offen · Jooble"),
-    ({"age_days": 0, "apply_channel": "direct_email", "source": "arbeitsagentur"},
+    ({"match_score": 0, "age_days": 0, "apply_channel": "direct_email",
+      "source": "arbeitsagentur"},
      "heute · E-Mail · BA"),
-    ({"age_days": 1, "apply_channel": "ats_form", "source": "arbeitnow"},
+    ({"match_score": 85, "age_days": 1, "apply_channel": "ats_form",
+      "source": "arbeitnow"},
      "1 T · Formular · Arbeitnow"),
-    ({"age_days": None, "apply_channel": "unknown", "source": ""},
+    ({"match_score": 40, "age_days": None, "apply_channel": "unknown",
+      "source": ""},
      "Datum ? · kein Weg"),
-    ({"age_days": 14, "apply_channel": "direct_email", "source": "arbeitsagentur",
-      "salary_from": "45000", "salary_to": "55000", "salary_period": "JAHRESGEHALT"},
+    ({"match_score": 91, "age_days": 14, "apply_channel": "direct_email",
+      "source": "arbeitsagentur", "salary_from": "45000", "salary_to": "55000",
+      "salary_period": "JAHRESGEHALT"},
      "14 T · E-Mail · 45–55 T€ · BA"),
+    # A posting the batch has not reached yet says so, FIRST — the row draws
+    # an em dash where the number goes, and an em dash is this app's word for
+    # "the advert states nothing", not for "nobody has looked yet".
+    ({"match_score": None, "status": "new", "age_days": 0,
+      "apply_channel": "", "source": "arbeitnow"},
+     "noch nicht bewertet · heute · Kanal offen · Arbeitnow"),
+    # And one nothing is coming for loses the "noch". The batch skips a hidden
+    # company on purpose, so a promise there would never be kept.
+    ({"match_score": None, "status": "new", "company_hidden": True,
+      "age_days": 3, "apply_channel": "", "source": "arbeitnow"},
+     "nicht bewertet · 3 T · Kanal offen · Arbeitnow"),
+    ({"match_score": None, "status": "duplicate", "age_days": 3,
+      "apply_channel": "", "source": "arbeitnow"},
+     "nicht bewertet · 3 T · Kanal offen · Arbeitnow"),
 ])
 def test_the_row_line_states_only_facts_the_posting_carries(job, expected):
     assert jobs.row_meta(job) == expected
+
+
+def test_a_scored_posting_says_nothing_about_being_scored():
+    """The line is for what is missing. Every row carrying "bewertet" would be
+    four hundred rows of noise around the handful that mean something — and
+    the score is already drawn at the end of the row above it."""
+    scored = {"match_score": 0, "status": "new", "age_days": 2,
+              "apply_channel": "", "source": "jooble"}
+    assert "bewertet" not in jobs.row_meta(scored)
 
 
 def test_an_hourly_wage_is_never_abbreviated_to_thousands():

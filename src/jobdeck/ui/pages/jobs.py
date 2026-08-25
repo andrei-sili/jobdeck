@@ -32,6 +32,7 @@ from jobdeck.services import (
     polling,
     preparing,
 )
+from jobdeck.services import scoring as scoring_service
 from jobdeck.services.register import plural
 from jobdeck.services.replies import RECEIPT_WINDOW_H
 from jobdeck.ui import draft_editor, helpers, live, rail
@@ -506,14 +507,45 @@ def _age_short(age: object) -> str:
     return "heute" if days <= 0 else f"{days} T"
 
 
+def awaits_score(job: dict) -> bool:
+    """Is the scoring batch coming for this posting?
+
+    The Python mirror of what `db.list_unscored_jobs` SELECTS, and a
+    differential test pins the two equal over a generated corpus — because the
+    screen makes a promise out of this answer, and a promise the worker does
+    not keep is worse than no promise.
+
+    `company_hidden` carries the third arm. It can: every view but one filters
+    hidden companies out, and the one that does not IS "Ausgeblendete Firmen",
+    where `_load_jobs` marks every row by construction. The batch skips those
+    on purpose — a score is a paid call, and a nineteen-branch agency he has
+    put out of sight would take the budget for ever."""
+    return (job.get("match_score") is None
+            and str(job.get("status") or "") == "new"
+            and not job.get("company_hidden"))
+
+
 def row_meta(job: dict) -> str:
     """'34 T · Formular · 45–55 T€ · BA' — one line of facts under a row.
 
     Every part is a fact the posting really states. Nothing is guessed and
     nothing is silently left out: an unresolved channel says so ("Kanal offen")
     rather than looking like a form, because which of the two it turns out to
-    be decides whether an application here is one press or twenty minutes."""
-    parts = [_age_short(job.get("age_days"))]
+    be decides whether an application here is one press or twenty minutes.
+
+    A posting with no score yet is the same kind of silence and used to be the
+    one kind nobody said out loud. Discovery hands postings over faster than
+    the batch scores them (twenty every ten minutes), so for those minutes a
+    row that has not been read yet drew an em dash where a number goes — which
+    reads exactly like an advert the machine had nothing to say about. He read
+    a screenful of them and asked why the app had stopped working.
+
+    "noch" carries the whole distinction and is only written where it is true:
+    the batch is coming for a posting in its queue and is never coming for one
+    outside it."""
+    parts = ["noch nicht bewertet" if awaits_score(job) else "nicht bewertet"] \
+        if job.get("match_score") is None else []
+    parts.append(_age_short(job.get("age_days")))
     channel = str(job.get("apply_channel") or "")
     parts.append(_CHANNEL_SHORT.get(channel, "Kanal offen") if channel
                  else "Kanal offen")
@@ -579,6 +611,11 @@ def _load_jobs(view_key: str, page: int, search: str = "",
         # the same thing — a screen that offers what the gate below it refuses
         # is the defect this project keeps pinning.
         draft_room = db.count_drafts_today(con) < db.daily_draft_cap(con)
+        # Whether the batch can run at all, read ONCE and carried on every row
+        # for the same reason as `draft_room` above: the line over the list and
+        # the note inside the reading pane both promise a score is coming, and
+        # two reads of that fact are two chances to promise different things.
+        scoring_on = scoring_service.is_ready(con)
         filters = {**view.filters, "stale_age_days": stale_age_days,
                    "search": search, "keep_ids": keep_ids,
                    # Only where the view says the floor belongs — the working
@@ -600,6 +637,7 @@ def _load_jobs(view_key: str, page: int, search: str = "",
         # database again once per row could only ever disagree with itself.
         in_hidden_view = filters["hidden"] == "only"
         rows = [{**dict(r), "draft_room": draft_room,
+                 "scoring_on": scoring_on,
                  "company_hidden": in_hidden_view}
                 for r in db.list_job_groups(
                     con, view.status, limit=PAGE_SIZE,
@@ -609,6 +647,7 @@ def _load_jobs(view_key: str, page: int, search: str = "",
         for row in db.list_company_siblings(con, keys, view.status, **filters):
             siblings.setdefault(row["company_key"], []).append(
                 {**dict(row), "draft_room": draft_room,
+                 "scoring_on": scoring_on,
                  "company_hidden": in_hidden_view})
         # Asked of the duplicate gate itself, for the rows on screen — see
         # dedupe.duplicates_for_jobs for why the stored flag cannot answer it.
@@ -644,6 +683,12 @@ def _load_jobs(view_key: str, page: int, search: str = "",
                                         **_HIDDEN_VIEW.filters),
             },
             "poll": polling.last_poll(con),
+            # Counted the way the batch SELECTS, not the way this view filters:
+            # it is a fact about the worker, not about the list. A figure that
+            # followed the view would read 0 in "Beworben" and tell him
+            # everything was graded on the one screen where nothing is.
+            "pending_scores": db.count_unscored_jobs(con),
+            "scoring_on": scoring_on,
             "search": search,
             "stale_age_days": stale_age_days,
             "total": total,
@@ -747,7 +792,14 @@ _WATCHED_SETTINGS = ("daily_draft_cap", "drafts_written_count",
                      # The search line states these, and none of them is a row
                      # any table signature can see.
                      polling.LAST_POLL_AT, polling.LAST_POLL_REPORT,
-                     polling.LAST_POLL_SOURCE)
+                     polling.LAST_POLL_SOURCE,
+                     # The waiting-for-a-score line reads this switch, and no
+                     # table signature moves when it flips. The count beside it
+                     # needs nothing extra: the jobs signature already carries
+                     # COUNT(*) and COUNT(match_score), so an arrival and a
+                     # score each move it, and the hidden-company signature
+                     # covers the third arm of the same rule.
+                     "ai_enabled")
 
 
 def _whole(value) -> int:
@@ -1201,11 +1253,59 @@ def _verdict_heading(job: dict) -> str:
     match and never mentioning how old the advert is."""
     score = job.get("match_score")
     if score is None:
-        return "WARUM"
+        # "WARUM" over "this has not been graded yet" asks a question the
+        # paragraph beneath it does not answer. The block heading names what
+        # the block is about, and for an ungraded posting that is the grading
+        # itself rather than the reasoning behind one.
+        return "BEWERTUNG"
     effective = job.get("effective_score")
     if effective is not None and effective != score:
         return f"WARUM {score} · durch das Alter noch {effective}"
     return f"WARUM {score}"
+
+
+def unscored_note(job: dict, scoring_on: bool) -> str:
+    """What the reading pane says where the verdict would be.
+
+    The block was drawn only when a reason existed, so an unscored posting
+    reached the buttons with nothing said about it at all — the same silence
+    the row had, on the screen he goes to precisely to find out what the
+    machine thought.
+
+    The promise is made only where it is kept. A posting in the queue gets one
+    while the batch is actually able to run; with scoring switched off, or no
+    key, or no profile, the same row would wait for ever and the honest
+    sentence is that nothing is coming."""
+    if not awaits_score(job):
+        if job.get("company_hidden"):
+            return ("Diese Anzeige wird nicht bewertet — die Firma ist "
+                    "ausgeblendet.")
+        return "Diese Anzeige wird nicht bewertet."
+    if not scoring_on:
+        return ("Diese Anzeige ist noch nicht bewertet, und die Bewertung "
+                "ist gerade ausgeschaltet — sie bleibt ohne Bewertung, bis "
+                "du sie in den Einstellungen wieder einschaltest.")
+    return ("Diese Anzeige ist noch nicht bewertet — die Bewertung läuft im "
+            "Hintergrund und holt sie nach.")
+
+
+def scoring_line(pending: int, scoring_on: bool) -> str:
+    """How many postings are still waiting for a score, '' when none are.
+
+    Silent at zero deliberately: a permanent "0 warten auf Bewertung" is a line
+    you stop reading, and this one has to be noticed on the ten minutes it is
+    about. It sits beside the search line because that is the same sentence —
+    discovery brings postings in, the batch grades twenty of them every ten
+    minutes, and the gap between those two was the part the screen never said.
+    """
+    if pending <= 0:
+        return ""
+    if not scoring_on:
+        return plural(pending, "Anzeige ohne Bewertung",
+                      "Anzeigen ohne Bewertung",
+                      " — die Bewertung ist ausgeschaltet.")
+    return plural(pending, "Anzeige wartet noch auf die Bewertung.",
+                  "Anzeigen warten noch auf die Bewertung.")
 
 
 def _row_fingerprint(job: dict) -> tuple:
@@ -1230,6 +1330,12 @@ def _row_fingerprint(job: dict) -> tuple:
         # The contact fields decide the button's own label and the channel
         # line beside it, so a save he just made has to move this tuple.
         "ansprechpartner", "contact_strasse", "contact_plz_ort",
+        # Not a column: the reading pane promises a score is coming for an
+        # ungraded posting, and that promise is only true while the batch can
+        # run. Flipping the switch in Einstellungen moves the page signature
+        # but no row's own values, so without this the note would go on
+        # promising a worker he had just switched off.
+        "scoring_on", "company_hidden",
     ))
     # The probe stamp is drawn only inside the offline warning, and the daily
     # liveness pass re-stamps hundreds of rows in a couple of minutes. Counting
@@ -1346,6 +1452,13 @@ async def jobs_page():
                             .props("flat dense").mark("poll-now")
                         poll_label = ui.label("").classes("jd-meta") \
                             .mark("poll-line")
+                        # Its own sentence beside the search line, not folded
+                        # into it: one says what the last search found, the
+                        # other says what has not been graded yet, and they are
+                        # true at different moments. Empty — and therefore
+                        # invisible — whenever nothing is waiting.
+                        wait_label = ui.label("").classes("jd-meta") \
+                            .mark("scoring-line")
                     with ui.row().classes("items-center gap-2 p-2"):
                         # `debounce` is Quasar's own: without it every
                         # keystroke resets the page, drops the selection and
@@ -1422,6 +1535,14 @@ async def jobs_page():
                 add="" if view["view"].floors
                     else 'hint="gilt nur für die Arbeitsliste"')
             poll_label.set_text(poll_line(view["poll"]))
+            waiting = scoring_line(view["pending_scores"], view["scoring_on"])
+            wait_label.set_text(waiting)
+            # Amber only for the standing state — a backlog nothing is coming
+            # for. A queue being worked through is the app doing its job, and
+            # colouring that would teach him to ignore the colour.
+            wait_label.classes(
+                add="warn" if waiting and not view["scoring_on"] else "",
+                remove="" if waiting and not view["scoring_on"] else "warn")
             live_view.mark(view["signature"])
             fresh = {row["id"]: row for row in view["rows"]}
             new_order = [row["id"] for row in view["rows"]]
@@ -1831,6 +1952,15 @@ async def jobs_page():
                     with ui.element("div").classes("jd-why"):
                         ui.label(_verdict_heading(job)).classes("jd-meta")
                         ui.label(job["match_reason"]).classes("text-sm mt-1")
+                elif job["match_score"] is None:
+                    # The block used to exist only where a verdict did, so the
+                    # postings with nothing said about them were the ones the
+                    # screen said nothing about — on the pane he opens to find
+                    # out what the machine thought.
+                    with ui.element("div").classes("jd-why"):
+                        ui.label(_verdict_heading(job)).classes("jd-meta")
+                        ui.label(unscored_note(job, bool(job.get("scoring_on")))) \
+                            .classes("text-sm mt-1")
                 _render_primary(job, already)
                 _render_siblings(job)
 
