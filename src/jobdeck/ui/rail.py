@@ -249,17 +249,23 @@ def connections() -> list[tuple[str, bool]]:
     ]
 
 
-def _application_counts(apps: list[dict], follow_up_days: int) -> tuple[int, int, int]:
+def _application_counts(apps: list[dict], follow_up_days: int,
+                        today: datetime.date) -> tuple[int, int, int]:
     """(sent, answered, silent) over the whole register.
 
     'Silent' is the one that earns a place in the rail: an application still
     open past the follow-up threshold is the only thing in this app that needs
-    him to do something about a company rather than about a posting."""
+    him to do something about a company rather than about a posting.
+
+    The day is passed in, not read here. `rubrics` above takes a clock and its
+    docstring promises purity; this arm quietly asked `date.today()` instead,
+    so the one number in the rail that moves on its own was the one number no
+    test could hold still."""
     answered = sum(1 for a in apps if (a.get("status") or "") in BEANTWORTET_STATUS)
     silent = sum(
         1 for a in apps
         if (a.get("status") or "") in OFFENE_STATUS
-        and (days_since(silence_anchor(a)) or 0) >= follow_up_days
+        and (days_since(silence_anchor(a), today) or 0) >= follow_up_days
     )
     return len(apps), answered, silent
 
@@ -273,7 +279,7 @@ def rubrics(view: dict, current: str, now: datetime.datetime) -> list[Rubric]:
     says the same thing, which is what makes the claims testable."""
     active, last_polled, poll_errors = view["profiles"]
     total, answered, silent = _application_counts(
-        view["apps"], view["follow_up_days"])
+        view["apps"], view["follow_up_days"], now.date())
     connected = [name for name, ok in view["connections"] if ok]
     missing = [name for name, ok in view["connections"] if not ok]
     return [

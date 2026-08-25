@@ -113,6 +113,26 @@ def test_bewerbungen_stays_quiet_when_nothing_is_overdue():
     assert rubric.amber is False
 
 
+def test_the_overdue_count_reads_the_clock_it_was_given():
+    """`rubrics` is documented as pure, and the overdue arm was not: it asked
+    `date.today()`, so the one number in the rail that moves by itself was the
+    one number no test could hold still. The test above pinned a send date 1
+    day before NOW and went red fourteen days later, on a day nobody had
+    touched the code.
+
+    Both directions are asserted from ONE view: the same input, two clocks,
+    two different answers — which is the property, and which no wall-clock
+    reading can satisfy."""
+    view = _view(apps=[_app(gesendet_am="2026-08-11")])
+    day_after = _rubric(view, "bewerbungen")                      # NOW: 08-12
+    fortnight = next(
+        r for r in rail.rubrics(view, "stellen",
+                                datetime.datetime(2026, 8, 25, 18, 0, 0))
+        if r.key == "bewerbungen")
+    assert (day_after.count, day_after.amber) == ("1 Bewerbungen", False)
+    assert (fortnight.count, fortnight.amber) == ("1 überfällig", True)
+
+
 def test_an_application_answered_long_ago_is_not_counted_as_silent():
     """Silence is about waiting, not about age: a rejection from June is
     finished business."""
