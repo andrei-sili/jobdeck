@@ -52,6 +52,28 @@ def test_the_answers_always_add_up_to_the_line_they_hang_under(counts):
     assert sum(step.count for step in register.answers(apps)) == answered.count
 
 
+@pytest.mark.parametrize("counts", [
+    {"Zurückgezogen": 2, "Gesendet": 1},
+    {"Zurückgezogen": 1},
+    {"": 3, "Absage": 1},                          # add_bewerbung's own default
+    {"Gesendet": 61, "Absage": 35, "In_Bearbeitung": 24, "Keine_Antwort": 19,
+     "Antwort_erhalten": 2},
+])
+def test_the_register_always_splits_into_parts_that_sum_to_it(counts):
+    """"Zurückgezogen" is in STATUS_OPTIONS, in none of the three sets the
+    ledger knew, and offered by the edit dialog on this very screen — so two
+    presses left the card printing "im Register 4" over parts summing to 2.
+    A blank status does the same, and `db.add_bewerbung` writes one whenever
+    the caller omits it.
+
+    The remainder is computed, not enumerated: a fifth status added to the
+    vocabulary tomorrow cannot break this."""
+    apps = _apps(**counts)
+    steps = {s.key: s for s in register.ledger({"apps": apps, "applied": 0})}
+    parts = sum(s.count for k, s in steps.items() if k != "register")
+    assert parts == steps["register"].count == len(apps)
+
+
 def test_no_invitation_yet_is_printed_rather_than_hidden():
     """Unlike the waiting-for-a-score line on Stellen, a zero belongs here.
     The difference is what the number is about: a background worker's empty
@@ -71,6 +93,33 @@ def test_an_invitation_that_was_a_classifier_error_is_not_counted():
     steps = {s.key: s for s in register.answers(corrected)}
     assert steps["einladung"].count == 0
     assert steps["sonstige"].count == 1
+
+
+def test_every_bar_on_the_card_is_measured_against_the_same_whole():
+    """Both groups draw through one row helper into sibling grids whose bar
+    tracks line up in a single visual column. Measured against their own
+    group, "Absagen 35" drew at 95 % of the width two rows under
+    "beantwortet 37" at 26 % — a smaller figure with a bar three and a half
+    times longer than the whole containing it.
+
+    Also the only test that reads a share at all: the two that did were
+    deleted with the funnel, after which `_share` could be replaced by
+    `return 0.0` and every bar on this card would render as a stub with the
+    suite green."""
+    apps = _apps(Gesendet=61, Absage=35, In_Bearbeitung=24, Keine_Antwort=19,
+                 Antwort_erhalten=2)
+    view = {"apps": apps, "applied": 0}
+    register_steps = {s.key: s for s in register.ledger(view)}
+    answer_steps = {s.key: s for s in register.answers(apps)}
+
+    assert register_steps["register"].share == 1.0
+    assert round(register_steps["beantwortet"].share, 4) == round(37 / 141, 4)
+    assert round(answer_steps["absage"].share, 4) == round(35 / 141, 4)
+    # The property, stated as the reader experiences it: a part never draws
+    # longer than the figure it is a part of.
+    assert answer_steps["absage"].share < register_steps["beantwortet"].share
+    assert sum(s.share for s in answer_steps.values()) == \
+        pytest.approx(register_steps["beantwortet"].share)
 
 
 def test_an_open_application_is_in_no_answer_group():
@@ -199,6 +248,33 @@ def _answered(con, *, firma, sent, arrived, classification,
     })
     con.commit()
     return row_id
+
+
+def test_the_signature_sees_the_two_values_the_sentence_is_made_of(con):
+    """The house rule, on the newest claim: the page's refresh signature must
+    move whenever anything the page STATES changes.
+
+    Two paths that moved nothing. Pressing "Korrigieren" on an already filed
+    reply rewrites `classification` between two non-empty values while
+    `needs_review` stays 0 and `set_status` short-circuits on an unchanged
+    status — every term of the old email tuple held still. And correcting a
+    send date through the edit dialog on this very screen moved neither
+    COUNT, MAX(id) nor status_history, though the span is computed from it.
+    """
+    row_id = _answered(con, firma="Eine GmbH", sent="2026-08-01",
+                       arrived="2026-08-06T09:00:00", classification="absage")
+
+    before = register.signature(con)
+    con.execute("UPDATE email_log SET classification='eingang' "
+                "WHERE bewerbung_id=?", (row_id,))
+    con.commit()
+    assert register.signature(con) != before, "a reclassification has to move it"
+
+    before = register.signature(con)
+    con.execute("UPDATE bewerbungen SET gesendet_am='2026-07-01' WHERE id=?",
+                (row_id,))
+    con.commit()
+    assert register.signature(con) != before, "a corrected send date too"
 
 
 def test_a_reply_still_on_the_review_shelf_is_not_measured(con):

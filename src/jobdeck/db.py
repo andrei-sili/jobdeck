@@ -17,6 +17,7 @@ from jobdeck import claims as claims_lib
 from jobdeck import settings as app_settings
 from jobdeck.constants import (
     BEANTWORTET_STATUS,
+    CLASSIFICATIONS,
     DECISION_CLASSIFICATIONS,
     DEFAULT_DAILY_CAP,
     DEFAULT_DAILY_DRAFT_CAP,
@@ -2094,8 +2095,15 @@ _DRAFTS_SIGNATURE_SQL = (
     + " FROM drafts"
 )
 
+# The send date joined it when the Bewerbungen card began STATING a span
+# computed from it: "im Median nach 4 Tagen" is derived from `gesendet_am`,
+# and correcting one through the edit dialog moved neither COUNT nor MAX(id)
+# nor status_history, so the sentence changed and the page never redrew.
+# TOTAL over julianday rather than MAX: an edit to any row but the newest is
+# invisible to a maximum, and a blank date reads as NULL, which TOTAL skips.
 _APPLICATIONS_SIGNATURE_SQL = """
 SELECT (SELECT COUNT(*) FROM bewerbungen), (SELECT MAX(id) FROM bewerbungen),
+       (SELECT TOTAL(julianday(gesendet_am)) FROM bewerbungen),
        (SELECT MAX(id) FROM status_history)
 """
 
@@ -2103,11 +2111,20 @@ SELECT (SELECT COUNT(*) FROM bewerbungen), (SELECT MAX(id) FROM bewerbungen),
 # see the transitions review actions make without adding rows (a confirm
 # flips needs_review, a correction rewrites classification — the count of
 # rows moves for neither).
-_EMAIL_SIGNATURE_SQL = """
-SELECT COUNT(*), MAX(id), TOTAL(needs_review),
-       TOTAL(classification<>''), TOTAL(bewerbung_id IS NOT NULL)
-  FROM email_log
-"""
+# Per-classification totals, derived from the vocabulary the way the drafts
+# signature derives its per-status ones — so a new classification joins by
+# existing. `TOTAL(classification<>'')` alone was blind to a REWRITE between
+# two non-empty values, which is exactly what "Korrigieren" on an already
+# filed reply does: needs_review 0 over 0, a non-empty value over a non-empty
+# one, and `set_status` short-circuits when the status does not move. Nothing
+# in the old tuple changed, while the answer-time sentence the card prints is
+# computed from those very values.
+_EMAIL_SIGNATURE_SQL = (
+    "SELECT COUNT(*), MAX(id), TOTAL(needs_review), "
+    "TOTAL(classification<>''), TOTAL(bewerbung_id IS NOT NULL), "
+    + ", ".join(f"TOTAL(classification='{kind}')" for kind in CLASSIFICATIONS)
+    + " FROM email_log"
+)
 
 
 # Hiding a company removes rows from every list on the pipeline pages, and it

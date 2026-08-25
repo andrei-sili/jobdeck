@@ -128,6 +128,19 @@ def ledger(view: dict) -> list[Step]:
             Step("ohne_antwort", "ohne Antwort geschlossen", unanswered,
                  _share(unanswered, total),
                  "niemand hat abgesagt — es kam nur nie eine Antwort"))
+    # The REMAINDER, not a fourth status set — so the parts add up by
+    # construction rather than by two vocabularies staying in step.
+    # "Zurückgezogen" is in STATUS_OPTIONS and in none of the three sets
+    # above, and the edit dialog on THIS screen offers it; `add_bewerbung`
+    # defaults a missing status to ''. Either one silently left the register
+    # split into parts that no longer summed to the total printed over them,
+    # on the card whose entire premise is that they do.
+    rest = total - open_rows - answered - unanswered
+    if rest > 0:
+        steps.append(
+            Step("sonst", "zurückgezogen oder ohne Stand", rest,
+                 _share(rest, total),
+                 "weder offen noch beantwortet — sie warten auf nichts"))
     return steps
 
 
@@ -146,23 +159,30 @@ def answers(apps: list[dict]) -> list[Step]:
     queue is nothing to report, and no invitations yet is the score.
     """
     answered = [a for a in apps if _status(a) in BEANTWORTET_STATUS]
-    whole = len(answered)
-    return [
-        Step("einladung", "Einladungen",
-             sum(1 for a in answered if _status(a) == "Einladung"),
-             _share(sum(1 for a in answered if _status(a) == "Einladung"), whole)),
-        Step("absage", "Absagen",
-             sum(1 for a in answered if _status(a) == "Absage"),
-             _share(sum(1 for a in answered if _status(a) == "Absage"), whole)),
+    counted = {
+        "einladung": sum(1 for a in answered if _status(a) == "Einladung"),
+        "absage": sum(1 for a in answered if _status(a) == "Absage"),
         # Everything else a person wrote back. Named for what it is rather
         # than left out: without it the three figures stop adding up to the
         # number directly above them, on the one screen whose entire value is
         # that its parts agree.
-        Step("sonstige", "sonstige Antworten",
-             sum(1 for a in answered
-                 if _status(a) not in ("Einladung", "Absage")),
-             _share(sum(1 for a in answered
-                        if _status(a) not in ("Einladung", "Absage")), whole)),
+        "sonstige": sum(1 for a in answered
+                        if _status(a) not in ("Einladung", "Absage")),
+    }
+    # Bars measured against the WHOLE REGISTER, exactly like the group above.
+    # Both groups render through one `_funnel_row` into sibling grids whose
+    # bar tracks line up in a single visual column, so two scales put a
+    # smaller figure under a longer bar: "Absagen 35" drew at 95 % of the
+    # width two rows under "beantwortet 37" at 26 %. One meaning for one
+    # column — every bar here is a share of the register.
+    whole = len(apps)
+    return [
+        Step("einladung", "Einladungen", counted["einladung"],
+             _share(counted["einladung"], whole)),
+        Step("absage", "Absagen", counted["absage"],
+             _share(counted["absage"], whole)),
+        Step("sonstige", "sonstige Antworten", counted["sonstige"],
+             _share(counted["sonstige"], whole)),
     ]
 
 
