@@ -1733,50 +1733,19 @@ def count_open_drafts(con: sqlite3.Connection) -> int:
     ).fetchone()[0]
 
 
-def pipeline_counts(con: sqlite3.Connection) -> dict:
-    """Every population the Bewerbungen screen measures, in one statement.
+def count_applied_postings(con: sqlite3.Connection) -> int:
+    """Postings that point at an application — what the register block means
+    by "über JobDeck".
 
-    One SELECT rather than six, because they are shown side by side and read
-    against each other: taken separately, sqlite3 gives each its own snapshot,
-    so a poll committing between two of them can put a posting in the later
-    number and not the earlier one — and "more letters than postings" is
-    exactly the kind of impossible pair a reader stops trusting the screen for.
-
-    `drafted_unread` is the one that has to be measured rather than inferred:
-    the daily batch and the form flow both write a letter without the posting
-    ever being opened, so the column is not a chain of subsets and the screen
-    has to say where it breaks.
-    """
-    row = con.execute(
-        """
-        SELECT
-          (SELECT COUNT(*) FROM jobs) AS jobs_total,
-          (SELECT COUNT(*) FROM jobs WHERE match_score > 0) AS scored_above_zero,
-          (SELECT COUNT(*) FROM jobs WHERE match_score = 0) AS scored_zero,
-          (SELECT COUNT(*) FROM jobs WHERE opened_at <> '') AS opened,
-          -- a letter EXISTS, not a draft row exists: 'generating' has an
-          -- empty body until the model answers and 'failed' never got one at
-          -- all, so counting rows would print them under "Anschreiben
-          -- geschrieben". A discarded letter was written and stays counted.
-          (SELECT COUNT(DISTINCT job_id) FROM drafts
-            WHERE anschreiben_body <> '') AS drafted,
-          (SELECT COUNT(DISTINCT d.job_id) FROM drafts d
-             JOIN jobs j ON j.id = d.job_id
-            WHERE d.anschreiben_body <> '' AND j.opened_at = '') AS drafted_unread,
-          (SELECT COUNT(*) FROM jobs WHERE bewerbung_id IS NOT NULL) AS applied,
-          -- MEASURED, not subtracted: `applied` and `drafted` are different
-          -- sets, so `applied - drafted` is only a lower bound and reads as
-          -- zero whenever more letters exist than applications, however many
-          -- of those applications carried none.
-          (SELECT COUNT(*) FROM jobs j
-            WHERE j.bewerbung_id IS NOT NULL
-              AND NOT EXISTS (SELECT 1 FROM drafts d
-                               WHERE d.job_id = j.id
-                                 AND d.anschreiben_body <> ''))
-            AS applied_without_letter
-        """
-    ).fetchone()
-    return dict(row)
+    All that survives of `pipeline_counts`, which computed eight populations
+    for the funnel. Seven of them had no reader left once the funnel came off
+    the screen, and they were not free: measured on the real corpus the full
+    statement cost 5.1 ms against 0.7 for this one, on every page build and
+    every watcher tick, including two COUNT(DISTINCT) scans over drafts and a
+    correlated NOT EXISTS per applied posting."""
+    return con.execute(
+        "SELECT COUNT(*) FROM jobs WHERE bewerbung_id IS NOT NULL"
+    ).fetchone()[0]
 
 
 def applications_by_source(con: sqlite3.Connection) -> list[sqlite3.Row]:

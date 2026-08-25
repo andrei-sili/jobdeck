@@ -397,6 +397,34 @@ def test_a_panel_with_no_rows_says_nothing_at_all():
 # --------------------------------------------------------------------------
 # What the panels SAY, not merely that they are there
 # --------------------------------------------------------------------------
+def _figures(user: User) -> dict[str, str]:
+    """{label: count} for every row of the two figure groups.
+
+    Keyed by label rather than positional, because the element registry does
+    not promise document order — what has to be pinned is that each count
+    belongs to the name beside it.
+
+    Read as PAIRS, because `should_see` is a substring match over every
+    visible element: the first version of the test below looped over
+    ("3", "1", "2", "0") and three of those four are satisfied by the date
+    "2026-08-11" that `_app_row` writes into the register list underneath.
+    Every count could be hardcoded to nought with the suite green — on the
+    assertion written to defend the decision that an invitation of nought is
+    DRAWN rather than hidden."""
+    groups = [e for e in user.find(marker=None).elements
+              if "jd-funnel" in getattr(e, "_classes", [])]
+    pairs: dict[str, str] = {}
+    for group in groups:
+        name = ""
+        for child in group.default_slot.children:
+            classes = getattr(child, "_classes", [])
+            if "name" in classes:
+                name = str(getattr(child, "text", ""))
+            elif "num" in classes:
+                pairs[name] = str(getattr(child, "text", ""))
+    return pairs
+
+
 async def test_the_numbers_print_the_populations_they_measured(user: User, con):
     """The panel that replaced the funnel, held to the same standard: without
     the figures asserted, every label could be relabelled 'x' and every count
@@ -411,15 +439,51 @@ async def test_the_numbers_print_the_populations_they_measured(user: User, con):
 
     await user.open("/bewerbungen")
 
-    await user.should_see("Das Register")
-    await user.should_see("noch ohne Antwort")
-    await user.should_see("Einladungen")
-    await user.should_see("Absagen")
-    await user.should_see("sonstige Antworten")
-    # The counts themselves: 3 in the register, 1 still waiting, 2 answered,
-    # and the two answers split one and one with no invitation among them.
-    for figure in ("3", "1", "2", "0"):
-        await user.should_see(figure)
+    assert _figures(user) == {
+        "im Register": "3",
+        "noch ohne Antwort": "1",
+        "beantwortet": "2",
+        "Einladungen": "0",
+        "Absagen": "1",
+        "sonstige Antworten": "1",
+    }
+
+
+async def test_the_answer_time_sentence_reaches_the_screen(user: User, con):
+    """No page test seeded enough measured answers, so `if sentence:` was
+    False in all forty of them and the two labels that draw the slice's
+    headline statement were never executed. Unit-tested as a string, untested
+    as something the screen shows."""
+    for n in range(register.ENOUGH_FOR_A_TIME):
+        row_id = _app_row(con, firma=f"Antwortende GmbH {n}",
+                          gesendet_am="2026-08-01", status="Absage")
+        db.add_email_log(con, {
+            "direction": "inbound", "gmail_message_id": f"mail{n}",
+            "internal_date": "2026-08-05T09:00:00", "bewerbung_id": row_id,
+            "classification": "absage",
+        })
+    con.commit()
+
+    await user.open("/bewerbungen")
+
+    await user.should_see("Im Median kam eine Antwort nach 4 Tagen.")
+    await user.should_see(f"Gemessen an {register.ENOUGH_FOR_A_TIME} der "
+                          f"{register.ENOUGH_FOR_A_TIME} beantworteten "
+                          f"Bewerbungen")
+
+
+async def test_a_card_with_too_few_answers_says_nothing_about_timing(
+        user: User, con):
+    """The other half of the same branch, and the one that matters: a median
+    over three replies is a coincidence, and this screen may not print a
+    figure it cannot stand behind."""
+    _app_row(con, firma="Eine GmbH", status="Absage")
+
+    await user.open("/bewerbungen")
+
+    drawn = [str(getattr(e, "text", "")) for e in user.find(marker=None).elements]
+    assert not [t for t in drawn if t.startswith("Im Median")]
+    assert not [t for t in drawn if t.startswith("Gemessen an")]
 
 
 async def test_only_the_whole_is_drawn_solid(user: User, con):
@@ -441,13 +505,19 @@ async def test_only_the_whole_is_drawn_solid(user: User, con):
     groups = [e for e in user.find(marker=None).elements
               if "jd-funnel" in getattr(e, "_classes", [])]
     assert len(groups) == 2, "the register and what came back"
-    solid = [inner
-             for group in groups
-             for row in group.default_slot.children
-             if "jd-bar" in getattr(row, "_classes", [])
-             for inner in row.default_slot.children
-             if "dim" not in getattr(inner, "_classes", [])]
-    assert len(solid) == 1, "exactly one figure here is a whole"
+    solid = []
+    for group in groups:
+        name = ""
+        for child in group.default_slot.children:
+            classes = getattr(child, "_classes", [])
+            if "name" in classes:
+                name = str(getattr(child, "text", ""))
+            elif "jd-bar" in classes:
+                solid += [name for inner in child.default_slot.children
+                          if "dim" not in getattr(inner, "_classes", [])]
+    # Named, not counted. Counting alone could not see the solid bar sitting
+    # on the wrong row, which is the property this test's own name states.
+    assert solid == ["im Register"]
 
 
 async def test_the_register_block_names_what_this_app_did_not_do(user: User,

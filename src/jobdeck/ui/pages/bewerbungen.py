@@ -243,7 +243,7 @@ async def bewerbungen_page():
                 ui.element("div").classes("h-1")
                 ui.label("Was zurückkam").classes("jd-card-title")
                 ui.label("Die beantworteten Bewerbungen, aufgeteilt danach, "
-                         "was sie geantwortet haben.").classes("jd-card-sub")
+                         "was geantwortet wurde.").classes("jd-card-sub")
                 with ui.element("div").classes("jd-funnel"):
                     for step in register.answers(view["apps"]):
                         # All three dim, because all three are PARTS. A solid

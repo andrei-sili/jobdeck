@@ -83,6 +83,19 @@ def test_no_invitation_yet_is_printed_rather_than_hidden():
     assert steps["einladung"].label == "Einladungen"
 
 
+def test_each_kind_of_answer_is_counted_as_itself():
+    """The add-up differential holds under any COORDINATED pair of edits, so
+    it was the only property asserted and both figures could be stuck: hard-
+    code the invitation arm to nought and widen "sonstige" to everything but
+    a rejection, and the sum still equals "beantwortet" while the one number
+    he is working toward can never become non-zero."""
+    steps = {s.key: s for s in register.answers(
+        _apps(Einladung=2, Absage=7, Antwort_erhalten=3, Gesendet=5))}
+    assert steps["einladung"].count == 2
+    assert steps["absage"].count == 7
+    assert steps["sonstige"].count == 3
+
+
 def test_an_invitation_that_was_a_classifier_error_is_not_counted():
     """Measured on the real register: exactly one application ever reached
     "Einladung", and it was written automatically after the classifier read a
@@ -330,15 +343,43 @@ def test_a_receipt_is_not_an_answer(con):
     assert register.answer_days(db.answer_delays(con)) == [14]
 
 
+def test_the_vocabulary_names_exactly_the_replies_a_person_wrote():
+    """The derivation itself, stated. The version of this test that looped
+    over `DECISION_CLASSIFICATIONS` and asserted a list of that length proved
+    only that the query uses whatever the constant says — never that the
+    constant says the right thing, which is the claim the docstring makes."""
+    assert DECISION_CLASSIFICATIONS == ("absage", "einladung", "sonstige")
+    assert "eingang" not in DECISION_CLASSIFICATIONS, "a robot, in the same hour"
+    assert "auto" not in DECISION_CLASSIFICATIONS, "an out-of-office"
+
+
 def test_every_decision_the_vocabulary_knows_is_measured(con):
-    """Derived from `CLASSIFICATION_TO_STATUS`, not hand-listed: a new kind of
-    reply that moves an application into an answered state joins this figure
-    by existing, rather than by someone remembering to add it."""
+    """And each of those three really does reach the statistic, so a fourth
+    kind joining the vocabulary tomorrow joins this figure by existing."""
     for n, kind in enumerate(DECISION_CLASSIFICATIONS):
         _answered(con, firma=f"Firma {n}", sent="2026-08-01",
-                  arrived="2026-08-03T09:00:00", classification=kind)
+                  arrived="2026-08-03T09:00:00", classification=kind,
+                  message=f"k{n}")
     assert register.answer_days(db.answer_delays(con)) == \
         [2] * len(DECISION_CLASSIFICATIONS)
+
+
+def test_the_first_answer_is_the_one_measured(con):
+    """An employer that acknowledges, then rejects, then writes again leaves
+    three decision mails on one application. The span is to the FIRST of
+    them — how long he waited — so `MIN → MAX` has to be visible."""
+    row_id = _answered(con, firma="Mehrfach GmbH", sent="2026-08-01",
+                       arrived="2026-08-04T09:00:00", classification="absage",
+                       message="first")
+    for day, name in (("2026-08-20T09:00:00", "second"),
+                      ("2026-09-01T09:00:00", "third")):
+        db.add_email_log(con, {
+            "direction": "inbound", "gmail_message_id": name,
+            "internal_date": day, "bewerbung_id": row_id,
+            "classification": "sonstige",
+        })
+    con.commit()
+    assert register.answer_days(db.answer_delays(con)) == [3]
 
 
 def test_the_aggregate_reads_the_mail_date_not_the_moment_it_was_filed(con):

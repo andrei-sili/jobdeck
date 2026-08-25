@@ -1,8 +1,8 @@
 """What the Bewerbungen screen states, pinned before anything is drawn.
 
 The two claims worth guarding are the two the real register forced: that the
-pipeline is NOT a chain of subsets, and that the app does not take credit for
-the 44 applications that predate it.
+card's parts always reach the total printed over them, and that the app does
+not take credit for the 44 applications that predate it.
 """
 
 import datetime
@@ -247,37 +247,6 @@ def _job(con, external_id, **over):
     return db.insert_job_if_new(con, values)
 
 
-def test_the_populations_are_counted_the_way_the_screen_reads_them(con):
-    read = _job(con, "read")
-    con.execute("UPDATE jobs SET opened_at='2026-08-16T10:00', match_score=80 "
-                "WHERE id=?", (read,))
-    batch = _job(con, "batch")   # a letter written without the ad being opened
-    con.execute("UPDATE jobs SET match_score=70 WHERE id=?", (batch,))
-    db.upsert_draft(con, batch, {"status": "ready",
-                                 "anschreiben_body": "Sehr geehrte"})
-    db.upsert_draft(con, read, {"status": "ready",
-                                "anschreiben_body": "Sehr geehrte"})
-    zero = _job(con, "zero")
-    con.execute("UPDATE jobs SET match_score=0 WHERE id=?", (zero,))
-    con.commit()
-
-    # a claim being written right now: the row exists, the letter does not
-    writing = _job(con, "writing")
-    con.execute("UPDATE jobs SET match_score=70 WHERE id=?", (writing,))
-    db.upsert_draft(con, writing, {"status": "generating"})
-    con.commit()
-
-    counts = db.pipeline_counts(con)
-
-    assert counts["jobs_total"] == 4
-    assert counts["scored_above_zero"] == 3
-    assert counts["scored_zero"] == 1
-    assert counts["opened"] == 1
-    assert counts["drafted"] == 2, "a draft row being written is not a letter"
-    assert counts["drafted_unread"] == 1, "the batch wrote one unread"
-    assert counts["applied"] == 0
-
-
 def test_a_board_only_gets_credit_for_the_applications_it_carried(con):
     """An imported row has no posting and therefore no board. Folding those
     into a per-source figure would credit a board with work it never did.
@@ -399,28 +368,17 @@ def test_a_future_dated_application_is_not_drawn_as_the_most_overdue():
                                   if r.firma == "Zukunft GmbH"))] == 0.0
 
 
-def test_a_letterless_application_is_counted_and_not_inferred(con):
-    """`applied` and `drafted` are different SETS. Subtracting them reads as
-    zero whenever more letters exist than applications, however many of those
-    applications actually carried none."""
-    with_letter = _job(con, "with")
-    db.upsert_draft(con, with_letter, {"status": "sent",
-                                       "anschreiben_body": "Sehr geehrte"})
-    db.apply_job(con, with_letter, kanal="E-Mail")
-    without = _job(con, "without")
-    db.apply_job(con, without, kanal="Online-Portal")
-    # …and a third posting that carries a letter but no application, so the
-    # aggregate difference (applied 2 - drafted 2) would be zero
-    spare = _job(con, "spare")
-    db.upsert_draft(con, spare, {"status": "ready",
-                                 "anschreiben_body": "Sehr geehrte"})
+def test_only_postings_that_point_at_an_application_are_counted(con):
+    """The single population the register block still reads, and the note it
+    prints turns on it: "N über JobDeck · M von Hand oder aus der alten
+    Liste". Seven other populations were computed beside it for the funnel
+    and outlived their only reader by one commit."""
+    linked = _job(con, "linked")
+    db.apply_job(con, linked, kanal="E-Mail")
+    _job(con, "untouched")
     con.commit()
 
-    counts = db.pipeline_counts(con)
-
-    assert counts["applied"] == 2
-    assert counts["drafted"] == 2
-    assert counts["applied_without_letter"] == 1, "measured, not subtracted"
+    assert db.count_applied_postings(con) == 1
 
 
 def test_the_rate_threshold_is_pinned_at_its_own_boundary():

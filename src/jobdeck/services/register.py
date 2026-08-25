@@ -6,15 +6,17 @@ pinned without a browser — and so a claim and its bar cannot disagree.
 
 Two honesty rules govern this module, both forced by his real register:
 
-* **The pipeline does not nest.** 45 postings have a letter and only 33 were
-  ever opened, because the daily batch and the form flow write one without him
-  reading the ad first. Drawn as a funnel of subsets that is simply false, so
-  the step that is not a subset says so in its own note rather than in a
-  caption somewhere else.
-* **The register is older than the app.** 44 of his 76 applications were
+* **The parts add up, or they say what is left over.** The card leads with a
+  total and splits it twice, and a reader who cannot make the parts reach the
+  whole stops trusting every other figure on the screen. Both remainders are
+  therefore computed rather than enumerated — a status added to the
+  vocabulary tomorrow cannot silently fall out of every line.
+* **The register is older than the app.** 44 of his applications were
   imported from the tracker he kept before JobDeck existed. A screen that
-  called all 76 "gesendet" would be claiming credit for them, so what this app
-  did and what the register holds are two separate blocks.
+  called all of them "gesendet" would be claiming credit for them, so what
+  this app did and what the register holds are two separate blocks — and it
+  is why the answer-time sample can never equal the figure above it: a
+  rejection recorded by hand carries no mail to measure.
 """
 
 import datetime
@@ -478,10 +480,14 @@ _WATCHED_SETTINGS = ("follow_up_days",)
 def signature(con) -> tuple:
     """Everything this screen shows, cheaply comparable (see ui/live.py).
 
-    Wider than the pipeline: the silence panel states the threshold, sorts by
-    it and colours by it, so raising it in Einstellungen has to reach this
+    Wider than the tables alone: the silence panel states the threshold, sorts
+    by it and colours by it, so raising it in Einstellungen has to reach this
     screen — otherwise the number beside "Ab N Tagen" and the rows beneath it
     describe two different settings until the page is reloaded.
+
+    The answer-time sentence added two more inputs, and `db.data_signature`
+    had to learn to see both: a reply RECLASSIFIED between two non-empty
+    values, and a send date corrected on any row but the newest.
     """
     return (*db.data_signature(con),
             *(db.get_setting(con, key, "") for key in _WATCHED_SETTINGS))
@@ -494,7 +500,6 @@ def facts() -> dict:
         # snapshot, so a write landing between them would marry stale rows to
         # a fresh signature and the watcher would record that as current.
         sig = signature(con)
-        counts = db.pipeline_counts(con)
         return {
             "signature": sig,
             "apps": [dict(row) for row in db.list_bewerbungen(con)],
@@ -509,7 +514,7 @@ def facts() -> dict:
             # above uses the recording moment — two clocks on purpose, and
             # `db.answer_delays` states why one claim needs each.
             "answer_delays": db.answer_delays(con),
-            **counts,
+            "applied": db.count_applied_postings(con),
         }
 
 
