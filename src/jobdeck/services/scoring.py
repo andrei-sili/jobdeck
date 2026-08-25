@@ -28,6 +28,33 @@ _lock = asyncio.Lock()
 _attempts: dict[int, int] = {}  # job id -> failed scoring attempts
 
 
+def blocking_reason(ai_enabled: bool, api_key: str, profile_text: str) -> str:
+    """Why the batch cannot score anything, '' when it can.
+
+    One definition, because the Stellen screen now PROMISES what this decides:
+    it tells him how many postings are waiting for a score, and "waiting" is
+    only true while a worker is coming for them. With scoring switched off —
+    which is this app's own default — the same queue would sit there for ever
+    under a word that says otherwise.
+
+    The sentences are the log lines the batch has always written, so the one
+    place that decides and the one place that reports it cannot drift."""
+    if not ai_enabled:
+        return "AI is disabled in Settings"
+    if not api_key:
+        return "ANTHROPIC_API_KEY not set"
+    if not profile_text:
+        return f"create {config.PROFILE_PATH} first"
+    return ""
+
+
+def is_ready(con) -> bool:
+    """Can the batch score anything at all? Asked by the screen that counts
+    what is waiting, on the connection it already holds open."""
+    return not blocking_reason(db.ai_enabled(con), config.anthropic_api_key(),
+                               profile.load_profile())
+
+
 def _ai_enabled() -> bool:
     with db.db() as con:
         return db.ai_enabled(con)
@@ -66,15 +93,12 @@ def _persist_usage(usage: llm.LLMResult) -> None:
 async def score_new_jobs(limit: int = BATCH_LIMIT) -> dict[str, int]:
     """Score up to `limit` unscored new jobs. Returns outcome counters."""
     counters = {"scored": 0, "failed": 0}
-    if not await asyncio.to_thread(_ai_enabled):
-        log.info("scoring skipped: AI is disabled in Settings")
-        return counters
-    if not config.anthropic_api_key():
-        log.info("scoring skipped: ANTHROPIC_API_KEY not set")
-        return counters
     profile_text = await asyncio.to_thread(profile.load_profile)
-    if not profile_text:
-        log.info("scoring skipped: create %s first", config.PROFILE_PATH)
+    blocked = blocking_reason(
+        await asyncio.to_thread(_ai_enabled), config.anthropic_api_key(),
+        profile_text)
+    if blocked:
+        log.info("scoring skipped: %s", blocked)
         return counters
 
     async with _lock:  # manual runs and the scheduled job never overlap

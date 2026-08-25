@@ -318,3 +318,38 @@ def test_list_unscored_jobs_orders_limits_and_excludes(con):
 
     rows = db.list_unscored_jobs(con, limit=2, exclude_ids={ids[0]})
     assert [r["id"] for r in rows] == ids[1:3]
+
+
+# ---------------------------------------------------------------------------
+# One definition of "can the batch run at all"
+# ---------------------------------------------------------------------------
+def test_the_batch_reports_the_first_thing_standing_in_its_way():
+    assert scoring.blocking_reason(False, "key", "profil") == \
+        "AI is disabled in Settings"
+    assert scoring.blocking_reason(True, "", "profil") == \
+        "ANTHROPIC_API_KEY not set"
+    assert "profile.md" in scoring.blocking_reason(True, "key", "")
+    assert scoring.blocking_reason(True, "key", "profil") == ""
+
+
+def test_the_screen_and_the_batch_ask_the_same_question(con, monkeypatch):
+    """`is_ready` is what the line promises on. It has to answer for all three
+    conditions the batch checks, not just the switch he can see."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    config.PROFILE_PATH.write_text("# Profil\nEin Satz.\n", encoding="utf-8")
+    db.set_setting(con, "ai_enabled", "1")
+    con.commit()
+    assert scoring.is_ready(con) is True
+
+    db.set_setting(con, "ai_enabled", "0")
+    con.commit()
+    assert scoring.is_ready(con) is False
+
+    db.set_setting(con, "ai_enabled", "1")
+    con.commit()
+    config.PROFILE_PATH.unlink()
+    assert scoring.is_ready(con) is False, "no profile, nothing to score against"
+
+    config.PROFILE_PATH.write_text("# Profil\n", encoding="utf-8")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    assert scoring.is_ready(con) is False, "no key, no call"
