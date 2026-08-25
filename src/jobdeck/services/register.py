@@ -22,6 +22,7 @@ Two honesty rules govern this module, both forced by his real register:
 import datetime
 import math
 import statistics
+import unicodedata
 from dataclasses import dataclass
 
 from jobdeck import db
@@ -33,6 +34,7 @@ from jobdeck.constants import (
     STATUS_NO_ANSWER,
 )
 from jobdeck.dates import MONATE_DE, silence_anchor
+from jobdeck.dedupe import fold
 
 # How far back the rhythm strip reaches. Sixty days is what makes a pause
 # legible as a pause: his own register holds a 37-day gap between two bursts,
@@ -368,6 +370,116 @@ def silence(apps: list[dict], follow_up_days: int,
     return sorted(waiting, key=lambda row: (row.days is None, -(row.days or 0)))
 
 
+# ---------------------------------------------------------------------------
+# The order the ledger is listed in
+# ---------------------------------------------------------------------------
+
+# What the order control offers, and the only orders that exist. Named rather
+# than clicked into a column heading: the register this screen replaced was a
+# spreadsheet "sorted by whichever heading was clicked last", and an order
+# with no name on screen has to be read back out of an arrow. Stellen already
+# spells its orders out under "Sortierung"; two screens, one convention.
+#
+# Three, because three are what the register can answer honestly. "Kanal"
+# holds two values and "Status" has a filter of its own directly beside it, so
+# ordering by either is a filter wearing the wrong clothes. "Antwort" is empty
+# or "?" on half the answered rows — the day is only known where a mail was
+# read — so it would gather a wall of "?" at one end and call it an order.
+SORT_LABELS = {
+    "date": "Neueste zuerst",
+    "waiting": "Längste Wartezeit zuerst",
+    "firma": "Firma A–Z",
+}
+
+# What `db.list_bewerbungen` already hands back, so the default order costs
+# nothing and the screen opens the way it always has.
+DEFAULT_SORT = "date"
+
+# Kept between visits, like Stellen's. An order is something he decides once
+# and then works under; handing him back the default every time he opens the
+# screen makes it a control he sets again every time, which is the shape of
+# one nobody uses twice.
+SORT_SETTING = "bewerbungen_sort"
+
+
+def stored_sort(raw: object) -> str:
+    """The stored order, or the default when it names nothing we offer.
+
+    Fail-closed on purpose: the value reaches here from a settings row, so a
+    hand-edited or half-migrated one must degrade to the order the screen was
+    built around rather than to no order at all.
+    """
+    value = str(raw or "")
+    return value if value in SORT_LABELS else DEFAULT_SORT
+
+
+def _alphabetical(name: object) -> str:
+    """Where a company name sits in a German alphabet.
+
+    Neither `fold` nor `norm` answers this, and both were tried: they exist for
+    searching and for identity, and both leave the umlaut in place, so a name
+    beginning "Ö" files after every name beginning "z" — U+00F6 is past 'z'. A
+    reader looking for it under O does not find it at the end of the list.
+
+    DIN 5007-1, the ordering a German dictionary uses: ä/ö/ü sort as a/o/u and
+    ß as ss. `casefold` already does the ß, and stripping the combining marks
+    left by NFKD does the rest. No locale and no collation library: this has to
+    give the same answer on his machine and on every CI runner.
+    """
+    folded = unicodedata.normalize("NFKD", fold(name))
+    return "".join(ch for ch in folded if not unicodedata.combining(ch))
+
+
+def order(apps: list[dict], waiting: list[Waiting], sort: str) -> list[dict]:
+    """The rows in the named order — total, stable, and never a second rule.
+
+    `waiting` is `silence()`'s own output and its POSITIONS are the waiting
+    order; this function does not re-derive "who has waited longest". That
+    matters more than it looks: the column reads from the last contact and the
+    default order reads from the send date, so the two genuinely disagree — on
+    the real register the longest-silent application sits at row 99 of 141 and
+    the column steps backwards fourteen times. Two implementations of one
+    claim would let the panel above the list and the list itself drift apart,
+    which is exactly what the anchor was unified to prevent.
+
+    An application that is not waiting has no waiting time, so it cannot take
+    a place in an order about waiting: those rows follow every waiting one,
+    keeping the order they arrived in. Python's sort is stable, so every tie
+    anywhere here falls back to `list_bewerbungen`'s own newest-first order
+    rather than to whatever the dict happened to hold.
+    """
+    if sort == "waiting":
+        rank = {row.bewerbung_id: place for place, row in enumerate(waiting)}
+        return sorted(apps,
+                      key=lambda app: rank.get(int(app.get("id") or 0),
+                                               len(rank)))
+    if sort == "firma":
+        return sorted(apps, key=lambda app: _alphabetical(app.get("firma")))
+    return list(apps)
+
+
+def order_note(rows: list[dict], waiting: list[Waiting], sort: str) -> str:
+    """What the order cannot say about the rows currently on screen, or "".
+
+    Ordering by waiting time is a claim about a column, and the status filter
+    directly beside the control can empty that column: "Absage", "Keine
+    Antwort" and "Antwort erhalten" hold no application that is still waiting,
+    and on the real register they are 56 rows of 141 — three of the six views.
+    Under those the list is in a perfectly well-defined order that happens to
+    distinguish nothing, so it reads as a control that has stopped working.
+
+    It says so rather than disabling the control: the order is not
+    inapplicable here, it just has nothing to separate, and a control he
+    cannot press is one he cannot press back.
+    """
+    if sort != "waiting" or not rows:
+        return ""
+    still_waiting = {row.bewerbung_id for row in waiting}
+    if any(int(app.get("id") or 0) in still_waiting for app in rows):
+        return ""
+    return "Keine davon wartet noch — diese Sortierung ändert hier nichts."
+
+
 def by_channel(apps: list[dict]) -> list[Share]:
     """Answered share per application channel, biggest population first."""
     channels: dict[str, list[dict]] = {}
@@ -474,7 +586,10 @@ def de_day(day: datetime.date) -> str:
 # The setting this screen PRINTS and colours by, which no table signature can
 # see. The rail learned this the hard way: connecting Gmail on the page beside
 # it left the rail reading "Gmail fehlt" for the life of that page.
-_WATCHED_SETTINGS = ("follow_up_days",)
+# The order control decides which row is at the top of the list, and no table
+# signature moves when it changes — so a second tab picking another order
+# would leave this one listing the old one for the life of the page.
+_WATCHED_SETTINGS = ("follow_up_days", SORT_SETTING)
 
 
 def signature(con) -> tuple:
@@ -515,6 +630,11 @@ def facts() -> dict:
             # `db.answer_delays` states why one claim needs each.
             "answer_delays": db.answer_delays(con),
             "applied": db.count_applied_postings(con),
+            # Read here rather than held in the page: the screen states the
+            # order it is in, and a setting it states is a setting it has to
+            # re-read — otherwise the control keeps naming the order this tab
+            # chose after another tab has changed it.
+            "sort": stored_sort(db.get_setting(con, SORT_SETTING, "")),
         }
 
 
