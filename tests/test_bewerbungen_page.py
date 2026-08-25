@@ -422,6 +422,34 @@ async def test_the_numbers_print_the_populations_they_measured(user: User, con):
         await user.should_see(figure)
 
 
+async def test_only_the_whole_is_drawn_solid(user: User, con):
+    """A solid bar means "this is the figure the others are shares of".
+
+    The answers group is three PARTS of the line above it, and drawing the
+    invitation solid put the only solid bar on the only value that is nought
+    — invisible by construction — while the two real numbers were dimmed as
+    though they were the aside. Found by opening the page, not by a test:
+    both groups' arithmetic was already right."""
+    _app_row(con, firma="Eine GmbH")
+    _app_row(con, firma="Andere GmbH", status="Absage")
+
+    await user.open("/bewerbungen")
+
+    # Scoped to the two groups of figures. The comparison panels further down
+    # draw bars too, and theirs mean something else entirely — a share of a
+    # channel's own population, with no whole among them to be solid.
+    groups = [e for e in user.find(marker=None).elements
+              if "jd-funnel" in getattr(e, "_classes", [])]
+    assert len(groups) == 2, "the register and what came back"
+    solid = [inner
+             for group in groups
+             for row in group.default_slot.children
+             if "jd-bar" in getattr(row, "_classes", [])
+             for inner in row.default_slot.children
+             if "dim" not in getattr(inner, "_classes", [])]
+    assert len(solid) == 1, "exactly one figure here is a whole"
+
+
 async def test_the_register_block_names_what_this_app_did_not_do(user: User,
                                                                  con):
     _app_row(con, firma="Von Hand GmbH")

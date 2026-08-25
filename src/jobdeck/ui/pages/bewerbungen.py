@@ -246,7 +246,15 @@ async def bewerbungen_page():
                          "was sie geantwortet haben.").classes("jd-card-sub")
                 with ui.element("div").classes("jd-funnel"):
                     for step in register.answers(view["apps"]):
-                        _funnel_row(step, dim=step.key != "einladung")
+                        # All three dim, because all three are PARTS. A solid
+                        # bar means "this is the figure the others are shares
+                        # of", and the whole they are shares of is the
+                        # "beantwortet" line in the group above. Highlighting
+                        # the invitation instead put the one solid bar on the
+                        # only value that is nought — a bright bar nobody can
+                        # see, over two real numbers drawn as though they were
+                        # the aside.
+                        _funnel_row(step, dim=True)
                 sentence, over = register.answer_time(view["answer_delays"])
                 if sentence:
                     ui.label(sentence).classes("jd-note mt-2")
