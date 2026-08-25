@@ -707,20 +707,28 @@ async def bewerbungen_page():
         async def set_sort(value) -> None:
             """The order the list is in, kept for the next visit.
 
+            It stores and then goes through `refresh`, which is the only thing
+            on this page that calls `live_view.mark`. Redrawing the list alone
+            would be cheaper and was tried: the stored order is a WATCHED
+            setting, so his own choice moves the signature, and with nothing
+            marking it the next tick reads that as somebody else's change — it
+            rebuilt the whole page half a minute after he clicked, or, with a
+            dialog open, lit the "Neue Daten" chip for data he already had.
+            Cheap here means the page repaints itself later, unasked.
+
             The early return is load-bearing rather than tidy: `refresh` writes
             the stored order back into this select when another tab has moved
             it, and NiceGUI fires a change handler on a server-side write
             whenever the value actually differs — which is exactly what that
-            path creates. Without it the handler stores the value it was just
-            handed and redraws the list, on every tick that carries a change.
-            Not a loop: the stored value is unchanged, so the signature is too.
+            path creates. Without it the handler re-stores what it was handed
+            and refreshes again on every tick that carries a change.
             """
             chosen = register.stored_sort(value)
             if chosen == state["sort"]:
                 return
             state["sort"] = chosen
-            redraw_register()           # from rows already in hand, no re-read
             await run.io_bound(_store_sort, chosen)
+            await refresh()
 
         def redraw_register() -> None:
             """Only the list, so typing in the search box does not rebuild the

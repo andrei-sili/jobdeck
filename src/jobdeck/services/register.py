@@ -413,6 +413,17 @@ def stored_sort(raw: object) -> str:
     return value if value in SORT_LABELS else DEFAULT_SORT
 
 
+# Letters NFKD cannot help with. A diaeresis is a combining mark and decomposes;
+# a STROKE or a LIGATURE is part of the letter and does not, so "Ørsted" and
+# "Łukasiewicz" filed after every name beginning "z" — the exact failure this
+# key exists to prevent, just for the letters the first fix did not reach. The
+# base letter is what a German index files them under.
+_STROKES_AND_LIGATURES = str.maketrans({
+    "ø": "o", "ł": "l", "đ": "d", "ð": "d", "ħ": "h", "ŧ": "t", "ı": "i",
+    "æ": "ae", "œ": "oe", "þ": "th",
+})
+
+
 def _alphabetical(name: object) -> str:
     """Where a company name sits in a German alphabet.
 
@@ -422,12 +433,18 @@ def _alphabetical(name: object) -> str:
     reader looking for it under O does not find it at the end of the list.
 
     DIN 5007-1, the ordering a German dictionary uses: ä/ö/ü sort as a/o/u and
-    ß as ss. `casefold` already does the ß, and stripping the combining marks
-    left by NFKD does the rest. No locale and no collation library: this has to
-    give the same answer on his machine and on every CI runner.
+    ß as ss. `casefold` does the ß and the case, the table above does the
+    letters that carry a stroke or are a ligature, and stripping the combining
+    marks left by NFKD does every accent. No locale and no collation library:
+    this has to give the same answer on his machine and on every CI runner.
+
+    Order matters. Casefold FIRST, or the table would have to carry both cases;
+    translate BEFORE NFKD, or nothing would be left to translate for the ones
+    NFKD does decompose.
     """
-    folded = unicodedata.normalize("NFKD", fold(name))
-    return "".join(ch for ch in folded if not unicodedata.combining(ch))
+    folded = fold(name).translate(_STROKES_AND_LIGATURES)
+    decomposed = unicodedata.normalize("NFKD", folded)
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
 
 
 def order(apps: list[dict], waiting: list[Waiting], sort: str) -> list[dict]:
@@ -462,22 +479,32 @@ def order_note(rows: list[dict], waiting: list[Waiting], sort: str) -> str:
     """What the order cannot say about the rows currently on screen, or "".
 
     Ordering by waiting time is a claim about a column, and the status filter
-    directly beside the control can empty that column: "Absage", "Keine
-    Antwort" and "Antwort erhalten" hold no application that is still waiting,
-    and on the real register they are 56 rows of 141 — three of the six views.
-    Under those the list is in a perfectly well-defined order that happens to
-    distinguish nothing, so it reads as a control that has stopped working.
+    directly beside the control can empty that column: five of the eight views
+    hold no application that is still waiting — every status outside
+    `OFFENE_STATUS`, plus nothing at all matching the search — and on the real
+    register those are 56 rows of 141. Under them the list is in a perfectly
+    well-defined order that happens to distinguish nothing, so it reads as a
+    control that has stopped working.
 
     It says so rather than disabling the control: the order is not
     inapplicable here, it just has nothing to separate, and a control he
     cannot press is one he cannot press back.
+
+    What it says matters as much as when. "This sorting changes nothing here"
+    was false and visibly so: with nothing waiting every row takes the same
+    key, so the stable sort hands back `list_bewerbungen`'s own order — which
+    is the DEFAULT order, not the order that was on screen. Coming from
+    "Firma A–Z" the rows all move at the exact moment the sentence claims they
+    cannot. So it names the order the list actually falls back to, and names it
+    from the label itself, which is the only spelling that cannot drift.
     """
     if sort != "waiting" or not rows:
         return ""
     still_waiting = {row.bewerbung_id for row in waiting}
     if any(int(app.get("id") or 0) in still_waiting for app in rows):
         return ""
-    return "Keine davon wartet noch — diese Sortierung ändert hier nichts."
+    return ("Keine davon wartet noch — die Liste steht deshalb wie bei "
+            f"„{SORT_LABELS[DEFAULT_SORT]}“.")
 
 
 def by_channel(apps: list[dict]) -> list[Share]:

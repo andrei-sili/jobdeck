@@ -438,8 +438,16 @@ def test_the_default_order_is_the_one_the_query_already_handed_back():
 
 
 def test_an_unknown_order_falls_back_to_the_one_the_screen_was_built_around():
-    apps = [_app(row_id=3), _app(row_id=2), _app(row_id=1)]
+    """The rows must differ in every dimension the other orders read, or the
+    fallback is indistinguishable from having applied one of them."""
+    apps = [_app(row_id=3, firma="Zeta GmbH", gesendet_am="2026-08-15"),
+            _app(row_id=2, firma="Alpha GmbH", gesendet_am="2026-06-01"),
+            _app(row_id=1, firma="Mitte GmbH", gesendet_am="2026-08-10",
+                 status="Absage")]
     assert _ids(_ordered(apps, "nach Lust und Laune")) == [3, 2, 1]
+    # ... and is not secretly one of the real orders
+    assert _ids(_ordered(apps, "firma")) != [3, 2, 1]
+    assert _ids(_ordered(apps, "waiting")) != [3, 2, 1]
 
 
 def test_a_stored_order_that_names_nothing_we_offer_is_refused():
@@ -598,10 +606,41 @@ def test_an_umlaut_ranks_among_its_base_letter_and_not_after_it():
 
 
 def test_the_sharp_s_sorts_as_the_two_letters_it_stands_for():
-    """DIN 5007-1, and the one part `casefold` already does."""
-    apps = [_app(row_id=1, firma="Strauß GmbH"),
-            _app(row_id=2, firma="Strassburg GmbH")]
-    assert _ids(_ordered(apps, "firma")) == [2, 1]
+    """DIN 5007-1, and the one part `casefold` already does.
+
+    The pair has to diverge AT the ß and nowhere earlier. "Strassburg" against
+    "Strauß" does not: they part at 's' vs 'u', four characters before it, so
+    the folding half of the claim went untested. Here both keys agree up to
+    "strass"; only expanding the ß decides, and it decides the other way round
+    from the raw code point (U+00DF is past every letter).
+    """
+    # No legal form on either name: a differing suffix would decide the
+    # comparison after the ß and hide exactly what this pins.
+    apps = [_app(row_id=1, firma="Straßen"), _app(row_id=2, firma="Strassen")]
+    # folded both are "strassen", so the tie falls back to the incoming order.
+    # Unfolded, 'ß' (U+00DF) is past 's' and row 1 would go last.
+    assert _ids(_ordered(apps, "firma")) == [1, 2]
+
+    apps = [_app(row_id=1, firma="Straße"), _app(row_id=2, firma="Strassen")]
+    # folded: "strasse" < "strassen".  unfolded: "strassen" < "straße".
+    assert _ids(_ordered(apps, "firma")) == [1, 2]
+
+
+def test_a_stroke_or_a_ligature_files_under_its_base_letter():
+    """NFKD decomposes an accent because a combining mark is a separate code
+    point; a STROKE is part of the letter and a LIGATURE is one letter, so
+    neither decomposes. Ø, Ł, Æ, Œ and Đ therefore filed after every name
+    beginning "z" — the exact failure the key exists to prevent, surviving the
+    first fix for the letters it could not reach.
+    """
+    names = ["Zeta GmbH", "Ørsted", "Łukasiewicz", "Æther AG", "Đuro",
+             "Œuvre", "Abend GmbH"]
+    apps = [_app(row_id=i, firma=n) for i, n in enumerate(names, start=1)]
+
+    listed = [str(row["firma"]) for row in _ordered(apps, "firma")]
+
+    assert listed == ["Abend GmbH", "Æther AG", "Đuro", "Łukasiewicz",
+                      "Œuvre", "Ørsted", "Zeta GmbH"]
 
 
 def test_two_rows_of_one_name_keep_the_newest_first():
@@ -610,9 +649,15 @@ def test_two_rows_of_one_name_keep_the_newest_first():
     assert _ids(_ordered(apps, "firma")) == [2, 1]
 
 
-def test_a_row_with_no_company_name_is_ordered_rather_than_dropped():
-    apps = [_app(row_id=1, firma="Alpha"), _app(row_id=2, firma=None)]
-    assert sorted(_ids(_ordered(apps, "firma"))) == [1, 2]
+def test_a_row_with_no_company_name_leads_rather_than_disappearing():
+    """`fold(None)` is the empty string, which sorts before every name — so a
+    nameless row goes to the TOP, where it is at least visible. The earlier
+    assertion sorted the ids before comparing, so it proved only that nothing
+    raised and nothing was lost, and would have passed wherever the row landed.
+    """
+    apps = [_app(row_id=1, firma="Alpha GmbH"), _app(row_id=2, firma=None),
+            _app(row_id=3, firma="")]
+    assert _ids(_ordered(apps, "firma")) == [2, 3, 1]
 
 
 def test_no_order_ever_loses_or_invents_a_row():

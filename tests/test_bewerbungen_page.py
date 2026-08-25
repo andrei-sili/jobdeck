@@ -753,7 +753,14 @@ async def test_the_control_offers_exactly_the_orders_that_exist(user: User,
     await user.open("/bewerbungen")
     await user.should_see("Sortierung")
 
-    assert _marked(user, "register-sort")[0].options == register.SORT_LABELS
+    # Literals, not `register.SORT_LABELS`: the select was BUILT from that
+    # object, so comparing the two is comparing a value with itself and would
+    # survive any rename, addition or removal of an order.
+    assert _marked(user, "register-sort")[0].options == {
+        "date": "Neueste zuerst",
+        "waiting": "Längste Wartezeit zuerst",
+        "firma": "Firma A–Z",
+    }
 
 
 async def test_the_longest_silence_can_be_brought_to_the_top(user: User, con):
@@ -775,10 +782,15 @@ async def test_the_longest_silence_can_be_brought_to_the_top(user: User, con):
 
 async def test_an_answered_application_never_leads_an_order_about_waiting(
         user: User, con):
+    """The answered row is the NEWER one, so the default order already puts it
+    first and only the waiting order can move it. With it dated 2026-01-01 the
+    default gave the asserted answer by itself, and the control could have done
+    nothing at all with this test green."""
     answered = _app_row(con, firma="Beantwortet GmbH",
-                        gesendet_am="2026-01-01", status="Absage")
+                        gesendet_am="2026-08-22", status="Absage")
     waiting = _app_row(con, firma="Wartet GmbH", gesendet_am="2026-08-20")
     await user.open("/bewerbungen")
+    assert _listed(user) == [answered, waiting]      # the default order
 
     _marked(user, "register-sort")[0].set_value("waiting")
     await asyncio.sleep(0.3)
@@ -865,6 +877,37 @@ async def _tick(user: User) -> None:
     await asyncio.sleep(0.1)
 
 
+async def test_his_own_choice_does_not_make_the_page_rebuild_itself(
+        user: User, con):
+    """The stored order is a WATCHED setting, so choosing one moves the
+    signature. `live_view.mark` is reachable from nowhere but `refresh`, so a
+    handler that stores and only redraws the list leaves the watcher holding
+    the pre-change tuple — and the next tick reads his own click as somebody
+    else's change and rebuilds the whole page, half a minute later, unasked.
+
+    Counted rather than described: `_load` runs once per refresh, so the tick
+    after a local change must add nothing.
+    """
+    _app_row(con, firma="Eine GmbH")
+    await user.open("/bewerbungen")
+
+    calls = []
+    original = bewerbungen._load
+    bewerbungen._load = lambda: (calls.append(1), original())[1]
+    try:
+        _marked(user, "register-sort")[0].set_value("firma")
+        await asyncio.sleep(0.4)
+        after_click = len(calls)
+        await _tick(user)
+        after_tick = len(calls)
+    finally:
+        bewerbungen._load = original
+
+    assert after_click == 1, "the choice itself must reload once, through refresh"
+    assert after_tick == after_click, \
+        "the watcher rebuilt the page for a change made in this very tab"
+
+
 async def test_an_order_chosen_in_another_tab_reaches_this_one(user: User, con):
     """The setting is watched precisely so this happens. Without the write
     back into the select, the list would reorder under a control still naming
@@ -929,6 +972,31 @@ async def test_a_status_view_with_nothing_waiting_says_why_the_order_is_flat(
     await asyncio.sleep(0.3)
 
     await user.should_see("Keine davon wartet noch")
+    # It must name where the list actually went. Saying the sorting "changes
+    # nothing here" was false: with nothing waiting every row takes the same
+    # key, so the list falls back to the DEFAULT order — coming from "Firma
+    # A–Z" every row moves as the sentence appears.
+    await user.should_see("Neueste zuerst")
+
+
+async def test_a_flat_order_reached_from_the_alphabet_really_does_reorder(
+        user: User, con):
+    """Why the note had to be reworded, pinned as behaviour: this is the move
+    during which the old sentence claimed nothing changed."""
+    zeta = _app_row(con, firma="Zeta GmbH", gesendet_am="2026-08-20",
+                    status="Absage")
+    alpha = _app_row(con, firma="alpha GmbH", gesendet_am="2026-08-10",
+                     status="Absage")
+    db.set_setting(con, register.SORT_SETTING, "firma")
+    con.commit()
+    await user.open("/bewerbungen")
+    assert _listed(user) == [alpha, zeta]
+
+    _marked(user, "register-sort")[0].set_value("waiting")
+    await asyncio.sleep(0.3)
+
+    assert _listed(user) == [zeta, alpha], "the rows moved"
+    await user.should_see("Neueste zuerst")
 
 
 async def test_the_note_is_drawn_above_the_column_heads_not_among_the_rows(
