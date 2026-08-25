@@ -139,6 +139,15 @@ CLASSIFICATION_TO_STATUS = {
     "sonstige": "Antwort erhalten",
 }
 
+# The classifications that mean a HUMAN decided something, derived from the
+# mapping above rather than listed by hand: a reply counts as a decision
+# exactly when it moves an application into an answered state. 'eingang' is a
+# robot confirming receipt in the same hour and 'auto' is an out-of-office —
+# both would report a promptness no employer showed.
+DECISION_CLASSIFICATIONS = tuple(sorted(
+    key for key, status in CLASSIFICATION_TO_STATUS.items()
+    if status in BEANTWORTET_STATUS))
+
 # Columns of the legacy `bewerbungen` table shown in list views: (key, label)
 DB_COLUMNS = [
     ("gesendet_am", "Datum"),

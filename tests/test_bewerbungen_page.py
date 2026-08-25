@@ -153,8 +153,8 @@ async def test_the_screen_states_the_shape_before_it_lists_the_rows(
 
     await user.open("/bewerbungen")
 
-    await user.should_see("Der Trichter")
     await user.should_see("Das Register")
+    await user.should_see("Was zurückkam")
     await user.should_see("Rhythmus")
     await user.should_see("Wer schweigt, seit wann")
     await user.should_see("Was antwortet")
@@ -397,24 +397,127 @@ def test_a_panel_with_no_rows_says_nothing_at_all():
 # --------------------------------------------------------------------------
 # What the panels SAY, not merely that they are there
 # --------------------------------------------------------------------------
-async def test_the_funnel_prints_the_populations_it_measured(user: User, con):
-    """Only the six headings were asserted, so every step could be relabelled
-    'x', every note blanked and every bar zeroed with the suite green."""
-    for n in range(3):
-        job_id = db.insert_job_if_new(con, {
-            "source": "stub", "external_id": f"j{n}", "company": f"Firma {n}",
-            "title": "Entwickler", "url": f"https://x.example/{n}"})
-        con.execute("UPDATE jobs SET match_score=? WHERE id=?",
-                    (0 if n == 2 else 80, job_id))
+def _figures(user: User) -> dict[str, str]:
+    """{label: count} for every row of the two figure groups.
+
+    Keyed by label rather than positional, because the element registry does
+    not promise document order — what has to be pinned is that each count
+    belongs to the name beside it.
+
+    Read as PAIRS, because `should_see` is a substring match over every
+    visible element: the first version of the test below looped over
+    ("3", "1", "2", "0") and three of those four are satisfied by the date
+    "2026-08-11" that `_app_row` writes into the register list underneath.
+    Every count could be hardcoded to nought with the suite green — on the
+    assertion written to defend the decision that an invitation of nought is
+    DRAWN rather than hidden."""
+    groups = [e for e in user.find(marker=None).elements
+              if "jd-funnel" in getattr(e, "_classes", [])]
+    pairs: dict[str, str] = {}
+    for group in groups:
+        name = ""
+        for child in group.default_slot.children:
+            classes = getattr(child, "_classes", [])
+            if "name" in classes:
+                name = str(getattr(child, "text", ""))
+            elif "num" in classes:
+                pairs[name] = str(getattr(child, "text", ""))
+    return pairs
+
+
+async def test_the_numbers_print_the_populations_they_measured(user: User, con):
+    """The panel that replaced the funnel, held to the same standard: without
+    the figures asserted, every label could be relabelled 'x' and every count
+    zeroed with the suite green.
+
+    An invitation nobody has received is drawn, not hidden. That is the one
+    number on this screen he is working toward, and a scoreboard that omits
+    the score until it is non-zero is a scoreboard that never says nought."""
+    _app_row(con, firma="Wartende GmbH")
+    _app_row(con, firma="Absagende GmbH", status="Absage")
+    _app_row(con, firma="Antwortende GmbH", status="Antwort erhalten")
+
+    await user.open("/bewerbungen")
+
+    assert _figures(user) == {
+        "im Register": "3",
+        "noch ohne Antwort": "1",
+        "beantwortet": "2",
+        "Einladungen": "0",
+        "Absagen": "1",
+        "sonstige Antworten": "1",
+    }
+
+
+async def test_the_answer_time_sentence_reaches_the_screen(user: User, con):
+    """No page test seeded enough measured answers, so `if sentence:` was
+    False in all forty of them and the two labels that draw the slice's
+    headline statement were never executed. Unit-tested as a string, untested
+    as something the screen shows."""
+    for n in range(register.ENOUGH_FOR_A_TIME):
+        row_id = _app_row(con, firma=f"Antwortende GmbH {n}",
+                          gesendet_am="2026-08-01", status="Absage")
+        db.add_email_log(con, {
+            "direction": "inbound", "gmail_message_id": f"mail{n}",
+            "internal_date": "2026-08-05T09:00:00", "bewerbung_id": row_id,
+            "classification": "absage",
+        })
     con.commit()
 
     await user.open("/bewerbungen")
 
-    await user.should_see("gefunden")
-    await user.should_see("nicht ausgeschlossen")
-    await user.should_see("von dir geöffnet")
-    await user.should_see("Anschreiben geschrieben")
-    await user.should_see("1 erfüllt ein Ausschlusskriterium nicht")
+    await user.should_see("Im Median kam eine Antwort nach 4 Tagen.")
+    await user.should_see(f"Gemessen an {register.ENOUGH_FOR_A_TIME} der "
+                          f"{register.ENOUGH_FOR_A_TIME} beantworteten "
+                          f"Bewerbungen")
+
+
+async def test_a_card_with_too_few_answers_says_nothing_about_timing(
+        user: User, con):
+    """The other half of the same branch, and the one that matters: a median
+    over three replies is a coincidence, and this screen may not print a
+    figure it cannot stand behind."""
+    _app_row(con, firma="Eine GmbH", status="Absage")
+
+    await user.open("/bewerbungen")
+
+    drawn = [str(getattr(e, "text", "")) for e in user.find(marker=None).elements]
+    assert not [t for t in drawn if t.startswith("Im Median")]
+    assert not [t for t in drawn if t.startswith("Gemessen an")]
+
+
+async def test_only_the_whole_is_drawn_solid(user: User, con):
+    """A solid bar means "this is the figure the others are shares of".
+
+    The answers group is three PARTS of the line above it, and drawing the
+    invitation solid put the only solid bar on the only value that is nought
+    — invisible by construction — while the two real numbers were dimmed as
+    though they were the aside. Found by opening the page, not by a test:
+    both groups' arithmetic was already right."""
+    _app_row(con, firma="Eine GmbH")
+    _app_row(con, firma="Andere GmbH", status="Absage")
+
+    await user.open("/bewerbungen")
+
+    # Scoped to the two groups of figures. The comparison panels further down
+    # draw bars too, and theirs mean something else entirely — a share of a
+    # channel's own population, with no whole among them to be solid.
+    groups = [e for e in user.find(marker=None).elements
+              if "jd-funnel" in getattr(e, "_classes", [])]
+    assert len(groups) == 2, "the register and what came back"
+    solid = []
+    for group in groups:
+        name = ""
+        for child in group.default_slot.children:
+            classes = getattr(child, "_classes", [])
+            if "name" in classes:
+                name = str(getattr(child, "text", ""))
+            elif "jd-bar" in classes:
+                solid += [name for inner in child.default_slot.children
+                          if "dim" not in getattr(inner, "_classes", [])]
+    # Named, not counted. Counting alone could not see the solid bar sitting
+    # on the wrong row, which is the property this test's own name states.
+    assert solid == ["im Register"]
 
 
 async def test_the_register_block_names_what_this_app_did_not_do(user: User,
@@ -528,7 +631,7 @@ async def test_a_tab_actually_navigates(user: User, con):
     user.find(marker="tab-register").click()
     await asyncio.sleep(0.5)
 
-    await user.should_see("Der Trichter")
+    await user.should_see("Das Register")
 
 
 def test_each_face_of_the_rubric_points_at_its_own_screen():

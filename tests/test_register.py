@@ -1,8 +1,8 @@
 """What the Bewerbungen screen states, pinned before anything is drawn.
 
 The two claims worth guarding are the two the real register forced: that the
-pipeline is NOT a chain of subsets, and that the app does not take credit for
-the 44 applications that predate it.
+card's parts always reach the total printed over them, and that the app does
+not take credit for the 44 applications that predate it.
 """
 
 import datetime
@@ -34,38 +34,6 @@ def _app(status="Gesendet", gesendet_am="2026-08-01", firma="Firma GmbH",
 # --------------------------------------------------------------------------
 # The pipeline, and the step that is not a subset
 # --------------------------------------------------------------------------
-def test_the_step_that_is_not_a_subset_says_so_itself():
-    """45 of his postings have a letter and only 33 were ever opened: the
-    daily batch and the form flow both write one without the ad being read.
-    A column drawn as nested subsets would simply be false, so the break is
-    stated ON the step where it happens, not in a caption further away."""
-    steps = {step.key: step for step in register.pipeline(
-        _view(opened=20, drafted=30, drafted_unread=25))}
-
-    assert "25" in steps["anschreiben"].note
-    assert steps["anschreiben"].count > steps["angesehen"].count
-
-
-def test_a_pipeline_that_really_does_nest_makes_no_excuse():
-    steps = {step.key: step for step in register.pipeline(
-        _view(drafted=10, drafted_unread=0))}
-
-    assert steps["anschreiben"].note == ""
-
-
-def test_every_bar_is_measured_against_what_was_found():
-    steps = register.pipeline(_view(jobs_total=100, opened=20))
-
-    assert steps[0].share == 1.0
-    assert next(s for s in steps if s.key == "angesehen").share == 0.2
-
-
-def test_an_empty_pipeline_states_zero_rather_than_dividing_by_it():
-    steps = register.pipeline(_view(jobs_total=0, scored_above_zero=0,
-                                    scored_zero=0, opened=0, drafted=0,
-                                    applied=0))
-
-    assert [step.share for step in steps] == [0.0] * len(steps)
 
 
 # --------------------------------------------------------------------------
@@ -279,37 +247,6 @@ def _job(con, external_id, **over):
     return db.insert_job_if_new(con, values)
 
 
-def test_the_populations_are_counted_the_way_the_screen_reads_them(con):
-    read = _job(con, "read")
-    con.execute("UPDATE jobs SET opened_at='2026-08-16T10:00', match_score=80 "
-                "WHERE id=?", (read,))
-    batch = _job(con, "batch")   # a letter written without the ad being opened
-    con.execute("UPDATE jobs SET match_score=70 WHERE id=?", (batch,))
-    db.upsert_draft(con, batch, {"status": "ready",
-                                 "anschreiben_body": "Sehr geehrte"})
-    db.upsert_draft(con, read, {"status": "ready",
-                                "anschreiben_body": "Sehr geehrte"})
-    zero = _job(con, "zero")
-    con.execute("UPDATE jobs SET match_score=0 WHERE id=?", (zero,))
-    con.commit()
-
-    # a claim being written right now: the row exists, the letter does not
-    writing = _job(con, "writing")
-    con.execute("UPDATE jobs SET match_score=70 WHERE id=?", (writing,))
-    db.upsert_draft(con, writing, {"status": "generating"})
-    con.commit()
-
-    counts = db.pipeline_counts(con)
-
-    assert counts["jobs_total"] == 4
-    assert counts["scored_above_zero"] == 3
-    assert counts["scored_zero"] == 1
-    assert counts["opened"] == 1
-    assert counts["drafted"] == 2, "a draft row being written is not a letter"
-    assert counts["drafted_unread"] == 1, "the batch wrote one unread"
-    assert counts["applied"] == 0
-
-
 def test_a_board_only_gets_credit_for_the_applications_it_carried(con):
     """An imported row has no posting and therefore no board. Folding those
     into a per-source figure would credit a board with work it never did.
@@ -375,41 +312,6 @@ def test_a_comparison_with_nothing_in_it_draws_nothing():
 # --------------------------------------------------------------------------
 # What the panel found: claims the data could not carry
 # --------------------------------------------------------------------------
-def test_a_draft_row_is_not_a_letter():
-    """"Anschreiben geschrieben" counted rows, so a draft still being written
-    (empty body) and one that failed (never got a body) were both reported as
-    letters that exist."""
-    steps = {step.key: step for step in register.pipeline(
-        _view(drafted=0, drafted_unread=0))}
-
-    assert steps["anschreiben"].count == 0
-
-
-def test_an_application_with_no_letter_behind_it_says_so():
-    """`applied` is not a subset of `drafted` either: pressing "Abgeschickt"
-    on a posting whose letter failed records one, and every pre-v10 form
-    application was entered that way. The step that is not a subset says so."""
-    steps = {step.key: step for step in register.pipeline(
-        _view(drafted=2, applied=5, applied_without_letter=3))}
-
-    assert "3 davon ohne Anschreiben" in steps["beworben"].note
-
-
-def test_a_pipeline_whose_applications_all_had_letters_makes_no_excuse():
-    steps = {step.key: step for step in register.pipeline(
-        _view(drafted=5, applied=5, applied_without_letter=0))}
-
-    assert steps["beworben"].note == ""
-
-
-def test_postings_the_scorer_has_not_reached_are_accounted_for():
-    """They are in neither figure below "gefunden", so without this the drop
-    is partly unexplained and the one note under it reads as the whole
-    reason."""
-    steps = {step.key: step for step in register.pipeline(
-        _view(jobs_total=100, scored_above_zero=60, scored_zero=30))}
-
-    assert "10 noch nicht bewertet" in steps["passend"].note
 
 
 def test_the_register_never_prints_a_negative_remainder():
@@ -466,28 +368,17 @@ def test_a_future_dated_application_is_not_drawn_as_the_most_overdue():
                                   if r.firma == "Zukunft GmbH"))] == 0.0
 
 
-def test_a_letterless_application_is_counted_and_not_inferred(con):
-    """`applied` and `drafted` are different SETS. Subtracting them reads as
-    zero whenever more letters exist than applications, however many of those
-    applications actually carried none."""
-    with_letter = _job(con, "with")
-    db.upsert_draft(con, with_letter, {"status": "sent",
-                                       "anschreiben_body": "Sehr geehrte"})
-    db.apply_job(con, with_letter, kanal="E-Mail")
-    without = _job(con, "without")
-    db.apply_job(con, without, kanal="Online-Portal")
-    # …and a third posting that carries a letter but no application, so the
-    # aggregate difference (applied 2 - drafted 2) would be zero
-    spare = _job(con, "spare")
-    db.upsert_draft(con, spare, {"status": "ready",
-                                 "anschreiben_body": "Sehr geehrte"})
+def test_only_postings_that_point_at_an_application_are_counted(con):
+    """The single population the register block still reads, and the note it
+    prints turns on it: "N über JobDeck · M von Hand oder aus der alten
+    Liste". Seven other populations were computed beside it for the funnel
+    and outlived their only reader by one commit."""
+    linked = _job(con, "linked")
+    db.apply_job(con, linked, kanal="E-Mail")
+    _job(con, "untouched")
     con.commit()
 
-    counts = db.pipeline_counts(con)
-
-    assert counts["applied"] == 2
-    assert counts["drafted"] == 2
-    assert counts["applied_without_letter"] == 1, "measured, not subtracted"
+    assert db.count_applied_postings(con) == 1
 
 
 def test_the_rate_threshold_is_pinned_at_its_own_boundary():

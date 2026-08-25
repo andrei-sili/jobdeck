@@ -6,18 +6,22 @@ pinned without a browser — and so a claim and its bar cannot disagree.
 
 Two honesty rules govern this module, both forced by his real register:
 
-* **The pipeline does not nest.** 45 postings have a letter and only 33 were
-  ever opened, because the daily batch and the form flow write one without him
-  reading the ad first. Drawn as a funnel of subsets that is simply false, so
-  the step that is not a subset says so in its own note rather than in a
-  caption somewhere else.
-* **The register is older than the app.** 44 of his 76 applications were
+* **The parts add up, or they say what is left over.** The card leads with a
+  total and splits it twice, and a reader who cannot make the parts reach the
+  whole stops trusting every other figure on the screen. Both remainders are
+  therefore computed rather than enumerated — a status added to the
+  vocabulary tomorrow cannot silently fall out of every line.
+* **The register is older than the app.** 44 of his applications were
   imported from the tracker he kept before JobDeck existed. A screen that
-  called all 76 "gesendet" would be claiming credit for them, so what this app
-  did and what the register holds are two separate blocks.
+  called all of them "gesendet" would be claiming credit for them, so what
+  this app did and what the register holds are two separate blocks — and it
+  is why the answer-time sample can never equal the figure above it: a
+  rejection recorded by hand carries no mail to measure.
 """
 
 import datetime
+import math
+import statistics
 from dataclasses import dataclass
 
 from jobdeck import db
@@ -98,62 +102,6 @@ def _share(part: int, whole: int) -> float:
     return min(1.0, part / whole) if whole > 0 else 0.0
 
 
-def pipeline(view: dict) -> list[Step]:
-    """From everything discovered to the applications this app recorded.
-
-    Deliberately stops at what JobDeck did. The register block states the rest,
-    because 44 of the rows in it predate this app and calling them "gesendet"
-    here would be this screen taking credit for them.
-    """
-    found = view["jobs_total"]
-    drafted, unread_drafts = view["drafted"], view["drafted_unread"]
-    applied = view["applied"]
-    # Everything the scorer has not reached yet: it is in neither figure below
-    # it, so without this the drop from "gefunden" is partly unexplained and
-    # the one note under it would be read as the whole reason.
-    unscored = max(0, found - view["scored_above_zero"] - view["scored_zero"])
-    passend_note = " · ".join(filter(None, [
-        # "verletzen eine harte Anforderung" was a calque of "violates a hard
-        # requirement"; German HR language says it with Ausschlusskriterium.
-        # Every count on this screen can be 1, so every sentence carrying one
-        # is inflected — `plural` exists because six of them printed
-        # "1 Bewerbungen", "1 Tage" and "1 davon sind".
-        plural(view["scored_zero"], "erfüllt ein Ausschlusskriterium nicht",
-               "erfüllen ein Ausschlusskriterium nicht"),
-        f"{unscored} noch nicht bewertet" if unscored else "",
-    ]))
-    return [
-        Step("gefunden", "gefunden", found, 1.0 if found else 0.0),
-        # NOT "passen zu einem Profil": the figure is every posting the
-        # scorer did not zero, including one scored 3 out of 100, and that
-        # label invites it to be read as "how many actually fit me".
-        Step("passend", "nicht ausgeschlossen", view["scored_above_zero"],
-             _share(view["scored_above_zero"], found), passend_note),
-        Step("angesehen", "von dir geöffnet", view["opened"],
-             _share(view["opened"], found)),
-        # The two places the column is not a chain, each said where it happens
-        # rather than in a caption further away.
-        Step("anschreiben", "Anschreiben geschrieben", drafted,
-             _share(drafted, found),
-             plural(unread_drafts,
-                    "davon entstand, ohne dass du die Anzeige geöffnet hast",
-                    "davon entstanden, ohne dass du die Anzeige geöffnet hast",
-                    tail=" — der Tagesstapel in den Einstellungen und der "
-                         "Formular-Ablauf schreiben von selbst")),
-        Step("beworben", "hier als Bewerbung eingetragen", applied,
-             _share(applied, found),
-             # An application can be recorded for a posting nothing was ever
-             # written for — that is what pressing "Abgeschickt" does on a
-             # posting whose letter failed, and how every pre-v10 form
-             # application was entered. Counted rather than subtracted: the
-             # two sets overlap only partly, so a difference would read as
-             # zero whenever there are more letters than applications.
-             plural(view["applied_without_letter"],
-                    "davon ohne Anschreiben aus JobDeck",
-                    "davon ohne Anschreiben aus JobDeck")),
-    ]
-
-
 def ledger(view: dict) -> list[Step]:
     """The register itself: everything he has ever sent, however it was sent."""
     apps = view["apps"]
@@ -182,7 +130,143 @@ def ledger(view: dict) -> list[Step]:
             Step("ohne_antwort", "ohne Antwort geschlossen", unanswered,
                  _share(unanswered, total),
                  "niemand hat abgesagt — es kam nur nie eine Antwort"))
+    # The REMAINDER, not a fourth status set — so the parts add up by
+    # construction rather than by two vocabularies staying in step.
+    # "Zurückgezogen" is in STATUS_OPTIONS and in none of the three sets
+    # above, and the edit dialog on THIS screen offers it; `add_bewerbung`
+    # defaults a missing status to ''. Either one silently left the register
+    # split into parts that no longer summed to the total printed over them,
+    # on the card whose entire premise is that they do.
+    rest = total - open_rows - answered - unanswered
+    if rest > 0:
+        steps.append(
+            Step("sonst", "zurückgezogen oder ohne Stand", rest,
+                 _share(rest, total),
+                 "weder offen noch beantwortet — sie warten auf nichts"))
     return steps
+
+
+def answers(apps: list[dict]) -> list[Step]:
+    """What the answers actually were — the breakdown the register bridges to.
+
+    Counted from the CURRENT status, so the three add up to "beantwortet"
+    exactly. Counting invitations ever REACHED was measured and rejected: on
+    the real register that number is one, and that one is the residue of a
+    classifier which read a quoted sentence out of his own application and
+    wrote "Einladung" by itself before being corrected. A figure whose only
+    non-zero value is a fixed bug is worse than an honest zero.
+
+    A zero IS printed here, unlike the waiting-for-a-score line on Stellen.
+    The difference is what the number is about: a background worker's empty
+    queue is nothing to report, and no invitations yet is the score.
+    """
+    answered = [a for a in apps if _status(a) in BEANTWORTET_STATUS]
+    counted = {
+        "einladung": sum(1 for a in answered if _status(a) == "Einladung"),
+        "absage": sum(1 for a in answered if _status(a) == "Absage"),
+        # Everything else a person wrote back. Named for what it is rather
+        # than left out: without it the three figures stop adding up to the
+        # number directly above them, on the one screen whose entire value is
+        # that its parts agree.
+        "sonstige": sum(1 for a in answered
+                        if _status(a) not in ("Einladung", "Absage")),
+    }
+    # Bars measured against the WHOLE REGISTER, exactly like the group above.
+    # Both groups render through one `_funnel_row` into sibling grids whose
+    # bar tracks line up in a single visual column, so two scales put a
+    # smaller figure under a longer bar: "Absagen 35" drew at 95 % of the
+    # width two rows under "beantwortet 37" at 26 %. One meaning for one
+    # column — every bar here is a share of the register.
+    whole = len(apps)
+    return [
+        Step("einladung", "Einladungen", counted["einladung"],
+             _share(counted["einladung"], whole)),
+        Step("absage", "Absagen", counted["absage"],
+             _share(counted["absage"], whole)),
+        Step("sonstige", "sonstige Antworten", counted["sonstige"],
+             _share(counted["sonstige"], whole)),
+    ]
+
+
+# Below this many measured answers a median is a coincidence rather than a
+# finding. Deliberately lower than ENOUGH_FOR_A_RATE: a rate has to be stable
+# against one more outcome flipping it, and a middle value does not.
+ENOUGH_FOR_A_TIME = 8
+
+
+def answer_days(pairs: list[tuple[str, str]]) -> list[int]:
+    """Whole days from sending to a decision, sorted, for the pairs that carry
+    two readable dates.
+
+    A negative span is dropped rather than clamped to zero: it means the two
+    dates describe different things (an imported row dated by hand, a reply
+    threaded onto the wrong application), and folding it into the middle of
+    the distribution would quietly pull the answer down.
+    """
+    days = []
+    for sent, answered in pairs:
+        try:
+            first = datetime.date.fromisoformat(str(sent)[:10])
+            last = datetime.date.fromisoformat(str(answered)[:10])
+        except (TypeError, ValueError):
+            continue
+        if (last - first).days >= 0:
+            days.append((last - first).days)
+    return sorted(days)
+
+
+def answer_time(pairs: list[tuple[str, str]],
+                answered: int) -> tuple[str, str]:
+    """(the sentence, what it was measured over) — ('', '') when too few.
+
+    The middle and the slowest, not the average: one reply after two months
+    drags a mean far past anything he has actually experienced, and the
+    question this answers is "how long before I stop expecting one".
+
+    `answered` is the figure directly above on the card, and it is required
+    rather than defaulted: a caller that did not have to state it is a caller
+    that can print a sample larger than the population it is drawn from. The second line
+    relates the sample to it rather than naming a bare population, because
+    the two can never be equal: an application he marked "Absage" by hand
+    carries no mail at all, and 44 of the rows in his register predate this
+    app. Saying "N Antworten" also counted the wrong noun — the query groups
+    by application, so N is applications, and the sentence said replies.
+    """
+    days = answer_days(pairs)
+    if len(days) < ENOUGH_FOR_A_TIME:
+        return "", ""
+    # Round half UP, not int() and not round(). Truncation floors the median
+    # of an even-sized sample, and it floors it in the flattering direction
+    # every time; Python's round() breaks a tie to even, which on integer day
+    # counts is a tie half the time and flatters on half of those. A wait is
+    # reported long rather than short, on the card whose whole claim is that
+    # its figures are honest.
+    middle, slowest = math.floor(statistics.median(days) + 0.5), days[-1]
+    sentence = f"Im Median kam eine Antwort {_after_days(middle)}"
+    # Only when it says something new. With every measured answer the same
+    # age, "die langsamste nach 4 Tagen" repeats the clause before it — and a
+    # sentence that states one fact twice is one a reader starts skimming.
+    sentence += (f", die langsamste {_after_days(slowest)}."
+                 if slowest != middle else ".")
+    rest = max(0, answered - len(days))
+    over = (f"Gemessen an {len(days)} der {answered} beantworteten "
+            f"Bewerbungen" +
+            (f" — bei den übrigen {rest} kam die Antwort nicht per E-Mail an."
+             if rest else " — Eingangsbestätigungen zählen nicht mit."))
+    return sentence, over
+
+
+def _after_days(days: int) -> str:
+    """'noch am selben Tag', 'nach einem Tag', 'nach 4 Tagen'.
+
+    The preposition belongs to the phrase, because the same-day case does not
+    take one: a wait of nought days is not a wait, and "nach 0 Tagen" is the
+    arithmetic showing through the German. Its own helper rather than
+    `plural`, which prefixes the figure — the singular here replaces it.
+    """
+    if days <= 0:
+        return "noch am selben Tag"
+    return "nach einem Tag" if days == 1 else f"nach {days} Tagen"
 
 
 def _status(app: dict) -> str:
@@ -396,10 +480,14 @@ _WATCHED_SETTINGS = ("follow_up_days",)
 def signature(con) -> tuple:
     """Everything this screen shows, cheaply comparable (see ui/live.py).
 
-    Wider than the pipeline: the silence panel states the threshold, sorts by
-    it and colours by it, so raising it in Einstellungen has to reach this
+    Wider than the tables alone: the silence panel states the threshold, sorts
+    by it and colours by it, so raising it in Einstellungen has to reach this
     screen — otherwise the number beside "Ab N Tagen" and the rows beneath it
     describe two different settings until the page is reloaded.
+
+    The answer-time sentence added two more inputs, and `db.data_signature`
+    had to learn to see both: a reply RECLASSIFIED between two non-empty
+    values, and a send date corrected on any row but the newest.
     """
     return (*db.data_signature(con),
             *(db.get_setting(con, key, "") for key in _WATCHED_SETTINGS))
@@ -412,7 +500,6 @@ def facts() -> dict:
         # snapshot, so a write landing between them would marry stale rows to
         # a fresh signature and the watcher would record that as current.
         sig = signature(con)
-        counts = db.pipeline_counts(con)
         return {
             "signature": sig,
             "apps": [dict(row) for row in db.list_bewerbungen(con)],
@@ -423,7 +510,11 @@ def facts() -> dict:
             # status_history, so a hand-recorded Absage and an ingested one
             # carry the same kind of date under the same column head.
             "answer_dates": db.first_answer_dates(con),
-            **counts,
+            # The aggregate uses the MAIL's date where the per-row column
+            # above uses the recording moment — two clocks on purpose, and
+            # `db.answer_delays` states why one claim needs each.
+            "answer_delays": db.answer_delays(con),
+            "applied": db.count_applied_postings(con),
         }
 
 

@@ -17,6 +17,8 @@ from jobdeck import claims as claims_lib
 from jobdeck import settings as app_settings
 from jobdeck.constants import (
     BEANTWORTET_STATUS,
+    CLASSIFICATIONS,
+    DECISION_CLASSIFICATIONS,
     DEFAULT_DAILY_CAP,
     DEFAULT_DAILY_DRAFT_CAP,
     DRAFT_STATUS,
@@ -1731,50 +1733,19 @@ def count_open_drafts(con: sqlite3.Connection) -> int:
     ).fetchone()[0]
 
 
-def pipeline_counts(con: sqlite3.Connection) -> dict:
-    """Every population the Bewerbungen screen measures, in one statement.
+def count_applied_postings(con: sqlite3.Connection) -> int:
+    """Postings that point at an application — what the register block means
+    by "über JobDeck".
 
-    One SELECT rather than six, because they are shown side by side and read
-    against each other: taken separately, sqlite3 gives each its own snapshot,
-    so a poll committing between two of them can put a posting in the later
-    number and not the earlier one — and "more letters than postings" is
-    exactly the kind of impossible pair a reader stops trusting the screen for.
-
-    `drafted_unread` is the one that has to be measured rather than inferred:
-    the daily batch and the form flow both write a letter without the posting
-    ever being opened, so the column is not a chain of subsets and the screen
-    has to say where it breaks.
-    """
-    row = con.execute(
-        """
-        SELECT
-          (SELECT COUNT(*) FROM jobs) AS jobs_total,
-          (SELECT COUNT(*) FROM jobs WHERE match_score > 0) AS scored_above_zero,
-          (SELECT COUNT(*) FROM jobs WHERE match_score = 0) AS scored_zero,
-          (SELECT COUNT(*) FROM jobs WHERE opened_at <> '') AS opened,
-          -- a letter EXISTS, not a draft row exists: 'generating' has an
-          -- empty body until the model answers and 'failed' never got one at
-          -- all, so counting rows would print them under "Anschreiben
-          -- geschrieben". A discarded letter was written and stays counted.
-          (SELECT COUNT(DISTINCT job_id) FROM drafts
-            WHERE anschreiben_body <> '') AS drafted,
-          (SELECT COUNT(DISTINCT d.job_id) FROM drafts d
-             JOIN jobs j ON j.id = d.job_id
-            WHERE d.anschreiben_body <> '' AND j.opened_at = '') AS drafted_unread,
-          (SELECT COUNT(*) FROM jobs WHERE bewerbung_id IS NOT NULL) AS applied,
-          -- MEASURED, not subtracted: `applied` and `drafted` are different
-          -- sets, so `applied - drafted` is only a lower bound and reads as
-          -- zero whenever more letters exist than applications, however many
-          -- of those applications carried none.
-          (SELECT COUNT(*) FROM jobs j
-            WHERE j.bewerbung_id IS NOT NULL
-              AND NOT EXISTS (SELECT 1 FROM drafts d
-                               WHERE d.job_id = j.id
-                                 AND d.anschreiben_body <> ''))
-            AS applied_without_letter
-        """
-    ).fetchone()
-    return dict(row)
+    All that survives of `pipeline_counts`, which computed eight populations
+    for the funnel. Seven of them had no reader left once the funnel came off
+    the screen, and they were not free: measured on the real corpus the full
+    statement cost 5.1 ms against 0.7 for this one, on every page build and
+    every watcher tick, including two COUNT(DISTINCT) scans over drafts and a
+    correlated NOT EXISTS per applied posting."""
+    return con.execute(
+        "SELECT COUNT(*) FROM jobs WHERE bewerbung_id IS NOT NULL"
+    ).fetchone()[0]
 
 
 def applications_by_source(con: sqlite3.Connection) -> list[sqlite3.Row]:
@@ -2093,8 +2064,15 @@ _DRAFTS_SIGNATURE_SQL = (
     + " FROM drafts"
 )
 
+# The send date joined it when the Bewerbungen card began STATING a span
+# computed from it: "im Median nach 4 Tagen" is derived from `gesendet_am`,
+# and correcting one through the edit dialog moved neither COUNT nor MAX(id)
+# nor status_history, so the sentence changed and the page never redrew.
+# TOTAL over julianday rather than MAX: an edit to any row but the newest is
+# invisible to a maximum, and a blank date reads as NULL, which TOTAL skips.
 _APPLICATIONS_SIGNATURE_SQL = """
 SELECT (SELECT COUNT(*) FROM bewerbungen), (SELECT MAX(id) FROM bewerbungen),
+       (SELECT TOTAL(julianday(gesendet_am)) FROM bewerbungen),
        (SELECT MAX(id) FROM status_history)
 """
 
@@ -2102,11 +2080,20 @@ SELECT (SELECT COUNT(*) FROM bewerbungen), (SELECT MAX(id) FROM bewerbungen),
 # see the transitions review actions make without adding rows (a confirm
 # flips needs_review, a correction rewrites classification — the count of
 # rows moves for neither).
-_EMAIL_SIGNATURE_SQL = """
-SELECT COUNT(*), MAX(id), TOTAL(needs_review),
-       TOTAL(classification<>''), TOTAL(bewerbung_id IS NOT NULL)
-  FROM email_log
-"""
+# Per-classification totals, derived from the vocabulary the way the drafts
+# signature derives its per-status ones — so a new classification joins by
+# existing. `TOTAL(classification<>'')` alone was blind to a REWRITE between
+# two non-empty values, which is exactly what "Korrigieren" on an already
+# filed reply does: needs_review 0 over 0, a non-empty value over a non-empty
+# one, and `set_status` short-circuits when the status does not move. Nothing
+# in the old tuple changed, while the answer-time sentence the card prints is
+# computed from those very values.
+_EMAIL_SIGNATURE_SQL = (
+    "SELECT COUNT(*), MAX(id), TOTAL(needs_review), "
+    "TOTAL(classification<>''), TOTAL(bewerbung_id IS NOT NULL), "
+    + ", ".join(f"TOTAL(classification='{kind}')" for kind in CLASSIFICATIONS)
+    + " FROM email_log"
+)
 
 
 # Hiding a company removes rows from every list on the pipeline pages, and it
@@ -2989,6 +2976,56 @@ def count_recent_invitations(con: sqlite3.Connection, days: int = 7) -> int:
         " WHERE direction=? AND classification='einladung' AND created_at>=?",
         (EMAIL_INBOUND, cutoff),
     ).fetchone()[0]
+
+
+def answer_delays(con: sqlite3.Connection) -> list[tuple[str, str]]:
+    """(sent on, decision arrived on) for every application a human answered.
+
+    Measured from the MAIL'S OWN date, not from when JobDeck recorded the
+    status. The per-row column beside `first_answer_dates` deliberately uses
+    the recording moment, because for the imported rows it is the only date
+    there is and one column may not mean two things — but an aggregate is a
+    different claim. On the real register the two disagree where it matters:
+    the recording clock puts the 90th percentile at 67 days, which is not how
+    long an employer took but how long a June reply waited for the August
+    pass that first read it.
+
+    Only a decision counts (`DECISION_CLASSIFICATIONS`): an Eingangs-
+    bestätigung is a robot answering the same hour, and its median of nought
+    days would report a promptness nobody showed.
+
+    And only an application the register itself calls ANSWERED. A reply is
+    classified the moment it is ingested, but its status is written only when
+    the verdict was safe enough — a name-arm match, an address without DMARC
+    or a rank the anti-downgrade guard refused all leave the mail on the
+    review shelf with its classification set and the application still open.
+    Without this arm the card printed "beantwortet 0" and, four lines lower,
+    "Gemessen an 9 Antworten": nine answers measured under a figure that had
+    just sworn none arrived. The sample is a subset of the line above it now,
+    which is the only relation a reader can be expected to hold.
+
+    An undated mail is excluded rather than aggregated. `internal_date` is
+    TEXT defaulting to '', and '' sorts before every ISO date — so one
+    undated decision shadowed every dated sibling under MIN() and took the
+    whole application out of the statistic instead of just itself.
+    """
+    places = ",".join("?" * len(DECISION_CLASSIFICATIONS))
+    answered = tuple(sorted(BEANTWORTET_STATUS))
+    status_places = ",".join("?" * len(answered))
+    rows = con.execute(
+        f"""
+        SELECT b.gesendet_am AS sent, MIN(e.internal_date) AS answered
+          FROM bewerbungen b
+          JOIN email_log e ON e.bewerbung_id = b.id
+         WHERE e.direction = 'inbound'
+           AND e.classification IN ({places})
+           AND e.internal_date <> ''
+           AND b.status IN ({status_places})
+         GROUP BY b.id
+        """,
+        (*DECISION_CLASSIFICATIONS, *answered),
+    ).fetchall()
+    return [(str(row["sent"] or ""), str(row["answered"] or "")) for row in rows]
 
 
 def first_answer_dates(con: sqlite3.Connection) -> dict[int, str]:

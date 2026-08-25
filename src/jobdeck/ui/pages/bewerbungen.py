@@ -221,23 +221,46 @@ async def bewerbungen_page():
                 ui.notify(message, **kwargs)
 
         # ------------------------------------------------------------------
-        # 1. The funnel: from the pile to an application, and the register
+        # 1. The numbers: the register, and what came back
         # ------------------------------------------------------------------
-        def draw_funnel(view: dict) -> None:
+        def draw_numbers(view: dict) -> None:
+            """Two groups that each add up, in place of the funnel.
+
+            The funnel counted postings — found, scored, opened, written to —
+            and it belonged to a screen about applications only as long as
+            nowhere else said those things. Stellen says all of them now, on
+            the rows themselves, so keeping the column here was asking him to
+            read the pipeline twice and reconcile it. He put it plainly: the
+            statistic is unintelligible and should be simple.
+            """
             with ui.column().classes("jd-card gap-3"):
-                ui.label("Der Trichter").classes("jd-card-title")
-                ui.label("Von der Anzeige bis zur Bewerbung — und wo die "
-                         "Stufen keine Folge sind.").classes("jd-card-sub")
-                with ui.element("div").classes("jd-funnel"):
-                    for step in register.pipeline(view):
-                        _funnel_row(step)
-                ui.element("div").classes("h-1")
                 ui.label("Das Register").classes("jd-card-title")
                 ui.label("Alles, was du je abgeschickt hast — auch vor "
                          "JobDeck.").classes("jd-card-sub")
                 with ui.element("div").classes("jd-funnel"):
                     for step in register.ledger(view):
                         _funnel_row(step, dim=step.key != "register")
+                ui.element("div").classes("h-1")
+                ui.label("Was zurückkam").classes("jd-card-title")
+                ui.label("Die beantworteten Bewerbungen, aufgeteilt danach, "
+                         "was geantwortet wurde.").classes("jd-card-sub")
+                with ui.element("div").classes("jd-funnel"):
+                    for step in register.answers(view["apps"]):
+                        # All three dim, because all three are PARTS. A solid
+                        # bar means "this is the figure the others are shares
+                        # of", and the whole they are shares of is the
+                        # "beantwortet" line in the group above. Highlighting
+                        # the invitation instead put the one solid bar on the
+                        # only value that is nought — a bright bar nobody can
+                        # see, over two real numbers drawn as though they were
+                        # the aside.
+                        _funnel_row(step, dim=True)
+                answered = {s.key: s for s in register.ledger(view)}
+                sentence, over = register.answer_time(
+                    view["answer_delays"], answered["beantwortet"].count)
+                if sentence:
+                    ui.label(sentence).classes("jd-note mt-2")
+                    ui.label(over).classes("jd-meta")
 
         def _funnel_row(step: register.Step, dim: bool = False) -> None:
             ui.label(step.label).classes("name")
@@ -680,7 +703,7 @@ async def bewerbungen_page():
             drawn["view"], drawn["today"] = view, today
             container.clear()
             with container:
-                draw_funnel(view)
+                draw_numbers(view)
                 with ui.row().classes("w-full gap-4 items-stretch no-wrap"):
                     draw_rhythm(view, today)
                     draw_silence(view, today)
