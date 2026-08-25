@@ -720,3 +720,300 @@ async def test_the_register_shows_when_an_answer_first_arrived(user: User, con):
     await user.open("/bewerbungen")
     await user.should_see("Antwort")
     await user.should_see(first_at)
+
+
+# --------------------------------------------------------------------------
+# The order the list is in — named, kept, and never a second rule
+# --------------------------------------------------------------------------
+def _marked(user: User, marker: str) -> list:
+    with user.client:
+        return [el for el in user.client.elements.values()
+                if marker in getattr(el, "_markers", [])]
+
+
+def _listed(user: User) -> list[int]:
+    """The application ids in the order the register drew them.
+
+    `user.find()` returns a SET, so it cannot answer a question about order.
+    `client.elements` is keyed by element id, which NiceGUI hands out in
+    creation order, and the rows are created in list order.
+    """
+    with user.client:
+        return [int(marker.split("-")[1])
+                for el in user.client.elements.values()
+                for marker in getattr(el, "_markers", [])
+                if marker.startswith("application-")]
+
+
+async def test_the_control_offers_exactly_the_orders_that_exist(user: User,
+                                                                con):
+    """Read off the control rather than off the page: an order drawn with no
+    rule behind it silently lists the default, and the control then names an
+    order the screen is not in."""
+    await user.open("/bewerbungen")
+    await user.should_see("Sortierung")
+
+    # Literals, not `register.SORT_LABELS`: the select was BUILT from that
+    # object, so comparing the two is comparing a value with itself and would
+    # survive any rename, addition or removal of an order.
+    assert _marked(user, "register-sort")[0].options == {
+        "date": "Neueste zuerst",
+        "waiting": "Längste Wartezeit zuerst",
+        "firma": "Firma A–Z",
+    }
+
+
+async def test_the_longest_silence_can_be_brought_to_the_top(user: User, con):
+    """The reason this exists. The list orders by the SEND date and the
+    "Wartet seit" cell counts from the last contact, so on his real register
+    the longest-silent application sits at row 99 of 141 — and the silence
+    panel names only the first eight of eighty-five.
+    """
+    fresh = _app_row(con, firma="Frisch GmbH", gesendet_am="2026-08-20")
+    old = _app_row(con, firma="Alt GmbH", gesendet_am="2026-05-01")
+    await user.open("/bewerbungen")
+    assert _listed(user) == [fresh, old]
+
+    _marked(user, "register-sort")[0].set_value("waiting")
+    await asyncio.sleep(0.3)
+
+    assert _listed(user) == [old, fresh]
+
+
+async def test_an_answered_application_never_leads_an_order_about_waiting(
+        user: User, con):
+    """The answered row is the NEWER one, so the default order already puts it
+    first and only the waiting order can move it. With it dated 2026-01-01 the
+    default gave the asserted answer by itself, and the control could have done
+    nothing at all with this test green."""
+    answered = _app_row(con, firma="Beantwortet GmbH",
+                        gesendet_am="2026-08-22", status="Absage")
+    waiting = _app_row(con, firma="Wartet GmbH", gesendet_am="2026-08-20")
+    await user.open("/bewerbungen")
+    assert _listed(user) == [answered, waiting]      # the default order
+
+    _marked(user, "register-sort")[0].set_value("waiting")
+    await asyncio.sleep(0.3)
+
+    assert _listed(user) == [waiting, answered]
+
+
+async def test_the_alphabet_is_an_alphabet_and_not_a_code_point_order(
+        user: User, con):
+    """An umlaut belongs under its base letter, and a lower-case name under
+    its own. `fold` and `norm` both leave the umlaut in place, which files it
+    past 'z' — after every other company on the screen.
+    """
+    zeta = _app_row(con, firma="Zeta GmbH", gesendet_am="2026-08-20")
+    uber = _app_row(con, firma="Übersicht GmbH", gesendet_am="2026-08-19")
+    alpha = _app_row(con, firma="alpha GmbH", gesendet_am="2026-08-18")
+    await user.open("/bewerbungen")
+
+    _marked(user, "register-sort")[0].set_value("firma")
+    await asyncio.sleep(0.3)
+
+    assert _listed(user) == [alpha, uber, zeta]
+
+
+async def test_the_order_is_where_he_left_it_next_visit(user: User, con):
+    """A control he has to set again every time is one nobody uses twice."""
+    fresh = _app_row(con, firma="Frisch GmbH", gesendet_am="2026-08-20")
+    old = _app_row(con, firma="Alt GmbH", gesendet_am="2026-05-01")
+    db.set_setting(con, register.SORT_SETTING, "waiting")
+    con.commit()
+
+    await user.open("/bewerbungen")
+
+    assert _listed(user) == [old, fresh]
+    assert _marked(user, "register-sort")[0].value == "waiting"
+
+
+async def test_choosing_an_order_records_it(user: User, con):
+    _app_row(con, firma="Eine GmbH")
+    await user.open("/bewerbungen")
+
+    _marked(user, "register-sort")[0].set_value("firma")
+    await asyncio.sleep(0.3)
+
+    assert db.get_setting(con, register.SORT_SETTING, "") == "firma"
+
+
+async def test_an_order_stored_as_nonsense_opens_the_screen_anyway(
+        user: User, con):
+    """The value reaches the page from a settings row, so a hand-edited or
+    half-migrated one must degrade to the order the screen was built around."""
+    _app_row(con, firma="Eine GmbH")
+    db.set_setting(con, register.SORT_SETTING, "nach Lust und Laune")
+    con.commit()
+
+    await user.open("/bewerbungen")
+
+    await user.should_see("Eine GmbH")
+    assert _marked(user, "register-sort")[0].value == register.DEFAULT_SORT
+
+
+def test_the_screen_watches_the_order_a_second_tab_could_change(con):
+    """No table moves when a setting does, so without this the control keeps
+    naming the order this tab chose after another tab has changed it."""
+    before = register.signature(con)
+    db.set_setting(con, register.SORT_SETTING, "waiting")
+    con.commit()
+
+    assert register.signature(con) != before
+
+
+async def _tick(user: User) -> None:
+    """Fire every live timer on the page by hand — the interval is half a
+    minute. Every one, not the first: this screen carries its own watcher and
+    the rail's. Inside the client context, which is what NiceGUI's own timer
+    loop enters before each invocation."""
+    from nicegui import ui as _ui
+    timers = [e for e in list(user.client.elements.values())
+              if isinstance(e, _ui.timer)]
+    assert timers, "the page has no live timer at all"
+    with user.client:
+        for timer in timers:
+            await timer.callback()
+    await asyncio.sleep(0.1)
+
+
+async def test_his_own_choice_does_not_make_the_page_rebuild_itself(
+        user: User, con):
+    """The stored order is a WATCHED setting, so choosing one moves the
+    signature. `live_view.mark` is reachable from nowhere but `refresh`, so a
+    handler that stores and only redraws the list leaves the watcher holding
+    the pre-change tuple — and the next tick reads his own click as somebody
+    else's change and rebuilds the whole page, half a minute later, unasked.
+
+    Counted rather than described: `_load` runs once per refresh, so the tick
+    after a local change must add nothing.
+    """
+    _app_row(con, firma="Eine GmbH")
+    await user.open("/bewerbungen")
+
+    calls = []
+    original = bewerbungen._load
+    bewerbungen._load = lambda: (calls.append(1), original())[1]
+    try:
+        _marked(user, "register-sort")[0].set_value("firma")
+        await asyncio.sleep(0.4)
+        after_click = len(calls)
+        await _tick(user)
+        after_tick = len(calls)
+    finally:
+        bewerbungen._load = original
+
+    assert after_click == 1, "the choice itself must reload once, through refresh"
+    assert after_tick == after_click, \
+        "the watcher rebuilt the page for a change made in this very tab"
+
+
+async def test_an_order_chosen_in_another_tab_reaches_this_one(user: User, con):
+    """The setting is watched precisely so this happens. Without the write
+    back into the select, the list would reorder under a control still naming
+    the order this tab chose — the shape of a control that lies.
+    """
+    fresh = _app_row(con, firma="Frisch GmbH", gesendet_am="2026-08-20")
+    old_one = _app_row(con, firma="Alt GmbH", gesendet_am="2026-05-01")
+    await user.open("/bewerbungen")
+    assert _listed(user) == [fresh, old_one]
+
+    db.set_setting(con, register.SORT_SETTING, "waiting")   # the other tab
+    con.commit()
+    await _tick(user)
+
+    assert _listed(user) == [old_one, fresh]
+    assert _marked(user, "register-sort")[0].value == "waiting"
+
+
+async def test_the_write_back_into_the_select_does_not_store_what_it_just_read(
+        user: User, con):
+    """`refresh` sets the select's value, and NiceGUI fires a change handler on
+    a server-side write whenever the value actually differs — which is exactly
+    the case this path creates. Without the early return the handler stores the
+    value it was just handed and redraws the list, on every tick that carries
+    another tab's choice.
+
+    The earlier version of this test set the select to the value it already
+    held; NiceGUI's own BindableProperty returns before the handler in that
+    case, so it passed with the guard deleted.
+    """
+    _app_row(con, firma="Eine GmbH")
+    await user.open("/bewerbungen")
+    db.set_setting(con, register.SORT_SETTING, "firma")     # the other tab
+    con.commit()
+
+    writes = []
+    original = bewerbungen._store_sort
+    bewerbungen._store_sort = lambda value: writes.append(value)
+    try:
+        await _tick(user)
+    finally:
+        bewerbungen._store_sort = original
+
+    assert _marked(user, "register-sort")[0].value == "firma"
+    assert writes == [], "the refresh stored the order it had just read"
+
+
+async def test_a_status_view_with_nothing_waiting_says_why_the_order_is_flat(
+        user: User, con):
+    """Three of the six status views hold no application that is still
+    waiting, and on the real ledger they are 56 rows of 141. Under those the
+    list is in a well-defined order that separates nothing, which reads as a
+    control that has stopped working."""
+    _app_row(con, firma="Abgelehnt GmbH", status="Absage")
+    _app_row(con, firma="Wartet GmbH", status="Gesendet")
+    db.set_setting(con, register.SORT_SETTING, "waiting")
+    con.commit()
+    await user.open("/bewerbungen")
+    await user.should_not_see("Keine davon wartet noch")
+
+    _marked(user, "register-status")[0].set_value("Absage")
+    await asyncio.sleep(0.3)
+
+    await user.should_see("Keine davon wartet noch")
+    # It must name where the list actually went. Saying the sorting "changes
+    # nothing here" was false: with nothing waiting every row takes the same
+    # key, so the list falls back to the DEFAULT order — coming from "Firma
+    # A–Z" every row moves as the sentence appears.
+    await user.should_see("Neueste zuerst")
+
+
+async def test_a_flat_order_reached_from_the_alphabet_really_does_reorder(
+        user: User, con):
+    """Why the note had to be reworded, pinned as behaviour: this is the move
+    during which the old sentence claimed nothing changed."""
+    zeta = _app_row(con, firma="Zeta GmbH", gesendet_am="2026-08-20",
+                    status="Absage")
+    alpha = _app_row(con, firma="alpha GmbH", gesendet_am="2026-08-10",
+                     status="Absage")
+    db.set_setting(con, register.SORT_SETTING, "firma")
+    con.commit()
+    await user.open("/bewerbungen")
+    assert _listed(user) == [alpha, zeta]
+
+    _marked(user, "register-sort")[0].set_value("waiting")
+    await asyncio.sleep(0.3)
+
+    assert _listed(user) == [zeta, alpha], "the rows moved"
+    await user.should_see("Neueste zuerst")
+
+
+async def test_the_note_is_drawn_above_the_column_heads_not_among_the_rows(
+        user: User, con):
+    """Drawn after the heads it sits exactly where a row sits and reads as
+    one — which is how it looked the first time the page was opened. Found by
+    opening it, so it is pinned by position rather than by presence."""
+    _app_row(con, firma="Abgelehnt GmbH", status="Absage")
+    db.set_setting(con, register.SORT_SETTING, "waiting")
+    con.commit()
+    await user.open("/bewerbungen")
+
+    with user.client:
+        order = [(el.id, str(getattr(el, "text", "")))
+                 for el in user.client.elements.values()]
+    note = next(i for i, t in order if t.startswith("Keine davon wartet"))
+    head = next(i for i, t in order if t == "Firma")
+    first_row = next(i for i, t in order if t == "Abgelehnt GmbH")
+
+    assert note < head < first_row

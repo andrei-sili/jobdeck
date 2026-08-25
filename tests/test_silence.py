@@ -535,3 +535,144 @@ async def test_the_pass_does_not_block_the_event_loop(data_dir, con):
 
     assert seen["thread"] is not loop_thread
     assert asyncio.get_running_loop() is not None
+
+
+# --- a contact cannot predate the application it is contact about ----------
+
+
+def test_a_receipt_older_than_the_application_does_not_close_it_early(
+        data_dir, con):
+    """A real ledger held exactly this. An unrelated notification from a job
+    board's own mail system, dated long BEFORE the application went out,
+    attached itself to it — that employer's posting came from the board, so
+    the board's domain authorized the receipt. The row then read "wartet 49 T"
+    six days after it was sent, and this rule would have filed it as "Keine
+    Antwort" seventeen days after it was sent.
+
+    The application here is TEN days old, well inside the window, and the
+    receipt predates it by half a year. Under the old anchor the receipt is the
+    last contact, so the row counts 200 silent days and closes; under the guard
+    it counts ten and stays open. An earlier version of this test used a
+    90-day-old application, which is past the window under BOTH readings — so
+    the whole guard could be deleted with the suite green.
+    """
+    bid = _application(con, days=10)
+    _inbound(con, bid, "eingang", days=200)      # long before it was sent
+    con.commit()
+
+    silence._close_silent()
+
+    assert db.get_bewerbung(con, bid)["status"] == "Gesendet"
+
+
+def test_an_old_application_whose_only_receipt_predates_it_still_closes(
+        data_dir, con):
+    """The other side: the guard must not keep a genuinely silent row open."""
+    bid = _application(con, days=90)
+    _inbound(con, bid, "eingang", days=200)
+    con.commit()
+
+    silence._close_silent()
+
+    assert db.get_bewerbung(con, bid)["status"] == STATUS_NO_ANSWER
+
+
+def test_a_receipt_on_the_day_it_went_out_still_counts(data_dir, con):
+    """The boundary, and the common case: an auto-acknowledgement arrives
+    minutes after the application does.
+
+    Asserted on the anchor rather than through the closing rule: a receipt
+    that lands on the send date leaves the anchor ON the send date, so a
+    90-day-old application is past the window either way and the rule cannot
+    tell the two readings apart.
+    """
+    bid = _application(con, days=90)
+    _inbound(con, bid, "eingang", days=90)
+    con.commit()
+
+    row = con.execute(
+        f"SELECT {db.LAST_CONTACT_SQL} AS lc FROM bewerbungen b WHERE b.id=?",
+        (bid,)).fetchone()
+
+    assert row["lc"] == _stamp(90)
+
+
+def test_a_receipt_dated_the_bare_send_day_is_still_the_last_contact(
+        data_dir, con):
+    """An imported row carries a bare day where an ingested mail carries an ISO
+    timestamp, so this is the one shape that lands exactly ON the boundary.
+
+    ⚠ `>=` against `>` is EQUIVALENT here and no test can separate them — this
+    was checked by mutation rather than assumed. The COALESCE falls back to
+    `b.gesendet_am`, which is the boundary value itself: `>=` keeps the receipt
+    and yields that string, `>` drops it and yields the same string from the
+    fallback. Same for the closing rule, which reads the same expression. The
+    operator is still the right one to write — it says what is meant — but do
+    not chase the surviving mutation.
+    """
+    bid = _application(con, days=90)
+    same_day = _days_ago(90)                       # a DAY, no time at all
+    con.execute(
+        "INSERT INTO email_log (direction, gmail_message_id, from_addr,"
+        " bewerbung_id, classification, internal_date, created_at)"
+        " VALUES ('inbound', 'bare-day', 'hr@beispiel.de', ?, 'eingang', ?, ?)",
+        (bid, same_day, _stamp(90)))
+    con.commit()
+
+    row = con.execute(
+        f"SELECT {db.LAST_CONTACT_SQL} AS lc FROM bewerbungen b WHERE b.id=?",
+        (bid,)).fetchone()
+
+    assert row["lc"] == same_day
+
+
+def test_a_receipt_with_no_date_at_all_is_not_the_last_contact(data_dir, con):
+    """`internal_date` is TEXT with a default of '', and '' sorts before every
+    ISO date — so an undated receipt would otherwise win MAX() on main and
+    silently become an anchor older than the application itself."""
+    bid = _application(con, days=30)
+    con.execute(
+        "INSERT INTO email_log (direction, gmail_message_id, from_addr,"
+        " bewerbung_id, classification, internal_date, created_at)"
+        " VALUES ('inbound', 'no-date', 'hr@beispiel.de', ?, 'eingang', '', ?)",
+        (bid, _stamp(5)))
+    con.commit()
+
+    row = con.execute(
+        f"SELECT b.gesendet_am, {db.LAST_CONTACT_SQL} AS lc"
+        "  FROM bewerbungen b WHERE b.id=?", (bid,)).fetchone()
+
+    assert row["lc"] == row["gesendet_am"]
+
+
+def test_an_application_with_no_send_date_rules_no_receipt_out(data_dir, con):
+    """The honest degradation: with nothing to compare against, nothing can be
+    excluded. An empty date must not silently discard every receipt."""
+    bid = _application(con, days=90)
+    con.execute("UPDATE bewerbungen SET gesendet_am='' WHERE id=?", (bid,))
+    _inbound(con, bid, "eingang", days=3)
+    con.commit()
+
+    row = con.execute(
+        f"SELECT {db.LAST_CONTACT_SQL} AS lc FROM bewerbungen b WHERE b.id=?",
+        (bid,)).fetchone()
+
+    assert row["lc"] == _stamp(3)
+
+
+def test_the_anchor_is_never_earlier_than_the_application(data_dir, con):
+    """One assertion over the shape, because every consumer of this anchor
+    inherits it: the register's column, the silence rule, and the cooling-off
+    window that decides whether a company's postings are shown at all."""
+    for offset in (200, 120, 91, 90, 45, 1):
+        bid = _application(con, firma=f"Firma {offset}", days=90)
+        _inbound(con, bid, "eingang", days=offset)
+    con.commit()
+
+    rows = con.execute(
+        f"SELECT b.gesendet_am, {db.LAST_CONTACT_SQL} AS lc FROM bewerbungen b"
+    ).fetchall()
+
+    assert rows
+    for row in rows:
+        assert row["lc"][:10] >= row["gesendet_am"], dict(row)

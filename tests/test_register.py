@@ -413,3 +413,300 @@ def test_a_count_of_one_is_never_printed_with_a_plural():
     assert register.plural(0, "Tag", "Tage") == "", "zero drops the note"
     assert register.plural(1, "davon wartet", "davon warten", tail=" länger") \
         == "1 davon wartet länger"
+
+
+# --------------------------------------------------------------------------
+# The order the ledger is listed in
+# --------------------------------------------------------------------------
+
+
+def _ordered(apps, sort, follow_up_days=14, today=TODAY):
+    """Order a corpus exactly as the screen does: one silence pass, then it."""
+    waiting = register.silence(apps, follow_up_days, today)
+    return register.order(apps, waiting, sort)
+
+
+def _ids(rows):
+    return [int(row["id"]) for row in rows]
+
+
+def test_the_default_order_is_the_one_the_query_already_handed_back():
+    apps = [_app(row_id=3, gesendet_am="2026-08-10"),
+            _app(row_id=2, gesendet_am="2026-08-05"),
+            _app(row_id=1, gesendet_am="2026-08-01")]
+    assert _ids(_ordered(apps, "date")) == [3, 2, 1]
+
+
+def test_an_unknown_order_falls_back_to_the_one_the_screen_was_built_around():
+    """The rows must differ in every dimension the other orders read, or the
+    fallback is indistinguishable from having applied one of them."""
+    apps = [_app(row_id=3, firma="Zeta GmbH", gesendet_am="2026-08-15"),
+            _app(row_id=2, firma="Alpha GmbH", gesendet_am="2026-06-01"),
+            _app(row_id=1, firma="Mitte GmbH", gesendet_am="2026-08-10",
+                 status="Absage")]
+    assert _ids(_ordered(apps, "nach Lust und Laune")) == [3, 2, 1]
+    # ... and is not secretly one of the real orders
+    assert _ids(_ordered(apps, "firma")) != [3, 2, 1]
+    assert _ids(_ordered(apps, "waiting")) != [3, 2, 1]
+
+
+def test_a_stored_order_that_names_nothing_we_offer_is_refused():
+    assert register.stored_sort("waiting") == "waiting"
+    for junk in ("", None, "Wartezeit", "date ", 7, "DATE"):
+        # The literal, not `register.DEFAULT_SORT`: comparing the fallback
+        # against the constant that defines it is an assertion that moves
+        # whenever the thing it guards does, and it passed while the default
+        # was mutated to another order.
+        assert register.stored_sort(junk) == "date"
+
+
+def test_the_screen_opens_in_the_order_it_has_always_opened_in():
+    assert register.DEFAULT_SORT == "date"
+    assert register.DEFAULT_SORT in register.SORT_LABELS
+
+
+def test_every_offered_order_is_an_order_somebody_implemented():
+    """A label with no rule behind it would silently list the default and the
+    control would name an order the screen is not in."""
+    # Newest-first as `list_bewerbungen` hands them over, and chosen so the
+    # three orders cannot coincide: the newest row has waited the least, and
+    # the row that is not waiting at all sits between them by date.
+    apps = [_app(row_id=1, firma="Zeta GmbH", gesendet_am="2026-08-15"),
+            _app(row_id=3, firma="Mitte GmbH", gesendet_am="2026-08-10",
+                 status="Absage"),
+            _app(row_id=2, firma="Alpha GmbH", gesendet_am="2026-06-01")]
+    seen = {key: tuple(_ids(_ordered(apps, key)))
+            for key in register.SORT_LABELS}
+    assert seen["date"] == (1, 3, 2)
+    assert seen["waiting"] == (2, 1, 3)
+    assert seen["firma"] == (2, 3, 1)
+    assert len(set(seen.values())) == len(register.SORT_LABELS), seen
+
+
+# -- the differential: the list and the panel above it use ONE waiting rule --
+
+
+def test_the_waiting_order_is_the_silence_panels_own_order():
+    """Not "the same idea as" — the same list. The column counts from the last
+    contact and the default order counts from the send date, so a second
+    implementation here would drift from the panel it sits under.
+    """
+    apps = [
+        _app(row_id=1, gesendet_am="2026-08-15", firma="Frisch GmbH"),
+        _app(row_id=2, gesendet_am="2026-06-01", firma="Alt GmbH"),
+        _app(row_id=3, gesendet_am="2026-07-20", firma="Mittel GmbH",
+             status="In Bearbeitung"),
+        _app(row_id=4, gesendet_am="2026-07-01", firma="Beantwortet GmbH",
+             status="Absage"),
+    ]
+    waiting = register.silence(apps, 14, TODAY)
+    listed = register.order(apps, waiting, "waiting")
+    assert _ids(listed)[:len(waiting)] == [row.bewerbung_id for row in waiting]
+
+
+def test_the_list_follows_the_panels_POSITIONS_and_not_its_numbers():
+    """The claim in the docstring is that this reads `silence()`'s output
+    rather than re-deriving "who has waited longest" from the day counts. The
+    two agree on almost every corpus, so only a `waiting` list in an order the
+    day counts do NOT explain can tell them apart — and a re-derivation passed
+    the whole suite until this existed.
+    """
+    apps = [_app(row_id=1, status="Gesendet"), _app(row_id=2, status="Gesendet")]
+    # Deliberately at odds with the numbers: row 1 has waited longer, and the
+    # list must still follow the order it was handed.
+    handed = [register.Waiting(bewerbung_id=2, firma="B", days=3, overdue=False),
+              register.Waiting(bewerbung_id=1, firma="A", days=99, overdue=True)]
+    assert _ids(register.order(apps, handed, "waiting")) == [2, 1]
+
+
+def test_a_row_sent_today_still_outranks_one_whose_date_cannot_be_read():
+    """Zero days is a measurement; no date at all is not. `silence()` files the
+    unreadable one last, and reading its day count instead ties them."""
+    apps = [_app(row_id=1, gesendet_am="", status="Gesendet"),
+            _app(row_id=2, gesendet_am=TODAY.isoformat(), status="Gesendet")]
+    assert _ids(_ordered(apps, "waiting")) == [2, 1]
+
+
+def test_the_waiting_order_holds_over_a_generated_corpus():
+    """One rule, many shapes: same-day batches, unreadable dates, every status
+    in the vocabulary. The register's real batch is nineteen on one day."""
+    from jobdeck.constants import STATUS_OPTIONS
+    apps = []
+    for index in range(60):
+        apps.append(_app(
+            row_id=index + 1,
+            status=STATUS_OPTIONS[index % len(STATUS_OPTIONS)],
+            # Deliberate collisions: a batch sent on one day has no order of
+            # its own, and two of them state no date at all.
+            gesendet_am="" if index in (11, 41)
+            else f"2026-0{6 + index % 3}-{1 + index % 20:02d}",
+            firma=f"Firma {index % 7}",
+        ))
+    waiting = register.silence(apps, 14, TODAY)
+    listed = register.order(apps, waiting, "waiting")
+    assert _ids(listed)[:len(waiting)] == [row.bewerbung_id for row in waiting]
+    assert sorted(_ids(listed)) == sorted(_ids(apps))
+
+
+def test_an_application_that_is_not_waiting_cannot_lead_an_order_about_waiting():
+    apps = [_app(row_id=1, gesendet_am="2026-01-01", status="Absage"),
+            _app(row_id=2, gesendet_am="2026-08-14", status="Gesendet")]
+    assert _ids(_ordered(apps, "waiting")) == [2, 1]
+
+
+def test_the_rows_that_are_not_waiting_keep_the_order_they_arrived_in():
+    apps = [_app(row_id=9, gesendet_am="2026-08-12", status="Absage"),
+            _app(row_id=8, gesendet_am="2026-08-11", status="Keine Antwort"),
+            _app(row_id=7, gesendet_am="2026-08-10", status="Zurückgezogen"),
+            _app(row_id=1, gesendet_am="2026-05-01", status="Gesendet")]
+    assert _ids(_ordered(apps, "waiting")) == [1, 9, 8, 7]
+
+
+def test_a_row_whose_age_cannot_be_read_claims_no_place_at_the_top():
+    """`silence()` files an unreadable date last among the waiting; the list
+    must agree with it rather than sort the row to wherever its id fell."""
+    apps = [_app(row_id=1, gesendet_am="", status="Gesendet"),
+            _app(row_id=2, gesendet_am="2026-08-14", status="Gesendet"),
+            _app(row_id=3, gesendet_am="2026-06-01", status="Gesendet")]
+    assert _ids(_ordered(apps, "waiting")) == [3, 2, 1]
+
+
+# -- alphabetical --
+
+
+def test_a_lowercase_name_sorts_by_its_letter_and_not_by_its_code_point():
+    """Twenty companies in the real ledger are spelled in lower case. Raw code
+    points put every one of them after every capitalised name, so the
+    discriminating pair is a lower-case name that must come FIRST.
+    """
+    apps = [_app(row_id=1, firma="Beta GmbH"),
+            _app(row_id=2, firma="alpha GmbH")]
+    assert _ids(_ordered(apps, "firma")) == [2, 1]
+
+
+def test_an_umlaut_sorts_where_a_reader_looks_for_it():
+    apps = [_app(row_id=1, firma="Zeta GmbH"),
+            _app(row_id=2, firma="Übersicht GmbH"),
+            _app(row_id=3, firma="Alpha GmbH")]
+    # Under 'U', not after "Zeta" — which is where a raw code-point sort files
+    # every umlaut, past 'z'.
+    assert _ids(_ordered(apps, "firma")) == [3, 2, 1]
+
+
+def test_an_umlaut_ranks_among_its_base_letter_and_not_after_it():
+    """NFKD alone moves the base letter to the front, which is enough to keep
+    an umlaut out of the far end of the list — so only a tie ON that base
+    letter separates decomposing from actually dropping the mark. DIN 5007-1
+    says 'u' with a diaeresis IS 'u', so it sorts before "Uz", not after it.
+    Left in, the combining mark is code point 776 and outranks every letter.
+    """
+    apps = [_app(row_id=1, firma="Uz GmbH"),
+            _app(row_id=2, firma="Über GmbH")]
+    assert _ids(_ordered(apps, "firma")) == [2, 1]
+
+
+def test_the_sharp_s_sorts_as_the_two_letters_it_stands_for():
+    """DIN 5007-1, and the one part `casefold` already does.
+
+    The pair has to diverge AT the ß and nowhere earlier. "Strassburg" against
+    "Strauß" does not: they part at 's' vs 'u', four characters before it, so
+    the folding half of the claim went untested. Here both keys agree up to
+    "strass"; only expanding the ß decides, and it decides the other way round
+    from the raw code point (U+00DF is past every letter).
+    """
+    # No legal form on either name: a differing suffix would decide the
+    # comparison after the ß and hide exactly what this pins.
+    apps = [_app(row_id=1, firma="Straßen"), _app(row_id=2, firma="Strassen")]
+    # folded both are "strassen", so the tie falls back to the incoming order.
+    # Unfolded, 'ß' (U+00DF) is past 's' and row 1 would go last.
+    assert _ids(_ordered(apps, "firma")) == [1, 2]
+
+    apps = [_app(row_id=1, firma="Straße"), _app(row_id=2, firma="Strassen")]
+    # folded: "strasse" < "strassen".  unfolded: "strassen" < "straße".
+    assert _ids(_ordered(apps, "firma")) == [1, 2]
+
+
+def test_a_stroke_or_a_ligature_files_under_its_base_letter():
+    """NFKD decomposes an accent because a combining mark is a separate code
+    point; a STROKE is part of the letter and a LIGATURE is one letter, so
+    neither decomposes. Ø, Ł, Æ, Œ and Đ therefore filed after every name
+    beginning "z" — the exact failure the key exists to prevent, surviving the
+    first fix for the letters it could not reach.
+    """
+    names = ["Zeta GmbH", "Ørsted", "Łukasiewicz", "Æther AG", "Đuro",
+             "Œuvre", "Abend GmbH"]
+    apps = [_app(row_id=i, firma=n) for i, n in enumerate(names, start=1)]
+
+    listed = [str(row["firma"]) for row in _ordered(apps, "firma")]
+
+    assert listed == ["Abend GmbH", "Æther AG", "Đuro", "Łukasiewicz",
+                      "Œuvre", "Ørsted", "Zeta GmbH"]
+
+
+def test_two_rows_of_one_name_keep_the_newest_first():
+    apps = [_app(row_id=2, firma="Gleiche GmbH", gesendet_am="2026-08-10"),
+            _app(row_id=1, firma="Gleiche GmbH", gesendet_am="2026-08-01")]
+    assert _ids(_ordered(apps, "firma")) == [2, 1]
+
+
+def test_a_row_with_no_company_name_leads_rather_than_disappearing():
+    """`fold(None)` is the empty string, which sorts before every name — so a
+    nameless row goes to the TOP, where it is at least visible. The earlier
+    assertion sorted the ids before comparing, so it proved only that nothing
+    raised and nothing was lost, and would have passed wherever the row landed.
+    """
+    apps = [_app(row_id=1, firma="Alpha GmbH"), _app(row_id=2, firma=None),
+            _app(row_id=3, firma="")]
+    assert _ids(_ordered(apps, "firma")) == [2, 3, 1]
+
+
+def test_no_order_ever_loses_or_invents_a_row():
+    apps = [_app(row_id=index, status=("Gesendet", "Absage")[index % 2],
+                 firma=f"Firma {index}") for index in range(1, 12)]
+    for key in register.SORT_LABELS:
+        assert sorted(_ids(_ordered(apps, key))) == list(range(1, 12))
+
+
+# -- when the order has nothing to separate --
+
+
+def test_an_order_about_waiting_says_so_where_nothing_waits():
+    """"Absage", "Keine Antwort" and "Antwort erhalten" hold no application
+    that is still waiting, and beside the control sits the filter that shows
+    exactly those — 56 rows of his 141, three of the six views."""
+    rows = [_app(row_id=1, status="Absage"), _app(row_id=2, status="Keine Antwort")]
+    waiting = register.silence(rows, 14, TODAY)
+
+    assert register.order_note(rows, waiting, "waiting")
+    assert "wartet noch" in register.order_note(rows, waiting, "waiting")
+
+
+def test_one_waiting_row_is_enough_for_the_order_to_mean_something():
+    rows = [_app(row_id=1, status="Absage"), _app(row_id=2, status="Gesendet")]
+    waiting = register.silence(rows, 14, TODAY)
+
+    assert register.order_note(rows, waiting, "waiting") == ""
+
+
+def test_the_note_is_about_the_rows_on_screen_and_not_the_whole_ledger():
+    """The filter is what empties the column, so the question has to be asked
+    of what is listed — asking the register would keep the note off the very
+    views it exists for."""
+    listed = [_app(row_id=1, status="Absage")]
+    # The ledger still holds a waiting application; it is filtered out.
+    waiting = register.silence([_app(row_id=2, status="Gesendet")], 14, TODAY)
+
+    assert register.order_note(listed, waiting, "waiting")
+
+
+def test_no_other_order_claims_anything_about_waiting():
+    rows = [_app(row_id=1, status="Absage")]
+    waiting = register.silence(rows, 14, TODAY)
+    for key in register.SORT_LABELS:
+        if key != "waiting":
+            assert register.order_note(rows, waiting, key) == ""
+
+
+def test_an_empty_list_is_already_answered_by_the_line_under_it():
+    waiting = register.silence([], 14, TODAY)
+    assert register.order_note([], waiting, "waiting") == ""
