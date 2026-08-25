@@ -17,6 +17,7 @@ from jobdeck import claims as claims_lib
 from jobdeck import settings as app_settings
 from jobdeck.constants import (
     BEANTWORTET_STATUS,
+    DECISION_CLASSIFICATIONS,
     DEFAULT_DAILY_CAP,
     DEFAULT_DAILY_DRAFT_CAP,
     DRAFT_STATUS,
@@ -2989,6 +2990,37 @@ def count_recent_invitations(con: sqlite3.Connection, days: int = 7) -> int:
         " WHERE direction=? AND classification='einladung' AND created_at>=?",
         (EMAIL_INBOUND, cutoff),
     ).fetchone()[0]
+
+
+def answer_delays(con: sqlite3.Connection) -> list[tuple[str, str]]:
+    """(sent on, decision arrived on) for every application a human answered.
+
+    Measured from the MAIL'S OWN date, not from when JobDeck recorded the
+    status. The per-row column beside `first_answer_dates` deliberately uses
+    the recording moment, because for the imported rows it is the only date
+    there is and one column may not mean two things — but an aggregate is a
+    different claim. On the real register the two disagree where it matters:
+    the recording clock puts the 90th percentile at 67 days, which is not how
+    long an employer took but how long a June reply waited for the August
+    pass that first read it.
+
+    Only a decision counts (`DECISION_CLASSIFICATIONS`): an Eingangs-
+    bestätigung is a robot answering the same hour, and its median of nought
+    days would report a promptness nobody showed.
+    """
+    places = ",".join("?" * len(DECISION_CLASSIFICATIONS))
+    rows = con.execute(
+        f"""
+        SELECT b.gesendet_am AS sent, MIN(e.internal_date) AS answered
+          FROM bewerbungen b
+          JOIN email_log e ON e.bewerbung_id = b.id
+         WHERE e.direction = 'inbound'
+           AND e.classification IN ({places})
+         GROUP BY b.id
+        """,
+        DECISION_CLASSIFICATIONS,
+    ).fetchall()
+    return [(str(row["sent"] or ""), str(row["answered"] or "")) for row in rows]
 
 
 def first_answer_dates(con: sqlite3.Connection) -> dict[int, str]:

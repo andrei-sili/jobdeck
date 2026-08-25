@@ -34,38 +34,6 @@ def _app(status="Gesendet", gesendet_am="2026-08-01", firma="Firma GmbH",
 # --------------------------------------------------------------------------
 # The pipeline, and the step that is not a subset
 # --------------------------------------------------------------------------
-def test_the_step_that_is_not_a_subset_says_so_itself():
-    """45 of his postings have a letter and only 33 were ever opened: the
-    daily batch and the form flow both write one without the ad being read.
-    A column drawn as nested subsets would simply be false, so the break is
-    stated ON the step where it happens, not in a caption further away."""
-    steps = {step.key: step for step in register.pipeline(
-        _view(opened=20, drafted=30, drafted_unread=25))}
-
-    assert "25" in steps["anschreiben"].note
-    assert steps["anschreiben"].count > steps["angesehen"].count
-
-
-def test_a_pipeline_that_really_does_nest_makes_no_excuse():
-    steps = {step.key: step for step in register.pipeline(
-        _view(drafted=10, drafted_unread=0))}
-
-    assert steps["anschreiben"].note == ""
-
-
-def test_every_bar_is_measured_against_what_was_found():
-    steps = register.pipeline(_view(jobs_total=100, opened=20))
-
-    assert steps[0].share == 1.0
-    assert next(s for s in steps if s.key == "angesehen").share == 0.2
-
-
-def test_an_empty_pipeline_states_zero_rather_than_dividing_by_it():
-    steps = register.pipeline(_view(jobs_total=0, scored_above_zero=0,
-                                    scored_zero=0, opened=0, drafted=0,
-                                    applied=0))
-
-    assert [step.share for step in steps] == [0.0] * len(steps)
 
 
 # --------------------------------------------------------------------------
@@ -375,41 +343,6 @@ def test_a_comparison_with_nothing_in_it_draws_nothing():
 # --------------------------------------------------------------------------
 # What the panel found: claims the data could not carry
 # --------------------------------------------------------------------------
-def test_a_draft_row_is_not_a_letter():
-    """"Anschreiben geschrieben" counted rows, so a draft still being written
-    (empty body) and one that failed (never got a body) were both reported as
-    letters that exist."""
-    steps = {step.key: step for step in register.pipeline(
-        _view(drafted=0, drafted_unread=0))}
-
-    assert steps["anschreiben"].count == 0
-
-
-def test_an_application_with_no_letter_behind_it_says_so():
-    """`applied` is not a subset of `drafted` either: pressing "Abgeschickt"
-    on a posting whose letter failed records one, and every pre-v10 form
-    application was entered that way. The step that is not a subset says so."""
-    steps = {step.key: step for step in register.pipeline(
-        _view(drafted=2, applied=5, applied_without_letter=3))}
-
-    assert "3 davon ohne Anschreiben" in steps["beworben"].note
-
-
-def test_a_pipeline_whose_applications_all_had_letters_makes_no_excuse():
-    steps = {step.key: step for step in register.pipeline(
-        _view(drafted=5, applied=5, applied_without_letter=0))}
-
-    assert steps["beworben"].note == ""
-
-
-def test_postings_the_scorer_has_not_reached_are_accounted_for():
-    """They are in neither figure below "gefunden", so without this the drop
-    is partly unexplained and the one note under it reads as the whole
-    reason."""
-    steps = {step.key: step for step in register.pipeline(
-        _view(jobs_total=100, scored_above_zero=60, scored_zero=30))}
-
-    assert "10 noch nicht bewertet" in steps["passend"].note
 
 
 def test_the_register_never_prints_a_negative_remainder():

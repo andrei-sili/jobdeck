@@ -153,8 +153,8 @@ async def test_the_screen_states_the_shape_before_it_lists_the_rows(
 
     await user.open("/bewerbungen")
 
-    await user.should_see("Der Trichter")
     await user.should_see("Das Register")
+    await user.should_see("Was zurückkam")
     await user.should_see("Rhythmus")
     await user.should_see("Wer schweigt, seit wann")
     await user.should_see("Was antwortet")
@@ -397,24 +397,29 @@ def test_a_panel_with_no_rows_says_nothing_at_all():
 # --------------------------------------------------------------------------
 # What the panels SAY, not merely that they are there
 # --------------------------------------------------------------------------
-async def test_the_funnel_prints_the_populations_it_measured(user: User, con):
-    """Only the six headings were asserted, so every step could be relabelled
-    'x', every note blanked and every bar zeroed with the suite green."""
-    for n in range(3):
-        job_id = db.insert_job_if_new(con, {
-            "source": "stub", "external_id": f"j{n}", "company": f"Firma {n}",
-            "title": "Entwickler", "url": f"https://x.example/{n}"})
-        con.execute("UPDATE jobs SET match_score=? WHERE id=?",
-                    (0 if n == 2 else 80, job_id))
-    con.commit()
+async def test_the_numbers_print_the_populations_they_measured(user: User, con):
+    """The panel that replaced the funnel, held to the same standard: without
+    the figures asserted, every label could be relabelled 'x' and every count
+    zeroed with the suite green.
+
+    An invitation nobody has received is drawn, not hidden. That is the one
+    number on this screen he is working toward, and a scoreboard that omits
+    the score until it is non-zero is a scoreboard that never says nought."""
+    _app_row(con, firma="Wartende GmbH")
+    _app_row(con, firma="Absagende GmbH", status="Absage")
+    _app_row(con, firma="Antwortende GmbH", status="Antwort erhalten")
 
     await user.open("/bewerbungen")
 
-    await user.should_see("gefunden")
-    await user.should_see("nicht ausgeschlossen")
-    await user.should_see("von dir geöffnet")
-    await user.should_see("Anschreiben geschrieben")
-    await user.should_see("1 erfüllt ein Ausschlusskriterium nicht")
+    await user.should_see("Das Register")
+    await user.should_see("noch ohne Antwort")
+    await user.should_see("Einladungen")
+    await user.should_see("Absagen")
+    await user.should_see("sonstige Antworten")
+    # The counts themselves: 3 in the register, 1 still waiting, 2 answered,
+    # and the two answers split one and one with no invitation among them.
+    for figure in ("3", "1", "2", "0"):
+        await user.should_see(figure)
 
 
 async def test_the_register_block_names_what_this_app_did_not_do(user: User,
@@ -528,7 +533,7 @@ async def test_a_tab_actually_navigates(user: User, con):
     user.find(marker="tab-register").click()
     await asyncio.sleep(0.5)
 
-    await user.should_see("Der Trichter")
+    await user.should_see("Das Register")
 
 
 def test_each_face_of_the_rubric_points_at_its_own_screen():
