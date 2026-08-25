@@ -1,9 +1,9 @@
 """The numbers on the Bewerbungen screen, after the funnel came off it.
 
-He said it plainly: "unde este statistica este de neinteles, trebuie sa fie
-simpla". The funnel counted postings — found, scored, opened, written to — on
-a screen about applications, and every one of those figures is now stated on
-Stellen, on the rows themselves. What replaced it is two groups that each add
+His verdict on the old one was that the statistic was unintelligible and
+should be simple. The funnel counted postings — found, scored, opened,
+written to — on a screen about applications, and every one of those figures
+is now stated on Stellen, on the rows themselves. What replaced it is two groups that each add
 up, and one sentence about how long an answer took.
 
 The properties here are arithmetic and honesty: the parts must agree with the
