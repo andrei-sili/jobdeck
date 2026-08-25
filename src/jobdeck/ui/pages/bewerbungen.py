@@ -105,6 +105,17 @@ def _load() -> dict:
     return register.facts()
 
 
+def _stored_sort() -> str:
+    with db.db() as con:
+        return register.stored_sort(
+            db.get_setting(con, register.SORT_SETTING, ""))
+
+
+def _store_sort(value: str) -> None:
+    with db.db() as con:
+        db.set_setting(con, register.SORT_SETTING, value)
+
+
 def _signature() -> tuple:
     with db.db() as con:
         return register.signature(con)
@@ -198,7 +209,13 @@ def legacy_applications_page():
 @ui.page(BEWERBUNGEN_PATH)
 async def bewerbungen_page():
     async with frame("Bewerbungen", current="bewerbungen"):
-        state = {"query": "", "status": VIEW_ALL}
+        # Read BEFORE the controls are drawn, the way Stellen reads its two:
+        # a select built on the default and corrected a moment later would name
+        # one order over a list already in another.
+        opening_sort = await run.io_bound(_stored_sort)
+        if opening_sort is None:
+            return                      # the page is going away
+        state = {"query": "", "status": VIEW_ALL, "sort": opening_sort}
         drawn: dict = {}
         refresh_gen = {"n": 0}
 
@@ -469,10 +486,13 @@ async def bewerbungen_page():
             return rows
 
         def draw_register(view: dict, today: datetime.date) -> None:
-            rows = visible(view)
-            ages = {row.bewerbung_id: row
-                    for row in register.silence(view["apps"],
-                                                view["follow_up_days"], today)}
+            # ONE silence pass, feeding both the "Wartet seit" cell and the
+            # order the rows are listed in. Asking twice would let the number
+            # in a row and the row's own place come from two readings.
+            waiting = register.silence(view["apps"], view["follow_up_days"],
+                                       today)
+            ages = {row.bewerbung_id: row for row in waiting}
+            rows = register.order(visible(view), waiting, state["sort"])
             with ui.column().classes("jd-card gap-2"):
                 with ui.row().classes("w-full items-baseline gap-3"):
                     # Not "Die Firmen": the figure counts ledger ROWS, and
@@ -482,6 +502,11 @@ async def bewerbungen_page():
                     ui.label(f"{len(rows)} von {len(view['apps'])}"
                              if len(rows) != len(view["apps"])
                              else f"{len(rows)}").classes("jd-card-sub")
+                # ABOVE the column heads, not between them and the first row:
+                # drawn there it sits where a row sits and is read as one.
+                note = register.order_note(rows, waiting, state["sort"])
+                if note:
+                    ui.label(note).classes("jd-card-sub")
                 with ui.element("div").classes("jd-head"):
                     # NOT "Still": four nouns and one English-looking
                     # adjective, above cells reading "12 T" — it parsed as
@@ -679,6 +704,24 @@ async def bewerbungen_page():
             state["status"] = value or VIEW_ALL
             redraw_register()
 
+        async def set_sort(value) -> None:
+            """The order the list is in, kept for the next visit.
+
+            The early return is load-bearing rather than tidy: `refresh` writes
+            the stored order back into this select when another tab has moved
+            it, and NiceGUI fires a change handler on a server-side write
+            whenever the value actually differs — which is exactly what that
+            path creates. Without it the handler stores the value it was just
+            handed and redraws the list, on every tick that carries a change.
+            Not a loop: the stored value is unchanged, so the signature is too.
+            """
+            chosen = register.stored_sort(value)
+            if chosen == state["sort"]:
+                return
+            state["sort"] = chosen
+            redraw_register()           # from rows already in hand, no re-read
+            await run.io_bound(_store_sort, chosen)
+
         def redraw_register() -> None:
             """Only the list, so typing in the search box does not rebuild the
             five panels above it — and does not move them under the cursor."""
@@ -699,6 +742,10 @@ async def bewerbungen_page():
             if view is None or generation != refresh_gen["n"]:
                 return  # going away, or superseded by a newer refresh
             live_view.mark(view["signature"])
+            # Another tab may have chosen a different order. State first, so
+            # the change this write raises finds nothing left to do.
+            state["sort"] = view["sort"]
+            sort_select.set_value(view["sort"])
             today = datetime.date.today()
             drawn["view"], drawn["today"] = view, today
             container.clear()
@@ -716,7 +763,11 @@ async def bewerbungen_page():
                 .mark("register-search")
             ui.select([VIEW_ALL, *STATUS_OPTIONS], value=VIEW_ALL,
                       label="Status", on_change=lambda e: set_status(e.value)) \
-                .props("dense").classes("w-48")
+                .props("dense").classes("w-48").mark("register-status")
+            sort_select = ui.select(
+                register.SORT_LABELS, value=state["sort"], label="Sortierung",
+                on_change=lambda e: set_sort(e.value)) \
+                .props("dense").classes("w-56").mark("register-sort")
             ui.space()
             live_host = ui.row().classes("items-center")
             ui.button("Neue Bewerbung", icon="add",
