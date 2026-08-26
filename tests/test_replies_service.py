@@ -1277,3 +1277,147 @@ def test_adopting_a_receipt_still_raises_an_open_application(inbox, con):
     assert service.adopt_receipt(row_id)["ok"] is True
 
     assert db.get_bewerbung(con, bewerbung_id)["status"] == "In Bearbeitung"
+
+
+# --------------------------------------------------------------------------
+# a board may never authorize, whatever the channel column says today
+# --------------------------------------------------------------------------
+async def test_a_board_mail_cannot_confirm_after_a_contact_address_moved_the_channel(
+        inbox, con):
+    """The hole the first board guard left open, and it fired for real.
+
+    The guard asked the row's CHANNEL. Entering a contact address by hand —
+    the ordinary way a posting found on a board becomes sendable — moves
+    that column to direct_email, while `apply_url` still holds the board
+    link the posting arrived by. The board's own domain then aligned with
+    the posting and a routine notification from it wrote a status onto a
+    live application."""
+    job_id = _strip_job(
+        con,
+        apply_url="https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1",
+        apply_channel="direct_email",
+        contact_email="info@firma-beispiel.de")
+    inbox.add("m-1", from_header="Terminservice <termin@arbeitsagentur.de>",
+              subject="Stornierung Ihres Termins",
+              body="Ihr Termin wurde storniert. Ihre Bewerbung ist "
+                   "eingegangen.",
+              auth=("mx.google.com; spf=pass smtp.mailfrom=arbeitsagentur.de; "
+                    "dmarc=pass header.from=arbeitsagentur.de"))
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 0
+    assert db.get_job(con, job_id)["bewerbung_id"] is None
+    assert _inbound_rows(con) == []
+
+
+async def test_a_board_mail_cannot_confirm_on_an_ats_channel_posting(inbox, con):
+    """The same shape as above and the commonest one: the channel resolves to
+    an ATS form while `apply_url` is still the board's link."""
+    job_id = _strip_job(
+        con, apply_url="https://www.arbeitnow.com/jobs/companies/x/y",
+        apply_channel="ats_form")
+    inbox.add("m-1", from_header="Arbeitnow <alerts@arbeitnow.com>",
+              subject="Eingangsbestätigung",
+              body="Ihre Bewerbung ist eingegangen.",
+              auth=("mx.google.com; spf=pass smtp.mailfrom=arbeitnow.com; "
+                    "dmarc=pass header.from=arbeitnow.com"))
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 0
+    assert db.get_job(con, job_id)["bewerbung_id"] is None
+
+
+async def test_a_board_domain_in_the_contact_column_cannot_authorize(inbox, con):
+    """The other column reaches the same target set. He types this field by
+    hand, so nothing stops a board address from landing in it."""
+    job_id = _strip_job(con, apply_url="",
+                        apply_channel="direct_email",
+                        contact_email="vermittlung@arbeitsagentur.de")
+    inbox.add("m-1", from_header="Agentur <vermittlung@arbeitsagentur.de>",
+              subject="Eingangsbestätigung",
+              body="Ihre Bewerbung ist eingegangen.",
+              auth=("mx.google.com; spf=pass smtp.mailfrom=arbeitsagentur.de; "
+                    "dmarc=pass header.from=arbeitsagentur.de"))
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 0
+    assert db.get_job(con, job_id)["bewerbung_id"] is None
+
+
+async def test_a_board_mail_quoting_the_refnr_becomes_a_proposal(inbox, con):
+    """The designed degradation, and the reason the guard is on AUTHORIZATION
+    rather than on identification: the Refnr is printed in the public advert,
+    so quoting it still says WHICH posting is meant. That is worth showing
+    him — it just may not write."""
+    job_id = _strip_job(
+        con, refnr="10000-1177449Z",
+        apply_url="https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1",
+        apply_channel="direct_email",
+        contact_email="info@firma-beispiel.de")
+    inbox.add("m-1", from_header="Agentur <noreply@arbeitsagentur.de>",
+              subject="Eingangsbestätigung Referenz 10000-1177449Z",
+              body="Ihre Bewerbung ist eingegangen.",
+              auth=("mx.google.com; spf=pass smtp.mailfrom=arbeitsagentur.de; "
+                    "dmarc=pass header.from=arbeitsagentur.de"))
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 0
+    assert outcome["review"] == 1
+    assert db.get_job(con, job_id)["bewerbung_id"] is None
+    row = _inbound_rows(con)[0]
+    assert row["needs_review"] == 1
+    assert row["job_id"] == job_id
+    # it says WHY it is only a proposal, so he is not left guessing
+    assert row["matched_note"] == ("Refnr 10000-1177449Z"
+                                  " · Absender gehört nicht zur Anzeige")
+
+
+async def test_the_employers_address_still_authorizes_on_a_board_found_posting(
+        inbox, con):
+    """The guard must cost nothing on the row it protects: the SAME posting,
+    board link and all, still records from the employer's own domain."""
+    job_id = _strip_job(
+        con,
+        apply_url="https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1",
+        apply_channel="direct_email",
+        contact_email="info@firma-beispiel.de")
+    inbox.add("m-1", from_header="Firma <info@firma-beispiel.de>",
+              subject="Eingangsbestätigung",
+              body="Ihre Bewerbung ist eingegangen.",
+              auth=("mx.google.com; spf=pass smtp.mailfrom=firma-beispiel.de; "
+                    "dmarc=pass header.from=firma-beispiel.de"))
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 1
+    job = db.get_job(con, job_id)
+    assert job["bewerbung_id"] is not None
+    assert db.get_bewerbung(con, job["bewerbung_id"])["status"] == "In Bearbeitung"
+
+
+async def test_a_stale_channel_column_does_not_decide_who_may_authorize(
+        inbox, con):
+    """The rule reads the URL, not the column, and that cuts both ways.
+
+    A row can be entered by hand with a channel that disagrees with its own
+    apply_url. Judging by the column would refuse the employer's own
+    e-recruiting host here — and it is exactly the column's mutability that
+    let a board through in the first place, so the fact wins."""
+    job_id = _strip_job(
+        con, apply_url="https://firma.mein-beispiel-portal.de/stelle-1",
+        apply_channel="board_apply")   # stale: the URL is no board
+    inbox.add("m-1", from_header="Portal <no-reply@mein-beispiel-portal.de>",
+              subject="Eingangsbestätigung",
+              body="Ihre Bewerbung ist eingegangen.",
+              auth=("mx.google.com; "
+                    "spf=pass smtp.mailfrom=mein-beispiel-portal.de; "
+                    "dmarc=pass header.from=mein-beispiel-portal.de"))
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 1
+    assert db.get_job(con, job_id)["bewerbung_id"] is not None

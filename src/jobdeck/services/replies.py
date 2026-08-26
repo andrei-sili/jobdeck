@@ -456,28 +456,31 @@ def _receipt_evidence(job, sender_domain: str, text: str) -> tuple[str, bool]:
     sent it. Refnr therefore corroborates an aligned sender and otherwise
     yields a proposal for his click.
 
-    `jobs.url` is deliberately NOT a target: that is the board's own page
-    (arbeitnow.com, arbeitsagentur.de), so accepting it would let any mail
-    from a job board record an application at the employer.
+    No domain a job board lives at can be a target, whichever column holds
+    it — `jobs.url` is the board's own page, and `apply_url` is the board's
+    link on any posting found through one. A board writes to everybody who
+    ever touched it, so letting one authorize would let a newsletter or a
+    notification record an application at an employer that never wrote.
     """
     refnr = resolve_refnr(job)
     by_refnr = replies.refnr_in_text(refnr, text, "")
     if sender_domain:
-        targets = set()
-        # `apply_url` is the EMPLOYER's application address only when the
-        # channel says so. On a board_apply posting it is the board's own
-        # link (de.jooble.org/away/…), so accepting it would let the board
-        # authorize: a Jooble job newsletter really did arrive, match a
-        # posting by that domain, and move an application to "In
-        # Bearbeitung" on the first real read of his mailbox.
-        if str(job["apply_channel"] or "") != apply_channel.CHANNEL_BOARD:
-            domain = registrable_domain(str(job["apply_url"] or ""))
-            if domain:
-                targets.add(domain)
-        contact_domain = registrable_domain(
-            str(job["contact_email"] or "").rpartition("@")[2])
-        if contact_domain:
-            targets.add(contact_domain)
+        # A board is not an employer, so no domain a board lives at may
+        # authorize — whichever column offered it. Asking the row's CHANNEL
+        # instead was the hole: `apply_channel` is a derivation that MOVES,
+        # and entering a contact address by hand moves it to direct_email
+        # while `apply_url` keeps the board link the posting was found by.
+        # A board's own mail then aligned with the posting and filed itself
+        # as an Eingangsbestätigung, which writes a status.
+        targets = {
+            domain
+            for domain in (
+                registrable_domain(str(job["apply_url"] or "")),
+                registrable_domain(
+                    str(job["contact_email"] or "").rpartition("@")[2]),
+            )
+            if domain and not apply_channel.is_board_domain(domain)
+        }
         if sender_domain in targets:
             evidence = f"Absender {sender_domain}"
             return (f"{evidence} · Refnr {refnr}" if by_refnr else evidence), True
