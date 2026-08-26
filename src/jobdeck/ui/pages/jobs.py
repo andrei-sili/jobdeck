@@ -1314,6 +1314,44 @@ def unscored_note(job: dict, scoring_on: bool) -> str:
             "Hintergrund und holt sie nach.")
 
 
+def missing_text_note(job: dict) -> str:
+    """What stands where the advert would be, when none is stored.
+
+    The pane used to print "(keine Beschreibung)" as if it were the advert,
+    and then a verdict and a row of buttons underneath it — so the one posting
+    the screen knew nothing about was styled exactly like one it knew
+    everything about. The sentence that matters is the second one: a letter
+    written from no advert can only restate the profile, which is what a
+    letter written from an empty posting was verified to produce.
+    """
+    note = ("Für diese Anzeige ist kein Text gespeichert. Ein Anschreiben "
+            "daraus kann nur dein Profil wiederholen — es antwortet auf keine "
+            "einzige Anforderung der Stelle.")
+    if _openable_url(job):
+        note += " Der vollständige Text steht beim Anbieter."
+    return note
+
+
+def verdict_caveat(job: dict) -> str:
+    """What qualifies a score that was formed on less than the advert, '' when
+    it was formed on the whole of it.
+
+    It belongs under the reason and not beside the number: the paragraph is
+    what reads like someone who has read the posting, and this is the sentence
+    that says how much of it there was to read.
+    """
+    if job.get("match_score") is None:
+        return ""
+    state = scoring.posting_text_state(job.get("description") or "")
+    if state == scoring.TEXT_NONE:
+        return ("Diese Bewertung entstand ohne den Anzeigentext — beurteilt "
+                "wurden nur Titel, Firma und Ort.")
+    if state == scoring.TEXT_SNIPPET:
+        return ("Diese Bewertung entstand nur auf dem Ausschnitt oben, nicht "
+                "auf der vollständigen Anzeige.")
+    return ""
+
+
 def scoring_line(pending: int, scoring_on: bool) -> str:
     """How many postings are still waiting for a score, '' when none are.
 
@@ -1951,9 +1989,15 @@ async def jobs_page():
                 for text, kind in reader_notes(job, already):
                     ui.label(text).classes(f"jd-note {kind} mb-2")
                 _render_facts(job)
-                description = job["description"] or "(keine Beschreibung)"
-                ui.markdown(posting_markdown(description[:DESCRIPTION_LIMIT])) \
-                    .classes("jd-ad mt-4")
+                description = job["description"] or ""
+                state = scoring.posting_text_state(description)
+                if state == scoring.TEXT_NONE:
+                    # No advert, so nothing to render as one. The note says so
+                    # and says what it costs, in the place he came to read.
+                    ui.label(missing_text_note(job)).classes("jd-note warn mt-4")
+                else:
+                    ui.markdown(posting_markdown(description[:DESCRIPTION_LIMIT])) \
+                        .classes("jd-ad mt-4")
                 if len(description) > DESCRIPTION_LIMIT:
                     # The screen exists to show the whole advert. Where it
                     # cannot, it says so — the requirements section it cut may
@@ -1964,10 +2008,10 @@ async def jobs_page():
                         f" von {len(description):,}".replace(",", ".") +
                         " Zeichen abgeschnitten — der Rest steht beim Anbieter."
                     ).classes("jd-note warn mt-3")
-                if scoring.looks_like_snippet(job["description"] or ""):
+                if state == scoring.TEXT_SNIPPET:
                     ui.label(
                         f"Diese Quelle liefert nur einen Ausschnitt "
-                        f"({len(job['description'] or '')} Zeichen) — der "
+                        f"({len(description)} Zeichen) — der "
                         f"vollständige Text steht beim Anbieter."
                     ).classes("jd-note mt-3")
                 # AFTER the text, deliberately: he reads the advert first and
@@ -1977,6 +2021,9 @@ async def jobs_page():
                     with ui.element("div").classes("jd-why"):
                         ui.label(_verdict_heading(job)).classes("jd-meta")
                         ui.label(job["match_reason"]).classes("text-sm mt-1")
+                        caveat = verdict_caveat(job)
+                        if caveat:
+                            ui.label(caveat).classes("jd-note mt-2")
                 elif job["match_score"] is None:
                     # The block used to exist only where a verdict did, so the
                     # postings with nothing said about them were the ones the

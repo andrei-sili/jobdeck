@@ -32,11 +32,20 @@ def _keep_the_package_importable():
     sys.modules.update(saved)
 
 
+# A real advert, because two of these tests hold the RENDERED advert as their
+# handle on the reading pane — and a posting with no text does not draw one any
+# more, it draws the sentence saying there is none. A fixture with no advert
+# was quietly testing that sentence and calling it "the advert he is reading".
+_ADVERT = ("Wir suchen eine Python-Entwicklerin. Django, FastAPI, "
+           "PostgreSQL, Docker. Bewerbung bitte per E-Mail. ") * 8
+
+
 def _posting(con, external_id="e1", title="Python Entwickler",
-             company="Beispiel GmbH"):
+             company="Beispiel GmbH", description=_ADVERT):
     job_id = db.insert_job_if_new(con, {
         "source": "stub", "external_id": external_id, "title": title,
         "company": company, "url": "https://beispiel.example/1",
+        "description": description,
     })
     con.commit()
     return job_id
