@@ -26,7 +26,10 @@ from jobdeck import config
 from jobdeck.ai import llm
 from jobdeck.ai.scoring import (  # noqa: F401 — re-exported for callers/tests
     MAX_DESCRIPTION_CHARS,
+    TEXT_NONE,
+    TEXT_SNIPPET,
     fence_posting,
+    posting_text_state,
 )
 
 # Sonnet drafts with adaptive thinking ON (disabling it made the model loop on
@@ -381,7 +384,38 @@ def build_user_content(
         f"Referenznummer: {refnr or 'n/a'}\n"
         f"Ansprechpartner: {ansprechpartner or 'unknown'}\n\n"
         f"{fence_posting(job['description'])}"
+        f"{_coverage_note(job['description'])}"
     )
+
+
+def _coverage_note(description: str) -> str:
+    """What to add when the advert is not all there.
+
+    The system prompt opens with "analyse the posting" and asks first which
+    competences THIS posting prioritises. With no advert, that step has
+    nothing to work on — and the letter it produced on a real posting answered
+    not one requirement of the role while sounding as though it had. The note
+    does not refuse the letter; it removes the pretence, which is the only
+    part that was false.
+    """
+    state = posting_text_state(description)
+    if state == TEXT_NONE:
+        return (
+            "\n\nNote: NO advert text is available — only the title, company "
+            "and location above. Do not describe requirements, tasks or "
+            "priorities as though the posting stated them, and do not open "
+            "with what they are looking for: nothing here says. Lead with the "
+            "candidate facts the role TITLE makes relevant, and write a "
+            "shorter letter rather than filling it with fit nobody stated."
+        )
+    if state == TEXT_SNIPPET:
+        return (
+            "\n\nNote: that text is a truncated SEARCH-RESULT SNIPPET, not the "
+            "full advert — it breaks off mid-posting. Tailor to what it "
+            "actually states and do not treat the missing part as a "
+            "requirement, an absence, or something the candidate must answer."
+        )
+    return ""
 
 
 # The letter TEMPLATE supplies "Mit freundlichen Grüßen" and the name, and the

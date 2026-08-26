@@ -139,6 +139,42 @@ def test_build_user_content_fences_posting_and_names_contact():
     assert content.rstrip().endswith("<<<POSTING END>>>")
 
 
+def test_a_letter_written_from_no_advert_is_told_there_is_none():
+    """The system prompt opens with "analyse the posting" and asks first which
+    competences THIS posting prioritises. With no advert that step has nothing
+    to work on, and the letter it produced on a real posting answered not one
+    requirement of the role while reading as though it had. 27 stored postings
+    hold no advert and 21 of them already carry a letter."""
+    content = ai_drafting.build_user_content(
+        _job(description=""), "my profile", refnr="K-17",
+        applicant_name="Erika Muster")
+    assert "NO advert text is available" in content
+    assert "Do not describe requirements, tasks or priorities" in content
+    # after the fence, never inside it: a note the posting could forge would
+    # be an instruction from untrusted text
+    assert content.index("<<<POSTING END>>>") < content.index("NO advert text")
+    assert "SEARCH-RESULT SNIPPET" not in content
+
+
+def test_a_letter_written_from_a_fragment_is_told_it_is_one():
+    """The elided half is not an absence to answer for. 178 stored postings
+    are a search fragment, and the letter path had no caution at all."""
+    content = ai_drafting.build_user_content(
+        _job(description="Deine Mission - Du entwickelst das Herz unser..."),
+        "my profile", refnr="K-17", applicant_name="Erika Muster")
+    assert "SEARCH-RESULT SNIPPET" in content
+    assert "NO advert text is available" not in content
+
+
+def test_a_whole_advert_adds_no_note_and_the_prompt_ends_at_the_fence():
+    content = ai_drafting.build_user_content(
+        _job(description="Wir suchen eine Entwicklerin. " * 40),
+        "my profile", refnr="K-17", applicant_name="Erika Muster")
+    assert "SEARCH-RESULT SNIPPET" not in content
+    assert "NO advert text is available" not in content
+    assert content.rstrip().endswith("<<<POSTING END>>>")
+
+
 def test_build_betreff_collapses_smuggled_whitespace():
     # posting-derived title must not inject newlines into a subject line
     assert ai_drafting.build_betreff("Dev\nX-Evil: 1", "K\n1", "Max\tMuster") \
