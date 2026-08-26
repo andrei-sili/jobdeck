@@ -9,6 +9,7 @@ this file pins the decisions.
 """
 
 import asyncio
+import datetime
 import email.message
 import email.policy
 import sqlite3
@@ -17,6 +18,7 @@ import pytest
 
 from jobdeck import db, gmail
 from jobdeck.ai import llm
+from jobdeck.constants import FORM_OPENED_UNKNOWN
 from jobdeck.services import replies as service
 
 ABSAGE_BODY = """Sehr geehrter Herr Beispiel,
@@ -61,6 +63,16 @@ def _raw(body: str) -> bytes:
     return message.as_bytes()
 
 
+def _now_ms() -> int:
+    return int(datetime.datetime.now().timestamp() * 1000)
+
+
+def _ms(stamp: str) -> int:
+    """A local naive ISO stamp as Gmail's internalDate — the same frame the
+    service reads it back in (`_iso_from_ms` uses fromtimestamp)."""
+    return int(datetime.datetime.fromisoformat(stamp).timestamp() * 1000)
+
+
 class FakeInbox:
     """Answers the gmail.py functions the service calls."""
 
@@ -77,7 +89,14 @@ class FakeInbox:
             from_header: str = "HR <hr@firma-beispiel.de>",
             subject: str = "Ihre Bewerbung", thread: str = "",
             auth: str = AUTH_PASS, size: int | None = None,
-            headers: dict | None = None) -> None:
+            headers: dict | None = None,
+            internal_date_ms: int | None = None) -> None:
+        """A mail arrives NOW unless a test says otherwise.
+
+        The default used to be a fixed moment in the past, which quietly
+        made every receipt fixture older than the form it confirmed — the
+        exact shape `_follows_the_opening` refuses. A stub that cannot
+        happen cannot guard anything."""
         raw = _raw(body)
         header_map = {"from": from_header, "subject": subject}
         if auth:
@@ -89,7 +108,8 @@ class FakeInbox:
                 "id": message_id,
                 "thread_id": thread or f"t-{message_id}",
                 "snippet": " ".join(body.split())[:100],
-                "internal_date_ms": 1755400000000,
+                "internal_date_ms": (
+                    _now_ms() if internal_date_ms is None else internal_date_ms),
                 "size_estimate": size if size is not None else len(raw),
                 "label_ids": ["INBOX"],
                 "headers": header_map,
@@ -1421,3 +1441,152 @@ async def test_a_stale_channel_column_does_not_decide_who_may_authorize(
 
     assert outcome["receipts"] == 1
     assert db.get_job(con, job_id)["bewerbung_id"] is not None
+
+
+# --------------------------------------------------------------------------
+# a receipt cannot predate the form opening it confirms
+# --------------------------------------------------------------------------
+def _opened_ago(con, job_id, hours: float) -> str:
+    """Stamp the form opening `hours` back and hand the stamp over.
+
+    Relative to the clock on purpose: the candidate window is 72 hours
+    wide, so a fixed date would fall out of it and the test would pass by
+    never reaching the guard at all."""
+    stamp = (datetime.datetime.now() - datetime.timedelta(hours=hours)
+             ).isoformat(timespec="seconds")
+    con.execute("UPDATE jobs SET form_opened_at=? WHERE id=?", (stamp, job_id))
+    con.commit()
+    return stamp
+
+
+async def test_a_mail_older_than_the_form_opening_cannot_confirm_it(inbox, con):
+    """The candidate window measures the POSTING's age, never the mail's, and
+    every re-read of the mailbox walks months of old mail past this arm. A
+    notification from before he opened the form is not its receipt."""
+    job_id = _strip_job(con, apply_url="https://bewerbung.firma-beispiel.de/7")
+    opened = _opened_ago(con, job_id, 2)
+    inbox.add("m-1", from_header="Firma <karriere@firma-beispiel.de>",
+              subject="Eingangsbestätigung",
+              body="Ihre Bewerbung ist eingegangen.",
+              internal_date_ms=_ms(opened) - 1000)
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 0
+    assert outcome["review"] == 1
+    assert db.get_job(con, job_id)["bewerbung_id"] is None
+    row = _inbound_rows(con)[0]
+    assert row["needs_review"] == 1
+    assert row["matched_note"].endswith("· älter als die Bewerbung")
+
+
+async def test_a_receipt_that_follows_the_opening_still_records(inbox, con):
+    """The guard must not cost the feature: same posting, same sender, a
+    mail dated AFTER he opened the form."""
+    job_id = _strip_job(con, apply_url="https://bewerbung.firma-beispiel.de/7")
+    opened = _opened_ago(con, job_id, 2)
+    inbox.add("m-1", from_header="Firma <karriere@firma-beispiel.de>",
+              subject="Eingangsbestätigung",
+              body="Ihre Bewerbung ist eingegangen.",
+              internal_date_ms=_ms(opened) + 1000)
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 1
+    assert db.get_job(con, job_id)["bewerbung_id"] is not None
+
+
+async def test_a_mail_stamped_at_the_very_moment_of_opening_still_records(
+        inbox, con):
+    """The boundary is inclusive on purpose: both stamps have one-second
+    resolution, so an ATS answering inside the same second is a real
+    receipt, not a mail from the past."""
+    job_id = _strip_job(con, apply_url="https://bewerbung.firma-beispiel.de/7")
+    opened = _opened_ago(con, job_id, 2)
+    inbox.add("m-1", from_header="Firma <karriere@firma-beispiel.de>",
+              subject="Eingangsbestätigung",
+              body="Ihre Bewerbung ist eingegangen.",
+              internal_date_ms=_ms(opened))
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 1
+
+
+async def test_an_undated_mail_cannot_confirm_anything(inbox, con):
+    """Gmail does hand back messages with no internalDate — his log holds
+    such rows. Nothing can be shown to follow the opening, so it waits."""
+    job_id = _strip_job(con, apply_url="https://bewerbung.firma-beispiel.de/7")
+    inbox.add("m-1", from_header="Firma <karriere@firma-beispiel.de>",
+              subject="Eingangsbestätigung",
+              body="Ihre Bewerbung ist eingegangen.",
+              internal_date_ms=0)
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 0
+    assert outcome["review"] == 1
+    assert db.get_job(con, job_id)["bewerbung_id"] is None
+
+
+# --------------------------------------------------------------------------
+# _follows_the_opening — every arm, including the one ingestion cannot reach
+# --------------------------------------------------------------------------
+def _meta_at(stamp: str | None) -> dict:
+    return {"internal_date_ms": 0 if stamp is None else _ms(stamp)}
+
+
+@pytest.mark.parametrize("opened, arrived, expected", [
+    ("2026-08-19T15:00:00", "2026-08-19T15:00:01", True),   # after
+    ("2026-08-19T15:00:00", "2026-08-19T15:00:00", True),   # same second
+    ("2026-08-19T15:00:00", "2026-08-19T14:59:59", False),  # one second before
+    ("2026-08-19T15:00:00", "2026-07-07T11:26:40", False),  # weeks before
+    ("2026-08-19T15:00:00", "2027-01-01T00:00:00", True),   # long after
+])
+def test_a_receipt_must_not_predate_the_opening(opened, arrived, expected):
+    job = {"form_opened_at": opened}
+    assert service._follows_the_opening(job, _meta_at(arrived)) is expected
+
+
+def test_a_mail_without_a_date_follows_nothing():
+    """Gmail does return messages with no internalDate. Nothing can be shown,
+    so nothing is authorized."""
+    job = {"form_opened_at": "2026-08-19T15:00:00"}
+    assert service._follows_the_opening(job, _meta_at(None)) is False
+
+
+@pytest.mark.parametrize("opened", ["", FORM_OPENED_UNKNOWN])
+def test_a_posting_with_no_real_opening_moment_authorizes_nothing(opened):
+    """`unbekannt` is what a pre-v10 row carries instead of a moment. The
+    candidate query filters those out today, so this arm is unreachable from
+    ingestion — it is asserted here because the predicate is the thing that
+    states the rule, and a later caller must not have to rediscover it."""
+    job = {"form_opened_at": opened}
+    assert service._follows_the_opening(job, _meta_at("2026-08-19T15:00:00")) \
+        is False
+
+
+def test_the_explicit_refusals_do_not_rest_on_how_a_stamp_sorts():
+    """Two checks in `_follows_the_opening` are EQUIVALENT MUTATIONS today —
+    verified, not assumed — and are kept deliberately.
+
+    Deleting `bool(arrived)` or the `FORM_OPENED_UNKNOWN` comparison leaves
+    the suite green, because an empty stamp sorts before every ISO date and
+    ASCII digits sort before letters. Both are accidents of the two strings
+    we happen to use, not properties of "no date". Respell the sentinel as
+    `-` or `0000-unknown` — either an ordinary choice — and the accident
+    flips to True, which authorizes a write on a posting that never
+    recorded an opening.
+    """
+    iso = "2026-08-19T15:00:00"
+    # today's accident, and how ordinarily it flips
+    assert (iso >= FORM_OPENED_UNKNOWN) is False
+    assert (iso >= "0000-unknown") is True
+    assert ("" >= iso) is False
+    # what the explicit checks state regardless of either
+    assert service._follows_the_opening({"form_opened_at": ""},
+                                        _meta_at(iso)) is False
+    assert service._follows_the_opening({"form_opened_at": FORM_OPENED_UNKNOWN},
+                                        _meta_at(iso)) is False
+    assert service._follows_the_opening({"form_opened_at": iso},
+                                        _meta_at(None)) is False

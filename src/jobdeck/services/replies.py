@@ -30,6 +30,7 @@ from jobdeck.constants import (
     CLASSIFICATION_TO_STATUS,
     EMAIL_INBOUND,
     EMAIL_INBOUND_IGNORED,
+    FORM_OPENED_UNKNOWN,
     OFFENE_STATUS,
     STATUS_RANK,
 )
@@ -429,11 +430,14 @@ def _receipt_match(con, meta: dict, from_addr: str, subject: str) -> dict | None
     if len(identified) == 1:
         job, evidence, authorizing = identified[0]
         authenticated = replies.sender_authenticated(meta["headers"])
-        strong = authorizing and authenticated
+        follows = _follows_the_opening(job, meta)
+        strong = authorizing and authenticated and follows
         if not authorizing:
             evidence += " · Absender gehört nicht zur Anzeige"
         elif not authenticated:
             evidence += " · Absender nicht verifiziert"
+        elif not follows:
+            evidence += " · älter als die Bewerbung"
         return {"kind": "receipt", "job": job, "strong": strong,
                 "evidence": evidence}
     if len(identified) > 1:
@@ -445,6 +449,29 @@ def _receipt_match(con, meta: dict, from_addr: str, subject: str) -> dict | None
         return {"kind": "receipt", "job": weak[0], "strong": False,
                 "evidence": "Firmenname"}
     return None
+
+
+def _follows_the_opening(job, meta: dict) -> bool:
+    """Could this mail be the receipt for THIS form opening?
+
+    A confirmation cannot predate the form it confirms. The window that
+    selects candidates measures the POSTING's age, so a mail from months
+    back could confirm a form opened yesterday — and every re-read of the
+    mailbox walks months of it past this arm. That is not hypothetical: a
+    routine notification, six weeks older than the application it landed
+    on, filed itself as an Eingangsbestätigung and moved a live status.
+
+    `form_opened_at` is written once and never rewritten, so no legitimate
+    receipt can sit before it. Both stamps are local naive ISO and compare
+    directly; a mail Gmail gives no date for cannot be shown to follow
+    anything and fails closed, as does the `unbekannt` sentinel a pre-v10
+    row carries instead of a moment.
+    """
+    opened = str(job["form_opened_at"] or "")
+    if not opened or opened == FORM_OPENED_UNKNOWN:
+        return False
+    arrived = _iso_from_ms(meta["internal_date_ms"])
+    return bool(arrived) and arrived >= opened
 
 
 def _receipt_evidence(job, sender_domain: str, text: str) -> tuple[str, bool]:
