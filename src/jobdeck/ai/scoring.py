@@ -227,6 +227,35 @@ def looks_like_snippet(description: str) -> bool:
     return text.endswith(SNIPPET_ELISIONS)
 
 
+# What JobDeck actually holds of an advert, as three named states. One home,
+# because the row, the reading pane and the prompt each make a statement about
+# the same text: three copies of "is there enough here" would drift, and a
+# screen that says one thing while the model was told another is a lie made of
+# two honest halves.
+TEXT_FULL = "full"
+TEXT_SNIPPET = "snippet"
+TEXT_NONE = "none"
+
+
+def posting_text_state(description: str) -> str:
+    """How much of this advert is stored: TEXT_FULL, TEXT_SNIPPET, TEXT_NONE.
+
+    `looks_like_snippet` answers False for an empty string — correctly, since
+    nothing is not a fragment — so the strictly WORSE case was the one nothing
+    named. Measured over 1521 stored postings: 27 hold no advert at all and
+    every one of them carries a score. One of them arrived through the
+    ordinary pipeline the morning it was measured — the source answered the
+    search and refused the detail call, so the posting was stored with no text
+    and then graded, with a confidently worded reason, from its title alone.
+    """
+    text = (description or "").strip()
+    if not text:
+        return TEXT_NONE
+    if looks_like_snippet(text):
+        return TEXT_SNIPPET
+    return TEXT_FULL
+
+
 def fence_posting(description: str) -> str:
     """Wrap untrusted posting text in fence markers.
 
@@ -257,13 +286,26 @@ def build_user_content(
         f"Location: {job['location'] or 'n/a'}{remote}\n\n"
         f"{fence_posting(job['description'])}"
     )
-    if looks_like_snippet(job["description"]):
+    state = posting_text_state(job["description"])
+    # if/elif over ONE state rather than two independent tests: a posting can
+    # only be in one of them, and two notes disagreeing about the same text
+    # would be the model's problem to resolve.
+    if state == TEXT_SNIPPET:
         content += (
             "\n\nNote: that text is a truncated SEARCH-RESULT SNIPPET, not the "
             "full advert — the posting continues where it breaks off. Judge "
             "only what it actually states: do not treat the missing part as a "
             "gap in the candidate, and do not report a hard requirement as "
             "violated unless the snippet itself shows the violation."
+        )
+    elif state == TEXT_NONE:
+        content += (
+            "\n\nNote: NO advert text is available for this posting — only the "
+            "title, company and location metadata above. Judge those alone: do "
+            "not treat the absent advert as a gap in the candidate, and do not "
+            "report a hard requirement as violated, because an advert you "
+            "cannot see cannot show one. State in your reason that the advert "
+            "text was not available."
         )
     if criteria is not None:
         content += f"\n\n{_criteria_section(criteria)}"

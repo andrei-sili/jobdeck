@@ -431,6 +431,46 @@ def test_a_full_posting_is_not_mistaken_for_a_snippet():
     assert scoring.looks_like_snippet(None) is False
 
 
+def test_a_posting_with_no_advert_text_at_all_says_so_in_the_prompt():
+    """The strictly worse case than a fragment, and the one nothing named.
+
+    `looks_like_snippet` answers False for an empty string, so a posting with
+    NO advert reached the model carrying '(no description available)' and not
+    one word of caution — while a posting carrying HALF an advert got a
+    paragraph of it. Measured over 1521 stored postings, 27 hold no text and
+    all 27 carry a score; one was graded 15 from its title alone, with a
+    reason worded as though an advert had been read."""
+    for empty in ("", "   \n\t ", None):
+        assert scoring.posting_text_state(empty) == scoring.TEXT_NONE
+
+    content = scoring.build_user_content(_job(description=""), "profile")
+    assert "NO advert text is available" in content
+    assert "do not report a hard requirement as violated" in content
+    # the model must not be handed two different accounts of the same text
+    assert "SEARCH-RESULT SNIPPET" not in content
+
+
+def test_each_posting_text_state_carries_exactly_one_account_of_itself():
+    """One state, one note. The row, the reading pane and the prompt all read
+    this function, so a posting that could answer two of them at once would
+    let a screen and the model disagree about the same advert."""
+    full = "Wir suchen eine Entwicklerin. " * 40
+    snippet = "Deine Mission - Du entwickelst das datengetriebene Herz unser..."
+    cases = {
+        scoring.TEXT_FULL: full,
+        scoring.TEXT_SNIPPET: snippet,
+        scoring.TEXT_NONE: "",
+    }
+    assert {scoring.posting_text_state(text) for text in cases.values()} \
+        == set(cases)
+    for state, text in cases.items():
+        assert scoring.posting_text_state(text) == state
+        content = scoring.build_user_content(_job(description=text), "profile")
+        notes = sum(marker in content for marker in
+                    ("SEARCH-RESULT SNIPPET", "NO advert text is available"))
+        assert notes == (0 if state == scoring.TEXT_FULL else 1), state
+
+
 def test_a_plain_apprenticeship_offer_is_knocked_out_without_the_model(monkeypatch):
     """The backstop under the model's judgement. It read "Als Auszubildender",
     "während der Ausbildung" and "Berufsschule", wrote "die Ausbildungsrolle
