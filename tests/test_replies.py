@@ -932,3 +932,70 @@ def test_each_english_opener_is_courtesy_and_nothing_more(opener):
     assert verdict is not None, opener
     assert verdict.classification == replies.CLASS_EINGANG
     assert verdict.confident is False, opener
+
+
+# --------------------------------------------------------------------------
+# The English rejection family must name its OBJECT — every body below was
+# produced by a review panel that broke the first version of these patterns.
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize("body", [
+    # an INVITATION to a further round — the worst possible misreading, since
+    # a confident Absage is rank 4 and locks the real invitation out behind it
+    "We have decided to move forward with another round of interviews and "
+    "would like to meet you.",
+    "We have decided to proceed with another stage: a technical interview "
+    "next week.",
+    # document requests
+    "We cannot proceed without a copy of your degree certificate.",
+    "We can't proceed until we receive your references.",
+    "We cannot proceed without your signed consent form.",
+    # reschedulings and ordinary bad news that is not about the application
+    "We regret to inform you that Tuesday's interview must move to Thursday.",
+    "We regret to inform you that the start date has slipped by a month.",
+    "Unfortunately I am not able to proceed with our meeting on Friday. "
+    "Could we find another slot?",
+    # hypotheticals and unrelated apologies
+    "If we are unable to proceed we will let you know next week.",
+    "Unfortunately our lead is away, so we will proceed on Monday.",
+    "Unfortunately the portal was down, so we could not consider it yesterday.",
+    "We are unable to proceed with the online form right now; our provider "
+    "is having an outage.",
+])
+def test_generic_english_bad_news_is_not_a_rejection(body):
+    """The first version bound a mood word to a bare verb — "unfortunately …
+    proceed", "we cannot … proceed" — with no object. Each of these filed a
+    CONFIDENT Absage, which closes the application, drops it out of the open
+    statuses, and blocks the true answer behind it on rank."""
+    verdict = replies.classify("Your application", body)
+    assert verdict is None or verdict.classification != replies.CLASS_ABSAGE, body
+
+
+@pytest.mark.parametrize("sentence", [
+    # the commonest English form: the object is the PERSON
+    "Unfortunately we can't move forward with you for this role.",
+    "For the moment, we are not able to move forward in the recruiting "
+    "process with you.",
+    # -ing forms, which a \\bproceed\\b could not reach
+    "Unfortunately, we will not be proceeding with your application at "
+    "this time.",
+    "We decided not to proceed with your application at this time.",
+    # object-anchored variants
+    "We have decided to pursue other candidates for this role.",
+    "You have not been selected for the next round.",
+    "The position has since been filled internally.",
+    "Sadly we cannot offer you a position at this time.",
+])
+def test_each_anchored_english_rejection_is_read(sentence):
+    verdict = replies.classify("Your application", sentence)
+    assert verdict is not None, sentence
+    assert verdict.classification == replies.CLASS_ABSAGE, sentence
+
+
+def test_a_positive_move_forward_is_not_a_rejection():
+    """`move forward with you` carries the rejection only under a negation —
+    on its own it is the good news."""
+    verdict = replies.classify(
+        "Your application",
+        "Good news! We would like to move forward with you and invite you to "
+        "a first interview.")
+    assert verdict is None or verdict.classification != replies.CLASS_ABSAGE
