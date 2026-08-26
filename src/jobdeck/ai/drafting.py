@@ -402,11 +402,22 @@ def _coverage_note(description: str) -> str:
     if state == TEXT_NONE:
         return (
             "\n\nNote: NO advert text is available — only the title, company "
-            "and location above. Do not describe requirements, tasks or "
-            "priorities as though the posting stated them, and do not open "
-            "with what they are looking for: nothing here says. Lead with the "
-            "candidate facts the role TITLE makes relevant, and write a "
-            "shorter letter rather than filling it with fit nobody stated."
+            "and location above. This OVERRIDES the parts of the format spec "
+            "that assume one, and nothing else: keep the stated length, the "
+            "paragraph count and every rule about attribution, and take the "
+            "substance from the ROLE TITLE and the candidate profile instead "
+            "of the advert.\n"
+            "- Do not describe requirements, tasks or priorities as though the "
+            "posting stated them, and do not open on why this role at this "
+            "company fits: nothing here says what they want. Open instead on "
+            "what the candidate brings that the role title makes relevant, "
+            "and let the middle paragraph rank his own facts by that title "
+            "rather than by requirements you cannot see.\n"
+            "- The e-mail's hook sentence must rest on the role title and the "
+            "candidate's own fact alone. If no honest hook is possible without "
+            "asserting something about the employer, leave the hook out and "
+            "keep the e-mail to its remaining sentences — an invented remark "
+            "about the company is the one thing that must never go out."
         )
     if state == TEXT_SNIPPET:
         return (

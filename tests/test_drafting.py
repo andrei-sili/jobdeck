@@ -150,6 +150,20 @@ def test_a_letter_written_from_no_advert_is_told_there_is_none():
         applicant_name="Erika Muster")
     assert "NO advert text is available" in content
     assert "Do not describe requirements, tasks or priorities" in content
+    # The format spec it has to live beside says "roughly half a page
+    # (150-220 words)", "3-4 paragraphs" and "open on why this role at this
+    # company fits". Two of those are impossible with no advert, so the note
+    # must say WHICH it overrides — an unresolved contradiction in a prompt is
+    # a coin flip, and the losing side is either the pretence coming back or a
+    # letter too short for the page it is printed on. A conspicuously short
+    # Anschreiben reads to German HR as disinterest.
+    assert "OVERRIDES the parts of the format spec" in content
+    assert "keep the stated length" in content
+    assert "shorter letter" not in content
+    # …and the e-mail's mandatory hook, which the spec ties to "the domain the
+    # posting foregrounds" — nothing an absent advert can supply.
+    assert "The e-mail's hook sentence must rest on the role title" in content
+    assert "leave the hook out" in content
     # after the fence, never inside it: a note the posting could forge would
     # be an instruction from untrusted text
     assert content.index("<<<POSTING END>>>") < content.index("NO advert text")
@@ -163,7 +177,9 @@ def test_a_letter_written_from_a_fragment_is_told_it_is_one():
         _job(description="Deine Mission - Du entwickelst das Herz unser..."),
         "my profile", refnr="K-17", applicant_name="Erika Muster")
     assert "SEARCH-RESULT SNIPPET" in content
+    assert "do not treat the missing part as a requirement" in content
     assert "NO advert text is available" not in content
+    assert content.index("<<<POSTING END>>>") < content.index("SEARCH-RESULT")
 
 
 def test_a_whole_advert_adds_no_note_and_the_prompt_ends_at_the_fence():
