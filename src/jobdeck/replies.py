@@ -155,6 +155,43 @@ _ABSAGE_PATTERNS = (
     r"(?:weg|werdegang|zukunft|lebensweg)\b[^.!?]{0,25}\balles gute\b",
     r"\b(?:senden|schicken|reichen) wir ihnen\b[^.!?]{0,60}\bzurück\b",
     r"\brücksendung (?:ihrer|der) (?:bewerbungs)?unterlagen\b",
+    # --- English -----------------------------------------------------------
+    # These rules were written for German mail, and English arrives anyway:
+    # an ATS rejection reading "we regret to inform you that we were unable
+    # to consider your application" hit NOTHING, so the receipt arm filed it
+    # as "your application arrived" — the opposite of what it said.
+    #
+    # Every one names the ACT **and its OBJECT**, the rule line 39 states and
+    # the German half keeps. The first version bound a mood word to a bare
+    # verb — "unfortunately … proceed", "we cannot … proceed" — and a bare
+    # "we cannot proceed" is a DOCUMENT REQUEST, "we regret to inform you" is
+    # as often a rescheduling, and "decided to move forward with another" is
+    # an INVITATION to another round. Each of those filed a confident rank-4
+    # Absage, which closes the application and locks the true answer out
+    # behind it.
+    r"\b(?:un(?:able|fortunately)|not able|cannot|can(?:'|\u2019)t|will not|"
+    r"won(?:'|\u2019)t|decided not|regret)\b[^.!?]{0,50}"
+    r"\b(?:consider(?:ing)?|proceed(?:ing)?|progress(?:ing)?|"
+    r"mov(?:e|ing) forward)\b[^.!?]{0,30}"
+    r"\b(?:your |the )?(?:application|candidacy|candidature|profile|cv)\b",
+    # "move forward with you" — the commonest English form, where the object
+    # is the PERSON and not the application. Bound to the negation, because
+    # "we would like to move forward with you" is the good news.
+    r"\b(?:un(?:able|fortunately)|not able|cannot|can(?:'|\u2019)t|will not|"
+    r"won(?:'|\u2019)t|decided not)\b[^.!?]{0,50}"
+    r"\b(?:mov(?:e|ing) forward|proceed(?:ing)?|progress(?:ing)?|continue)\b"
+    r"[^.!?]{0,40}\bwith you\b",
+    r"\b(?:decided|chosen|opted) to (?:move forward|proceed|continue|go ahead)"
+    r"[^.!?]{0,25}\bwith (?:other|another|a different|different)\b"
+    r"[^.!?]{0,25}\b(?:candidate|applicant|profile|person)",
+    r"\bpursue (?:other|another|different)\b[^.!?]{0,20}"
+    r"\b(?:candidate|applicant|direction)",
+    r"\byour application (?:was|has been) unsuccessful\b",
+    r"\b(?:have )?not been (?:selected|shortlisted|successful|chosen)\b",
+    r"\bthe (?:position|role|vacancy) has (?:since |already )?been filled\b",
+    # The English twin of "keine passende Stelle anbieten".
+    r"\b(?:cannot|can(?:'|\u2019)t|unable to|not able to)\b[^.!?]{0,25}"
+    r"\boffer you\b[^.!?]{0,30}\b(?:position|role|job|place|opportunity)\b",
 )
 
 _EINLADUNG_PATTERNS = (
@@ -185,6 +222,15 @@ _EINGANG_PATTERNS = (
     # two of the first five real receipts used, and one none of the earlier
     # patterns reached: it names the SENDING rather than the arrival.
     r"zusendung (?:ihrer|deiner) bewerbungsunterlagen",
+    # --- English -----------------------------------------------------------
+    # Only STATEMENTS, never the opener: "thank you for your application" is
+    # the English courtesy line and belongs below with its German twin, or
+    # every English rejection would read as a receipt again.
+    r"\byour application has (?:landed|arrived|been received)\b",
+    r"\bwe(?:'ve| have) received your application\b",
+    r"\b(?:is|are|will be)[^.!?]{0,20}\breview(?:ing)?\b[^.!?]{0,30}\byour application\b",
+    r"\breview(?:s|ing)? (?:your )?applications?\b[^.!?]{0,25}\bcarefully\b",
+    r"\bcarefully review(?:ing)?\b[^.!?]{0,25}\b(?:your )?applications?\b",
 )
 
 # The thank-you opener. EVERY German reply starts this way — a rejection, an
@@ -194,6 +240,15 @@ _EINGANG_PATTERNS = (
 _COURTESY_PATTERNS = (
     r"danken? (?:ihnen |dir )?für (?:ihre|deine) bewerbung",
     r"vielen dank für (?:ihre|deine) bewerbung",
+    # The English twin, and it opens a rejection exactly as often: every one
+    # of his English rejections begins "Thank you very much for your
+    # application" before turning it down.
+    # `thanks?` covers "Thank" and "Thanks" alike, so one pattern is the whole
+    # opener; a second spelled-out "thank you" variant was redundant and
+    # survived its own deletion, which is how it was found.
+    r"\bthanks?(?: you| so much| very much)?[^.!?]{0,30}"
+    r"\bfor (?:your )?(?:applying|application)\b",
+    r"\bfor taking the time to apply\b",
 )
 
 _FAMILIES = (

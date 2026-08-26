@@ -824,3 +824,178 @@ def test_the_employers_own_text_survives_the_strip():
         "Sehr geehrte Frau Muster,\n\nwir laden Sie ein.\n\n"
         "Am 09.06.2026 um 14:02 schrieb Andrei:\n> Hallo")
     assert "wir laden Sie ein." in kept and "Hallo" not in kept
+
+
+# --------------------------------------------------------------------------
+# English — these rules were written for German, and English arrives anyway
+# --------------------------------------------------------------------------
+def test_an_english_rejection_that_opens_with_thanks_is_still_a_rejection():
+    """The shape that mattered: every English rejection in his mailbox opens
+    "Thank you very much for your application" and turns it down two
+    sentences later. Read as a receipt, it recorded an arrival for a mail
+    that said the opposite."""
+    verdict = replies.classify(
+        "Your application as Backend Developer",
+        "Dear Andrei, Thank you very much once again for your application "
+        "and your interest in joining our team. As we received a large "
+        "number of applications, we regret to inform you that we were "
+        "unable to consider your application in the shortlist. We wish you "
+        "all the best.")
+    assert verdict is not None
+    assert verdict.classification == replies.CLASS_ABSAGE
+    assert verdict.confident is True
+
+
+def test_an_english_statement_that_the_application_is_being_read_is_a_receipt():
+    verdict = replies.classify(
+        "Thank you for your application",
+        "Hi Andrei, Thank you for applying with us. Our hiring team is "
+        "reviewing your application and will be in touch soon about the "
+        "next steps.")
+    assert verdict is not None
+    assert verdict.classification == replies.CLASS_EINGANG
+    assert verdict.confident is True
+
+
+def test_the_english_thank_you_alone_never_writes_a_status():
+    """The English twin of the German courtesy opener, and it must behave
+    the same way: it is what a rejection opens with too, so alone it is the
+    weakest evidence in the module."""
+    verdict = replies.classify(
+        "Thank you for your application",
+        "Hello! Thanks for your application and your interest in joining "
+        "us, we will reach out if your profile matches.")
+    assert verdict is not None
+    assert verdict.classification == replies.CLASS_EINGANG
+    assert verdict.confident is False
+
+
+def test_your_application_has_landed_is_a_receipt():
+    verdict = replies.classify(
+        "Back-End Engineer",
+        "Hi Andrei, Your application has landed. We appreciate the time and "
+        "effort you put into applying.")
+    assert verdict is not None
+    assert verdict.classification == replies.CLASS_EINGANG
+    assert verdict.confident is True
+
+
+@pytest.mark.parametrize("subject, body", [
+    ("Bitte bestätige Deine E-Mail-Adresse",
+     "Willkommen! Bitte bestätige Deine E-Mail-Adresse mit einem Klick auf "
+     "den Link. Du erhältst diese E-Mail, weil Du Dich angemeldet hast."),
+    ("Passwort erstellen",
+     "Hey Andrei! Willkommen! Bitte bestätige Deine E-Mail-Adresse um die "
+     "Registrierung abzuschließen. Aus Sicherheitsgründen läuft der Link ab."),
+])
+def test_a_platform_account_mail_says_nothing_about_an_application(subject, body):
+    """Both of these reached the receipt arm from a domain that could
+    authorize. Neither says an application arrived, so neither may be read
+    as one — and the arm that writes now requires the rules to SAY it."""
+    assert replies.classify(subject, body) is None
+
+
+@pytest.mark.parametrize("sentence, family", [
+    # Each phrase alone, because they overlap in real mail and a test that
+    # lets two of them cover one case leaves either deletable.
+    ("We regret to inform you that the role has been filled.",
+     replies.CLASS_ABSAGE),
+    ("Sadly we were unable to consider your application further.",
+     replies.CLASS_ABSAGE),
+    ("We will not be moving forward with your candidacy.",
+     replies.CLASS_ABSAGE),
+    ("We have decided to move forward with other candidates.",
+     replies.CLASS_ABSAGE),
+    ("Your application was unsuccessful on this occasion.",
+     replies.CLASS_ABSAGE),
+    ("We have received your application.", replies.CLASS_EINGANG),
+    ("Your application has been received.", replies.CLASS_EINGANG),
+    ("Our team is reviewing your application right now.",
+     replies.CLASS_EINGANG),
+    ("We review applications carefully and come back to everyone.",
+     replies.CLASS_EINGANG),
+])
+def test_each_english_phrase_carries_its_family_on_its_own(sentence, family):
+    verdict = replies.classify("Your application", sentence)
+    assert verdict is not None, sentence
+    assert verdict.classification == family, sentence
+
+
+@pytest.mark.parametrize("opener", [
+    "Thank you for your application.",
+    "Thanks for applying.",
+    "Thanks so much for taking the time to apply.",
+])
+def test_each_english_opener_is_courtesy_and_nothing_more(opener):
+    """Alone, each is a proposal — never a written status."""
+    verdict = replies.classify("Your application", opener)
+    assert verdict is not None, opener
+    assert verdict.classification == replies.CLASS_EINGANG
+    assert verdict.confident is False, opener
+
+
+# --------------------------------------------------------------------------
+# The English rejection family must name its OBJECT — every body below was
+# produced by a review panel that broke the first version of these patterns.
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize("body", [
+    # an INVITATION to a further round — the worst possible misreading, since
+    # a confident Absage is rank 4 and locks the real invitation out behind it
+    "We have decided to move forward with another round of interviews and "
+    "would like to meet you.",
+    "We have decided to proceed with another stage: a technical interview "
+    "next week.",
+    # document requests
+    "We cannot proceed without a copy of your degree certificate.",
+    "We can't proceed until we receive your references.",
+    "We cannot proceed without your signed consent form.",
+    # reschedulings and ordinary bad news that is not about the application
+    "We regret to inform you that Tuesday's interview must move to Thursday.",
+    "We regret to inform you that the start date has slipped by a month.",
+    "Unfortunately I am not able to proceed with our meeting on Friday. "
+    "Could we find another slot?",
+    # hypotheticals and unrelated apologies
+    "If we are unable to proceed we will let you know next week.",
+    "Unfortunately our lead is away, so we will proceed on Monday.",
+    "Unfortunately the portal was down, so we could not consider it yesterday.",
+    "We are unable to proceed with the online form right now; our provider "
+    "is having an outage.",
+])
+def test_generic_english_bad_news_is_not_a_rejection(body):
+    """The first version bound a mood word to a bare verb — "unfortunately …
+    proceed", "we cannot … proceed" — with no object. Each of these filed a
+    CONFIDENT Absage, which closes the application, drops it out of the open
+    statuses, and blocks the true answer behind it on rank."""
+    verdict = replies.classify("Your application", body)
+    assert verdict is None or verdict.classification != replies.CLASS_ABSAGE, body
+
+
+@pytest.mark.parametrize("sentence", [
+    # the commonest English form: the object is the PERSON
+    "Unfortunately we can't move forward with you for this role.",
+    "For the moment, we are not able to move forward in the recruiting "
+    "process with you.",
+    # -ing forms, which a \\bproceed\\b could not reach
+    "Unfortunately, we will not be proceeding with your application at "
+    "this time.",
+    "We decided not to proceed with your application at this time.",
+    # object-anchored variants
+    "We have decided to pursue other candidates for this role.",
+    "You have not been selected for the next round.",
+    "The position has since been filled internally.",
+    "Sadly we cannot offer you a position at this time.",
+])
+def test_each_anchored_english_rejection_is_read(sentence):
+    verdict = replies.classify("Your application", sentence)
+    assert verdict is not None, sentence
+    assert verdict.classification == replies.CLASS_ABSAGE, sentence
+
+
+def test_a_positive_move_forward_is_not_a_rejection():
+    """`move forward with you` carries the rejection only under a negation —
+    on its own it is the good news."""
+    verdict = replies.classify(
+        "Your application",
+        "Good news! We would like to move forward with you and invite you to "
+        "a first interview.")
+    assert verdict is None or verdict.classification != replies.CLASS_ABSAGE

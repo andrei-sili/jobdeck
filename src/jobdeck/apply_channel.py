@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 
 from jobdeck import netsafe
+from jobdeck.contact_resolve import registrable_domain
 
 # Channel vocabulary — a subset of the full cascade enum; the rest (RECRUITER,
 # IMPRESSUM_ONLY, PHONE_POSTAL) needs the web-lookup slice.
@@ -74,28 +75,45 @@ _ATS_RULES = tuple(
 )
 
 # Job boards / aggregators we ingest from or that host the apply themselves.
+# HOSTS, not patterns: the registry answers two different questions and only a
+# plain host can answer both — "is the page a user landed on a board's page?"
+# (a suffix match, below) and "does a board live at this registrable domain?"
+# (`is_board_domain`, which must see jobs.ams.at when handed ams.at).
 _BOARDS = (
-    ("Arbeitsagentur", r"(?:^|\.)arbeitsagentur\.de$"),
-    ("Jooble", r"(?:^|\.)jooble\.org$"),
+    ("Arbeitsagentur", ("arbeitsagentur.de",)),
+    ("Jooble", ("jooble.org",)),
     # Arbeitnow serves its UK listings from a second TLD whose pages, markup and
     # robots.txt are identical to the .com one (byte-identical robots, verified
     # 2026-08-06). Without it 13 of his postings read as the employer's own site
     # and earn a page inspection the board never needed.
-    ("Arbeitnow", r"(?:^|\.)arbeitnow\.(?:com|co\.uk)$"),
+    ("Arbeitnow", ("arbeitnow.com", "arbeitnow.co.uk")),
     # aggregators the Arbeitsagentur feed points at via externeURL — without an
     # entry they classify as company_site and earn a pointless page inspection
-    ("get in IT", r"(?:^|\.)get-in-it\.de$"),
-    ("GermanTechJobs", r"(?:^|\.)germantechjobs\.de$"),
-    ("Persy", r"(?:^|\.)persy\.jobs$"),
-    ("Deutschland-Stellenmarkt", r"(?:^|\.)deutschland-stellenmarkt\.de$"),
-    ("Studyflix", r"(?:^|\.)studyflix\.de$"),
-    ("StepStone", r"(?:^|\.)stepstone\.de$"),
-    ("Indeed", r"(?:^|\.)indeed\.(?:com|de)$"),
-    ("XING", r"(?:^|\.)xing\.com$"),
-    ("LinkedIn", r"(?:^|\.)linkedin\.com$"),
-    ("AMS", r"(?:^|\.)jobs\.ams\.at$"),
+    ("get in IT", ("get-in-it.de",)),
+    ("GermanTechJobs", ("germantechjobs.de",)),
+    ("Persy", ("persy.jobs",)),
+    ("Deutschland-Stellenmarkt", ("deutschland-stellenmarkt.de",)),
+    ("Studyflix", ("studyflix.de",)),
+    ("StepStone", ("stepstone.de",)),
+    ("Indeed", ("indeed.com", "indeed.de")),
+    ("XING", ("xing.com",)),
+    ("LinkedIn", ("linkedin.com",)),
+    ("AMS", ("jobs.ams.at",)),
 )
-_BOARD_RULES = tuple((label, re.compile(h, re.I)) for label, h in _BOARDS)
+_BOARD_RULES = tuple(
+    (label,
+     re.compile(r"(?:^|\.)(?:" + "|".join(re.escape(h) for h in hosts) + r")$",
+                re.I))
+    for label, hosts in _BOARDS
+)
+_BOARD_HOSTS = tuple(h for _label, hosts in _BOARDS for h in hosts)
+# The registrable name each board host sits under, so a caller holding
+# `ams.at` still recognises the board at `jobs.ams.at`. Derived through the
+# public-suffix list rather than by counting dots: `jobs.ams.at` ends with
+# `.at` too, and a bare public suffix must never read as a board.
+_BOARD_DOMAINS = frozenset(
+    d for d in (registrable_domain(h) for h in _BOARD_HOSTS) if d
+)
 
 
 # The board runs one site per market — its UK listings live on .co.uk, with the
@@ -189,6 +207,29 @@ def classify(url: str, contact_email: str = "") -> ApplyChannel:
         if host_re.search(host):
             return ApplyChannel(CHANNEL_BOARD, label)
     return ApplyChannel(CHANNEL_COMPANY_SITE)
+
+
+def is_board_domain(domain: str) -> bool:
+    """Does a job board or aggregator live at this registrable domain?
+
+    Asked of a DOMAIN a caller is about to trust, never of a page a user is
+    standing on — `classify` answers that. The two questions need different
+    matches: `classify` walks down from a host to its board, this walks UP
+    from a registrable domain to any board host beneath it, because the
+    caller has already collapsed `jobs.ams.at` to `ams.at` and a mail from
+    the agency arrives at the registrable name.
+
+    A board is not an employer. Whatever column handed us this domain, mail
+    from it may identify which posting is meant and may never authorize a
+    write to the ledger — see `services.replies._receipt_evidence`.
+    """
+    domain = (domain or "").strip().lower().rstrip(".")
+    if not domain:
+        return False
+    if domain in _BOARD_DOMAINS:
+        return True
+    return any(domain == host or domain.endswith("." + host)
+               for host in _BOARD_HOSTS)
 
 
 # Vendor fingerprints for PAGE CONTENT (form-action / script-src / iframe-src

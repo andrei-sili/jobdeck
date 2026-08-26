@@ -30,6 +30,7 @@ from jobdeck.constants import (
     CLASSIFICATION_TO_STATUS,
     EMAIL_INBOUND,
     EMAIL_INBOUND_IGNORED,
+    FORM_OPENED_UNKNOWN,
     OFFENE_STATUS,
     STATUS_RANK,
 )
@@ -429,11 +430,14 @@ def _receipt_match(con, meta: dict, from_addr: str, subject: str) -> dict | None
     if len(identified) == 1:
         job, evidence, authorizing = identified[0]
         authenticated = replies.sender_authenticated(meta["headers"])
-        strong = authorizing and authenticated
+        follows = _follows_the_opening(job, meta)
+        strong = authorizing and authenticated and follows
         if not authorizing:
             evidence += " · Absender gehört nicht zur Anzeige"
         elif not authenticated:
             evidence += " · Absender nicht verifiziert"
+        elif not follows:
+            evidence += " · älter als die Bewerbung"
         return {"kind": "receipt", "job": job, "strong": strong,
                 "evidence": evidence}
     if len(identified) > 1:
@@ -447,6 +451,29 @@ def _receipt_match(con, meta: dict, from_addr: str, subject: str) -> dict | None
     return None
 
 
+def _follows_the_opening(job, meta: dict) -> bool:
+    """Could this mail be the receipt for THIS form opening?
+
+    A confirmation cannot predate the form it confirms. The window that
+    selects candidates measures the POSTING's age, so a mail from months
+    back could confirm a form opened yesterday — and every re-read of the
+    mailbox walks months of it past this arm. That is not hypothetical: a
+    routine notification, six weeks older than the application it landed
+    on, filed itself as an Eingangsbestätigung and moved a live status.
+
+    `form_opened_at` is written once and never rewritten, so no legitimate
+    receipt can sit before it. Both stamps are local naive ISO and compare
+    directly; a mail Gmail gives no date for cannot be shown to follow
+    anything and fails closed, as does the `unbekannt` sentinel a pre-v10
+    row carries instead of a moment.
+    """
+    opened = str(job["form_opened_at"] or "")
+    if not opened or opened == FORM_OPENED_UNKNOWN:
+        return False
+    arrived = _iso_from_ms(meta["internal_date_ms"])
+    return bool(arrived) and arrived >= opened
+
+
 def _receipt_evidence(job, sender_domain: str, text: str) -> tuple[str, bool]:
     """(what identified this posting, may it AUTHORIZE a ledger write).
 
@@ -456,28 +483,31 @@ def _receipt_evidence(job, sender_domain: str, text: str) -> tuple[str, bool]:
     sent it. Refnr therefore corroborates an aligned sender and otherwise
     yields a proposal for his click.
 
-    `jobs.url` is deliberately NOT a target: that is the board's own page
-    (arbeitnow.com, arbeitsagentur.de), so accepting it would let any mail
-    from a job board record an application at the employer.
+    No domain a job board lives at can be a target, whichever column holds
+    it — `jobs.url` is the board's own page, and `apply_url` is the board's
+    link on any posting found through one. A board writes to everybody who
+    ever touched it, so letting one authorize would let a newsletter or a
+    notification record an application at an employer that never wrote.
     """
     refnr = resolve_refnr(job)
     by_refnr = replies.refnr_in_text(refnr, text, "")
     if sender_domain:
-        targets = set()
-        # `apply_url` is the EMPLOYER's application address only when the
-        # channel says so. On a board_apply posting it is the board's own
-        # link (de.jooble.org/away/…), so accepting it would let the board
-        # authorize: a Jooble job newsletter really did arrive, match a
-        # posting by that domain, and move an application to "In
-        # Bearbeitung" on the first real read of his mailbox.
-        if str(job["apply_channel"] or "") != apply_channel.CHANNEL_BOARD:
-            domain = registrable_domain(str(job["apply_url"] or ""))
-            if domain:
-                targets.add(domain)
-        contact_domain = registrable_domain(
-            str(job["contact_email"] or "").rpartition("@")[2])
-        if contact_domain:
-            targets.add(contact_domain)
+        # A board is not an employer, so no domain a board lives at may
+        # authorize — whichever column offered it. Asking the row's CHANNEL
+        # instead was the hole: `apply_channel` is a derivation that MOVES,
+        # and entering a contact address by hand moves it to direct_email
+        # while `apply_url` keeps the board link the posting was found by.
+        # A board's own mail then aligned with the posting and filed itself
+        # as an Eingangsbestätigung, which writes a status.
+        targets = {
+            domain
+            for domain in (
+                registrable_domain(str(job["apply_url"] or "")),
+                registrable_domain(
+                    str(job["contact_email"] or "").rpartition("@")[2]),
+            )
+            if domain and not apply_channel.is_board_domain(domain)
+        }
         if sender_domain in targets:
             evidence = f"Absender {sender_domain}"
             return (f"{evidence} · Refnr {refnr}" if by_refnr else evidence), True
@@ -670,7 +700,7 @@ def _handle_receipt(match: dict, meta: dict, from_addr: str, subject: str,
         "body_text": body,
         "job_id": int(job["id"]),
         "matched_by": MATCHED_RECEIPT,
-        "classification": said or "eingang",
+        "classification": said,
         "classified_by": "rules",
         # What identified this posting, so a proposal can say why it is only
         # a proposal instead of leaving him to guess.
@@ -680,6 +710,29 @@ def _handle_receipt(match: dict, meta: dict, from_addr: str, subject: str,
         # An answer, not a receipt. There is no application in the ledger to
         # carry it yet, so recording one AND filing its outcome is two
         # decisions at once — he makes them with one press.
+        _propose(row, counters, meta)
+        return
+    if not said or not verdict.confident:
+        # THE RULES READ NOTHING — or read only the polite opener, which
+        # `replies.py` calls the weakest evidence in the module and says
+        # "must never write a status". This arm never asked, so the opener
+        # alone recorded an application; with the English opener added that
+        # covers most rejections whose wording no absage pattern reaches.
+        #
+        # The original hole: the arm below writes a ledger row.
+        # Defaulting that to "eingang" made "we recognised none of this"
+        # mean "your application arrived", which is the opposite of what
+        # this function's own contract says it decides on.
+        #
+        # It fired: a job platform's account-confirmation mail ("bitte
+        # bestätige deine E-Mail-Adresse"), sent from the very domain the
+        # posting applies through, was strong enough to authorize and empty
+        # enough to say nothing — so it recorded an application to an
+        # employer nothing had been sent to, moved it to "In Bearbeitung",
+        # and spent that company's one slot against the duplicate gate.
+        # Screening that one phrase would have left every other unrecognised
+        # platform mail — password resets, welcome mail, alerts — doing the
+        # same thing.
         _propose(row, counters, meta)
         return
     if not match["strong"]:

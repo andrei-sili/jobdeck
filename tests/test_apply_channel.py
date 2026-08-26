@@ -212,3 +212,72 @@ def test_a_dot_segment_cannot_smuggle_the_apply_route_past_the_screen(url):
     assert httpx.URL(url).path.endswith("/apply"), "premise: this is what is sent"
     assert ac.is_robots_disallowed(url)
     assert not ac.is_arbeitnow_job(url)
+
+
+# --------------------------------------------------------------------------
+# is_board_domain — a job board may never authorize a write to the ledger
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize("domain", [
+    "arbeitsagentur.de",
+    "jooble.org",
+    "arbeitnow.com",
+    "arbeitnow.co.uk",
+    "stepstone.de",
+    "indeed.de",
+    "indeed.com",
+    "xing.com",
+    "linkedin.com",
+    "persy.jobs",
+])
+def test_a_board_registrable_domain_is_recognised(domain):
+    assert ac.is_board_domain(domain)
+
+
+def test_the_registrable_name_above_a_board_host_counts_as_the_board():
+    """The AMS board is registered at `jobs.ams.at`, but every caller has
+    already collapsed a sender address to its registrable domain — so the
+    agency writes from `ams.at` and the guard has to see it there."""
+    assert ac.is_board_domain("jobs.ams.at")
+    assert ac.is_board_domain("ams.at")
+
+
+@pytest.mark.parametrize("suffix", ["at", "de", "com", "co.uk", "jobs"])
+def test_a_bare_public_suffix_is_not_a_board(suffix):
+    """Walking up from `jobs.ams.at` stops at the registrable name. Counting
+    dots instead would make `.at` — and therefore every Austrian employer's
+    domain compared against it — read as the board."""
+    assert not ac.is_board_domain(suffix)
+
+
+@pytest.mark.parametrize("domain", [
+    "example.com",
+    "kranichbau-example.de",
+    "my-stepstone.de",          # a longer name that merely ends the same way
+    "stepstone.de.attacker.net",  # the board's name in a label someone else owns
+    "arbeitsagentur.de.evil.com",
+    "",
+    "   ",
+])
+def test_an_employer_domain_is_not_a_board(domain):
+    assert not ac.is_board_domain(domain)
+
+
+def test_the_domain_question_is_asked_case_and_dot_insensitively():
+    """A From header spells the host however the sender felt like."""
+    assert ac.is_board_domain("ARBEITSAGENTUR.DE")
+    assert ac.is_board_domain("Arbeitsagentur.de.")
+
+
+def test_every_registered_board_answers_yes_for_its_own_domain():
+    """The registry is data and grows; a new board must be protected the day
+    it is added, without anyone remembering to extend a second list."""
+    from jobdeck.contact_resolve import registrable_domain
+    for _label, hosts in ac._BOARDS:
+        for host in hosts:
+            assert ac.is_board_domain(host), host
+            assert ac.is_board_domain(registrable_domain(host)), host
+
+
+def test_a_subdomain_of_a_board_is_the_board():
+    assert ac.is_board_domain("de.jooble.org")
+    assert ac.is_board_domain("www.arbeitnow.com")

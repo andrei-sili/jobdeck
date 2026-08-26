@@ -9,14 +9,16 @@ this file pins the decisions.
 """
 
 import asyncio
+import datetime
 import email.message
 import email.policy
 import sqlite3
 
 import pytest
 
-from jobdeck import db, gmail
+from jobdeck import db, gmail, replies
 from jobdeck.ai import llm
+from jobdeck.constants import FORM_OPENED_UNKNOWN
 from jobdeck.services import replies as service
 
 ABSAGE_BODY = """Sehr geehrter Herr Beispiel,
@@ -61,6 +63,16 @@ def _raw(body: str) -> bytes:
     return message.as_bytes()
 
 
+def _now_ms() -> int:
+    return int(datetime.datetime.now().timestamp() * 1000)
+
+
+def _ms(stamp: str) -> int:
+    """A local naive ISO stamp as Gmail's internalDate — the same frame the
+    service reads it back in (`_iso_from_ms` uses fromtimestamp)."""
+    return int(datetime.datetime.fromisoformat(stamp).timestamp() * 1000)
+
+
 class FakeInbox:
     """Answers the gmail.py functions the service calls."""
 
@@ -77,7 +89,14 @@ class FakeInbox:
             from_header: str = "HR <hr@firma-beispiel.de>",
             subject: str = "Ihre Bewerbung", thread: str = "",
             auth: str = AUTH_PASS, size: int | None = None,
-            headers: dict | None = None) -> None:
+            headers: dict | None = None,
+            internal_date_ms: int | None = None) -> None:
+        """A mail arrives NOW unless a test says otherwise.
+
+        The default used to be a fixed moment in the past, which quietly
+        made every receipt fixture older than the form it confirmed — the
+        exact shape `_follows_the_opening` refuses. A stub that cannot
+        happen cannot guard anything."""
         raw = _raw(body)
         header_map = {"from": from_header, "subject": subject}
         if auth:
@@ -89,7 +108,8 @@ class FakeInbox:
                 "id": message_id,
                 "thread_id": thread or f"t-{message_id}",
                 "snippet": " ".join(body.split())[:100],
-                "internal_date_ms": 1755400000000,
+                "internal_date_ms": (
+                    _now_ms() if internal_date_ms is None else internal_date_ms),
                 "size_estimate": size if size is not None else len(raw),
                 "label_ids": ["INBOX"],
                 "headers": header_map,
@@ -1277,3 +1297,394 @@ def test_adopting_a_receipt_still_raises_an_open_application(inbox, con):
     assert service.adopt_receipt(row_id)["ok"] is True
 
     assert db.get_bewerbung(con, bewerbung_id)["status"] == "In Bearbeitung"
+
+
+# --------------------------------------------------------------------------
+# a board may never authorize, whatever the channel column says today
+# --------------------------------------------------------------------------
+async def test_a_board_mail_cannot_confirm_after_a_contact_address_moved_the_channel(
+        inbox, con):
+    """The hole the first board guard left open, and it fired for real.
+
+    The guard asked the row's CHANNEL. Entering a contact address by hand —
+    the ordinary way a posting found on a board becomes sendable — moves
+    that column to direct_email, while `apply_url` still holds the board
+    link the posting arrived by. The board's own domain then aligned with
+    the posting and a routine notification from it wrote a status onto a
+    live application."""
+    job_id = _strip_job(
+        con,
+        apply_url="https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1",
+        apply_channel="direct_email",
+        contact_email="info@firma-beispiel.de")
+    inbox.add("m-1", from_header="Terminservice <termin@arbeitsagentur.de>",
+              subject="Stornierung Ihres Termins",
+              body="Ihr Termin wurde storniert. Ihre Bewerbung ist "
+                   "eingegangen.",
+              auth=("mx.google.com; spf=pass smtp.mailfrom=arbeitsagentur.de; "
+                    "dmarc=pass header.from=arbeitsagentur.de"))
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 0
+    assert db.get_job(con, job_id)["bewerbung_id"] is None
+    assert _inbound_rows(con) == []
+
+
+async def test_a_board_mail_cannot_confirm_on_an_ats_channel_posting(inbox, con):
+    """The same shape as above and the commonest one: the channel resolves to
+    an ATS form while `apply_url` is still the board's link."""
+    job_id = _strip_job(
+        con, apply_url="https://www.arbeitnow.com/jobs/companies/x/y",
+        apply_channel="ats_form")
+    inbox.add("m-1", from_header="Arbeitnow <alerts@arbeitnow.com>",
+              subject="Eingangsbestätigung",
+              body="Ihre Bewerbung ist eingegangen.",
+              auth=("mx.google.com; spf=pass smtp.mailfrom=arbeitnow.com; "
+                    "dmarc=pass header.from=arbeitnow.com"))
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 0
+    assert db.get_job(con, job_id)["bewerbung_id"] is None
+
+
+async def test_a_board_domain_in_the_contact_column_cannot_authorize(inbox, con):
+    """The other column reaches the same target set. He types this field by
+    hand, so nothing stops a board address from landing in it."""
+    job_id = _strip_job(con, apply_url="",
+                        apply_channel="direct_email",
+                        contact_email="vermittlung@arbeitsagentur.de")
+    inbox.add("m-1", from_header="Agentur <vermittlung@arbeitsagentur.de>",
+              subject="Eingangsbestätigung",
+              body="Ihre Bewerbung ist eingegangen.",
+              auth=("mx.google.com; spf=pass smtp.mailfrom=arbeitsagentur.de; "
+                    "dmarc=pass header.from=arbeitsagentur.de"))
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 0
+    assert db.get_job(con, job_id)["bewerbung_id"] is None
+
+
+async def test_a_board_mail_quoting_the_refnr_becomes_a_proposal(inbox, con):
+    """The designed degradation, and the reason the guard is on AUTHORIZATION
+    rather than on identification: the Refnr is printed in the public advert,
+    so quoting it still says WHICH posting is meant. That is worth showing
+    him — it just may not write."""
+    job_id = _strip_job(
+        con, refnr="10000-1177449Z",
+        apply_url="https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1",
+        apply_channel="direct_email",
+        contact_email="info@firma-beispiel.de")
+    inbox.add("m-1", from_header="Agentur <noreply@arbeitsagentur.de>",
+              subject="Eingangsbestätigung Referenz 10000-1177449Z",
+              body="Ihre Bewerbung ist eingegangen.",
+              auth=("mx.google.com; spf=pass smtp.mailfrom=arbeitsagentur.de; "
+                    "dmarc=pass header.from=arbeitsagentur.de"))
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 0
+    assert outcome["review"] == 1
+    assert db.get_job(con, job_id)["bewerbung_id"] is None
+    row = _inbound_rows(con)[0]
+    assert row["needs_review"] == 1
+    assert row["job_id"] == job_id
+    # it says WHY it is only a proposal, so he is not left guessing
+    assert row["matched_note"] == ("Refnr 10000-1177449Z"
+                                  " · Absender gehört nicht zur Anzeige")
+
+
+async def test_the_employers_address_still_authorizes_on_a_board_found_posting(
+        inbox, con):
+    """The guard must cost nothing on the row it protects: the SAME posting,
+    board link and all, still records from the employer's own domain."""
+    job_id = _strip_job(
+        con,
+        apply_url="https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1",
+        apply_channel="direct_email",
+        contact_email="info@firma-beispiel.de")
+    inbox.add("m-1", from_header="Firma <info@firma-beispiel.de>",
+              subject="Eingangsbestätigung",
+              body="Ihre Bewerbung ist eingegangen.",
+              auth=("mx.google.com; spf=pass smtp.mailfrom=firma-beispiel.de; "
+                    "dmarc=pass header.from=firma-beispiel.de"))
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 1
+    job = db.get_job(con, job_id)
+    assert job["bewerbung_id"] is not None
+    assert db.get_bewerbung(con, job["bewerbung_id"])["status"] == "In Bearbeitung"
+
+
+async def test_a_stale_channel_column_does_not_decide_who_may_authorize(
+        inbox, con):
+    """The rule reads the URL, not the column, and that cuts both ways.
+
+    A row can be entered by hand with a channel that disagrees with its own
+    apply_url. Judging by the column would refuse the employer's own
+    e-recruiting host here — and it is exactly the column's mutability that
+    let a board through in the first place, so the fact wins."""
+    job_id = _strip_job(
+        con, apply_url="https://firma.mein-beispiel-portal.de/stelle-1",
+        apply_channel="board_apply")   # stale: the URL is no board
+    inbox.add("m-1", from_header="Portal <no-reply@mein-beispiel-portal.de>",
+              subject="Eingangsbestätigung",
+              body="Ihre Bewerbung ist eingegangen.",
+              auth=("mx.google.com; "
+                    "spf=pass smtp.mailfrom=mein-beispiel-portal.de; "
+                    "dmarc=pass header.from=mein-beispiel-portal.de"))
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 1
+    assert db.get_job(con, job_id)["bewerbung_id"] is not None
+
+
+# --------------------------------------------------------------------------
+# a receipt cannot predate the form opening it confirms
+# --------------------------------------------------------------------------
+def _opened_ago(con, job_id, hours: float) -> str:
+    """Stamp the form opening `hours` back and hand the stamp over.
+
+    Relative to the clock on purpose: the candidate window is 72 hours
+    wide, so a fixed date would fall out of it and the test would pass by
+    never reaching the guard at all."""
+    stamp = (datetime.datetime.now() - datetime.timedelta(hours=hours)
+             ).isoformat(timespec="seconds")
+    con.execute("UPDATE jobs SET form_opened_at=? WHERE id=?", (stamp, job_id))
+    con.commit()
+    return stamp
+
+
+async def test_a_mail_older_than_the_form_opening_cannot_confirm_it(inbox, con):
+    """The candidate window measures the POSTING's age, never the mail's, and
+    every re-read of the mailbox walks months of old mail past this arm. A
+    notification from before he opened the form is not its receipt."""
+    job_id = _strip_job(con, apply_url="https://bewerbung.firma-beispiel.de/7")
+    opened = _opened_ago(con, job_id, 2)
+    inbox.add("m-1", from_header="Firma <karriere@firma-beispiel.de>",
+              subject="Eingangsbestätigung",
+              body="Ihre Bewerbung ist eingegangen.",
+              internal_date_ms=_ms(opened) - 1000)
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 0
+    assert outcome["review"] == 1
+    assert db.get_job(con, job_id)["bewerbung_id"] is None
+    row = _inbound_rows(con)[0]
+    assert row["needs_review"] == 1
+    assert row["matched_note"].endswith("· älter als die Bewerbung")
+
+
+async def test_a_receipt_that_follows_the_opening_still_records(inbox, con):
+    """The guard must not cost the feature: same posting, same sender, a
+    mail dated AFTER he opened the form."""
+    job_id = _strip_job(con, apply_url="https://bewerbung.firma-beispiel.de/7")
+    opened = _opened_ago(con, job_id, 2)
+    inbox.add("m-1", from_header="Firma <karriere@firma-beispiel.de>",
+              subject="Eingangsbestätigung",
+              body="Ihre Bewerbung ist eingegangen.",
+              internal_date_ms=_ms(opened) + 1000)
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 1
+    assert db.get_job(con, job_id)["bewerbung_id"] is not None
+
+
+async def test_a_mail_stamped_at_the_very_moment_of_opening_still_records(
+        inbox, con):
+    """The boundary is inclusive on purpose: both stamps have one-second
+    resolution, so an ATS answering inside the same second is a real
+    receipt, not a mail from the past."""
+    job_id = _strip_job(con, apply_url="https://bewerbung.firma-beispiel.de/7")
+    opened = _opened_ago(con, job_id, 2)
+    inbox.add("m-1", from_header="Firma <karriere@firma-beispiel.de>",
+              subject="Eingangsbestätigung",
+              body="Ihre Bewerbung ist eingegangen.",
+              internal_date_ms=_ms(opened))
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 1
+
+
+async def test_an_undated_mail_cannot_confirm_anything(inbox, con):
+    """Gmail does hand back messages with no internalDate — his log holds
+    such rows. Nothing can be shown to follow the opening, so it waits."""
+    job_id = _strip_job(con, apply_url="https://bewerbung.firma-beispiel.de/7")
+    inbox.add("m-1", from_header="Firma <karriere@firma-beispiel.de>",
+              subject="Eingangsbestätigung",
+              body="Ihre Bewerbung ist eingegangen.",
+              internal_date_ms=0)
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 0
+    assert outcome["review"] == 1
+    assert db.get_job(con, job_id)["bewerbung_id"] is None
+
+
+# --------------------------------------------------------------------------
+# _follows_the_opening — every arm, including the one ingestion cannot reach
+# --------------------------------------------------------------------------
+def _meta_at(stamp: str | None) -> dict:
+    return {"internal_date_ms": 0 if stamp is None else _ms(stamp)}
+
+
+@pytest.mark.parametrize("opened, arrived, expected", [
+    ("2026-08-19T15:00:00", "2026-08-19T15:00:01", True),   # after
+    ("2026-08-19T15:00:00", "2026-08-19T15:00:00", True),   # same second
+    ("2026-08-19T15:00:00", "2026-08-19T14:59:59", False),  # one second before
+    ("2026-08-19T15:00:00", "2026-07-07T11:26:40", False),  # weeks before
+    ("2026-08-19T15:00:00", "2027-01-01T00:00:00", True),   # long after
+])
+def test_a_receipt_must_not_predate_the_opening(opened, arrived, expected):
+    job = {"form_opened_at": opened}
+    assert service._follows_the_opening(job, _meta_at(arrived)) is expected
+
+
+def test_a_mail_without_a_date_follows_nothing():
+    """Gmail does return messages with no internalDate. Nothing can be shown,
+    so nothing is authorized."""
+    job = {"form_opened_at": "2026-08-19T15:00:00"}
+    assert service._follows_the_opening(job, _meta_at(None)) is False
+
+
+@pytest.mark.parametrize("opened", ["", FORM_OPENED_UNKNOWN])
+def test_a_posting_with_no_real_opening_moment_authorizes_nothing(opened):
+    """`unbekannt` is what a pre-v10 row carries instead of a moment. The
+    candidate query filters those out today, so this arm is unreachable from
+    ingestion — it is asserted here because the predicate is the thing that
+    states the rule, and a later caller must not have to rediscover it."""
+    job = {"form_opened_at": opened}
+    assert service._follows_the_opening(job, _meta_at("2026-08-19T15:00:00")) \
+        is False
+
+
+def test_the_explicit_refusals_do_not_rest_on_how_a_stamp_sorts():
+    """Two checks in `_follows_the_opening` are EQUIVALENT MUTATIONS today —
+    verified, not assumed — and are kept deliberately.
+
+    Deleting `bool(arrived)` or the `FORM_OPENED_UNKNOWN` comparison leaves
+    the suite green, because an empty stamp sorts before every ISO date and
+    ASCII digits sort before letters. Both are accidents of the two strings
+    we happen to use, not properties of "no date". Respell the sentinel as
+    `-` or `0000-unknown` — either an ordinary choice — and the accident
+    flips to True, which authorizes a write on a posting that never
+    recorded an opening.
+    """
+    iso = "2026-08-19T15:00:00"
+    # today's accident, and how ordinarily it flips
+    assert (iso >= FORM_OPENED_UNKNOWN) is False
+    assert (iso >= "0000-unknown") is True
+    assert ("" >= iso) is False
+    # what the explicit checks state regardless of either
+    assert service._follows_the_opening({"form_opened_at": ""},
+                                        _meta_at(iso)) is False
+    assert service._follows_the_opening({"form_opened_at": FORM_OPENED_UNKNOWN},
+                                        _meta_at(iso)) is False
+    assert service._follows_the_opening({"form_opened_at": iso},
+                                        _meta_at(None)) is False
+
+
+# --------------------------------------------------------------------------
+# a receipt must be SAID — "we read nothing" is not "your application arrived"
+# --------------------------------------------------------------------------
+async def test_a_mail_the_rules_cannot_read_never_records_an_application(
+        inbox, con):
+    """The defect that fired on his real mailbox, in the shape it fired in.
+
+    A job platform's own account mail arrives from the very domain the
+    posting applies through, so it is strong enough to authorize — and it
+    says nothing the German rules recognise. The classification defaulted to
+    'eingang', so "we recognised none of this" was filed as "your
+    application arrived": an application was recorded to an employer nothing
+    had been sent to, and that company's one slot was spent."""
+    job_id = _strip_job(
+        con, apply_url="https://portal-beispiel.de/stellen/7",
+        apply_channel="ats_form")
+    inbox.add("m-1", from_header="Portal <mail@info.portal-beispiel.de>",
+              subject="Bitte bestätige Deine E-Mail-Adresse",
+              body="Willkommen! Bitte bestätige Deine E-Mail-Adresse mit "
+                   "einem Klick auf den Link. Viel Glück bei Deiner "
+                   "Bewerbung! Du erhältst diese E-Mail, weil Du Dich "
+                   "angemeldet hast.",
+              auth=("mx.google.com; "
+                    "spf=pass smtp.mailfrom=portal-beispiel.de; "
+                    "dmarc=pass header.from=portal-beispiel.de"))
+
+    outcome = await service.ingest_replies()
+
+    # premise: the rules really do read nothing here, so this test is about
+    # what the arm does with silence rather than about a missing pattern
+    assert replies.classify("Bitte bestätige Deine E-Mail-Adresse",
+                            "Willkommen! Bitte bestätige Deine "
+                            "E-Mail-Adresse.") is None
+    assert outcome["receipts"] == 0
+    assert outcome["review"] == 1
+    assert db.get_job(con, job_id)["bewerbung_id"] is None
+    assert db.get_job(con, job_id)["status"] == "new"
+    row = _inbound_rows(con)[0]
+    assert row["needs_review"] == 1
+    # and it does not CLAIM to be a receipt on the screen either
+    assert row["classification"] == ""
+
+
+async def test_a_stated_receipt_from_the_same_sender_still_records(inbox, con):
+    """The guard must not cost the feature: the same domain, the same
+    posting, a mail that actually says the application arrived."""
+    job_id = _strip_job(
+        con, apply_url="https://portal-beispiel.de/stellen/7",
+        apply_channel="ats_form")
+    inbox.add("m-1", from_header="Portal <mail@info.portal-beispiel.de>",
+              subject="Eingangsbestätigung",
+              body="Ihre Bewerbung ist eingegangen.",
+              auth=("mx.google.com; "
+                    "spf=pass smtp.mailfrom=portal-beispiel.de; "
+                    "dmarc=pass header.from=portal-beispiel.de"))
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 1
+    job = db.get_job(con, job_id)
+    assert job["bewerbung_id"] is not None
+    assert db.get_bewerbung(con, job["bewerbung_id"])["status"] == "In Bearbeitung"
+    assert _inbound_rows(con)[0]["classification"] == "eingang"
+
+
+async def test_the_polite_opener_alone_records_no_application(inbox, con):
+    """`replies.py` calls the courtesy opener the weakest evidence in the
+    module and says it must never write a status — but this arm asked only
+    WHAT family the rules read, never how sure they were, so the opener
+    alone recorded an application.
+
+    The rule-level tests carry that invariant in their NAMES and assert only
+    `confident is False`; the write went unchecked. This asserts the write."""
+    job_id = _strip_job(
+        con, apply_url="https://portal-beispiel.de/stellen/7",
+        apply_channel="ats_form")
+    inbox.add("m-1", from_header="Portal <mail@info.portal-beispiel.de>",
+              subject="Thank you for your application",
+              body="Hello! Thanks for your application and your interest in "
+                   "joining us, we will reach out if your profile matches.",
+              auth=("mx.google.com; spf=pass smtp.mailfrom=portal-beispiel.de; "
+                    "dmarc=pass header.from=portal-beispiel.de"))
+
+    outcome = await service.ingest_replies()
+
+    # premise: the rules DO read it, but only as courtesy
+    verdict = replies.classify(
+        "Thank you for your application",
+        "Hello! Thanks for your application and your interest in joining us.")
+    assert verdict is not None and verdict.confident is False
+
+    assert outcome["receipts"] == 0
+    assert outcome["review"] == 1
+    assert db.get_job(con, job_id)["bewerbung_id"] is None
+    assert db.get_job(con, job_id)["status"] == "new"
+    assert _inbound_rows(con)[0]["needs_review"] == 1
