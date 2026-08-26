@@ -700,7 +700,7 @@ def _handle_receipt(match: dict, meta: dict, from_addr: str, subject: str,
         "body_text": body,
         "job_id": int(job["id"]),
         "matched_by": MATCHED_RECEIPT,
-        "classification": said or "eingang",
+        "classification": said,
         "classified_by": "rules",
         # What identified this posting, so a proposal can say why it is only
         # a proposal instead of leaving him to guess.
@@ -710,6 +710,23 @@ def _handle_receipt(match: dict, meta: dict, from_addr: str, subject: str,
         # An answer, not a receipt. There is no application in the ledger to
         # carry it yet, so recording one AND filing its outcome is two
         # decisions at once — he makes them with one press.
+        _propose(row, counters, meta)
+        return
+    if not said:
+        # THE RULES READ NOTHING, and the arm below writes a ledger row.
+        # Defaulting that to "eingang" made "we recognised none of this"
+        # mean "your application arrived", which is the opposite of what
+        # this function's own contract says it decides on.
+        #
+        # It fired: a job platform's account-confirmation mail ("bitte
+        # bestätige deine E-Mail-Adresse"), sent from the very domain the
+        # posting applies through, was strong enough to authorize and empty
+        # enough to say nothing — so it recorded an application to an
+        # employer nothing had been sent to, moved it to "In Bearbeitung",
+        # and spent that company's one slot against the duplicate gate.
+        # Screening that one phrase would have left every other unrecognised
+        # platform mail — password resets, welcome mail, alerts — doing the
+        # same thing.
         _propose(row, counters, meta)
         return
     if not match["strong"]:

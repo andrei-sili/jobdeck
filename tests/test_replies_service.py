@@ -16,7 +16,7 @@ import sqlite3
 
 import pytest
 
-from jobdeck import db, gmail
+from jobdeck import db, gmail, replies
 from jobdeck.ai import llm
 from jobdeck.constants import FORM_OPENED_UNKNOWN
 from jobdeck.services import replies as service
@@ -1590,3 +1590,68 @@ def test_the_explicit_refusals_do_not_rest_on_how_a_stamp_sorts():
                                         _meta_at(iso)) is False
     assert service._follows_the_opening({"form_opened_at": iso},
                                         _meta_at(None)) is False
+
+
+# --------------------------------------------------------------------------
+# a receipt must be SAID — "we read nothing" is not "your application arrived"
+# --------------------------------------------------------------------------
+async def test_a_mail_the_rules_cannot_read_never_records_an_application(
+        inbox, con):
+    """The defect that fired on his real mailbox, in the shape it fired in.
+
+    A job platform's own account mail arrives from the very domain the
+    posting applies through, so it is strong enough to authorize — and it
+    says nothing the German rules recognise. The classification defaulted to
+    'eingang', so "we recognised none of this" was filed as "your
+    application arrived": an application was recorded to an employer nothing
+    had been sent to, and that company's one slot was spent."""
+    job_id = _strip_job(
+        con, apply_url="https://portal-beispiel.de/stellen/7",
+        apply_channel="ats_form")
+    inbox.add("m-1", from_header="Portal <mail@info.portal-beispiel.de>",
+              subject="Bitte bestätige Deine E-Mail-Adresse",
+              body="Willkommen! Bitte bestätige Deine E-Mail-Adresse mit "
+                   "einem Klick auf den Link. Viel Glück bei Deiner "
+                   "Bewerbung! Du erhältst diese E-Mail, weil Du Dich "
+                   "angemeldet hast.",
+              auth=("mx.google.com; "
+                    "spf=pass smtp.mailfrom=portal-beispiel.de; "
+                    "dmarc=pass header.from=portal-beispiel.de"))
+
+    outcome = await service.ingest_replies()
+
+    # premise: the rules really do read nothing here, so this test is about
+    # what the arm does with silence rather than about a missing pattern
+    assert replies.classify("Bitte bestätige Deine E-Mail-Adresse",
+                            "Willkommen! Bitte bestätige Deine "
+                            "E-Mail-Adresse.") is None
+    assert outcome["receipts"] == 0
+    assert outcome["review"] == 1
+    assert db.get_job(con, job_id)["bewerbung_id"] is None
+    assert db.get_job(con, job_id)["status"] == "new"
+    row = _inbound_rows(con)[0]
+    assert row["needs_review"] == 1
+    # and it does not CLAIM to be a receipt on the screen either
+    assert row["classification"] == ""
+
+
+async def test_a_stated_receipt_from_the_same_sender_still_records(inbox, con):
+    """The guard must not cost the feature: the same domain, the same
+    posting, a mail that actually says the application arrived."""
+    job_id = _strip_job(
+        con, apply_url="https://portal-beispiel.de/stellen/7",
+        apply_channel="ats_form")
+    inbox.add("m-1", from_header="Portal <mail@info.portal-beispiel.de>",
+              subject="Eingangsbestätigung",
+              body="Ihre Bewerbung ist eingegangen.",
+              auth=("mx.google.com; "
+                    "spf=pass smtp.mailfrom=portal-beispiel.de; "
+                    "dmarc=pass header.from=portal-beispiel.de"))
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 1
+    job = db.get_job(con, job_id)
+    assert job["bewerbung_id"] is not None
+    assert db.get_bewerbung(con, job["bewerbung_id"])["status"] == "In Bearbeitung"
+    assert _inbound_rows(con)[0]["classification"] == "eingang"
