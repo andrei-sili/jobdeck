@@ -2,7 +2,7 @@
 status: current
 owner: Engineering Lead
 scope: Behavior and limitations verified in the current JobDeck implementation.
-last_verified: 2026-08-24
+last_verified: 2026-08-26
 supersedes: []
 superseded_by: null
 related_adrs:
@@ -55,7 +55,7 @@ processes sharing a database.
 | Source identity | SQLite enforces `UNIQUE(source, external_id)`. |
 | Cross-source deduplication | A company-and-title normalization heuristic is applied before insertion. |
 | Search profiles | Keywords, location, radius, sources, hard tags, soft preferences, strictness, polling interval, and optional auto-send are persisted. |
-| Match scoring | Opt-in Anthropic scoring stores a score, one text reason, and extracted contact fields. |
+| Match scoring | Opt-in Anthropic scoring stores a score, one text reason, and extracted contact fields. The request states whether the stored advert is complete, a truncated search fragment, or absent, and the posting list and reading pane repeat that state beside the score they show. |
 | Drafting | On-demand Anthropic drafting produces an Anschreiben and e-mail body from the free-form profile and the selected posting. |
 | Candidate claims register | Anthropic reads claim entries from `profile.md` across eight families (experience, project, skill, education, credential, language, strength, condition). Entries are stored as proposals carrying their source section, and are confirmed or refused by the candidate one row or one family at a time. A confirmed entry is corrected by supersession; a refused one is retained so a later reading cannot offer it again. |
 | Anlagen | Local PDF upload, readability checks, ordering, removal to a recovery folder, and merge into a Mappe. |
@@ -92,6 +92,17 @@ handling in core workflows.
   states this on screen so the guarantee is not assumed.
 - Match persistence contains only one score and one free-text reason, without a
   structured dimension breakdown, uncertainty, or candidate feedback model.
+- A posting whose advert text is missing or truncated is still scored, on the
+  metadata and whatever text exists. The score is published together with the
+  text state it was formed on rather than withheld, and the reading pane states
+  that an application letter written from an absent advert can only restate the
+  candidate profile. The text state is derived from the stored text at read
+  time; the reason the text is missing is not recorded, so a posting whose
+  source refused the detail request is indistinguishable from one whose source
+  publishes no text.
+- A detail request that fails during discovery is logged and the posting is
+  stored from search data alone, which combined with the absence of re-
+  enrichment below means such a posting keeps no advert text at all.
 - Cross-source deduplication does not model source observations, fingerprints,
   or republications and discards alternate provenance. Republication is
   therefore recognized only by an exact normalized company and title match, not

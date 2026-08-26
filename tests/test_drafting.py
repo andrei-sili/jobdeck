@@ -139,6 +139,58 @@ def test_build_user_content_fences_posting_and_names_contact():
     assert content.rstrip().endswith("<<<POSTING END>>>")
 
 
+def test_a_letter_written_from_no_advert_is_told_there_is_none():
+    """The system prompt opens with "analyse the posting" and asks first which
+    competences THIS posting prioritises. With no advert that step has nothing
+    to work on, and the letter it produced on a real posting answered not one
+    requirement of the role while reading as though it had. 27 stored postings
+    hold no advert and 21 of them already carry a letter."""
+    content = ai_drafting.build_user_content(
+        _job(description=""), "my profile", refnr="K-17",
+        applicant_name="Erika Muster")
+    assert "NO advert text is available" in content
+    assert "Do not describe requirements, tasks or priorities" in content
+    # The format spec it has to live beside says "roughly half a page
+    # (150-220 words)", "3-4 paragraphs" and "open on why this role at this
+    # company fits". Two of those are impossible with no advert, so the note
+    # must say WHICH it overrides — an unresolved contradiction in a prompt is
+    # a coin flip, and the losing side is either the pretence coming back or a
+    # letter too short for the page it is printed on. A conspicuously short
+    # Anschreiben reads to German HR as disinterest.
+    assert "OVERRIDES the parts of the format spec" in content
+    assert "keep the stated length" in content
+    assert "shorter letter" not in content
+    # …and the e-mail's mandatory hook, which the spec ties to "the domain the
+    # posting foregrounds" — nothing an absent advert can supply.
+    assert "The e-mail's hook sentence must rest on the role title" in content
+    assert "leave the hook out" in content
+    # after the fence, never inside it: a note the posting could forge would
+    # be an instruction from untrusted text
+    assert content.index("<<<POSTING END>>>") < content.index("NO advert text")
+    assert "SEARCH-RESULT SNIPPET" not in content
+
+
+def test_a_letter_written_from_a_fragment_is_told_it_is_one():
+    """The elided half is not an absence to answer for. 178 stored postings
+    are a search fragment, and the letter path had no caution at all."""
+    content = ai_drafting.build_user_content(
+        _job(description="Deine Mission - Du entwickelst das Herz unser..."),
+        "my profile", refnr="K-17", applicant_name="Erika Muster")
+    assert "SEARCH-RESULT SNIPPET" in content
+    assert "do not treat the missing part as a requirement" in content
+    assert "NO advert text is available" not in content
+    assert content.index("<<<POSTING END>>>") < content.index("SEARCH-RESULT")
+
+
+def test_a_whole_advert_adds_no_note_and_the_prompt_ends_at_the_fence():
+    content = ai_drafting.build_user_content(
+        _job(description="Wir suchen eine Entwicklerin. " * 40),
+        "my profile", refnr="K-17", applicant_name="Erika Muster")
+    assert "SEARCH-RESULT SNIPPET" not in content
+    assert "NO advert text is available" not in content
+    assert content.rstrip().endswith("<<<POSTING END>>>")
+
+
 def test_build_betreff_collapses_smuggled_whitespace():
     # posting-derived title must not inject newlines into a subject line
     assert ai_drafting.build_betreff("Dev\nX-Evil: 1", "K\n1", "Max\tMuster") \

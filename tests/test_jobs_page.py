@@ -1468,39 +1468,83 @@ def test_an_application_at_the_firm_outranks_every_channel():
 # --------------------------------------------------------------------------
 # What a row and a reader state
 # --------------------------------------------------------------------------
+# Every case states what advert text it holds, because the line does too. An
+# omitted key is read as "no text" on purpose: a loader that stopped selecting
+# the column would otherwise make every row look like a full advert, silently.
+_AD = "Wir suchen eine Python-Entwicklerin fuer unser Team."
+
+
 @pytest.mark.parametrize("job, expected", [
-    ({"match_score": 72, "age_days": 34, "apply_channel": "", "source": "jooble"},
+    ({"match_score": 72, "age_days": 34, "apply_channel": "", "source": "jooble",
+      "description": _AD},
      "34 T · Kanal offen · Jooble"),
     ({"match_score": 0, "age_days": 0, "apply_channel": "direct_email",
-      "source": "arbeitsagentur"},
+      "source": "arbeitsagentur", "description": _AD},
      "heute · E-Mail · BA"),
     ({"match_score": 85, "age_days": 1, "apply_channel": "ats_form",
-      "source": "arbeitnow"},
+      "source": "arbeitnow", "description": _AD},
      "1 T · Formular · Arbeitnow"),
     ({"match_score": 40, "age_days": None, "apply_channel": "unknown",
-      "source": ""},
+      "source": "", "description": _AD},
      "Datum ? · kein Weg"),
     ({"match_score": 91, "age_days": 14, "apply_channel": "direct_email",
       "source": "arbeitsagentur", "salary_from": "45000", "salary_to": "55000",
-      "salary_period": "JAHRESGEHALT"},
+      "salary_period": "JAHRESGEHALT", "description": _AD},
      "14 T · E-Mail · 45–55 T€ · BA"),
     # A posting the batch has not reached yet says so, FIRST — the row draws
     # an em dash where the number goes, and an em dash is this app's word for
     # "the advert states nothing", not for "nobody has looked yet".
     ({"match_score": None, "status": "new", "age_days": 0,
-      "apply_channel": "", "source": "arbeitnow"},
+      "apply_channel": "", "source": "arbeitnow", "description": _AD},
      "noch nicht bewertet · heute · Kanal offen · Arbeitnow"),
     # And one nothing is coming for loses the "noch". The batch skips a hidden
     # company on purpose, so a promise there would never be kept.
     ({"match_score": None, "status": "new", "company_hidden": True,
-      "age_days": 3, "apply_channel": "", "source": "arbeitnow"},
+      "age_days": 3, "apply_channel": "", "source": "arbeitnow",
+      "description": _AD},
      "nicht bewertet · 3 T · Kanal offen · Arbeitnow"),
     ({"match_score": None, "status": "duplicate", "age_days": 3,
-      "apply_channel": "", "source": "arbeitnow"},
+      "apply_channel": "", "source": "arbeitnow", "description": _AD},
      "nicht bewertet · 3 T · Kanal offen · Arbeitnow"),
+    # A score formed on a title alone. It reads exactly like a score formed on
+    # four thousand characters of advert, and this part is the only thing that
+    # tells them apart — so it stands directly after the score, before the age.
+    ({"match_score": 15, "age_days": 0, "apply_channel": "board_apply",
+      "source": "arbeitsagentur", "description": ""},
+     "kein Anzeigentext · heute · Formular · BA"),
+    # A truncated search fragment: some of the advert, not none of it, and the
+    # row says which.
+    ({"match_score": 72, "age_days": 2, "apply_channel": "", "source": "jooble",
+      "description": "Deine Mission - Du entwickelst das Herz unserer Ser..."},
+     "nur ein Ausschnitt · 2 T · Kanal offen · Jooble"),
+    # Both silences at once, each keeping its own words.
+    ({"match_score": None, "status": "new", "age_days": 1,
+      "apply_channel": "", "source": "arbeitsagentur", "description": "  "},
+     "noch nicht bewertet · kein Anzeigentext · 1 T · Kanal offen · BA"),
 ])
 def test_the_row_line_states_only_facts_the_posting_carries(job, expected):
     assert jobs.row_meta(job) == expected
+
+
+def test_a_row_whose_loader_never_handed_over_the_advert_says_so():
+    """An absent key can only mean a caller stopped selecting the column, and
+    the honest reading of "I was not given the text" is "I do not have it".
+    The other reading — stay silent — would make every row on the screen look
+    like a whole advert the day a loader changed, and say nothing about it."""
+    forgotten = {"match_score": 70, "age_days": 1, "apply_channel": "",
+                 "source": "arbeitsagentur"}
+    assert jobs.row_meta(forgotten) == "kein Anzeigentext · 1 T · Kanal offen · BA"
+
+
+def test_a_row_standing_on_a_whole_advert_says_nothing_about_its_text():
+    """Silence is the point. Measured on the working list he actually sees,
+    273 of 314 rows hold a full advert; a part drawn on all of them would be
+    read past, and the 41 that mean something would go with it."""
+    full = {"match_score": 80, "age_days": 5, "apply_channel": "direct_email",
+            "source": "arbeitsagentur", "description": "Wir suchen. " * 60}
+    line = jobs.row_meta(full)
+    assert "Anzeigentext" not in line and "Ausschnitt" not in line
+    assert line == "5 T · E-Mail · BA"
 
 
 def test_a_scored_posting_says_nothing_about_being_scored():
