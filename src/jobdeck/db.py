@@ -2061,7 +2061,18 @@ SELECT COUNT(*), MAX(id), COUNT(match_score), TOTAL(match_score),
        TOTAL(status='skipped'), TOTAL(status='duplicate'),
        TOTAL(contact_email<>''), TOTAL(COALESCE(apply_channel,'')<>''),
        TOTAL(bookmarked_at<>''), TOTAL(opened_at<>''),
-       TOTAL(form_opened_at<>''), TOTAL(upload_path<>''), TOTAL(mappe_kind<>'')
+       TOTAL(form_opened_at<>''), TOTAL(upload_path<>''), TOTAL(mappe_kind<>''),
+       -- How many postings hold an advert at all, and how much text there is
+       -- in total. Three statements on the Stellen screen are derived from
+       -- `description` — the row's coverage marker, the note where the advert
+       -- would be, and the caveat under the verdict — and a watcher that
+       -- cannot see the column can never take any of them back. Nothing
+       -- writes a description in place TODAY, so this is the term that has to
+       -- exist before the first thing that does: a posting whose text arrives
+       -- while the page is open would otherwise keep reading
+       -- "kein Anzeigentext" over text already in the database. Two terms
+       -- rather than one: a count alone misses an advert being REPLACED.
+       TOTAL(COALESCE(description,'')<>''), TOTAL(LENGTH(COALESCE(description,'')))
   FROM jobs
 """
 
