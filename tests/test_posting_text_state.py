@@ -282,6 +282,55 @@ async def test_a_fragment_is_drawn_and_declared_a_fragment(
     assert any("nur einen Ausschnitt" in text for text in labels)
     assert any("beruht nur auf dem Ausschnitt oben" in text for text in labels)
     assert not any("kein Text gespeichert" in text for text in labels)
+    # ONCE on the screen, not twice: the pane's header reuses row_meta, and
+    # the advert it describes is a few centimetres below. Asserted at the DRAW
+    # site — the pure-function test two blocks up passes either way, so
+    # dropping the flag at the call site would go unnoticed without this.
+    assert sum("nur ein Ausschnitt" in text for text in labels) == 1, labels
+
+
+async def test_a_verdict_with_no_prose_still_says_what_it_stands_on(
+        user: User, con, data_dir):
+    """The caveat used to hang off the reason paragraph, so a score stored
+    with an empty reason rendered neither arm of the verdict block and lost
+    the caveat exactly where the pane already says least."""
+    _job(con, "empty", "", score=85, reason="")
+
+    await user.open("/")
+
+    labels = _labels(user)
+    assert any("ohne Anzeigentext" in text for text in labels), labels
+    assert any("WARUM 85" in text for text in labels), labels
+
+
+def test_an_advert_arriving_moves_the_page_signature(con):
+    """Three statements on this screen are derived from `jobs.description`,
+    and a watcher that cannot see the column can never take any of them back.
+    Nothing writes a description in place today — every `UPDATE jobs` was read
+    and `set_job_contacts` has a closed allowlist without it — so this is the
+    guard that has to exist BEFORE the first thing that does, which is the
+    description backfill already on the table."""
+    job_id = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "e1", "title": "Entwickler",
+        "company": "Eine GmbH", "url": "https://example.invalid/1",
+        "description": "",
+    })
+    db.set_job_score(con, job_id, 85, "Titel passt genau.")
+    con.commit()
+    before = jobs.signature_of(con)
+
+    con.execute("UPDATE jobs SET description=? WHERE id=?", (FULL, job_id))
+    con.commit()
+    assert jobs.signature_of(con) != before, \
+        "an advert arriving has to move it, or the row keeps saying there is none"
+
+    # …and a REPLACED advert too: a count alone cannot see one text swapped
+    # for another of a different length.
+    arrived = jobs.signature_of(con)
+    con.execute("UPDATE jobs SET description=? WHERE id=?",
+                (FULL + " Und noch ein Satz.", job_id))
+    con.commit()
+    assert jobs.signature_of(con) != arrived
 
 
 def test_the_screen_and_both_prompts_read_the_same_function():
