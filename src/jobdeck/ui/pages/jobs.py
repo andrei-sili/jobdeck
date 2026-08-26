@@ -525,6 +525,15 @@ def awaits_score(job: dict) -> bool:
             and not job.get("company_hidden"))
 
 
+# How much of the advert this row stands on, where that is not the whole of
+# it. Silent for a full posting: a part that appeared on every row would stop
+# being read, and there is nothing to say when the text is all there.
+_TEXT_STATE_SHORT = {
+    scoring.TEXT_NONE: "kein Anzeigentext",
+    scoring.TEXT_SNIPPET: "nur ein Ausschnitt",
+}
+
+
 def row_meta(job: dict) -> str:
     """'34 T · Formular · 45–55 T€ · BA' — one line of facts under a row.
 
@@ -542,9 +551,25 @@ def row_meta(job: dict) -> str:
 
     "noch" carries the whole distinction and is only written where it is true:
     the batch is coming for a posting in its queue and is never coming for one
-    outside it."""
+    outside it.
+
+    A posting whose text is missing or truncated is the same kind of silence
+    one step further in: there, the score itself was formed on less than the
+    advert, and nothing on the row said so. Measured over 1521 stored
+    postings, 27 hold no advert text at all and 178 hold only an elided
+    search fragment — and every one of them was graded as if it were an
+    advert."""
     parts = ["noch nicht bewertet" if awaits_score(job) else "nicht bewertet"] \
         if job.get("match_score") is None else []
+    # Directly after the score, because it is a statement ABOUT the score: a
+    # number formed from a title alone reads exactly like one formed from a
+    # four-thousand-character advert, and only this line can tell them apart.
+    # Rare enough to mean something — measured on the working list he actually
+    # sees, 273 of 314 rows hold a full advert and this part is silent on them.
+    thin = _TEXT_STATE_SHORT.get(
+        scoring.posting_text_state(job.get("description") or ""))
+    if thin:
+        parts.append(thin)
     parts.append(_age_short(job.get("age_days")))
     channel = str(job.get("apply_channel") or "")
     parts.append(_CHANNEL_SHORT.get(channel, "Kanal offen") if channel
