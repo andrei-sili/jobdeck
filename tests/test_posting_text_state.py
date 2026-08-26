@@ -19,6 +19,7 @@ from nicegui import ui
 from nicegui.testing import User
 
 from jobdeck import db
+from jobdeck.ai import drafting as ai_drafting
 from jobdeck.ai import scoring
 from jobdeck.ui.pages import jobs
 
@@ -38,10 +39,11 @@ def _keep_the_package_importable():
     sys.modules.update(saved)
 
 
-def _job(con, ext, description, *, score=80, reason="Passt gut."):
+def _job(con, ext, description, *, score=80, reason="Passt gut.",
+         company="Eine GmbH"):
     job_id = db.insert_job_if_new(con, {
         "source": "stub", "external_id": ext, "title": "Entwickler",
-        "company": "Eine GmbH", "url": f"https://example.invalid/{ext}",
+        "company": company, "url": f"https://example.invalid/{ext}",
         "description": description,
     })
     day = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
@@ -66,6 +68,35 @@ def _adverts(user: User) -> list[str]:
                 and "jd-ad" in getattr(el, "_classes", [])]
 
 
+def _row_metas(user: User) -> list[str]:
+    """The meta line of every rendered LIST row.
+
+    `row_meta` was exercised only dict-in/string-out, so neither draw site was
+    covered and nothing pinned that the loader hands `description` to the row
+    at all — the marker rested entirely on the list query being SELECT *."""
+    with user.client:
+        rows = [el for el in user.client.elements.values()
+                if "jd-row" in getattr(el, "_classes", [])]
+        out = []
+        for row in rows:
+            out += [d.text for d in row.descendants()
+                    if isinstance(d, ui.label)
+                    and "jd-meta" in getattr(d, "_classes", [])]
+        return out
+
+
+def _markdown(user: User) -> list[str]:
+    """EVERY rendered markdown body, whatever class it carries.
+
+    `_adverts` is keyed on the exact class string, so an advert body drawn
+    under a different class would slip past it — and the placeholder this
+    slice removed was rendered through markdown, which means a label-only
+    assertion could never have observed it in the first place."""
+    with user.client:
+        return [el.content for el in user.client.elements.values()
+                if isinstance(el, ui.markdown)]
+
+
 # --------------------------------------------------- what the sentences say
 
 
@@ -76,6 +107,7 @@ def test_a_posting_with_no_advert_names_what_a_letter_from_it_would_be():
     note = jobs.missing_text_note({"url": "https://example.invalid/1"})
     assert note.startswith("Für diese Anzeige ist kein Text gespeichert.")
     assert "nur dein Profil wiederholen" in note
+    assert "es geht auf keine einzige Anforderung der Stelle ein" in note
     assert "Der vollständige Text steht beim Anbieter." in note
 
 
@@ -88,14 +120,52 @@ def test_a_posting_nobody_can_open_does_not_send_him_to_a_page():
 
 @pytest.mark.parametrize("description, expected", [
     (FULL, ""),
-    ("", "Diese Bewertung entstand ohne den Anzeigentext — beurteilt wurden "
+    ("", "Diese Bewertung entstand ohne Anzeigentext — beurteilt wurden "
          "nur Titel, Firma und Ort."),
-    (SNIPPET, "Diese Bewertung entstand nur auf dem Ausschnitt oben, nicht "
+    (SNIPPET, "Diese Bewertung beruht nur auf dem Ausschnitt oben, nicht "
               "auf der vollständigen Anzeige."),
 ])
 def test_the_verdict_says_how_much_there_was_to_read(description, expected):
     assert jobs.verdict_caveat(
         {"match_score": 70, "description": description}) == expected
+
+
+def test_a_score_of_zero_is_the_verdict_that_most_needs_qualifying():
+    """`match_score is None` is the guard, and the tidy-up anyone would make
+    to that line — `if not job.get("match_score")` — silences every score-0
+    posting with the suite green. Those are the knock-outs: the verdict that
+    files a posting away as a mismatch, and a 0 formed from a title alone is
+    exactly the one worth saying so about."""
+    assert jobs.verdict_caveat({"match_score": 0, "description": ""}) \
+        == ("Diese Bewertung entstand ohne Anzeigentext — beurteilt wurden "
+            "nur Titel, Firma und Ort.")
+
+
+def test_a_posting_the_source_says_is_gone_is_not_sent_after_its_text():
+    """The pane already draws "⚠ Anzeige offline — beim letzten Abruf … nicht
+    mehr vorhanden" a few blocks higher. Adding "der vollständige Text steht
+    beim Anbieter" underneath it is the app contradicting itself on one
+    screen, and the no-text pile is where the expired postings live."""
+    alive = {"url": "https://example.invalid/1", "liveness": "alive"}
+    gone = {"url": "https://example.invalid/1", "liveness": "gone"}
+    assert "beim Anbieter" in jobs.missing_text_note(alive)
+    assert "beim Anbieter" not in jobs.missing_text_note(gone)
+    # …and the sentence it keeps is the one that is still true
+    assert jobs.missing_text_note(gone).startswith(
+        "Für diese Anzeige ist kein Text gespeichert.")
+
+
+def test_the_reading_pane_header_does_not_repeat_the_list_marker():
+    """The row part was written for the LIST, where it is the only thing that
+    tells a title-only score from an advert-based one. In the pane the advert
+    itself is a few centimetres below and says the same thing in full — the
+    same duplication `_score_line(with_age=False)` already exists to avoid."""
+    job = {"match_score": 82, "age_days": 2, "apply_channel": "",
+           "source": "jooble", "description": SNIPPET}
+    assert "nur ein Ausschnitt" in jobs.row_meta(job)
+    assert "nur ein Ausschnitt" not in jobs.row_meta(job, with_text_state=False)
+    # everything else the line states survives the flag
+    assert jobs.row_meta(job, with_text_state=False) == "2 T · Kanal offen · Jooble"
 
 
 def test_an_ungraded_posting_gets_no_caveat_about_its_grade():
@@ -105,6 +175,50 @@ def test_an_ungraded_posting_gets_no_caveat_about_its_grade():
 
 
 # ------------------------------------------------------------- on the screen
+
+
+async def test_the_list_row_carries_the_marker_the_loader_really_hands_it(
+        user: User, con, data_dir):
+    """Three shapes on one screen, so the pane cannot describe a different row
+    than the one being asserted and the marker cannot be a coincidence. This
+    also pins that the loader supplies `description` at all: the module reads
+    an absent key as "no text" on purpose, which fails loudly on his screen
+    and silently in CI — and CI is the half that decides whether it ships."""
+    # one row stands for a COMPANY, so three shapes need three employers
+    _job(con, "empty", "", score=85, reason="Titel passt genau.", company="Alpha GmbH")
+    _job(con, "snip", SNIPPET, score=82, reason="Fragment.", company="Beta GmbH")
+    _job(con, "full", FULL, score=80, reason="Ganze Anzeige.", company="Gamma GmbH")
+
+    await user.open("/")
+
+    metas = _row_metas(user)
+    assert len(metas) == 3, metas
+    marked = [m for m in metas if "Anzeigentext" in m or "Ausschnitt" in m]
+    assert len(marked) == 2, metas
+    assert any(m.startswith("kein Anzeigentext · ") for m in metas), metas
+    assert any(m.startswith("nur ein Ausschnitt · ") for m in metas), metas
+    # …and exactly one row says nothing about its text, because it has all of it
+    assert sum("Anzeigentext" not in m and "Ausschnitt" not in m
+               for m in metas) == 1, metas
+
+
+async def test_a_sibling_posting_says_what_its_score_stands_on_too(
+        user: User, con, data_dir):
+    """The sibling panel exists so he can choose WHICH posting to apply with,
+    and the score is the whole basis of that choice — so a sibling graded on a
+    title alone must not render like one graded on four thousand characters.
+    Score is also the within-company ranking key, which is what puts an
+    inflated title-only score at the top of this very list."""
+    _job(con, "best", FULL, score=90, reason="Ganze Anzeige.")
+    _job(con, "thin", "", score=85, reason="Titel passt genau.")
+
+    await user.open("/")
+
+    labels = _labels(user)
+    assert any("weitere Stelle bei Eine GmbH" in text for text in labels), labels
+    # the sibling is the text-less one, and it says so beside its score
+    assert labels.count("kein Anzeigentext") == 1, \
+        "the sibling's score is rendered with no word about what it stands on"
 
 
 async def test_the_reading_pane_states_a_missing_advert_instead_of_drawing_one(
@@ -119,10 +233,13 @@ async def test_the_reading_pane_states_a_missing_advert_instead_of_drawing_one(
     await user.open("/")
 
     assert _adverts(user) == [], "an advert body was drawn where none exists"
+    # …and no markdown body under ANY class: the placeholder was rendered
+    # through ui.markdown, so an assertion over labels could never have seen
+    # it, and one keyed on the advert's CSS class would miss it under another.
+    assert not any("keine Beschreibung" in body for body in _markdown(user))
     labels = _labels(user)
     assert any("kein Text gespeichert" in text for text in labels)
     assert any("nur dein Profil wiederholen" in text for text in labels)
-    assert not any("keine Beschreibung" in text for text in labels)
 
 
 async def test_a_grade_formed_without_the_advert_says_so_under_its_reason(
@@ -133,7 +250,7 @@ async def test_a_grade_formed_without_the_advert_says_so_under_its_reason(
 
     labels = _labels(user)
     assert "Titel passt genau." in labels
-    assert any("ohne den Anzeigentext" in text for text in labels)
+    assert any("ohne Anzeigentext" in text for text in labels)
 
 
 async def test_a_whole_advert_is_drawn_and_carries_no_caveat_at_all(
@@ -163,14 +280,19 @@ async def test_a_fragment_is_drawn_and_declared_a_fragment(
     assert len(_adverts(user)) == 1
     labels = _labels(user)
     assert any("nur einen Ausschnitt" in text for text in labels)
-    assert any("nur auf dem Ausschnitt oben" in text for text in labels)
+    assert any("beruht nur auf dem Ausschnitt oben" in text for text in labels)
     assert not any("kein Text gespeichert" in text for text in labels)
 
 
-def test_the_screen_and_the_prompt_read_the_same_function():
-    """One home for "how much is there". A row, a reading pane and a prompt
-    that each decided for themselves would each be honest alone and
-    collectively a lie."""
+def test_the_screen_and_both_prompts_read_the_same_function():
+    """One home for "how much is there". A row, a reading pane, the scoring
+    prompt and the LETTER prompt that each decided for themselves would each
+    be honest alone and collectively a lie — so all four are driven here
+    against the same inputs. The letter half is the one that decides what he
+    sends, and before this test nothing pinned it to the shared function at
+    all."""
+    job = {"title": "Entwickler", "company": "Eine GmbH", "location": "Berlin",
+           "remote": 0, "refnr": "K-17", "ansprechpartner": ""}
     for description in ("", "   ", SNIPPET, FULL):
         state = scoring.posting_text_state(description)
         row = jobs.row_meta({"match_score": 70, "age_days": 1,
@@ -178,6 +300,16 @@ def test_the_screen_and_the_prompt_read_the_same_function():
                              "description": description})
         caveat = jobs.verdict_caveat({"match_score": 70,
                                       "description": description})
+        scored = scoring.build_user_content({**job, "description": description},
+                                            "profile")
+        letter = ai_drafting.build_user_content(
+            {**job, "description": description}, "profile",
+            refnr="K-17", applicant_name="Erika Muster")
         assert ("kein Anzeigentext" in row) == (state == scoring.TEXT_NONE)
         assert ("nur ein Ausschnitt" in row) == (state == scoring.TEXT_SNIPPET)
         assert bool(caveat) == (state != scoring.TEXT_FULL)
+        for prompt in (scored, letter):
+            assert ("NO advert text is available" in prompt) \
+                == (state == scoring.TEXT_NONE)
+            assert ("SEARCH-RESULT SNIPPET" in prompt) \
+                == (state == scoring.TEXT_SNIPPET)

@@ -534,7 +534,7 @@ _TEXT_STATE_SHORT = {
 }
 
 
-def row_meta(job: dict) -> str:
+def row_meta(job: dict, with_text_state: bool = True) -> str:
     """'34 T · Formular · 45–55 T€ · BA' — one line of facts under a row.
 
     Every part is a fact the posting really states. Nothing is guessed and
@@ -558,7 +558,14 @@ def row_meta(job: dict) -> str:
     advert, and nothing on the row said so. Measured over 1521 stored
     postings, 27 hold no advert text at all and 178 hold only an elided
     search fragment — and every one of them was graded as if it were an
-    advert."""
+    advert.
+
+    `with_text_state=False` for the reading pane's header, where the advert
+    itself is a few centimetres below and says the same thing in full. The
+    part was designed for the LIST, where it is the only thing that can tell
+    a title-only score from an advert-based one; repeating it beside the text
+    it describes is the duplication `_score_line(with_age=False)` two lines
+    away already exists to avoid."""
     parts = ["noch nicht bewertet" if awaits_score(job) else "nicht bewertet"] \
         if job.get("match_score") is None else []
     # Directly after the score, because it is a statement ABOUT the score: a
@@ -568,7 +575,7 @@ def row_meta(job: dict) -> str:
     # sees, 273 of 314 rows hold a full advert and this part is silent on them.
     thin = _TEXT_STATE_SHORT.get(
         scoring.posting_text_state(job.get("description") or ""))
-    if thin:
+    if thin and with_text_state:
         parts.append(thin)
     parts.append(_age_short(job.get("age_days")))
     channel = str(job.get("apply_channel") or "")
@@ -1324,10 +1331,13 @@ def missing_text_note(job: dict) -> str:
     written from no advert can only restate the profile, which is what a
     letter written from an empty posting was verified to produce.
     """
-    note = ("Für diese Anzeige ist kein Text gespeichert. Ein Anschreiben "
-            "daraus kann nur dein Profil wiederholen — es antwortet auf keine "
-            "einzige Anforderung der Stelle.")
-    if _openable_url(job):
+    note = ("Für diese Anzeige ist kein Text gespeichert. Ein Anschreiben zu "
+            "dieser Stelle kann nur dein Profil wiederholen — es geht auf "
+            "keine einzige Anforderung der Stelle ein.")
+    # Not on a posting the last probe found gone: the pane already says the
+    # advert is no longer there, and sending him after it in the next
+    # sentence is the app contradicting itself on one screen.
+    if _openable_url(job) and job.get("liveness") != liveness.LIVENESS_GONE:
         note += " Der vollständige Text steht beim Anbieter."
     return note
 
@@ -1344,10 +1354,10 @@ def verdict_caveat(job: dict) -> str:
         return ""
     state = scoring.posting_text_state(job.get("description") or "")
     if state == scoring.TEXT_NONE:
-        return ("Diese Bewertung entstand ohne den Anzeigentext — beurteilt "
+        return ("Diese Bewertung entstand ohne Anzeigentext — beurteilt "
                 "wurden nur Titel, Firma und Ort.")
     if state == scoring.TEXT_SNIPPET:
-        return ("Diese Bewertung entstand nur auf dem Ausschnitt oben, nicht "
+        return ("Diese Bewertung beruht nur auf dem Ausschnitt oben, nicht "
                 "auf der vollständigen Anzeige.")
     return ""
 
@@ -1900,6 +1910,18 @@ async def jobs_page():
                         score = other["effective_score"]
                         ui.label("—" if score is None else str(score)) \
                             .classes("jd-score")
+                        # This panel exists so he can choose WHICH posting to
+                        # apply with, and the score is the whole basis of that
+                        # choice — so a sibling graded on a title alone must
+                        # not look like one graded on four thousand
+                        # characters. Score is also the within-company ranking
+                        # key, so an inflated title-only score is exactly what
+                        # puts a posting at the top of this list.
+                        thin = _TEXT_STATE_SHORT.get(
+                            scoring.posting_text_state(
+                                other.get("description") or ""))
+                        if thin:
+                            ui.label(thin).classes("jd-meta")
                         ui.label(clean_title(other["title"]) or other["title"]) \
                             .classes("text-sm")
                         other_url = _openable_url(other)
@@ -1929,7 +1951,8 @@ async def jobs_page():
                 ui.label(clean_title(job["title"])).classes("text-base mt-1")
                 # `row_meta` already states the age; `_score_line` would state
                 # it a second time in the same line ("61 T · … · 61 Tage alt").
-                ui.label(row_meta(job) + _score_line(job, with_age=False)) \
+                ui.label(row_meta(job, with_text_state=False)
+                         + _score_line(job, with_age=False)) \
                     .classes("jd-meta mt-2")
                 # Triage first: the three things he does WITHOUT reading, so
                 # they are reachable before the text and again from the
@@ -1990,8 +2013,14 @@ async def jobs_page():
                     ui.label(text).classes(f"jd-note {kind} mb-2")
                 _render_facts(job)
                 description = job["description"] or ""
-                state = scoring.posting_text_state(description)
-                if state == scoring.TEXT_NONE:
+                # NOT `state`: the page-scope `state` dict is read by every
+                # sibling closure here, and binding that name locally would
+                # make it unreachable from this whole function — the next line
+                # added to the reading pane that wants `state["selected"]`
+                # would raise UnboundLocalError, which NiceGUI turns into one
+                # log line and a blank pane.
+                text_state = scoring.posting_text_state(description)
+                if text_state == scoring.TEXT_NONE:
                     # No advert, so nothing to render as one. The note says so
                     # and says what it costs, in the place he came to read.
                     ui.label(missing_text_note(job)).classes("jd-note warn mt-4")
@@ -2008,7 +2037,7 @@ async def jobs_page():
                         f" von {len(description):,}".replace(",", ".") +
                         " Zeichen abgeschnitten — der Rest steht beim Anbieter."
                     ).classes("jd-note warn mt-3")
-                if state == scoring.TEXT_SNIPPET:
+                if text_state == scoring.TEXT_SNIPPET:
                     ui.label(
                         f"Diese Quelle liefert nur einen Ausschnitt "
                         f"({len(description)} Zeichen) — der "
@@ -2017,22 +2046,24 @@ async def jobs_page():
                 # AFTER the text, deliberately: he reads the advert first and
                 # only then sees what the machine made of it, and only then is
                 # offered the one action that commits him.
-                if job["match_reason"]:
+                caveat = verdict_caveat(job)
+                # The block used to exist only where a verdict did, so the
+                # postings with nothing said about them were the ones the
+                # screen said nothing about — on the pane he opens to find
+                # out what the machine thought. And a score stored with an
+                # empty reason renders neither arm, so hanging the caveat off
+                # the reason paragraph would drop it exactly there.
+                if job["match_reason"] or caveat or job["match_score"] is None:
                     with ui.element("div").classes("jd-why"):
                         ui.label(_verdict_heading(job)).classes("jd-meta")
-                        ui.label(job["match_reason"]).classes("text-sm mt-1")
-                        caveat = verdict_caveat(job)
+                        if job["match_reason"]:
+                            ui.label(job["match_reason"]).classes("text-sm mt-1")
+                        elif job["match_score"] is None:
+                            ui.label(
+                                unscored_note(job, bool(job.get("scoring_on")))
+                            ).classes("text-sm mt-1")
                         if caveat:
                             ui.label(caveat).classes("jd-note mt-2")
-                elif job["match_score"] is None:
-                    # The block used to exist only where a verdict did, so the
-                    # postings with nothing said about them were the ones the
-                    # screen said nothing about — on the pane he opens to find
-                    # out what the machine thought.
-                    with ui.element("div").classes("jd-why"):
-                        ui.label(_verdict_heading(job)).classes("jd-meta")
-                        ui.label(unscored_note(job, bool(job.get("scoring_on")))) \
-                            .classes("text-sm mt-1")
                 _render_primary(job, already)
                 _render_siblings(job)
 
