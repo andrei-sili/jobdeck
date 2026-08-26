@@ -712,8 +712,14 @@ def _handle_receipt(match: dict, meta: dict, from_addr: str, subject: str,
         # decisions at once — he makes them with one press.
         _propose(row, counters, meta)
         return
-    if not said:
-        # THE RULES READ NOTHING, and the arm below writes a ledger row.
+    if not said or not verdict.confident:
+        # THE RULES READ NOTHING — or read only the polite opener, which
+        # `replies.py` calls the weakest evidence in the module and says
+        # "must never write a status". This arm never asked, so the opener
+        # alone recorded an application; with the English opener added that
+        # covers most rejections whose wording no absage pattern reaches.
+        #
+        # The original hole: the arm below writes a ledger row.
         # Defaulting that to "eingang" made "we recognised none of this"
         # mean "your application arrived", which is the opposite of what
         # this function's own contract says it decides on.

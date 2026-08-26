@@ -1655,3 +1655,36 @@ async def test_a_stated_receipt_from_the_same_sender_still_records(inbox, con):
     assert job["bewerbung_id"] is not None
     assert db.get_bewerbung(con, job["bewerbung_id"])["status"] == "In Bearbeitung"
     assert _inbound_rows(con)[0]["classification"] == "eingang"
+
+
+async def test_the_polite_opener_alone_records_no_application(inbox, con):
+    """`replies.py` calls the courtesy opener the weakest evidence in the
+    module and says it must never write a status — but this arm asked only
+    WHAT family the rules read, never how sure they were, so the opener
+    alone recorded an application.
+
+    The rule-level tests carry that invariant in their NAMES and assert only
+    `confident is False`; the write went unchecked. This asserts the write."""
+    job_id = _strip_job(
+        con, apply_url="https://portal-beispiel.de/stellen/7",
+        apply_channel="ats_form")
+    inbox.add("m-1", from_header="Portal <mail@info.portal-beispiel.de>",
+              subject="Thank you for your application",
+              body="Hello! Thanks for your application and your interest in "
+                   "joining us, we will reach out if your profile matches.",
+              auth=("mx.google.com; spf=pass smtp.mailfrom=portal-beispiel.de; "
+                    "dmarc=pass header.from=portal-beispiel.de"))
+
+    outcome = await service.ingest_replies()
+
+    # premise: the rules DO read it, but only as courtesy
+    verdict = replies.classify(
+        "Thank you for your application",
+        "Hello! Thanks for your application and your interest in joining us.")
+    assert verdict is not None and verdict.confident is False
+
+    assert outcome["receipts"] == 0
+    assert outcome["review"] == 1
+    assert db.get_job(con, job_id)["bewerbung_id"] is None
+    assert db.get_job(con, job_id)["status"] == "new"
+    assert _inbound_rows(con)[0]["needs_review"] == 1
