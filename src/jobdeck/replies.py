@@ -155,6 +155,16 @@ _ABSAGE_PATTERNS = (
     r"(?:weg|werdegang|zukunft|lebensweg)\b[^.!?]{0,25}\balles gute\b",
     r"\b(?:senden|schicken|reichen) wir ihnen\b[^.!?]{0,60}\bzurück\b",
     r"\brücksendung (?:ihrer|der) (?:bewerbungs)?unterlagen\b",
+    # --- English -----------------------------------------------------------
+    # These rules were written for German mail, and English arrives anyway:
+    # an ATS rejection reading "we regret to inform you that we were unable
+    # to consider your application" hit NOTHING, so the receipt arm filed it
+    # as "your application arrived" — the opposite of what it said.
+    r"\bwe regret to inform you\b",
+    r"\b(?:un(?:able|fortunately)|not able)[^.!?]{0,40}\b(?:consider|move forward|proceed)\b",
+    r"\bwe (?:will not|won't|cannot|can't) (?:be )?(?:mov(?:e|ing) forward|proceed)",
+    r"\b(?:decided|chosen) to (?:move forward|proceed) with (?:other|another)",
+    r"\byour application (?:was|has been) unsuccessful\b",
 )
 
 _EINLADUNG_PATTERNS = (
@@ -185,6 +195,15 @@ _EINGANG_PATTERNS = (
     # two of the first five real receipts used, and one none of the earlier
     # patterns reached: it names the SENDING rather than the arrival.
     r"zusendung (?:ihrer|deiner) bewerbungsunterlagen",
+    # --- English -----------------------------------------------------------
+    # Only STATEMENTS, never the opener: "thank you for your application" is
+    # the English courtesy line and belongs below with its German twin, or
+    # every English rejection would read as a receipt again.
+    r"\byour application has (?:landed|arrived|been received)\b",
+    r"\bwe(?:'ve| have) received your application\b",
+    r"\b(?:is|are|will be)[^.!?]{0,20}\breview(?:ing)?\b[^.!?]{0,30}\byour application\b",
+    r"\breview(?:s|ing)? (?:your )?applications?\b[^.!?]{0,25}\bcarefully\b",
+    r"\bcarefully review(?:ing)?\b[^.!?]{0,25}\b(?:your )?applications?\b",
 )
 
 # The thank-you opener. EVERY German reply starts this way — a rejection, an
@@ -194,6 +213,15 @@ _EINGANG_PATTERNS = (
 _COURTESY_PATTERNS = (
     r"danken? (?:ihnen |dir )?für (?:ihre|deine) bewerbung",
     r"vielen dank für (?:ihre|deine) bewerbung",
+    # The English twin, and it opens a rejection exactly as often: every one
+    # of his English rejections begins "Thank you very much for your
+    # application" before turning it down.
+    # `thanks?` covers "Thank" and "Thanks" alike, so one pattern is the whole
+    # opener; a second spelled-out "thank you" variant was redundant and
+    # survived its own deletion, which is how it was found.
+    r"\bthanks?(?: you| so much| very much)?[^.!?]{0,30}"
+    r"\bfor (?:your )?(?:applying|application)\b",
+    r"\bfor taking the time to apply\b",
 )
 
 _FAMILIES = (
