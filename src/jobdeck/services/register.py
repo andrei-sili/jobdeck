@@ -531,6 +531,7 @@ SOURCE_NAMES = {
     "arbeitsagentur": "Arbeitsagentur",
     "jooble": "Jooble",
     "arbeitnow": "Arbeitnow",
+    "manual": "Von dir eingetragen",
 }
 
 

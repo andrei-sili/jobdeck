@@ -12,6 +12,7 @@ field with no known answer remains visibly unanswered for candidate review.
 from dataclasses import dataclass
 
 from jobdeck.ai.drafting import clean_title, resolve_refnr
+from jobdeck.constants import MANUAL_SOURCE
 
 # Applicant facts, held as settings because they are personal data: they live in
 # his database, never in this repository. ONE source of truth for the keys AND
@@ -113,6 +114,22 @@ class _row:
         return "" if value is None else str(value)
 
 
+def found_via(source: str) -> str:
+    """The answer to "Wie haben Sie von uns erfahren?", '' when there is none.
+
+    An unregistered BOARD still answers with its own key: `neuesboard` is very
+    nearly the board's name and he can recognise it, which beats a blank.
+
+    A posting he entered HIMSELF is the one case where that reasoning fails.
+    `manual` names how the row got in, not where the advert lives — the app
+    genuinely does not know where he found it — and this value is copied into a
+    real employer's form, so the hint asks him instead of inventing an answer.
+    """
+    if source == MANUAL_SOURCE:
+        return ""
+    return SOURCE_LABELS.get(source, source)
+
+
 def posting_fields(job: dict, draft: dict | None) -> list[Field]:
     """The posting half: what THIS employer's form needs about THIS role.
 
@@ -138,8 +155,8 @@ def posting_fields(job: dict, draft: dict | None) -> list[Field]:
               "this posting states no Referenznummer"),
         Field("Ansprechpartner", get("ansprechpartner"),
               "none named in the posting"),
-        Field("Gefunden über", SOURCE_LABELS.get(source, source),
-              "unknown source"),
+        Field("Gefunden über", found_via(source),
+              "not stated — enter where you found this posting"),
         Field("Betreff", drafted("betreff"),
               "draft the application first — the Betreff comes with it"),
         Field("Anschreiben", drafted("anschreiben_body"),
