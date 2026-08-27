@@ -11,6 +11,7 @@ from jobdeck.sources.arbeitnow import ArbeitnowSource
 from jobdeck.sources.arbeitsagentur import MAX_PAGE_BYTES, ArbeitsagenturSource
 from jobdeck.sources.base import (
     EMAIL_RE,
+    JobPosting,
     SearchQuery,
     SourceUnavailable,
     extract_email,
@@ -50,6 +51,18 @@ BA_DETAILS = {
     # real key observed live (July 2026, still current on the v4 detail route)
     "stellenangebotsBeschreibung": "Wir suchen... Bewerbung an hr@eurogard.de. Remote möglich.",
     "firma": "Eurogard GmbH",
+    # the EMPLOYER's title, as the detail payload states it — the manual path
+    # builds a posting from a Referenznummer alone and has no other source
+    "stellenangebotsTitel": "Python Entwickler (m/w/d)",
+    # and the date of THIS version of the ad, for the same reason
+    "veroeffentlichungszeitraum": {"von": "2026-07-10"},
+    # the detail payload carries the same `stellenlokationen` list the search
+    # does — verified against the live API, 2026-08-27. The fixture lacked it,
+    # which is how `_place` looked unusable here while it works in production.
+    "stellenlokationen": [
+        {"adresse": {"ort": "Musterstadt", "region": "NORDRHEIN_WESTFALEN",
+                     "land": "DEUTSCHLAND"}},
+    ],
 }
 
 BA_DETAILS_LEGACY_KEY = {
@@ -155,6 +168,82 @@ async def test_arbeitsagentur_details_enrich():
     enriched = await source.fetch_details(postings[0])
     assert enriched.contact_email == "hr@eurogard.de"
     assert enriched.remote is True  # "Remote möglich" in description
+
+
+async def test_details_supply_a_title_when_the_posting_has_none():
+    """Only reached when the posting was built from a Referenznummer alone —
+    which is what happens when the user pastes a link and types nothing. Every
+    other caller comes from `search`, which always sets a title, so a stub that
+    sets one cannot see this: the manual path was refused as `needs_title`
+    against the LIVE api while the whole suite stayed green."""
+    def handler(request):
+        return httpx.Response(200, json=BA_DETAILS)
+
+    source = ArbeitsagenturSource(make_client(handler))
+    bare = JobPosting(source="arbeitsagentur", external_id="10001-1-S")
+    enriched = await source.fetch_details(bare)
+    assert enriched.title == BA_DETAILS["stellenangebotsTitel"]
+    assert enriched.company == BA_DETAILS["firma"]
+    # and the date, or the row reads as fresh — the very claim the
+    # hand-inserted rows made by stamping today
+    assert enriched.published_at == "2026-07-10"
+
+
+async def test_details_never_overwrite_a_date_the_caller_already_has():
+    """Its twin one block above has this direction pinned; without it the guard
+    could be rewritten to always overwrite, and search's date — the one the
+    corpus was re-dated on — would be replaced on every liveness pass."""
+    def handler(request):
+        return httpx.Response(200, json=BA_DETAILS)
+
+    source = ArbeitsagenturSource(make_client(handler))
+    held = JobPosting(source="arbeitsagentur", external_id="10001-1-S",
+                      published_at="2026-08-01")
+    enriched = await source.fetch_details(held)
+    assert enriched.published_at == "2026-08-01"
+
+
+async def test_details_supply_the_place_from_the_payload():
+    """Same arm as the title and the date: a posting built from a
+    Referenznummer alone had no place, and the place is where "remote" is
+    written on most of the adverts he enters by hand."""
+    def handler(request):
+        return httpx.Response(200, json=BA_DETAILS)
+
+    source = ArbeitsagenturSource(make_client(handler))
+    bare = JobPosting(source="arbeitsagentur", external_id="10001-1-S")
+    enriched = await source.fetch_details(bare)
+    assert enriched.location
+
+
+async def test_remote_is_judged_after_the_title_and_place_are_supplied():
+    """`remote` used to be computed BEFORE those arms ran, so a posting built
+    from a Referenznummer alone was judged on an empty title and an empty
+    place — the two fields most likely to be where "remote" is written."""
+    payload = {**BA_DETAILS,
+               "stellenangebotsTitel": "Backend Engineer (remote)",
+               "stellenangebotsBeschreibung": "Wir suchen dich.",
+               "homeofficemoeglich": False}
+    def handler(request):
+        return httpx.Response(200, json=payload)
+
+    source = ArbeitsagenturSource(make_client(handler))
+    bare = JobPosting(source="arbeitsagentur", external_id="10001-1-S")
+    enriched = await source.fetch_details(bare)
+    assert enriched.remote is True
+
+
+async def test_details_never_overwrite_a_title_the_caller_already_has():
+    """The employer's cleaned title beats the payload's: search stores the one
+    the drafter was built to read."""
+    def handler(request):
+        return httpx.Response(200, json=BA_DETAILS)
+
+    source = ArbeitsagenturSource(make_client(handler))
+    held = JobPosting(source="arbeitsagentur", external_id="10001-1-S",
+                      title="Sauberer Titel")
+    enriched = await source.fetch_details(held)
+    assert enriched.title == "Sauberer Titel"
 
 
 async def test_arbeitsagentur_details_legacy_field_fallback():

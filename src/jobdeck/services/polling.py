@@ -10,6 +10,7 @@ import asyncio
 import datetime
 import json
 import logging
+from dataclasses import dataclass
 
 import httpx
 
@@ -66,13 +67,52 @@ def _profile_due(profile, now: datetime.datetime) -> bool:
     return now - last_dt >= interval
 
 
-def _store_posting(profile_id: int, posting: JobPosting) -> str:
-    """Insert one posting with duplicate handling. Returns the outcome:
-    'new', 'duplicate' (this position already has an application), or
-    'known'."""
+# What storing one posting can conclude. Named because three callers now branch
+# on them and a typo in a string literal is a silent no-op.
+NEW = "new"
+DUPLICATE = "duplicate"   # this position already has an application
+KNOWN = "known"           # already in the corpus
+
+
+@dataclass(frozen=True)
+class Stored:
+    """The outcome, and the row it landed on when it made one.
+
+    `job_id` is None only for KNOWN — the advert was already here and nothing
+    was written. DUPLICATE DOES write a row (status='duplicate', pointing at
+    the application that claimed the position), so it carries a real id and a
+    screen can point at it.
+    """
+
+    outcome: str
+    job_id: int | None
+
+
+def store_posting(profile_id: int | None, posting: JobPosting) -> Stored:
+    """Insert one posting with duplicate handling.
+
+    The ONE gate a posting passes to enter the corpus, whoever brought it:
+    discovery polls through here, and so does a posting the user pasted in by
+    hand. A second copy of these three checks is how a hand-added row ends up
+    bypassing the cooling-off window and the cross-source duplicate check —
+    which is exactly what raw SQL did on four occasions.
+
+    `profile_id` is None for a posting that came from no search profile. The
+    column is nullable and that null is the honest record of it: nothing else
+    has to be stored to know the row did not come from discovery.
+
+    BEGIN IMMEDIATE because the check and the write must be one step across
+    CONNECTIONS. This used to have a single caller — the poll, which holds a
+    lock of its own — and now has two: a press on "Anzeige hinzufügen" can land
+    inside a scheduled poll, and both would read "not here yet" before either
+    wrote. `UNIQUE(source, external_id)` catches the identical advert, but the
+    cooling-off decision is read-then-write over `bewerbungen` and has no such
+    backstop.
+    """
     with db.db() as con:
+        con.execute("BEGIN IMMEDIATE")
         if find_duplicate_job(con, posting.company, posting.title):
-            return "known"  # same job already arrived through another source
+            return Stored(KNOWN, None)  # already here via another source
         # The SAME decision every gate and screen asks. Filing a posting away
         # at discovery is permanent, so only a permanent refusal may do it: a
         # company merely inside its cooling-off window must arrive as `new`
@@ -100,9 +140,10 @@ def _store_posting(profile_id: int, posting: JobPosting) -> str:
             values["duplicate_of"] = decision.application_id
         job_id = db.insert_job_if_new(con, values)
         if job_id is None:
-            return "known"
+            return Stored(KNOWN, None)
         db.set_job_facts(con, job_id, posting.facts)
-        return "duplicate" if values.get("status") == "duplicate" else "new"
+        return Stored(DUPLICATE if values.get("status") == "duplicate" else NEW,
+                      job_id)
 
 
 async def poll_profile(profile) -> dict[str, int]:
@@ -119,7 +160,7 @@ async def poll_profile(profile) -> dict[str, int]:
         return_exceptions=True,
     )
 
-    counters = {"new": 0, "duplicate": 0, "known": 0}
+    counters = {NEW: 0, DUPLICATE: 0, KNOWN: 0}
     errors: list[str] = []
     for outcome in results:
         if isinstance(outcome, SourceUnavailable):
@@ -135,8 +176,8 @@ async def poll_profile(profile) -> dict[str, int]:
                 source = sources.get(posting.source)
                 if source is not None:
                     posting = await source.fetch_details(posting)
-            result = await asyncio.to_thread(_store_posting, profile["id"], posting)
-            counters[result] += 1
+            stored = await asyncio.to_thread(store_posting, profile["id"], posting)
+            counters[stored.outcome] += 1
 
     error_text = "; ".join(errors) if errors else None
     await asyncio.to_thread(_mark_polled, profile["id"], error_text)

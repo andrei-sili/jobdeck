@@ -28,6 +28,7 @@ from jobdeck.services import (
     contact_lookup,
     drafting,
     liveness,
+    manual_posting,
     mappe,
     polling,
     preparing,
@@ -590,8 +591,12 @@ def row_meta(job: dict, with_text_state: bool = True) -> str:
     return " · ".join(parts)
 
 
+# `manual` is not a board — it is a posting he entered himself, and saying so
+# on the row is what distinguishes "JobDeck found this" from "you did". Falling
+# through to the raw key would print the lowercase identifier `manual` beside
+# BA and Jooble.
 _SOURCE_LABELS = {"arbeitsagentur": "BA", "arbeitnow": "Arbeitnow",
-                  "jooble": "Jooble"}
+                  "jooble": "Jooble", "manual": "von dir"}
 
 
 def _salary_short(job: dict) -> str:
@@ -1296,6 +1301,158 @@ def _verdict_heading(job: dict) -> str:
     return f"WARUM {score}"
 
 
+# Why a hand-entered advert was refused, in the words the screen uses. Both
+# name the field AND why it is needed: "Firma fehlt" is an instruction to type
+# something, and the reason it cannot be skipped is the part that stops the
+# next attempt going back to raw SQL.
+MANUAL_REFUSALS = {
+    manual_posting.NEEDS_COMPANY:
+        "Ohne Firma geht es nicht — daran erkennt JobDeck, ob du dich dort "
+        "schon beworben hast.",
+    manual_posting.NEEDS_TITLE:
+        "Ohne Stellenbezeichnung geht es nicht — daran erkennt JobDeck, ob "
+        "die Anzeige schon in der Liste steht.",
+}
+
+
+# Where a stored posting can be, other than the working list — asked with the
+# very SQL the list filters on, so the sentence cannot drift from the screen.
+# Ordered: the first true one is the pile he will actually find the row in.
+_LANDING_SQL = (
+    ("gone", db.GONE_SQL),
+    ("hidden_firm", db.HIDDEN_FIRM_SQL),
+    ("duplicate", "jobs.status='duplicate'"),
+    ("held_firm", db.APPLIED_FIRM_SQL),
+    ("republication", db.REPUBLICATION_SQL),
+    ("old", freshness.OLD_SQL),
+)
+
+# Which VIEW each pile is, by key. The sentence tells him where to look, so the
+# label is read out of `VIEWS` rather than written again here: the first version
+# spelled two of them by hand and got both wrong — «Schon beworben», which is
+# not a view this app has, and «Ältere Anzeigen» for a view called «Alt».
+_LANDING_VIEW_KEYS = {
+    "gone": "offline",
+    "hidden_firm": "ausgeblendet",
+    "duplicate": "doppelt",
+    "held_firm": "firma_kontaktiert",
+    "republication": "gleiche_stelle",
+    "old": "alt",
+}
+
+
+def landing_view_label(landed: str) -> str:
+    """What the pile is called in the view control, '' when it is not a pile.
+
+    Derived from `VIEWS`, so renaming a view cannot leave this sentence
+    pointing at a name the control no longer offers.
+    """
+    key = _LANDING_VIEW_KEYS.get(landed, "")
+    for view in VIEWS:
+        if view.key == key:
+            return view.label
+    return ""
+
+
+def _scoring_ready() -> bool:
+    """Whether the batch can score anything at all, on its own connection."""
+    with db.db() as con:
+        return scoring_service.is_ready(con)
+
+
+def _manual_landing(job_id: int | None) -> tuple[int | None, int, str]:
+    """The advert's age, the age the list hides at, and the pile it fell into.
+
+    Read back off the ROW rather than off what he typed: a fetched advert
+    carries the board's own publication date, which is the date the age pile
+    compares against — and is the point of fetching rather than stamping today.
+
+    The pile matters because a posting he just typed out and cannot find is
+    what sent him to raw SQL. FOUR of the six piles can swallow a row stored as
+    `new`, and the first version of this named only one of them.
+    """
+    if job_id is None:
+        return None, 0, ""
+    with db.db() as con:
+        row = db.get_job(con, job_id)
+        stale = freshness.stale_age_setting(
+            db.get_setting(con, "stale_age_days", ""))
+        landed = ""
+        age = None
+        if row is not None:
+            for key, clause in _LANDING_SQL:
+                params = (stale,) if "?" in clause else ()
+                hit = con.execute(
+                    f"SELECT 1 FROM jobs WHERE id=? AND {clause}",
+                    (job_id, *params)).fetchone()
+                if hit:
+                    landed = key
+                    break
+            # The age is asked with the SAME expression the age pile is decided
+            # on. `dates.days_since` reads the LOCAL date while `AGE_SQL` reads
+            # a UTC one, so near midnight the sentence could name a number the
+            # pile did not use.
+            age = con.execute(
+                f"SELECT {freshness.AGE_SQL} FROM jobs WHERE id=?",
+                (job_id,)).fetchone()[0]
+    if row is None:
+        return None, stale, ""
+    return age, stale, landed
+
+
+def manual_scoring_note(scoring_ready: bool) -> str:
+    """What the dialog says about scoring.
+
+    Same rule as `unscored_note`: promise only what will be kept. The first
+    version promised unconditionally, and the app's own default is scoring OFF.
+    """
+    if not scoring_ready:
+        return ("Bewertet wird die Anzeige erst, wenn du die Bewertung in den "
+                "Einstellungen einschaltest — sie landet solange unbewertet "
+                "in der Liste.")
+    return ("Die Bewertung macht JobDeck selbst — die Anzeige landet "
+            "unbewertet in der Liste.")
+
+
+def manual_outcome_line(stored, company: str, age_days: int | None = None,
+                        stale_age_days: int = 0, landed: str = "",
+                        scoring_ready: bool = True) -> str:
+    """What storing a hand-entered advert concluded, as a sentence.
+
+    The two refusals are the whole point of routing this through the same gate
+    discovery uses, so they say WHICH rule turned it away rather than failing
+    quietly — a silent no-op on a posting he just typed out is exactly what
+    would send him back to the sqlite prompt.
+
+    And a posting that WAS taken says where it went when that is not the
+    working list. Four piles can swallow a row stored as `new`, and the pile is
+    named with the VIEW's own label so the sentence tells him where to look.
+    Verified live: an advert added from a link was published 48 days earlier
+    and vanished from the list that had just confirmed taking it.
+    """
+    firma = (company or "").strip()
+    if stored.outcome == polling.DUPLICATE:
+        pile = landing_view_label("duplicate")
+        return (f"Aufgenommen — aber bei {firma} läuft schon eine Bewerbung, "
+                f"also liegt die Anzeige unter «{pile}».") if firma else (
+            f"Aufgenommen — bei dieser Firma läuft schon eine Bewerbung, "
+            f"also liegt die Anzeige unter «{pile}».")
+    if stored.outcome == polling.KNOWN:
+        return ("Diese Anzeige steht schon in der Liste — es wurde nichts "
+                "doppelt angelegt.")
+    line = ("Anzeige aufgenommen. Die Bewertung folgt automatisch."
+            if scoring_ready else
+            "Anzeige aufgenommen. Bewertet wird sie erst, wenn du die "
+            "Bewertung in den Einstellungen wieder einschaltest.")
+    view = landing_view_label(landed)
+    if landed == "old" and stale_age_days and age_days is not None:
+        line += (f" Sie ist allerdings schon {age_days} Tage alt und liegt "
+                 f"deshalb unter «{view}».")
+    elif view:
+        line += f" Sie liegt allerdings unter «{view}»."
+    return line
+
+
 def unscored_note(job: dict, scoring_on: bool) -> str:
     """What the reading pane says where the verdict would be.
 
@@ -1532,6 +1689,15 @@ async def jobs_page():
                         # invisible — whenever nothing is waiting.
                         wait_label = ui.label("").classes("jd-meta") \
                             .mark("scoring-line")
+                        # Beside the search, because both are how a posting
+                        # gets in. Without it the only way to enter an ad he
+                        # found himself was raw SQL against the live database,
+                        # which he reached for four times — walking past the
+                        # duplicate check, the cooling-off window and the
+                        # scorer every time.
+                        ui.button("Anzeige hinzufügen", icon="add",
+                                  on_click=lambda: add_posting()) \
+                            .props("flat dense no-caps").mark("add-posting")
                     with ui.row().classes("items-center gap-2 p-2"):
                         # `debounce` is Quasar's own: without it every
                         # keystroke resets the page, drops the selection and
@@ -2238,6 +2404,124 @@ async def jobs_page():
                 search_button.set_text("Jetzt suchen")
                 search_button.enable()
             await refresh(force=True)
+
+        async def add_posting() -> None:
+            """Enter an advert he found himself.
+
+            The link and the text are both optional and either can carry the
+            advert: a Bundesagentur link is fetched, anything else needs the
+            text pasted, because six of the eight urls he pasted by hand were
+            search-results pages. Company and title are required — they are the
+            key the duplicate check and the cooling-off window compare, and a
+            posting missing either cannot be checked against anything.
+            """
+            # Cleared BEFORE the wait, never after: clearing afterwards
+            # destroys a dialog opened meanwhile, and one awaited on then never
+            # resolves at all.
+            overlay.clear()
+            # ONE definition of "can the batch run", the same one the reading
+            # pane and the waiting-count line ask.
+            scoring_ready = await run.io_bound(_scoring_ready)
+            with overlay, ui.dialog().props("persistent") as dialog, \
+                    ui.card().classes("w-[560px] max-w-full"):
+                # `persistent`: ESC or a backdrop click during the fetch would
+                # close the dialog while the write went on regardless, and the
+                # outcome sentence — the only thing that says WHERE the row
+                # landed — would be attached to a dialog that no longer exists.
+                ui.label("Anzeige hinzufügen").classes("font-bold")
+                ui.label("Für eine Anzeige, die du selbst gefunden hast.") \
+                    .classes("text-sm text-gray-600")
+                link = ui.input("Link zur Anzeige (optional)") \
+                    .classes("w-full").props("dense").mark("manual-url")
+                ui.label("Bei einem Link der Bundesagentur holt JobDeck den "
+                         "Anzeigentext selbst. Sonst füg ihn unten ein.") \
+                    .classes("text-xs text-gray-500")
+                with ui.row().classes("w-full gap-2 no-wrap"):
+                    firma = ui.input("Firma").classes("flex-1") \
+                        .props("dense").mark("manual-company")
+                    titel = ui.input("Stellenbezeichnung").classes("flex-1") \
+                        .props("dense").mark("manual-title")
+                ort = ui.input("Ort (optional)").classes("w-full") \
+                    .props("dense").mark("manual-location")
+                text = ui.textarea("Anzeigentext") \
+                    .classes("w-full").props("dense outlined rows=8") \
+                    .mark("manual-text")
+                # The cost of leaving it empty, stated where the decision is
+                # made — the same sentence the reading pane shows afterwards.
+                ui.label("Ohne Anzeigentext kann ein Anschreiben nur dein "
+                         "Profil wiederholen — es geht auf keine einzige "
+                         "Anforderung der Stelle ein.") \
+                    .classes("text-xs text-gray-500")
+                # The promise is made only where it is kept, exactly as
+                # `unscored_note` does it two screens over: with scoring off,
+                # no key or no profile, the row would wait for ever under a
+                # word that says a worker is coming for it.
+                ui.label(manual_scoring_note(scoring_ready)) \
+                    .classes("text-xs text-gray-500")
+
+                # One write at a time. `button.disable()` only reaches the
+                # browser at the end of the socket turn, so two clicks landing
+                # inside the same turn both run the handler and both fetch —
+                # and the second would then meet the first one's row and be
+                # told the advert is "already in the list".
+                writing = {"busy": False}
+
+                async def save() -> None:
+                    if writing["busy"]:
+                        return
+                    # Captured BEFORE the await: the toast used to re-read
+                    # `firma.value` afterwards, so a keystroke during the fetch
+                    # made it name a different company than the one stored.
+                    values = (link.value or "", text.value or "",
+                              firma.value or "", titel.value or "",
+                              ort.value or "")
+                    typed_company = values[2]
+                    writing["busy"] = True
+                    button.disable()
+                    button.set_text("Wird geholt …")
+                    try:
+                        stored, refusal = await manual_posting.add(*values)
+                    except Exception as exc:      # a source can refuse anytime
+                        log.exception("manual posting failed")
+                        say(f"Das hat nicht geklappt: {exc}", type="warning",
+                            multi_line=True)
+                        return
+                    finally:
+                        writing["busy"] = False
+                        button.set_text("Hinzufügen")
+                        button.enable()
+                    if refusal:
+                        say(MANUAL_REFUSALS[refusal], type="warning")
+                        return
+                    dialog.close()
+                    if manual_posting.was_cut(values[1]):
+                        # Said here because it can be said nowhere else: a cut
+                        # advert reads as a complete one to the row marker,
+                        # the reading pane and the scoring prompt alike.
+                        say(f"Der eingefügte Text war länger als "
+                            f"{manual_posting.MAX_TEXT:,}".replace(",", ".") +
+                            " Zeichen und wurde gekürzt.",
+                            type="warning", multi_line=True)
+                    # The age is read back off the STORED row, not off what he
+                    # typed: a fetched advert carries the board's own
+                    # publication date, and that is the date the age pile
+                    # compares against.
+                    age, stale, landed = await run.io_bound(_manual_landing,
+                                                            stored.job_id)
+                    say(manual_outcome_line(stored, typed_company,
+                                            age, stale, landed,
+                                            scoring_ready),
+                        type="positive" if stored.outcome == polling.NEW
+                        else "warning", multi_line=True)
+                    await refresh(force=True)
+
+                with ui.row().classes("w-full justify-end gap-2"):
+                    button = ui.button("Hinzufügen", icon="check",
+                                       on_click=save) \
+                        .props("color=positive no-caps").mark("manual-save")
+                    ui.button("Abbrechen", on_click=dialog.close) \
+                        .props("flat no-caps")
+            dialog.open()
 
         async def ask_before_committing(step: Step, job: dict) -> bool:
             """The keyboard asks before an action he cannot take back cheaply.

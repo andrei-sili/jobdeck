@@ -85,6 +85,30 @@ def anthropic_model() -> str:
     return os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
 
 
+DEFAULT_PORT = 8123
+
+
+def ui_port() -> int:
+    """The port the UI binds to.
+
+    Hardcoding it meant a second instance could not exist: a verification run
+    against a COPY of the data had to take the port the real app uses, so
+    starting JobDeck while one was open silently failed to bind. An unreadable
+    value falls back rather than refusing to start — the port is a convenience,
+    and a typo in an env var must never be the reason the app will not open.
+    """
+    raw = os.environ.get("JOBDECK_PORT", "").strip()
+    if not raw:
+        return DEFAULT_PORT
+    try:
+        port = int(raw)
+    except ValueError:
+        return DEFAULT_PORT
+    # 1-1023 need root, which this app never has: binding would fail at
+    # startup, which is the one outcome the fallback exists to prevent.
+    return port if 1024 <= port <= 65535 else DEFAULT_PORT
+
+
 def anthropic_drafting_model() -> str:
     """Model for application drafting — the low-volume, quality-critical call
     the user actually applies with. Stronger than the scoring default so the

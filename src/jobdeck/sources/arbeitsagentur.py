@@ -11,6 +11,7 @@ import asyncio
 import base64
 import logging
 import math
+from urllib.parse import unquote
 
 import httpx
 
@@ -32,6 +33,11 @@ PAGE_SIZE = 100
 # Search moved to v6 (v4 and v5 answer 404); the DETAIL route did not move and
 # has no v6 — every v6/v5/v2/v1 jobdetails path answers 403 as an unregistered
 # route. Verified live 2026-08-05, and it matches bundesAPI/jobsuche-api.
+# The `jobs.source` value for this adapter. A module constant so a caller
+# can name the source without holding an instance — the manual path builds
+# a posting BEFORE it knows whether the fetch will work.
+SOURCE_NAME = "arbeitsagentur"
+
 SEARCH_PATH = "/pc/v6/jobs"
 DETAIL_PATH = "/pc/v4/jobdetails"
 HOME_COUNTRY = "DEUTSCHLAND"
@@ -71,6 +77,45 @@ def detail_url(external_id: str) -> str:
     encoding cannot drift between the two callers."""
     encoded = base64.urlsafe_b64encode(external_id.encode()).decode()
     return f"{BASE_URL}{DETAIL_PATH}/{encoded}"
+
+
+JOB_PAGE_PREFIX = "/jobsuche/jobdetail/"
+
+
+def refnr_from_url(url: str) -> str:
+    """The Referenznummer inside a BA posting URL, '' when it is not one.
+
+    The inverse of the URL `search()` stores, and it lives beside it so the two
+    cannot drift apart. This is how a posting the user found in their browser
+    becomes a posting JobDeck can fetch: the Referenznummer is the only handle
+    the detail endpoint takes.
+
+    Deliberately narrow. A BA SEARCH url (`/jobsuche/suche?...`) names no single
+    posting, so it answers '' rather than guessing — six of the eight rows the
+    user hand-inserted on 2026-08-26 carried a search page, and three of those
+    urls were shared by two different postings.
+    """
+    parts = netsafe.split_url(url.strip() if "://" in url else "https://" + url.strip())
+    if parts is None:
+        return ""
+    # The scheme is screened for the same reason `_screen_external_url` screens
+    # it thirty lines above: the answer becomes a Referenznummer this app then
+    # FETCHES, and a `javascript:` or `file:` authority that happens to read as
+    # the agency is not a posting link.
+    if (parts.scheme or "").lower() not in ("http", "https"):
+        return ""
+    host = (parts.hostname or "").lower()
+    if host != "arbeitsagentur.de" and not host.endswith(".arbeitsagentur.de"):
+        return ""
+    path = parts.path or ""
+    if not path.startswith(JOB_PAGE_PREFIX):
+        return ""
+    # the app's own links carry nothing after the id, but a copied one can end
+    # in a slash; anything further down the path is not a Referenznummer
+    rest = path[len(JOB_PAGE_PREFIX):].strip("/")
+    if not rest or "/" in rest:
+        return ""
+    return unquote(rest)
 
 
 def publication_start(payload) -> str:
@@ -189,7 +234,7 @@ def posting_facts(payload) -> dict:
 
 
 class ArbeitsagenturSource:
-    name = "arbeitsagentur"
+    name = SOURCE_NAME
 
     def __init__(self, client: httpx.AsyncClient):
         self._client = client
@@ -300,16 +345,36 @@ class ArbeitsagenturSource:
         posting.description = description
         posting.facts = posting_facts(detail)
         posting.contact_email = extract_email(description)
-        posting.remote = bool(
-            detail.get("homeofficemoeglich")
-            or posting.remote
-            or looks_remote(posting.title, description)
-        )
+        # The four fields below are only unset when the posting was built from
+        # a Referenznummer ALONE — which is what happens when the user pastes a
+        # link and types nothing. Every other caller comes from `search`, which
+        # fills all four, so these arms are the manual path's whole supply.
         if not posting.company:
             # `arbeitgeber` no longer exists in either payload — the old line
             # survived only because of this fallback. `firma` is the sole
             # employer-name source now.
             posting.company = detail.get("firma", "") or ""
+        if not posting.title:
+            # The employer's own title, never the BERUFENET label: see `search`.
+            posting.title = detail.get("stellenangebotsTitel", "") or ""
+        if not posting.location:
+            posting.location = _place(detail)
+        if not posting.published_at:
+            # It decides whether the row tells the truth about its age: with no
+            # date the posting reads as fresh, which is the exact claim the
+            # hand-inserted rows made by stamping today. The detail payload
+            # states the same two dates the search does, and `publication_start`
+            # picks the one that means "this version".
+            posting.published_at = publication_start(detail)
+        # LAST, so it can read the title and the location this call just
+        # supplied. Computed before them, a posting built from a Referenznummer
+        # alone was judged on an empty title and an empty place — the two
+        # fields most likely to be where "remote" is written.
+        posting.remote = bool(
+            detail.get("homeofficemoeglich")
+            or posting.remote
+            or looks_remote(posting.title, posting.location, description)
+        )
         return posting
 
     async def _fetch_page_text(self, url: str) -> str:
