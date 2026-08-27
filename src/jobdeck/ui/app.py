@@ -46,7 +46,7 @@ def run_app(native: bool = False) -> None:
     ui.run(
         title="JobDeck",
         host="127.0.0.1",  # unauthenticated UI with a spend switch — never LAN
-        port=8123,
+        port=config.ui_port(),
         reload=False,  # reload would double-start the scheduler
         show=True,
         native=native,

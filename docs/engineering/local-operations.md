@@ -29,9 +29,16 @@ uv sync
 uv run jobdeck
 ```
 
-JobDeck listens on `127.0.0.1:8123`. It is not designed to be exposed through
-a reverse proxy, LAN binding, or shared host. There is no JobDeck authentication
-or authorization layer.
+JobDeck listens on `127.0.0.1:8123`. `JOBDECK_PORT` overrides the port, which
+is how a second instance — a verification run against a copy of the data
+directory — can exist without taking the port the real app uses. An unset,
+unreadable, privileged or out-of-range value falls back to 8123: the port is a
+convenience, and a typo must never be the reason the app will not open.
+
+The HOST is not configurable, deliberately. This is an unauthenticated UI with
+a spend switch on it, so it is not designed to be exposed through a reverse
+proxy, LAN binding, or shared host. There is no JobDeck authentication or
+authorization layer.
 
 ## Data directory
 
