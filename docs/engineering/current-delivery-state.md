@@ -2,7 +2,7 @@
 status: current
 owner: Engineering Lead
 scope: Behavior and limitations verified in the current JobDeck implementation.
-last_verified: 2026-08-26
+last_verified: 2026-08-27
 supersedes: []
 superseded_by: null
 related_adrs:
@@ -68,6 +68,7 @@ processes sharing a database.
 | Backups | Existing databases receive a verified SQLite recovery snapshot before startup migration. Creation failures stop migration and are reported explicitly; snapshots are rotated while retaining the best valid copy. |
 | Application identity | One decision function is consulted by every gate and every screen that explains a refusal. It returns a verdict with its evidence: a republication, a company inside its cooling-off window, or a live reservation. |
 | Attempt integrity | Every path that can create an application takes a persistent reservation, keyed per posting with a `UNIQUE` constraint, inside the same transaction as the state change it guards. Reservations left by an interrupted process are released at startup from evidence. |
+| Candidate-entered postings | A posting the candidate found themselves enters through the same gate as a discovered one — the cross-source duplicate check, the cooling-off decision and the insert run in one immediate transaction, and the row is stored unscored so the scorer judges it. A link naming an Arbeitsagentur posting is fetched and retains that source even when the fetch yields nothing; anything else takes the advert text pasted by the candidate, which is scanned for an application address like an adapter's would be. Where the board states a field, the board's value is authoritative and typed input fills only what it left empty. The row carries no search profile. |
 
 Application undo prepares a deterministic staged artifact before changing the
 ledger, commits all database changes together, and compensates ordinary
@@ -231,3 +232,9 @@ from that environmental failure.
 - The PDF effective-DPI estimate assumes page-sized placement and can
   conservatively skip some useful compression; it does not reduce image quality
   below the configured floor.
+- A candidate-entered posting is not selected or scrolled to after it is
+  stored. The confirmation names the view it landed in when that is not the
+  working list, which covers the case an advert dated before the staleness
+  threshold produces, but the list itself does not move to the new row.
+- The cause of a missing advert text is not retained, so a posting a source
+  refused to serve cannot be told from one that genuinely has none.
