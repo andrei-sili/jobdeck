@@ -4,6 +4,11 @@ Status vocabulary is carried over unchanged from the legacy tracker so the
 existing application history keeps its meaning.
 """
 
+# The `jobs.source` value of a posting the user entered himself. Not a board:
+# it names how the row got in, not where the advert lives, and three screens
+# have to tell it apart from an adapter name.
+MANUAL_SOURCE = "manual"
+
 # Application channels
 KANAL_OPTIONS = ["E-Mail", "Online-Portal", "Post", "Initiativ", "Sonstiges"]
 
