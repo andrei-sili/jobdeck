@@ -1189,7 +1189,8 @@ def test_v15_reads_an_existing_register_row_as_his_own_confirmed_skill(data_dir)
     migrations.migrate(con)
 
     row = con.execute("SELECT * FROM claims").fetchone()
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert (con.execute("PRAGMA user_version").fetchone()[0]
+            == migrations.SCHEMA_VERSION)
     assert row["kind"] == "skill"
     assert row["state"] == "confirmed"
     assert row["source"] == "user"
@@ -1256,4 +1257,44 @@ def test_v15_backfills_the_confirmation_date_once_and_never_again(data_dir):
 
     assert con.execute("SELECT confirmed_at FROM claims").fetchone()[0] == "", (
         "the backfill ran again on a later start")
+    con.close()
+
+
+# ---------------------------------------------------------------------------
+# v16 — application_documents: what one build produced for one posting
+# ---------------------------------------------------------------------------
+
+def test_v15_becomes_v16_without_touching_a_posting_or_the_ledger(data_dir):
+    """The table is additive. A v15 database carries every posting, draft and
+    ledger row across unchanged, and the new table starts empty — nothing is
+    derived from the disk at upgrade time."""
+    con = db.connect()
+    migrations.migrate(con)
+    job_id = db.insert_job_if_new(con, {
+        "source": "arbeitnow", "external_id": "d-1", "title": "Dev",
+        "company": "Alpha GmbH", "description": "x"})
+    db.upsert_draft(con, job_id, {"status": "ready", "pdf_path": "/x/y.pdf"})
+    before = (con.execute("SELECT * FROM jobs").fetchall(),
+              con.execute("SELECT * FROM drafts").fetchall())
+    con.execute("DROP TABLE application_documents")
+    con.execute("PRAGMA user_version = 15")
+    con.commit()
+
+    migrations.migrate(con)
+
+    assert (con.execute("PRAGMA user_version").fetchone()[0]
+            == migrations.SCHEMA_VERSION)
+    assert con.execute("SELECT COUNT(*) FROM application_documents").fetchone()[0] == 0
+    assert (con.execute("SELECT * FROM jobs").fetchall(),
+            con.execute("SELECT * FROM drafts").fetchall()) == before
+    con.close()
+
+
+def test_v16_migration_is_repeatable(data_dir):
+    con = db.connect()
+    migrations.migrate(con)
+    migrations.migrate(con)
+    cols = [r[1] for r in con.execute("PRAGMA table_info(application_documents)")]
+    assert {"job_id", "kind", "path", "staged_path", "sha256", "bytes",
+            "pages", "built_at"} <= set(cols)
     con.close()
