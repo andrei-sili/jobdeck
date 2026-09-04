@@ -33,7 +33,9 @@ _PHONE_RE = re.compile(r"\+?\d[\d\s()/-]{7,}\d")  # \s: a number may wrap
 # heading becomes under pdfminer-style extraction.
 _SPACED_RE = re.compile(r"\b(?:[A-ZÄÖÜ] ){4,}[A-ZÄÖÜ]\b")
 # A "word" no German CV contains: spaces lost between words by the extractor.
-_GLUED_RE = re.compile(r"\S{40,}")
+# Letters only — a URL or an e-mail address is legitimately that long, and the
+# first live run flagged github.com/…/ecommerce-microservices as glued text.
+_GLUED_RE = re.compile(r"[A-Za-zÄÖÜäöüß]{40,}")
 
 
 @dataclasses.dataclass(frozen=True)

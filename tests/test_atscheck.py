@@ -91,6 +91,14 @@ def test_a_letter_spaced_heading_is_a_finding_not_a_heading():
     assert not atscheck._SPACED_RE.search("BERUFSERFAHRUNG IT · Python")
 
 
+def test_a_long_url_is_not_glued_text():
+    """The first live run flagged a project link as words glued together."""
+    assert not atscheck._GLUED_RE.search(
+        "github.com/andrei-sili/ecommerce-microservices · pm.example.org")
+    assert atscheck._GLUED_RE.search(
+        "BackendEntwicklungeinerWebanwendungDatenmodelleSerializerundRESTEndpunkte")
+
+
 def test_a_letter_is_not_marked_down_for_having_no_cv_headings(tmp_path):
     out = tmp_path / "brief.pdf"
     pdf.html_to_pdf("<html><body><p>Sehr geehrte Frau Muster, " + "x " * 150
