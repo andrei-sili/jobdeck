@@ -90,3 +90,13 @@ def test_zero_daily_send_cap_remains_a_compatible_hard_stop(con, data_dir):
     assert settings._get_settings()["daily_send_cap"] == 0
     assert send._load_context(-1)[2]["daily_send_cap"] == 0
     assert autosend._global_block(con) == "daily cap reached"
+
+
+def test_the_portal_cv_path_round_trips_and_defaults_to_empty(con, data_dir):
+    """The one-column Lebenslauf for portals is optional: unset, the build
+    falls back to the Mappe's CV page, and the page must show the field
+    empty rather than break on a missing setting."""
+    assert settings._get_settings()["cv_ats_path"] == ""
+    db.set_setting(con, "cv_ats_path", "~/Dokumente/Lebenslauf_ATS.html")
+    con.commit()
+    assert settings._get_settings()["cv_ats_path"] == "~/Dokumente/Lebenslauf_ATS.html"

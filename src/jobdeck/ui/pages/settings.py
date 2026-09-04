@@ -59,6 +59,7 @@ def _get_settings():
                for key in apply_form.APPLICANT_SETTINGS},
             "template_path": db.get_setting(con, "template_path", ""),
             "anlagen_dir": db.get_setting(con, "anlagen_dir", ""),
+            "cv_ats_path": db.get_setting(con, "cv_ats_path", ""),
             "email_signature": db.get_setting(con, "email_signature", ""),
             "mappe_compress": app_settings.boolean(con, "mappe_compress", True),
             # Parsed the same way the builder parses it, so a hand-edited or
@@ -320,6 +321,17 @@ async def settings_page():
                 "Anlagen are appended in filename order — prefix them "
                 "01_, 02_, … to control the sequence."
             ).classes("text-xs text-gray-500")
+            cv_ats_path = ui.input(
+                "Lebenslauf für Portale (einspaltige HTML-Datei, ohne Tokens)",
+                value=settings["cv_ats_path"],
+            ).classes("w-full")
+            ui.label(
+                "Optional. Für eine Bewerbung über ein Formular werden "
+                "Anschreiben, Lebenslauf und Anlagen zusätzlich als einzelne "
+                "Dateien bereitgelegt; dieser Lebenslauf ist die Datei, die ein "
+                "Bewerbermanagementsystem in der richtigen Reihenfolge liest. "
+                "Ohne ihn wird die Lebenslauf-Seite der Mappe verwendet."
+            ).classes("text-xs text-gray-500")
             compress = ui.switch(
                 "Shrink the Mappe to fit the application channel",
                 value=settings["mappe_compress"],
@@ -359,6 +371,8 @@ async def settings_page():
                                    template_path.value.strip())
                 await run.io_bound(_set_setting, "anlagen_dir",
                                    anlagen_dir.value.strip())
+                await run.io_bound(_set_setting, "cv_ats_path",
+                                   cv_ats_path.value.strip())
                 await run.io_bound(_set_setting, "email_signature",
                                    (email_signature.value or "").strip())
                 await run.io_bound(_set_setting, "mappe_compress",
