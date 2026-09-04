@@ -592,12 +592,18 @@ def delete_claim(con: sqlite3.Connection, claim_id: int) -> None:
     con.execute("DELETE FROM claims WHERE id=?", (claim_id,))
 
 
-def recent_letter_bodies(con: sqlite3.Connection, limit: int = 20) -> list[str]:
+def recent_letter_bodies(con: sqlite3.Connection, limit: int = 20,
+                         exclude_job_id: int | None = None) -> list[str]:
     """The newest letters, for the "opens like an earlier one" check — a
-    recruiter who received two of them sees the shared opening at once."""
+    recruiter who received two of them sees the shared opening at once.
+
+    `exclude_job_id` leaves out the posting's own earlier letter: a redraft
+    keeps the old body until it finishes, and a letter always opens like
+    itself."""
     return [row[0] for row in con.execute(
         "SELECT anschreiben_body FROM drafts WHERE TRIM(anschreiben_body) <> '' "
-        "ORDER BY id DESC LIMIT ?", (limit,))]
+        "AND (? IS NULL OR job_id <> ?) ORDER BY id DESC LIMIT ?",
+        (exclude_job_id, exclude_job_id, limit))]
 
 
 def letter_bodies(con: sqlite3.Connection) -> list[str]:

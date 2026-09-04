@@ -451,14 +451,16 @@ def test_the_loader_measures_every_row_against_the_other_rows(con, data_dir):
     rows = queue._load("open")["drafts"]
 
     by_job = {r["job_id"]: r for r in rows}
-    assert ("Beginnt wie ein früherer Brief", "warn") in by_job[job_a]["quality"]
-    assert ("Beginnt wie ein früherer Brief", "warn") in by_job[job_b]["quality"]
+    assert any(t.startswith("Beginnt wie ein früherer Brief") and tone == "warn"
+               for t, tone in by_job[job_a]["quality"])
+    assert any(t.startswith("Beginnt wie ein früherer Brief") and tone == "warn"
+               for t, tone in by_job[job_b]["quality"])
     # one row alone has nobody to open like
     db.upsert_draft(con, job_b, {"status": "discarded"})
     con.commit()
     rows = queue._load("open")["drafts"]
-    assert all(("Beginnt wie ein früherer Brief", "warn") not in r["quality"]
-               for r in rows)
+    assert all(not t.startswith("Beginnt wie") for r in rows
+               for t, _tone in r["quality"])
 
 
 def test_the_loader_hands_every_row_the_posting_text_the_line_is_measured_on(
@@ -479,4 +481,4 @@ def test_the_loader_hands_every_row_the_posting_text_the_line_is_measured_on(
     assert rows[0]["job_description"] == "Wir suchen Python und Docker."
     assert rows[0]["quality"][0] == (
         "Begriffe aus der Anzeige: 1 von 2 im Brief · 0 im Lebenslauf · "
-        "in keinem: Docker", "")
+        "weder im Brief noch im Lebenslauf: Docker", "")

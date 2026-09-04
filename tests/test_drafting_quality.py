@@ -99,6 +99,7 @@ def test_the_prompt_forbids_the_phrases_and_asks_for_the_adverts_terms():
     for phrase in ("reizt mich besonders", "mit großem Interesse",
                    "In der heutigen dynamischen Arbeitswelt"):
         assert phrase in prompt
-    assert "advert's spelling" in drafting.SYSTEM_PROMPT
+    assert "advert's TERM" in drafting.SYSTEM_PROMPT
+    assert "correct German orthography" in drafting.SYSTEM_PROMPT
     assert "Mirror TERMS, never SENTENCES" in drafting.SYSTEM_PROMPT
     assert "Each letter is its own" in drafting.SYSTEM_PROMPT

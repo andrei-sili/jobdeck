@@ -1034,3 +1034,15 @@ def test_a_document_landing_or_leaving_the_upload_folder_moves_the_signature(con
     db.set_document_staged(con, job_id, db.DOC_MAPPE, "")
     con.commit()
     assert db.data_signature(con) != landed
+
+
+def test_recent_letters_leave_out_the_postings_own_earlier_letter(con):
+    """A redraft keeps the old body until it finishes; compared with itself
+    every redraft would "open like an earlier letter"."""
+    a = _doc_job(con, "let-a")
+    b = _doc_job(con, "let-b")
+    db.upsert_draft(con, a, {"status": "ready", "anschreiben_body": "Brief A"})
+    db.upsert_draft(con, b, {"status": "ready", "anschreiben_body": "Brief B"})
+    con.commit()
+    assert db.recent_letter_bodies(con) == ["Brief B", "Brief A"]
+    assert db.recent_letter_bodies(con, exclude_job_id=a) == ["Brief B"]

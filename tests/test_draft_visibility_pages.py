@@ -411,5 +411,6 @@ async def test_the_queue_row_says_what_the_letter_carries(
     await user.open("/queue")
 
     await user.should_see("Begriffe aus der Anzeige: 1 von 2 im Brief · "
-                          "0 im Lebenslauf · in keinem: Docker")
+                          "0 im Lebenslauf · weder im Brief noch im Lebenslauf: "
+                          "Docker")
     await user.should_see("Floskel: „reizt mich besonders“")

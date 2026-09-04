@@ -86,7 +86,7 @@ TERM_VARIANTS: dict[str, tuple[str, ...]] = {
     "Design Patterns": ("design patterns", "entwurfsmuster"),
     "OOP": ("oop", "objektorientiert", "objektorientierte", "object-oriented"),
     "Scrum": ("scrum",),
-    "Agile": ("agile", "agiles", "agil", "agilen", "agiler", "agiler"),
+    "Agil": ("agile", "agiles", "agil", "agilen", "agiler"),
     "Kanban": ("kanban",),
     "Jira": ("jira",),
     "Confluence": ("confluence",),
@@ -167,14 +167,16 @@ class Coverage:
     def line(self) -> str:
         """The sentence the Postausgang prints. Empty when the posting
         names no term this vocabulary knows — a count of zero of zero says
-        nothing."""
+        nothing. The letter argues with three or four terms; the CV carries
+        the rest, which is why both counts stand side by side."""
         if not self.terms:
             return ""
         n = len(self.terms)
         text = (f"Begriffe aus der Anzeige: {len(self.in_letter)} von {n} im "
                 f"Brief · {len(self.in_cv)} im Lebenslauf")
         if self.missing:
-            text += " · in keinem: " + ", ".join(self.missing)
+            text += (" · weder im Brief noch im Lebenslauf: "
+                     + ", ".join(self.missing))
         return text
 
 
@@ -219,20 +221,48 @@ FLOSKELN: tuple[str, ...] = (
     "hochmotiviert",
     "ich bin ein teamplayer",
     "meine stärken liegen in",
-    "über eine einladung zum vorstellungsgespräch würde ich mich sehr freuen",
-    "würde ich mich sehr freuen",
-    "würde mich freuen",
+    "neue herausforderung",
+    "neuen herausforderung",
+    "hat mich sofort angesprochen",
+    "mich beruflich weiterentwickeln",
+    "sie suchen",
+    "bringe ich mit",
 )
+
+# The subjunctive close in every one of its shapes ("würde mich freuen",
+# "würde ich mich sehr freuen", "würde mich über eine Einladung freuen"), and
+# the adjective list ("teamfähig, flexibel und belastbar") that names nothing
+# the candidate did. Both are the class, not one spelling of it.
+_WUERDE_RE = re.compile(r"würde\w*\s+(?:ich\s+)?mich\b[^.!?]{0,60}?\bfreuen", re.I)
+_ADJECTIVES = ("teamfähig", "flexibel", "belastbar", "kommunikativ",
+               "zuverlässig", "motiviert", "engagiert")
+_ADJ = r"\b(?:" + "|".join(_ADJECTIVES) + r")\w*\b"
+_ADJECTIVE_RE = re.compile(_ADJ + r"(?:[^.!?]{0,40}?" + _ADJ + r")+", re.I)
+
+
+def _flat(text: str) -> str:
+    """One line, one space between words — a phrase must not hide behind a
+    line-wrap inside a paragraph."""
+    return " ".join((text or "").split())
 
 
 def floskeln(text: str) -> list[str]:
-    """The stock phrases `text` carries, in the order they appear. A phrase
-    inside a longer found phrase is not reported twice."""
-    lowered = (text or "").lower()
-    found = [p for p in FLOSKELN if p in lowered]
-    found = [p for p in found
-             if not any(p != q and p in q for q in found)]
-    return sorted(found, key=lambda p: (lowered.find(p), -len(p)))
+    """The stock phrases `text` carries, in the letter's own words and in
+    the order they appear. A phrase inside a longer found phrase is not
+    reported twice."""
+    flat = _flat(text)
+    lowered = flat.lower()
+    hits: list[tuple[int, int]] = []
+    for phrase in FLOSKELN:
+        pos = lowered.find(phrase)
+        if pos >= 0:
+            hits.append((pos, pos + len(phrase)))
+    for pattern in (_WUERDE_RE, _ADJECTIVE_RE):
+        for match in pattern.finditer(flat):
+            hits.append((match.start(), match.end()))
+    hits = [(a, b) for a, b in hits
+            if not any((c, d) != (a, b) and c <= a and b <= d for c, d in hits)]
+    return [flat[a:b] for a, b in sorted(set(hits))]
 
 
 _TOKEN_RE = re.compile(rf"[{_WORD_CHARS}]+")
@@ -242,29 +272,43 @@ def _tokens(text: str) -> list[str]:
     return [t.lower() for t in _TOKEN_RE.findall(text or "")]
 
 
-def copied_spans(text: str, posting: str, n: int = 8) -> list[str]:
-    """Runs of `n` or more words the letter shares verbatim with the advert.
+def copied_spans(text: str, posting: str, n: int = 8,
+                 allowed: str = "") -> list[str]:
+    """Runs of `n` or more words the letter shares verbatim with the advert,
+    quoted in the letter's own words.
 
     Mirroring the advert's TERMS is wanted; mirroring its SENTENCES is the
-    second tell recruiters name. Punctuation and case are ignored so a
-    comma moved does not hide the copy."""
-    letter = _tokens(text)
+    second tell recruiters name. Punctuation and case are ignored for the
+    comparison so a comma moved does not hide the copy. `allowed` is text
+    that may be repeated — the job title, which the letter names the way
+    the advert does and which "(m/w/d)" alone stretches to three words."""
+    flat = _flat(text)
+    letter = [(m.start(), m.end(), m.group(0).lower())
+              for m in _TOKEN_RE.finditer(flat)]
     advert = _tokens(posting)
     if len(letter) < n or len(advert) < n:
         return []
     grams = {tuple(advert[i:i + n]) for i in range(len(advert) - n + 1)}
+    allowed_tokens = _tokens(allowed)
+    words = [w for _s, _e, w in letter]
     spans: list[str] = []
     i = 0
     while i <= len(letter) - n:
-        if tuple(letter[i:i + n]) in grams:
+        if tuple(words[i:i + n]) in grams:
             j = i + n
-            while j < len(letter) and tuple(letter[j - n + 1:j + 1]) in grams:
+            while j < len(letter) and tuple(words[j - n + 1:j + 1]) in grams:
                 j += 1
-            spans.append(" ".join(letter[i:j]))
+            if not (allowed_tokens and _contains(allowed_tokens, words[i:j])):
+                spans.append(flat[letter[i][0]:letter[j - 1][1]])
             i = j
         else:
             i += 1
     return spans
+
+
+def _contains(haystack: list[str], needle: list[str]) -> bool:
+    return any(haystack[k:k + len(needle)] == needle
+               for k in range(len(haystack) - len(needle) + 1))
 
 
 def opening(text: str, words: int = 6) -> str:
@@ -291,20 +335,34 @@ class Note:
     text: str
 
 
-def notes(letter: str, posting: str, previous: list[str] = ()) -> list[Note]:
+def notes(letter: str, posting: str, previous: list[str] = (),
+          title: str = "") -> list[Note]:
     """What a person would hold against this letter, in German, for the
-    Postausgang. Empty when nothing was found."""
+    Postausgang. Empty when nothing was found. `title` is the posting's
+    Stellenbezeichnung, which the letter may repeat verbatim."""
     out: list[Note] = []
     stock = floskeln(letter)
     if stock:
-        out.append(Note("floskel", "Floskel: „" + "“, „".join(stock) + "“"))
-    copies = copied_spans(letter, posting)
+        label = "Floskel" if len(stock) == 1 else "Floskeln"
+        out.append(Note("floskel", f"{label}: „" + "“, „".join(stock) + "“"))
+    copies = copied_spans(letter, posting, allowed=title)
     if copies:
         shown = copies[0] if len(copies[0]) <= 60 else copies[0][:57] + "…"
         out.append(Note("kopie", f"Wörtlich aus der Anzeige: „{shown}“"))
     if repeats_an_opening(letter, list(previous)):
-        out.append(Note("einstieg", "Beginnt wie ein früherer Brief"))
+        out.append(Note("einstieg", "Beginnt wie ein früherer Brief: „"
+                        + opening_text(letter) + "“"))
     return out
+
+
+def opening_text(text: str, words: int = 6) -> str:
+    """The opening in the letter's own words, for the note and the hint."""
+    paragraphs = [p.strip() for p in (text or "").split("\n\n") if p.strip()]
+    body = paragraphs[1] if len(paragraphs) > 1 else (paragraphs[0] if paragraphs else "")
+    matches = list(_TOKEN_RE.finditer(body))[:words]
+    if not matches:
+        return ""
+    return body[matches[0].start():matches[-1].end()]
 
 
 def retry_hint(found: list[Note]) -> str:
@@ -313,12 +371,14 @@ def retry_hint(found: list[Note]) -> str:
     for note in found:
         if note.kind == "floskel":
             parts.append("stock phrases a recruiter reads as generated text: "
-                         + note.text.removeprefix("Floskel: "))
+                         + note.text.split(": ", 1)[1])
         elif note.kind == "kopie":
             parts.append("a sentence copied from the advert: "
                          + note.text.removeprefix("Wörtlich aus der Anzeige: "))
         elif note.kind == "einstieg":
-            parts.append("the same opening sentence as an earlier letter")
+            parts.append("the same opening as an earlier letter, "
+                         + note.text.split(": ", 1)[1]
+                         + " (take a different one of the three angles)")
     return ("\n\nNote: your previous draft contained " + "; ".join(parts)
             + ". Write it again without them, keeping every rule above. "
             "Say the same facts in your own words: a plain sentence about "

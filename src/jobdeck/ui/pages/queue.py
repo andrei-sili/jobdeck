@@ -143,7 +143,8 @@ def quality_lines(row: dict, cv: str, previous: list[str] = ()) -> list[tuple[st
     line = letterquality.coverage(posting, letter, cv).line()
     if line:
         lines.append((line, ""))
-    for note in letterquality.notes(letter, posting, list(previous)):
+    for note in letterquality.notes(letter, posting, list(previous),
+                                    title=row.get("job_title") or ""):
         lines.append((note.text, "warn"))
     return lines
 
