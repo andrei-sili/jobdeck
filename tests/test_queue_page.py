@@ -409,3 +409,53 @@ def test_the_two_ways_a_letter_can_have_gone_are_not_one_word():
     """"gesendet" beside a letter that went into an employer's upload field
     credits this app with an e-mail it never addressed."""
     assert queue.draft_state("filed") != queue.draft_state("sent")
+
+
+# -- what the Postausgang says about a letter before he reads it --------------
+
+def test_quality_lines_count_the_adverts_terms_and_name_the_tells():
+    row = {"id": 1,
+           "anschreiben_body": "Sehr geehrte Damen und Herren,\n\nMit Python und "
+                               "Docker habe ich bei Beispiel GmbH gearbeitet. Die "
+                               "Aufgabe reizt mich besonders.",
+           "job_description": "Wir suchen Python, Docker und Kubernetes."}
+
+    lines = queue.quality_lines(row, cv="Python · Kubernetes")
+
+    assert lines == [
+        ("Begriffe aus der Anzeige: 2 von 3 im Brief · 2 im Lebenslauf", ""),
+        ("Floskel: „reizt mich besonders“", "warn"),
+    ]
+
+
+def test_a_draft_without_a_letter_gets_no_quality_line():
+    assert queue.quality_lines({"id": 1, "anschreiben_body": "",
+                                "job_description": "Python"}, cv="") == []
+
+
+def test_the_loader_measures_every_row_against_the_other_rows(con, data_dir):
+    """The opening comparison runs against the OTHER letters on file — a
+    letter always opens like itself, and comparing it with itself would
+    flag every draft."""
+    job_a = _job_with_draft(con, anschreiben_body=(
+        "Sehr geehrte Damen und Herren,\n\nBei Beispiel GmbH habe ich REST-APIs "
+        "gebaut."))
+    job_b = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "j2", "title": "Dev",
+        "company": "Zweite GmbH", "description": "Python."})
+    db.upsert_draft(con, job_b, {"status": "ready", "anschreiben_body": (
+        "Sehr geehrte Frau Weber,\n\nBei Beispiel GmbH habe ich REST-APIs "
+        "gebaut und getestet.")})
+    con.commit()
+
+    rows = queue._load("open")["drafts"]
+
+    by_job = {r["job_id"]: r for r in rows}
+    assert ("Beginnt wie ein früherer Brief", "warn") in by_job[job_a]["quality"]
+    assert ("Beginnt wie ein früherer Brief", "warn") in by_job[job_b]["quality"]
+    # one row alone has nobody to open like
+    db.upsert_draft(con, job_b, {"status": "discarded"})
+    con.commit()
+    rows = queue._load("open")["drafts"]
+    assert all(("Beginnt wie ein früherer Brief", "warn") not in r["quality"]
+               for r in rows)
