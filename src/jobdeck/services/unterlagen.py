@@ -436,8 +436,18 @@ def ats_reports(settings: dict, letter_pages: int = 0) -> dict:
     trips over (Type 3 fonts, lost spaces, letter-spaced headings) only
     exist in the rendered file."""
     portal_budget = mappe.target_bytes(settings, apply_channel.CHANNEL_ATS)
+    cv_file = (config.user_path(settings["cv_ats_path"])
+               if settings["cv_ats_path"] else None)
     reports: dict = {"mappe": None, "lebenslauf": None,
-                     "cv_configured": bool(settings["cv_ats_path"])}
+                     "cv_configured": bool(settings["cv_ats_path"]),
+                     # The reason the CV report is missing, when it is: a
+                     # path that leads nowhere must be said on the page, not
+                     # only in a toast that has faded by the time he looks.
+                     "cv_missing": (f"Lebenslauf für Portale nicht gefunden: "
+                                    f"{cv_file}"
+                                    if settings["cv_ats_path"]
+                                    and (cv_file is None or not cv_file.is_file())
+                                    else "")}
     if specimen_path().is_file():
         # Text and fonts are judged on the template's pages only — the
         # Anlagen behind them are scans, and a scan's OCR layer is not the
@@ -505,9 +515,6 @@ def rail_fingerprint(con) -> tuple:
         _folder_fingerprint(settings["anlagen_dir"]),
         _file_fingerprint(config.user_path(template)),
         _file_fingerprint(specimen_path()),
-        _file_fingerprint(config.user_path(
-            db.get_setting(con, "cv_ats_path", "").strip())),
-        _file_fingerprint(specimen_cv_path()),
         db.get_setting(con, LETTER_PAGES_SETTING, ""),
     )
 

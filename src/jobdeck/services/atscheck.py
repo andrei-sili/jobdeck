@@ -27,6 +27,7 @@ from pypdf import PdfReader
 # finding, not as a heading.
 HEADINGS = ("Berufserfahrung", "Ausbildung", "Kenntnisse", "Projekte",
             "Sprachen", "Zertifikate", "Profil")
+_WORD_LETTERS = r"A-Za-zÄÖÜäöüß0-9/&-"
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 _PHONE_RE = re.compile(r"\+?\d[\d\s()/-]{7,}\d")  # \s: a number may wrap
 # A run of single letters separated by single spaces: what a letter-spaced
@@ -94,6 +95,19 @@ def _unspace(text: str) -> str:
     return _SPACED_RE.sub(lambda m: m.group(0).replace(" ", ""), text)
 
 
+def _is_heading(heading: str, text: str) -> bool:
+    """A heading is a LINE of its own — the word, with at most two more
+    words beside it ("Berufserfahrung IT", "Technische Kenntnisse") — not
+    the same word inside a sentence: "abgeschlossene Ausbildung zum …" is
+    body text a parser will not take for a section."""
+    want = heading.lower()
+    for line in text.splitlines():
+        words = re.findall(rf"[{_WORD_LETTERS}]+", line.strip().rstrip(":").lower())
+        if 1 <= len(words) <= 3 and want in words:
+            return True
+    return False
+
+
 def inspect(path: pathlib.Path, *, budget_bytes: int = 0,
             expect_headings: bool = True, first_pages: int = 0) -> Report:
     """Measure one PDF the way a parser meets it.
@@ -119,12 +133,21 @@ def inspect(path: pathlib.Path, *, budget_bytes: int = 0,
         text = "\n".join((page.extract_text() or "") for page in measured)
         fonts, type3 = _fonts(measured)
     except Exception as exc:  # noqa: BLE001 — pypdf raises many kinds on a torn file
-        return Report(str(path), 0, path.stat().st_size, 0, 0, 0, (), (),
+        # The file can vanish between is_file() and here: a rebuild unlinks
+        # the specimen while the page reads it.
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        return Report(str(path), 0, size, 0, 0, 0, (), (),
                       error=f"PDF nicht lesbar: {exc}")
-    size = path.stat().st_size
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return Report(str(path), 0, 0, 0, 0, 0, (), (),
+                      error="Datei nicht gefunden")
     folded = _unspace(text)
-    lowered = folded.lower()
-    headings = tuple(h for h in HEADINGS if h.lower() in lowered)
+    headings = tuple(h for h in HEADINGS if _is_heading(h, folded))
     spaced = _SPACED_RE.search(text) is not None
     glued = _GLUED_RE.search(text) is not None
 

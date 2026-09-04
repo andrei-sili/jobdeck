@@ -550,6 +550,7 @@ async def unterlagen_page():
                      "Einstellungen setzen. Bis dahin bekommt ein Formular "
                      "die Lebenslauf-Seite der Mappe."
                      if not ats["cv_configured"] else
+                     ats.get("cv_missing") or
                      "Noch nicht gebaut — „Neu bauen“ rendert und misst ihn."),
                 ):
                     ui.label(label).classes("font-bold")

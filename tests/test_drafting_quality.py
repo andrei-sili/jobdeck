@@ -103,3 +103,17 @@ def test_the_prompt_forbids_the_phrases_and_asks_for_the_adverts_terms():
     assert "correct German orthography" in drafting.SYSTEM_PROMPT
     assert "Mirror TERMS, never SENTENCES" in drafting.SYSTEM_PROMPT
     assert "Each letter is its own" in drafting.SYSTEM_PROMPT
+
+
+def test_a_re_roll_does_not_eat_a_parse_attempt(monkeypatch):
+    """DRAFT_ATTEMPTS bounds parse and transport failures; the quality
+    re-roll spends its own budget. Three unparseable samples, a fourth with
+    a stock phrase, and the re-rolled fifth must still be accepted."""
+    seen: list[str] = []
+    monkeypatch.setattr(llm, "complete", _fake(
+        ["garbage", "garbage", "garbage", _response(FLOSKEL), _response(CLEAN)], seen))
+
+    body, *_ = drafting.draft_application(JOB, "profile")
+
+    assert body == CLEAN
+    assert len(seen) == 5

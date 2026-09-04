@@ -110,7 +110,26 @@ def _signature_of(con) -> tuple:
     # The pipeline first, the sending mode after it — the same order every
     # loader here reads in, and the reason the rule that pins it exists.
     signature = db.data_signature(con)
-    return (signature, *sorted(db.send_mode(con).items()))
+    # The coverage line is measured against a CV file on disk, reached through
+    # two settings; neither is in any table, so both and the file itself join
+    # the signature — or an edited Lebenslauf never reaches the page.
+    cv_settings = tuple(db.get_setting(con, key, "").strip()
+                        for key in ("cv_ats_path", "template_path"))
+    return (signature, *sorted(db.send_mode(con).items()), cv_settings,
+            _cv_fingerprint(cv_settings))
+
+
+def _cv_fingerprint(paths: tuple[str, ...]) -> tuple:
+    """Size and mtime of the first readable CV file, as the loader picks it."""
+    for raw in paths:
+        path = config.user_path(raw)
+        if path is not None and path.is_file():
+            try:
+                stat = path.stat()
+            except OSError:
+                return ()
+            return (str(path), stat.st_size, stat.st_mtime_ns)
+    return ()
 
 
 def _signature() -> tuple:
@@ -160,11 +179,11 @@ def _load(filter_value: str) -> dict:
         # The CV's words, read once per load: every row's coverage line is
         # counted against the same file.
         cv = cv_text(con)
+        # The same letters the drafting re-roll compares against — the newest
+        # on file, whatever their status — never this row's own.
+        recent = db.recent_letter_bodies(con, limit=40)
         for row in rows:
-            # Earlier letters are the OTHER drafts on file, never this one —
-            # a letter always opens like itself.
-            others = [r["anschreiben_body"] for r in rows
-                      if r["id"] != row["id"] and r.get("anschreiben_body")]
+            others = [b for b in recent if b != row.get("anschreiben_body")]
             row["quality"] = quality_lines(row, cv, others)
         # Asked of the identity rule itself, for the drafts on screen: the send
         # path refuses an application to a company still inside its

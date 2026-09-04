@@ -128,6 +128,10 @@ def _compile(term: str, variants: tuple[str, ...]) -> re.Pattern:
 
 _TERM_RES = {term: _compile(term, variants)
              for term, variants in TERM_VARIANTS.items()}
+# Every word of every variant, lower-cased, for telling a term list from prose.
+_VOCAB_WORDS = frozenset(
+    w for variants in TERM_VARIANTS.values() for v in variants
+    for w in re.findall(rf"[{_WORD_CHARS}]+", v.lower()))
 
 
 def terms_in(text: str) -> list[str]:
@@ -153,15 +157,20 @@ def terms_in(text: str) -> list[str]:
 
 @dataclasses.dataclass(frozen=True)
 class Coverage:
-    """Which of the posting's terms the letter and the CV carry."""
+    """Which of the posting's terms the letter and the CV carry.
+
+    `cv_known` is False when no CV text could be read at all: the line then
+    counts the letter alone and says so, instead of stating as fact that the
+    CV lacks every term."""
 
     terms: tuple[str, ...]
     in_letter: tuple[str, ...]
     in_cv: tuple[str, ...]
+    cv_known: bool = True
 
     @property
     def missing(self) -> tuple[str, ...]:
-        carried = set(self.in_letter) | set(self.in_cv)
+        carried = set(self.in_letter) | (set(self.in_cv) if self.cv_known else set())
         return tuple(t for t in self.terms if t not in carried)
 
     def line(self) -> str:
@@ -172,8 +181,12 @@ class Coverage:
         if not self.terms:
             return ""
         n = len(self.terms)
-        text = (f"Begriffe aus der Anzeige: {len(self.in_letter)} von {n} im "
-                f"Brief · {len(self.in_cv)} im Lebenslauf")
+        text = f"Begriffe aus der Anzeige: {len(self.in_letter)} von {n} im Brief"
+        if not self.cv_known:
+            if self.missing:
+                text += " · nicht im Brief: " + ", ".join(self.missing)
+            return text + " · Lebenslauf nicht lesbar"
+        text += f" · {len(self.in_cv)} im Lebenslauf"
         if self.missing:
             text += (" · weder im Brief noch im Lebenslauf: "
                      + ", ".join(self.missing))
@@ -188,6 +201,7 @@ def coverage(posting: str, letter: str, cv_text: str = "") -> Coverage:
         terms=tuple(terms),
         in_letter=tuple(t for t in terms if t in letter_terms),
         in_cv=tuple(t for t in terms if t in cv_terms),
+        cv_known=bool((cv_text or "").strip()),
     )
 
 
@@ -225,8 +239,10 @@ FLOSKELN: tuple[str, ...] = (
     "neuen herausforderung",
     "hat mich sofort angesprochen",
     "mich beruflich weiterentwickeln",
-    "sie suchen",
-    "bringe ich mit",
+    # "Sie suchen … ich biete" as a pair; "Sie suchen" alone and "bringe ich
+    # mit" alone are ordinary German and must not cost a re-roll.
+    "sie suchen einen",
+    "sie suchen eine",
 )
 
 # The subjunctive close in every one of its shapes ("würde mich freuen",
@@ -298,7 +314,13 @@ def copied_spans(text: str, posting: str, n: int = 8,
             j = i + n
             while j < len(letter) and tuple(words[j - n + 1:j + 1]) in grams:
                 j += 1
-            if not (allowed_tokens and _contains(allowed_tokens, words[i:j])):
+            span_words = words[i:j]
+            title_repeat = allowed_tokens and _contains(allowed_tokens, span_words)
+            # A list of the advert's TERMS in the advert's order is the
+            # mirroring the prompt asks for, not a copied sentence: only
+            # what is left once the vocabulary is taken out counts as prose.
+            prose = [w for w in span_words if w not in _VOCAB_WORDS]
+            if not title_repeat and len(prose) >= 4:
                 spans.append(flat[letter[i][0]:letter[j - 1][1]])
             i = j
         else:

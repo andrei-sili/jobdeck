@@ -154,3 +154,37 @@ def test_cv_text_strips_markup_and_style_and_tolerates_a_missing_file(tmp_path):
     assert "Erika & Co" in text and "Docker" in text and "color" not in text
     assert lq.text_of_html(tmp_path / "nein.html") == ""
     assert lq.text_of_html(None) == ""
+
+
+def test_without_a_cv_the_line_counts_the_letter_alone_and_says_so():
+    cov = lq.coverage(POSTING, LETTER, cv_text="")
+    assert not cov.cv_known
+    assert cov.line() == ("Begriffe aus der Anzeige: 6 von 10 im Brief · nicht im "
+                          "Brief: Backend, CI/CD, Englisch, Agil · Lebenslauf nicht lesbar")
+
+
+def test_a_term_list_in_the_adverts_order_is_mirroring_not_copying():
+    """The prompt asks for the advert's TERMS; a list of them in the
+    advert's order must not burn the paid re-roll as a copied sentence."""
+    posting = "Kenntnisse in Python, Django REST Framework, PostgreSQL, Docker und CI/CD."
+    letter = ("Sehr geehrte Damen und Herren,\n\nmeine Werkzeuge: Python, Django "
+              "REST Framework, PostgreSQL, Docker und CI/CD, täglich im Einsatz.")
+    assert lq.copied_spans(letter, posting) == []
+
+
+def test_ordinary_german_is_not_a_floskel():
+    for text in ("Erfahrung mit Docker bringe ich mit.",
+                 "Die Werkzeuge, die Sie suchen, kenne ich aus dem Projekt."):
+        assert lq.floskeln(text) == [], text
+    assert lq.floskeln("Sie suchen einen Entwickler mit Django-Erfahrung.") \
+        == ["Sie suchen einen"]
+
+
+def test_the_title_rule_needs_the_whole_span_inside_the_title():
+    title = "Junior Softwareentwickler Python Django (m/w/d) in Vollzeit"
+    posting = (f"Wir suchen: {title}. Dazu Kundensupport und Mentoring im Team "
+               "gehören zu den Aufgaben.")
+    letter = ("Sehr geehrte Damen und Herren,\n\nDazu Kundensupport und Mentoring im "
+              "Team gehören zu den Aufgaben, sagt Ihre Anzeige.")
+    # the copied sentence merely SHARES words with the title — it is not it
+    assert lq.copied_spans(letter, posting, allowed=title) != []

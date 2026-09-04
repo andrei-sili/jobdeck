@@ -147,3 +147,15 @@ def test_first_pages_limits_the_text_checks_but_not_the_page_count(tmp_path):
     assert not whole.passed and any("Buchstabe" in c.text for c in whole.checks
                                     if not c.ok)
     assert front.passed, [c.text for c in front.checks if not c.ok]
+
+
+def test_a_heading_is_a_line_of_its_own_not_a_word_in_a_sentence():
+    body = ("Nach der abgeschlossenen Ausbildung zum Fachinformatiker habe ich "
+            "Berufserfahrung gesammelt; meine Kenntnisse in Python sind gut.\n"
+            "Sprachkenntnisse: Deutsch")
+    assert not atscheck._is_heading("Ausbildung", body)
+    assert not atscheck._is_heading("Berufserfahrung", body)
+    assert not atscheck._is_heading("Kenntnisse", body)
+    lines = "Profil\nText\nBerufserfahrung IT\nText\nTechnische Kenntnisse:\nText\nAusbildung\n"
+    for h in ("Profil", "Berufserfahrung", "Kenntnisse", "Ausbildung"):
+        assert atscheck._is_heading(h, lines), h

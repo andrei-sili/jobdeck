@@ -762,7 +762,7 @@ def test_nothing_built_means_no_report_rather_than_a_failed_one(con, data_dir):
     _setup(con, data_dir)
     view = unterlagen.read(con, None)
     assert view["ats"] == {"mappe": None, "lebenslauf": None,
-                           "cv_configured": False}
+                           "cv_configured": False, "cv_missing": ""}
 
 
 async def test_building_renders_the_portal_cv_and_measures_both_files(
@@ -819,3 +819,29 @@ async def test_the_signature_sees_the_portal_cv_specimen_being_built(
     before = unterlagen.signature(con, job_id)
     await unterlagen.build(job_id)
     assert unterlagen.signature(con, job_id) != before
+
+
+def test_a_configured_cv_that_leads_nowhere_is_named_on_the_page_not_only_in_a_toast(
+    con, data_dir
+):
+    _setup(con, data_dir)
+    db.set_setting(con, "cv_ats_path", str(data_dir / "weg.html"))
+    con.commit()
+    ats = unterlagen.read(con, None)["ats"]
+    assert ats["cv_configured"]
+    assert ats["cv_missing"].startswith("Lebenslauf für Portale nicht gefunden")
+
+
+async def test_the_mappe_report_ignores_a_scanned_anlage_with_a_letter_spaced_title(
+    con, data_dir
+):
+    """The live run judged the Mappe on a certificate behind the CV; the
+    report is measured on the template's pages only."""
+    job_id = _setup(con, data_dir)
+    anlage = data_dir / "anlagen" / "03_zertifikat.pdf"
+    pdf.html_to_pdf("<html><body><p style='letter-spacing:.4em'>CERTIFICATE OF "
+                    "COMPLETION</p></body></html>", anlage)
+    assert (await unterlagen.build(job_id))["ok"]
+    report = unterlagen.read(con, job_id)["ats"]["mappe"]
+    assert not any("Buchstabe" in c.text for c in report.checks if not c.ok)
+    assert report.pages == 1 + 2 + 1 + 1     # template + the three Anlagen

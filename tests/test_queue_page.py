@@ -455,8 +455,14 @@ def test_the_loader_measures_every_row_against_the_other_rows(con, data_dir):
                for t, tone in by_job[job_a]["quality"])
     assert any(t.startswith("Beginnt wie ein früherer Brief") and tone == "warn"
                for t, tone in by_job[job_b]["quality"])
-    # one row alone has nobody to open like
+    # a discarded letter still counts — the drafting re-roll compares
+    # against the newest letters of any status, and so does the queue
     db.upsert_draft(con, job_b, {"status": "discarded"})
+    con.commit()
+    rows = queue._load("open")["drafts"]
+    assert any(t.startswith("Beginnt wie") for r in rows for t, _tone in r["quality"])
+    # a letter with no body is nobody to open like
+    db.upsert_draft(con, job_b, {"anschreiben_body": ""})
     con.commit()
     rows = queue._load("open")["drafts"]
     assert all(not t.startswith("Beginnt wie") for r in rows
@@ -479,6 +485,66 @@ def test_the_loader_hands_every_row_the_posting_text_the_line_is_measured_on(
     rows = queue._load("open")["drafts"]
 
     assert rows[0]["job_description"] == "Wir suchen Python und Docker."
+    # no CV file is configured in this test: the line counts the letter
+    # alone and says so, rather than stating the CV lacks Docker
     assert rows[0]["quality"][0] == (
-        "Begriffe aus der Anzeige: 1 von 2 im Brief · 0 im Lebenslauf · "
-        "weder im Brief noch im Lebenslauf: Docker", "")
+        "Begriffe aus der Anzeige: 1 von 2 im Brief · nicht im Brief: Docker · "
+        "Lebenslauf nicht lesbar", "")
+
+
+def test_an_editor_save_withdraws_the_package_built_from_the_old_text(con, data_dir):
+    from jobdeck import config
+    from jobdeck.services import upload
+    job_id = _job_with_draft(con)
+    db.mark_form_opened(con, job_id)
+    archive = pathlib.Path(data_dir) / "output" / f"job_{job_id}" / "Anschreiben_M_F.pdf"
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"%PDF-1.4 alt")
+    staged = upload.stage(archive)
+    db.set_upload(con, job_id, str(staged), "vollständig")
+    db.set_documents(con, job_id, [{"kind": db.DOC_ANSCHREIBEN, "path": str(archive),
+                                    "staged_path": str(staged)}])
+    con.commit()
+
+    _draft, error = draft_editor._save_draft(job_id, _edit(), clear_pdf=True)
+
+    assert error == ""
+    assert list(pathlib.Path(config.UPLOAD_DIR).iterdir()) == []
+    assert db.list_documents(con, job_id) == []
+    assert db.get_job(con, job_id)["mappe_kind"] == ""
+
+
+def test_cv_text_prefers_the_portal_cv_and_falls_back_to_the_template(con, data_dir):
+    template = pathlib.Path(data_dir) / "vorlage.html"
+    template.write_text("<p>Python Docker</p>", encoding="utf-8")
+    db.set_setting(con, "template_path", str(template))
+    con.commit()
+    assert "Docker" in queue.cv_text(con)
+    cv = pathlib.Path(data_dir) / "cv.html"
+    cv.write_text("<p>Kubernetes</p>", encoding="utf-8")
+    db.set_setting(con, "cv_ats_path", str(cv))
+    con.commit()
+    text = queue.cv_text(con)
+    assert "Kubernetes" in text and "Docker" not in text
+    # a configured path that leads nowhere falls back to the template
+    db.set_setting(con, "cv_ats_path", str(pathlib.Path(data_dir) / "weg.html"))
+    con.commit()
+    assert "Docker" in queue.cv_text(con)
+
+
+def test_the_queue_signature_sees_the_cv_file_and_its_settings_change(con, data_dir):
+    """The coverage line is measured against a file on disk reached through
+    two settings; neither is in a table, so the watcher was blind to an
+    edited Lebenslauf."""
+    _job_with_draft(con)
+    before = queue._signature_of(con)
+    cv = pathlib.Path(data_dir) / "cv.html"
+    cv.write_text("<p>Python</p>", encoding="utf-8")
+    db.set_setting(con, "cv_ats_path", str(cv))
+    con.commit()
+    configured = queue._signature_of(con)
+    assert configured != before
+    cv.write_text("<p>Python Docker</p>", encoding="utf-8")
+    import os
+    os.utime(cv, (1, 1))
+    assert queue._signature_of(con) != configured
