@@ -67,11 +67,12 @@ class Report:
         return sum(1 for c in self.checks if not c.ok)
 
 
-def _fonts(reader: PdfReader) -> tuple[int, int]:
-    """(fonts, of which Type 3) across every page, by resource dictionary."""
+def _fonts(pages) -> tuple[int, int]:
+    """(fonts, of which Type 3) across the given pages, by resource
+    dictionary."""
     seen: set = set()
     type3 = 0
-    for page in reader.pages:
+    for page in pages:
         resources = page.get("/Resources") or {}
         fonts = resources.get("/Font") or {}
         for name, ref in fonts.items():
@@ -94,21 +95,29 @@ def _unspace(text: str) -> str:
 
 
 def inspect(path: pathlib.Path, *, budget_bytes: int = 0,
-            expect_headings: bool = True) -> Report:
+            expect_headings: bool = True, first_pages: int = 0) -> Report:
     """Measure one PDF the way a parser meets it.
 
     `expect_headings` is False for a document that is not a CV — a letter
     or the merged Anlagen carry no section headings and must not be marked
-    down for it."""
+    down for it.
+
+    `first_pages` limits the TEXT and FONT checks to the leading pages: on a
+    merged Mappe the Anlagen are scanned certificates whose OCR layer, where
+    one exists, is nobody's typography to fix, and a "C E R T I F I C A T E"
+    inside one would otherwise be reported as a heading of the CV. Page count
+    and size still describe the whole file."""
     path = pathlib.Path(path)
     if not path.is_file():
         return Report(str(path), 0, 0, 0, 0, 0, (), (),
                       error="Datei nicht gefunden")
     try:
         reader = PdfReader(str(path))
-        text = "\n".join((page.extract_text() or "") for page in reader.pages)
-        fonts, type3 = _fonts(reader)
         pages = len(reader.pages)
+        measured = (reader.pages[:first_pages] if first_pages > 0
+                    else reader.pages)
+        text = "\n".join((page.extract_text() or "") for page in measured)
+        fonts, type3 = _fonts(measured)
     except Exception as exc:  # noqa: BLE001 — pypdf raises many kinds on a torn file
         return Report(str(path), 0, path.stat().st_size, 0, 0, 0, (), (),
                       error=f"PDF nicht lesbar: {exc}")

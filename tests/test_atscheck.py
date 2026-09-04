@@ -125,3 +125,25 @@ def test_the_portal_budget_is_a_check_when_given(tmp_path):
     assert any("über dem Portal-Budget" in c.text for c in over.checks if not c.ok)
     assert atscheck.inspect(out).checks[-1].text != "über"  # no budget, no check
     assert not any("Budget" in c.text for c in atscheck.inspect(out).checks)
+
+
+def test_first_pages_limits_the_text_checks_but_not_the_page_count(tmp_path):
+    """A merged Mappe: the CV in front, a scanned certificate behind it. The
+    scan's own text is not the CV's typography — its letter-spaced title must
+    not be reported as a heading defect — but the file's size and page count
+    are still the whole file's."""
+    cv = tmp_path / "cv.pdf"
+    pdf.html_to_pdf(CV_HTML, cv)
+    scan = tmp_path / "scan.pdf"
+    pdf.html_to_pdf("<html><body><p style='letter-spacing:.4em'>CERTIFICATE OF "
+                    "COMPLETION</p></body></html>", scan)
+    merged = tmp_path / "mappe.pdf"
+    pdf.merge_pdfs([cv, scan], merged)
+
+    whole = atscheck.inspect(merged)
+    front = atscheck.inspect(merged, first_pages=1)
+
+    assert whole.pages == front.pages == 2
+    assert not whole.passed and any("Buchstabe" in c.text for c in whole.checks
+                                    if not c.ok)
+    assert front.passed, [c.text for c in front.checks if not c.ok]

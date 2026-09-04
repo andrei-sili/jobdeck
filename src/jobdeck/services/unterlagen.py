@@ -423,11 +423,11 @@ def read(con, job_id: int | None) -> dict:
         # A budget line may only promise more compression when compression is
         # actually switched on; with it off, what was merged is what is sent.
         "compress": settings["compress"],
-        "ats": ats_reports(settings),
+        "ats": ats_reports(settings, facts["letter_pages"]),
     }
 
 
-def ats_reports(settings: dict) -> dict:
+def ats_reports(settings: dict, letter_pages: int = 0) -> dict:
     """What a portal's parser will make of the two files it can be given:
     the specimen Mappe (the whole package, uploaded as one) and the specimen
     one-column Lebenslauf. None where the file has not been built.
@@ -439,8 +439,13 @@ def ats_reports(settings: dict) -> dict:
     reports: dict = {"mappe": None, "lebenslauf": None,
                      "cv_configured": bool(settings["cv_ats_path"])}
     if specimen_path().is_file():
+        # Text and fonts are judged on the template's pages only — the
+        # Anlagen behind them are scans, and a scan's OCR layer is not the
+        # CV's typography. `letter_pages` is what the last build measured;
+        # 0 before any build, which means the whole file.
         reports["mappe"] = atscheck.inspect(specimen_path(),
-                                            budget_bytes=portal_budget)
+                                            budget_bytes=portal_budget,
+                                            first_pages=letter_pages)
     if settings["cv_ats_path"] and specimen_cv_path().is_file():
         reports["lebenslauf"] = atscheck.inspect(specimen_cv_path(),
                                                  budget_bytes=portal_budget)
