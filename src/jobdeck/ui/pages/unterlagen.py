@@ -234,6 +234,11 @@ async def unterlagen_page():
                 # English; this toast lands between two German sentences.
                 say(f"{result['pages']} Seiten · "
                     f"{_kb(result['size_bytes'])} — gebaut", type="positive")
+                if result.get("cv_error"):
+                    # the Mappe is built; the portal CV is not, and the
+                    # ATS panel below says so too — but a toast is what he
+                    # is looking at when he pressed
+                    say(result["cv_error"], type="warning")
             await refresh()
 
         def _current_preview_job() -> int | None:
@@ -524,6 +529,42 @@ async def unterlagen_page():
                          "vor Zertifikaten. Die Pfeile benennen die Dateien "
                          "um; im Ordner umbenennen tut dasselbe.") \
                     .classes("jd-card-sub")
+
+        def draw_ats(view: dict) -> None:
+            """What a Bewerbermanagementsystem's parser makes of the files,
+            measured on the built PDFs. Two files, because a portal takes
+            either the whole Mappe as one upload or the Lebenslauf on its
+            own — and the two are built differently."""
+            ats = view["ats"]
+            with ui.column().classes("jd-card gap-3"):
+                ui.label("ATS-Check").classes("jd-card-title")
+                ui.label("So liest ein Bewerbermanagementsystem die Dateien "
+                         "— gemessen an den gebauten PDFs. Ein Parser lehnt "
+                         "nicht ab, er sortiert; was hier rot ist, kostet "
+                         "Rang, nicht die Bewerbung.").classes("jd-card-sub")
+                for label, report, hint in (
+                    ("Die Mappe (als eine Datei hochgeladen)", ats["mappe"],
+                     "Noch nicht gebaut — „Neu bauen“ misst sie."),
+                    ("Der Lebenslauf für Portale", ats["lebenslauf"],
+                     "Kein Lebenslauf für Portale eingetragen — in den "
+                     "Einstellungen setzen. Bis dahin bekommt ein Formular "
+                     "die Lebenslauf-Seite der Mappe."
+                     if not ats["cv_configured"] else
+                     "Noch nicht gebaut — „Neu bauen“ rendert und misst ihn."),
+                ):
+                    ui.label(label).classes("font-bold")
+                    if report is None:
+                        ui.label(hint).classes("jd-note")
+                        continue
+                    if report.error:
+                        ui.label(report.error).classes("jd-note danger")
+                        continue
+                    ui.label(f"{_pages(report.pages)} · {_kb(report.size_bytes)}"
+                             f" · {report.fonts} Schriften") \
+                        .classes("jd-card-sub")
+                    for check in report.checks:
+                        ui.label(("✓ " if check.ok else "✗ ") + check.text) \
+                            .classes("jd-note" + ("" if check.ok else " warn"))
 
         def _budget_notes(view: dict) -> list[dict]:
             """What the built size means for each way it can travel.
@@ -1086,6 +1127,7 @@ async def unterlagen_page():
                 ui.label("Was der Arbeitgeber bekommt — und woraus die KI es "
                          "bauen darf.").classes("jd-card-sub")
                 draw_mappe(view["mappe"])
+                draw_ats(view["mappe"])
                 draw_preview(view["mappe"])
                 draw_claims(view["claims"], view["letters"],
                             view["coverage"], view["refused"])

@@ -28,13 +28,16 @@ import tempfile
 from jobdeck import apply_channel, config, db, pdf, templates
 from jobdeck import settings as app_settings
 from jobdeck.services import anlagen as anlagen_lib
-from jobdeck.services import mappe
+from jobdeck.services import atscheck, mappe
 
 log = logging.getLogger(__name__)
 
 _lock = asyncio.Lock()  # one Chrome render at a time, as for a real Mappe
 
 SPECIMEN_NAME = "Bewerbungsmappe_Muster.pdf"
+# The one-column Lebenslauf for portals, rendered once so the ATS check can
+# measure the file a portal will actually parse rather than its HTML.
+SPECIMEN_CV_NAME = "Lebenslauf_Muster.pdf"
 
 # The letter body an employer never sees. It stands in for the Anschreiben so
 # the specimen has the shape of a real letter, and it says what it is in the
@@ -84,6 +87,10 @@ class Part:
     @property
     def last_page(self) -> int:
         return self.first_page + self.pages - 1
+
+
+def specimen_cv_path() -> pathlib.Path:
+    return pathlib.Path(config.OUTPUT_DIR) / "muster" / SPECIMEN_CV_NAME
 
 
 def specimen_path() -> pathlib.Path:
@@ -230,6 +237,9 @@ def signature(con, job_id: int | None) -> tuple:
         # CONTENTS are facts on disk that no table and no setting can see.
         _file_fingerprint(config.user_path(template)),
         _file_fingerprint(specimen_path()),
+        _file_fingerprint(config.user_path(
+            db.get_setting(con, "cv_ats_path", "").strip())),
+        _file_fingerprint(specimen_cv_path()),
         # The same reasoning, for the file the coverage line measures: he
         # edits profile.md outside this app, and the screen would go on
         # naming sections he had renamed or filled.
@@ -413,7 +423,28 @@ def read(con, job_id: int | None) -> dict:
         # A budget line may only promise more compression when compression is
         # actually switched on; with it off, what was merged is what is sent.
         "compress": settings["compress"],
+        "ats": ats_reports(settings),
     }
+
+
+def ats_reports(settings: dict) -> dict:
+    """What a portal's parser will make of the two files it can be given:
+    the specimen Mappe (the whole package, uploaded as one) and the specimen
+    one-column Lebenslauf. None where the file has not been built.
+
+    Measured on the built PDFs, never on the HTML: the properties a parser
+    trips over (Type 3 fonts, lost spaces, letter-spaced headings) only
+    exist in the rendered file."""
+    portal_budget = mappe.target_bytes(settings, apply_channel.CHANNEL_ATS)
+    reports: dict = {"mappe": None, "lebenslauf": None,
+                     "cv_configured": bool(settings["cv_ats_path"])}
+    if specimen_path().is_file():
+        reports["mappe"] = atscheck.inspect(specimen_path(),
+                                            budget_bytes=portal_budget)
+    if settings["cv_ats_path"] and specimen_cv_path().is_file():
+        reports["lebenslauf"] = atscheck.inspect(specimen_cv_path(),
+                                                 budget_bytes=portal_budget)
+    return reports
 
 
 # ---------------------------------------------------------------------------
@@ -469,6 +500,9 @@ def rail_fingerprint(con) -> tuple:
         _folder_fingerprint(settings["anlagen_dir"]),
         _file_fingerprint(config.user_path(template)),
         _file_fingerprint(specimen_path()),
+        _file_fingerprint(config.user_path(
+            db.get_setting(con, "cv_ats_path", "").strip())),
+        _file_fingerprint(specimen_cv_path()),
         db.get_setting(con, LETTER_PAGES_SETTING, ""),
     )
 
@@ -552,6 +586,7 @@ def _build(job_id: int | None) -> dict:
     except (templates.TemplateError, pdf.PdfError) as exc:
         return {"ok": False, "error": str(exc)}
 
+    cv_error = _build_cv_specimen(settings)
     total_pages = pdf.page_count(out_path)
     size_bytes = out_path.stat().st_size
     with db.db() as con:
@@ -575,7 +610,27 @@ def _build(job_id: int | None) -> dict:
             "letter_pages": letter_pages,
             "size_bytes": size_bytes,
             "compression": compression.describe(),
-            "met_target": compression.met_target}
+            "met_target": compression.met_target,
+            "cv_error": cv_error}
+
+
+def _build_cv_specimen(settings: dict) -> str:
+    """Render the portal Lebenslauf beside the specimen Mappe, '' on success
+    or when none is configured. A failure here is reported, not raised: the
+    Mappe was built, and the ATS panel says what is missing."""
+    if not settings["cv_ats_path"]:
+        specimen_cv_path().unlink(missing_ok=True)
+        return ""
+    cv_file = config.user_path(settings["cv_ats_path"])
+    if cv_file is None or not cv_file.is_file():
+        specimen_cv_path().unlink(missing_ok=True)
+        return f"Lebenslauf für Portale nicht gefunden: {cv_file}"
+    try:
+        pdf.html_to_pdf(cv_file.read_text(encoding="utf-8"), specimen_cv_path())
+    except (OSError, UnicodeDecodeError, pdf.PdfError) as exc:
+        specimen_cv_path().unlink(missing_ok=True)
+        return f"Lebenslauf für Portale nicht gerendert: {exc}"
+    return ""
 
 
 async def build(job_id: int | None = None) -> dict:
