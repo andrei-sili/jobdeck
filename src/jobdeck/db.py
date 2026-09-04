@@ -592,6 +592,14 @@ def delete_claim(con: sqlite3.Connection, claim_id: int) -> None:
     con.execute("DELETE FROM claims WHERE id=?", (claim_id,))
 
 
+def recent_letter_bodies(con: sqlite3.Connection, limit: int = 20) -> list[str]:
+    """The newest letters, for the "opens like an earlier one" check — a
+    recruiter who received two of them sees the shared opening at once."""
+    return [row[0] for row in con.execute(
+        "SELECT anschreiben_body FROM drafts WHERE TRIM(anschreiben_body) <> '' "
+        "ORDER BY id DESC LIMIT ?", (limit,))]
+
+
 def letter_bodies(con: sqlite3.Connection) -> list[str]:
     """Every Anschreiben this app has written, for the register's counters.
 
@@ -2493,7 +2501,8 @@ _DRAFT_WITH_JOB_COLUMNS = """
                j.location AS job_location, j.status AS job_status,
                j.contact_email AS job_contact_email,
                j.liveness AS job_liveness,
-               j.liveness_checked_at AS job_liveness_checked_at
+               j.liveness_checked_at AS job_liveness_checked_at,
+               j.description AS job_description
         FROM drafts d JOIN jobs j ON j.id = d.job_id
 """
 

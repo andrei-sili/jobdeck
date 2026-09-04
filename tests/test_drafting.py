@@ -516,7 +516,7 @@ def profile_file(data_dir):
     config.PROFILE_PATH.write_text("Python developer, 3 years", encoding="utf-8")
 
 
-def _must_not_be_called(job, profile_text, refnr="", applicant_name=""):
+def _must_not_be_called(job, profile_text, refnr="", applicant_name="", previous_letters=None):
     raise AssertionError("LLM called although a gate should have fired")
 
 
@@ -559,7 +559,7 @@ async def test_successful_draft_is_persisted_and_metered(
 
     monkeypatch.setattr(
         "jobdeck.ai.drafting.draft_application",
-        lambda job, profile_text, refnr="", applicant_name="":
+        lambda job, profile_text, refnr="", applicant_name="", previous_letters=None:
             ("Sehr geehrte Frau Weber,\n\nAbsatz.",
              "Guten Tag,\n\nanbei meine Bewerbung.\n\n"
              "Mit freundlichen Grüßen\nMax Muster",
@@ -594,7 +594,7 @@ async def test_drafted_email_carries_the_configured_signature(
     con.commit()
     monkeypatch.setattr(
         "jobdeck.ai.drafting.draft_application",
-        lambda job, profile_text, refnr="", applicant_name="":
+        lambda job, profile_text, refnr="", applicant_name="", previous_letters=None:
             ("Anrede,\n\nText.", "Guten Tag,\n\nanbei meine Bewerbung.\n\n"
                                  "Mit freundlichen Grüßen\nMax Muster", "", _usage()),
     )
@@ -613,7 +613,7 @@ async def test_no_signature_configured_leaves_the_email_untouched(
     con.commit()
     monkeypatch.setattr(
         "jobdeck.ai.drafting.draft_application",
-        lambda job, profile_text, refnr="", applicant_name="":
+        lambda job, profile_text, refnr="", applicant_name="", previous_letters=None:
             ("Anrede,\n\nText.", "Guten Tag,\n\nMit freundlichen Grüßen\nMax",
              "", _usage()),
     )
@@ -633,7 +633,7 @@ async def test_empty_stellenbezeichnung_falls_back_to_the_cleaned_job_title(
     con.commit()
     monkeypatch.setattr(
         "jobdeck.ai.drafting.draft_application",
-        lambda job, profile_text, refnr="", applicant_name="":
+        lambda job, profile_text, refnr="", applicant_name="", previous_letters=None:
             ("Anrede,\n\nText.", "Mail.", "", _usage()),  # empty stellenbezeichnung
     )
     result = await drafting.draft_for_job(job_id)
@@ -649,7 +649,7 @@ async def test_failed_draft_is_recorded_and_metered(
     job_id = _insert_job(con)
     con.commit()
 
-    def failing(job, profile_text, refnr="", applicant_name=""):
+    def failing(job, profile_text, refnr="", applicant_name="", previous_letters=None):
         raise llm.LLMError("unparseable", usage=_usage(cost=0.003))
 
     monkeypatch.setattr("jobdeck.ai.drafting.draft_application", failing)
@@ -664,7 +664,7 @@ async def test_failed_draft_is_recorded_and_metered(
     # a failed draft is re-claimable immediately — the user may retry
     monkeypatch.setattr(
         "jobdeck.ai.drafting.draft_application",
-        lambda job, profile_text, refnr="", applicant_name="":
+        lambda job, profile_text, refnr="", applicant_name="", previous_letters=None:
             ("Anrede,\n\nText.", "Mail.", "", _usage()),
     )
     result = await drafting.draft_for_job(job_id)
@@ -681,7 +681,7 @@ async def test_redraft_clears_stale_pdf_path(
     con.commit()
     monkeypatch.setattr(
         "jobdeck.ai.drafting.draft_application",
-        lambda job, profile_text, refnr="", applicant_name="":
+        lambda job, profile_text, refnr="", applicant_name="", previous_letters=None:
             ("Anrede,\n\nText.", "Mail.", "", _usage()),
     )
     assert (await drafting.draft_for_job(job_id))["ok"]
@@ -715,7 +715,7 @@ async def test_llm_not_configured_releases_claim_without_metering(
     job_id = _insert_job(con)
     con.commit()
 
-    def not_configured(job, profile_text, refnr="", applicant_name=""):
+    def not_configured(job, profile_text, refnr="", applicant_name="", previous_letters=None):
         raise llm.LLMNotConfigured("ANTHROPIC_API_KEY is not set")
 
     monkeypatch.setattr("jobdeck.ai.drafting.draft_application", not_configured)
@@ -788,7 +788,7 @@ async def test_finish_discards_result_when_claim_was_taken_away(
     job_id = _insert_job(con)
     con.commit()
 
-    def steal_then_draft(job, profile_text, refnr="", applicant_name=""):
+    def steal_then_draft(job, profile_text, refnr="", applicant_name="", previous_letters=None):
         # simulates a human resolving the draft while the LLM call runs
         with db.db() as other:
             db.upsert_draft(other, job_id, {"status": "discarded"})
@@ -817,7 +817,7 @@ async def test_abandoned_claim_is_reclaimed(
 
     monkeypatch.setattr(
         "jobdeck.ai.drafting.draft_application",
-        lambda job, profile_text, refnr="", applicant_name="":
+        lambda job, profile_text, refnr="", applicant_name="", previous_letters=None:
             ("Anrede,\n\nText.", "Mail.", "", _usage()),
     )
     result = await drafting.draft_for_job(job_id)

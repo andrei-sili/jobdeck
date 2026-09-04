@@ -122,6 +122,12 @@ def _claim(job_id: int) -> str:
         return ""
 
 
+def _previous_letters() -> list[str]:
+    """The letters already written, so a new one is not the same letter."""
+    with db.db() as con:
+        return db.recent_letter_bodies(con)
+
+
 def _finish(job_id: int, values: dict, usage: llm.LLMResult | None) -> dict | None:
     """Persist the generation result, unless the claim is no longer ours.
 
@@ -168,9 +174,11 @@ async def draft_for_job(job_id: int) -> dict:
         return _error(claim_error)
 
     refnr = resolve_refnr(job)
+    previous = await asyncio.to_thread(_previous_letters)
     try:
         anschreiben, email_body, stellenbezeichnung, usage = await asyncio.to_thread(
-            ai_drafting.draft_application, job, profile_text, refnr, applicant_name
+            ai_drafting.draft_application, job, profile_text, refnr,
+            applicant_name, previous,
         )
     except llm.LLMNotConfigured as exc:
         await asyncio.to_thread(
