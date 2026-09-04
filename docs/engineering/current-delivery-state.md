@@ -60,6 +60,8 @@ processes sharing a database.
 | Candidate claims register | Anthropic reads claim entries from `profile.md` across eight families (experience, project, skill, education, credential, language, strength, condition). Entries are stored as proposals carrying their source section, and are confirmed or refused by the candidate one row or one family at a time. A confirmed entry is corrected by supersession; a refused one is retained so a later reading cannot offer it again. |
 | Anlagen | Local PDF upload, readability checks, ordering, removal to a recovery folder, and merge into a Mappe. |
 | PDF generation | A local HTML template is rendered through Chrome and merged with Anlagen. Size-aware compression is available. |
+| Channel-specific document package | Every build produces the complete Mappe. A form application additionally receives the parts a portal asks for as separate uploads — the Anschreiben cut from the rendered template, a one-column Lebenslauf rendered from an optional second template (falling back to the Mappe's CV page), and the Anlagen merged into one file — each fitted to the portal budget on its own, archived beside the Mappe, staged in the upload folder under a name a file dialog can tell apart, and recorded per kind with hash, size and page count. The application strip offers one copy-path control per staged file; recording, undoing or abandoning the application moves every part together. |
+| ATS check | The Unterlagen screen measures the specimen Mappe and a rendered specimen of the portal Lebenslauf the way a parser meets them: text extractable, fonts embedded as TrueType rather than Type 3, words not glued, headings arriving as words rather than letter-spaced characters, contact details present as text, and the portal size budget. It states that a parser ranks rather than rejects. |
 | E-mail sending | Gmail OAuth, preview/edit, explicit approval state, test mode, real-send switch, daily cap, and ambiguous-outcome recovery. |
 | Scheduled sending | Approved drafts may be transmitted by the scheduler for search profiles with auto-send enabled. |
 | Form support | JobDeck detects known ATS and form channels, opens the employer page, prepares copy-ready values, and stages a PDF. It records an application after candidate confirmation or after a strongly matched receipt; it does not submit the form. |
@@ -177,9 +179,11 @@ as proof that a posting is a different role.
 
 The current Mappe is built from one mutable draft, one configured HTML template,
 and all PDFs found in the Anlagen directory. The build records a `pdf_path` and
-checks that the draft did not change during rendering. It does not retain
-document versions, template versions, a selected attachment set, or hashes for
-the exact submission.
+checks that the draft did not change during rendering. It records the documents
+it produced per posting and kind (`application_documents`: archive path, staged
+path, SHA-256, size, pages, build time), which is the first piece of the
+submission manifest ADR 0005 describes. It does not yet retain document
+versions, template versions, or a selected attachment set.
 
 The PDF renderer executes a user-configured HTML template in Chrome with
 `--no-sandbox`. Template values are escaped, but JavaScript and foreground
