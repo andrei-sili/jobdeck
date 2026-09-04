@@ -126,6 +126,52 @@ def recover_interrupted_undos(con) -> int:
     return removed
 
 
+def sweep_orphans(con) -> list[str]:
+    """Remove every file in the upload folder that no live row offers.
+
+    A staged file is meaningful only while an application is UNDER WAY and
+    a job's `upload_path` or a document row's `staged_path` names it — that
+    is what the strip shows and what the recorder takes back. Anything else
+    in the folder is a leftover the picker will offer for the NEXT
+    application: on 2026-09-04 the real folder held 21 Mappen from August
+    applications recorded before staging was taken back on record — 20 of
+    them still named by the `upload_path` of a job long since `applied`,
+    which is why the job's status is part of the rule, the same way the
+    strip's own query (`_STARTED_FORM_SQL`) reads it. Startup sweeps by that
+    rule rather than by hand; `.part` files belong to
+    `recover_interrupted_undos`.
+
+    Answers with the names removed, for the log."""
+    folder = pathlib.Path(config.UPLOAD_DIR)
+    if not folder.is_dir():
+        return []
+    # Exactly the strip's own definition of "under way" (`_STARTED_FORM_SQL`):
+    # a form he opened, on a posting not yet closed. Eight more leftovers had
+    # a job still `new` with a blank form_opened_at — staged by an older
+    # flow for a form never opened, shown on no strip, offered by the picker.
+    live = ("j.form_opened_at <> '' "
+            "AND j.status NOT IN ('applied','duplicate','skipped')")
+    referenced = {row[0] for row in con.execute(
+        f"SELECT j.upload_path FROM jobs j WHERE j.upload_path <> '' AND {live}")}
+    referenced |= {row[0] for row in con.execute(
+        "SELECT d.staged_path FROM application_documents d JOIN jobs j ON j.id = d.job_id "
+        f"WHERE d.staged_path <> '' AND {live}")}
+    referenced = {str(pathlib.Path(p)) for p in referenced}
+    removed = []
+    for target in sorted(folder.iterdir()):
+        if not target.is_file() or target.name.startswith("."):
+            continue
+        if str(target) in referenced:
+            continue
+        try:
+            target.unlink()
+        except OSError:
+            log.warning("upload: could not remove orphan %s", target)
+        else:
+            removed.append(target.name)
+    return removed
+
+
 def stage(source: pathlib.Path, previous: str = "") -> pathlib.Path:
     """Put `source` in the upload folder and answer with the staged path.
 
