@@ -141,15 +141,26 @@ def record_application(job_id: int, kanal: str,
         # Postausgang stops offering to e-mail a letter whose application is
         # already out.
         _file_letter(con, draft, bewerbung_id)
-        # the loop is closed: nothing should still be offered for upload
+        # the loop is closed: nothing should still be offered for upload —
+        # the Mappe and every part beside it. The document rows stay: they
+        # are the record of what was built for this application.
         upload.clear(job["upload_path"])
         db.set_upload(con, job_id, "", "")
+        _unstage_documents(con, job_id)
         con.commit()
     log.info("recorded form application for job %s (%s) as bewerbung %s",
              job_id, source, bewerbung_id)
     return {"ok": True, "bewerbung_id": bewerbung_id, "company": company,
             "duplicate": None, "decision": decision, "undo": True,
             "previous_status": previous_status}
+
+
+def _unstage_documents(con, job_id: int) -> None:
+    """Take every staged document of a posting out of the upload folder and
+    say so on its row. The archive files under output/job_<id>/ stay."""
+    for row in db.list_documents(con, job_id):
+        upload.clear(row["staged_path"])
+        db.set_document_staged(con, job_id, row["kind"], "")
 
 
 def undo(job_id: int, bewerbung_id: int, previous_status: str) -> None:
@@ -160,6 +171,9 @@ def undo(job_id: int, bewerbung_id: int, previous_status: str) -> None:
     application remains recorded and any newly staged artifact is removed.
     """
     staged: pathlib.Path | None = None
+    # every part the build made for this form, restaged under the same
+    # deterministic names, so a retried undo lands on its own files
+    restaged: list[tuple[str, pathlib.Path]] = []
     with db.db() as con:
         job = db.get_job(con, job_id)
         draft = db.get_draft_by_job(con, job_id)
@@ -173,6 +187,16 @@ def undo(job_id: int, bewerbung_id: int, previous_status: str) -> None:
                         upload.undo_staged_path(source, job_id, bewerbung_id)
                     ),
                 )
+            for row in db.list_documents(con, job_id):
+                if row["kind"] == db.DOC_MAPPE:
+                    if staged is not None:
+                        restaged.append((row["kind"], staged))
+                    continue
+                part = pathlib.Path(row["path"])
+                if part.is_file():
+                    restaged.append((row["kind"], upload.stage(
+                        part, previous=str(upload.undo_staged_path(
+                            part, job_id, bewerbung_id)))))
     try:
         with db.db() as con:
             con.execute("BEGIN IMMEDIATE")
@@ -183,9 +207,13 @@ def undo(job_id: int, bewerbung_id: int, previous_status: str) -> None:
             db.unrecord_application(con, job_id, bewerbung_id, previous_status)
             if staged is not None:
                 db.set_upload(con, job_id, str(staged), MAPPE_COMPLETE)
+            for kind, path in restaged:
+                db.set_document_staged(con, job_id, kind, str(path))
     except Exception:
         if staged is not None:
             upload.clear(staged)
+        for _kind, path in restaged:
+            upload.clear(path)
         raise
     log.info("undid the form application for job %s (bewerbung %s)",
              job_id, bewerbung_id)
@@ -205,6 +233,7 @@ def abandon_form(job_id: int) -> None:
         if job is None:
             return
         upload.clear(job["upload_path"])
+        _unstage_documents(con, job_id)
         db.clear_form_opened(con, job_id)
         con.commit()
     log.info("took back the started form application for job %s", job_id)
