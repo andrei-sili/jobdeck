@@ -116,6 +116,9 @@ _BUILD_SETTINGS = (
     ("applicant_ort", "applicant_ort", "", True),
     ("template_path", "template_path", "", True),
     ("anlagen_dir", "anlagen_dir", "", True),
+    # The one-column Lebenslauf a portal's parser reads in order. Optional:
+    # without it the CV part is the Mappe's own CV page.
+    ("cv_ats_path", "cv_ats_path", "", True),
     ("compress", "mappe_compress", "1", False),
     ("target_mb", "mappe_target_mb", "", False),
     ("target_portal_mb", "mappe_target_portal_mb", "", False),
@@ -143,6 +146,41 @@ def build_settings(con) -> dict:
     }
     values["compress"] = app_settings.parse_bool(values["compress"], True)
     return values
+
+
+# The file names a portal's upload dialog shows for the parts. The company is
+# in every one of them for the same reason it is in the Mappe's: the upload
+# folder is flat and holds several applications at once.
+PART_STEMS = {
+    db.DOC_ANSCHREIBEN: "Anschreiben",
+    db.DOC_LEBENSLAUF: "Lebenslauf",
+    db.DOC_ANLAGEN: "Anlagen",
+}
+
+
+def wants_parts(job) -> bool:
+    """Whether this posting's application goes through a form, where a
+    portal asks for the letter, the CV and the certificates as separate files.
+
+    A form he already opened counts regardless of what the channel column
+    says: the column is a derivation that can lag, the opened form is a
+    fact."""
+    return bool(job["form_opened_at"]) or (
+        (job["apply_channel"] or "") in PORTAL_CHANNELS)
+
+
+def letter_page_range(rendered_pages: int) -> tuple[int, int]:
+    """Which pages of the rendered template ARE the Anschreiben.
+
+    The template's contract (`unterlagen.TEMPLATE_LABEL`) is Deckblatt ·
+    Anschreiben · Lebenslauf, so with three or more pages the letter is
+    everything between the first and the last. A template that renders fewer
+    pages has no cover sheet or CV to strip, and the whole render is the
+    letter — a one-page letter template is the simplest possible shape and
+    must not lose its only page to this rule."""
+    if rendered_pages >= 3:
+        return 2, rendered_pages - 1
+    return 1, max(rendered_pages, 1)
 
 
 def target_bytes(settings: dict, channel: str) -> int:
@@ -205,6 +243,7 @@ def _build_mappe(job_id: int) -> dict:
                     / f"{out_name}.pdf")
 
         budget = target_bytes(settings, job["apply_channel"] or "")
+        parts: list[dict] = []
         with tempfile.TemporaryDirectory(prefix="jobdeck_mappe_") as tmp:
             letter_pdf = pathlib.Path(tmp) / "anschreiben.pdf"
             pdf.html_to_pdf(letter_html, letter_pdf)
@@ -222,9 +261,13 @@ def _build_mappe(job_id: int) -> dict:
                     size_bytes=merged_size, original_bytes=merged_size,
                     met_target=merged_size <= budget,
                 )
+            if wants_parts(job):
+                parts = _build_parts(job_id, settings, letter_pdf, anlagen,
+                                     pathlib.Path(tmp), out_path.parent,
+                                     name_part, firma_part)
         size = out_path.stat().st_size
         pages = pdf.page_count(out_path)
-    except (templates.TemplateError, pdf.PdfError) as exc:
+    except (templates.TemplateError, pdf.PdfError, OSError) as exc:
         return _error(str(exc))
 
     if compression.applied:
@@ -258,11 +301,23 @@ def _build_mappe(job_id: int) -> dict:
             # The draft was regenerated while Chrome rendered — this PDF
             # holds the OLD text and must not be linked to the new draft.
             out_path.unlink(missing_ok=True)
+            for part in parts:
+                pathlib.Path(part["path"]).unlink(missing_ok=True)
             upload.clear(job["upload_path"])
+            for row in db.list_documents(con, job_id):
+                upload.clear(row["staged_path"])
+            db.clear_documents(con, job_id)
             db.set_upload(con, job_id, "", "")
             return _error("the draft changed while the Mappe was rendering "
                           "— create the PDF again for the new text")
         db.upsert_draft(con, job_id, {"pdf_path": str(out_path)})
+        documents = [{"kind": db.DOC_MAPPE, "path": str(out_path),
+                      "pages": pages, "bytes": size,
+                      "sha256": pdf.sha256_of(out_path)}, *parts]
+        # Where the previous build's files were offered, so a rebuild lands on
+        # its own links instead of walking one "(2)" further every time.
+        previously = {row["kind"]: row["staged_path"]
+                      for row in db.list_documents(con, job_id)}
         # Staged only for an application that is actually being uploaded to a
         # form. Every channel builds a Mappe — the review-and-send editor and
         # the prepare batch both come through here — and only the form
@@ -281,11 +336,78 @@ def _build_mappe(job_id: int) -> dict:
         if job["form_opened_at"]:
             staged = upload.stage(out_path, job["upload_path"])
             db.set_upload(con, job_id, str(staged), MAPPE_COMPLETE)
+            for doc in documents:
+                if doc["kind"] == db.DOC_MAPPE:
+                    # already staged above, under `upload_path` — staging it
+                    # a second time would land beside itself as "… (2).pdf"
+                    doc["staged_path"] = str(staged)
+                    continue
+                doc["staged_path"] = str(upload.stage(
+                    pathlib.Path(doc["path"]), previously.get(doc["kind"], "")))
+            # A part the previous build staged and this one did not produce
+            # must leave the folder, or the picker offers a file the strip
+            # no longer lists.
+            for kind, old_path in previously.items():
+                if old_path and kind not in {d["kind"] for d in documents}:
+                    upload.clear(old_path)
+        db.set_documents(con, job_id, documents)
     return {"ok": True, "error": "", "pdf_path": str(out_path),
             "warning": warning, "pages": pages, "size_bytes": size,
             "size_before_bytes": compression.original_bytes,
             "compression": compression.describe(),
-            "anlagen": [p.name for p in anlagen]}
+            "anlagen": [p.name for p in anlagen],
+            "documents": documents}
+
+
+def _build_parts(job_id: int, settings: dict, letter_pdf: pathlib.Path,
+                 anlagen: list[pathlib.Path], tmp: pathlib.Path,
+                 job_dir: pathlib.Path, name_part: str,
+                 firma_part: str) -> list[dict]:
+    """The three files a portal's form asks for, beside the full Mappe.
+
+    Each is fitted to the PORTAL budget on its own — upload forms cap per file
+    — and lands in the same per-job archive folder as the Mappe. The CV is the
+    one-column ATS Lebenslauf when one is configured; otherwise the Mappe's
+    own CV page, so a portal never gets no CV at all.
+    """
+    rendered = pdf.page_count(letter_pdf)
+    first, last = letter_page_range(rendered)
+    sources: list[tuple[str, pathlib.Path]] = []
+    brief = tmp / "brief.pdf"
+    pdf.extract_pages(letter_pdf, brief, first, last)
+    sources.append((db.DOC_ANSCHREIBEN, brief))
+
+    cv_file = config.user_path(settings["cv_ats_path"])
+    cv = tmp / "lebenslauf.pdf"
+    if cv_file is not None and cv_file.is_file():
+        pdf.html_to_pdf(cv_file.read_text(encoding="utf-8"), cv)
+        sources.append((db.DOC_LEBENSLAUF, cv))
+    elif rendered >= 3:
+        pdf.extract_pages(letter_pdf, cv, rendered, rendered)
+        sources.append((db.DOC_LEBENSLAUF, cv))
+    if anlagen:
+        merged = tmp / "anlagen.pdf"
+        pdf.merge_pdfs(anlagen, merged)
+        sources.append((db.DOC_ANLAGEN, merged))
+
+    budget = target_bytes(settings, apply_channel.CHANNEL_ATS)
+    parts = []
+    for kind, src in sources:
+        out = job_dir / "_".join(
+            p for p in (PART_STEMS[kind], name_part, firma_part) if p)
+        out = out.with_suffix(".pdf")
+        if settings["compress"]:
+            compression = pdf.compress_to_target(src, out, budget)
+            if not compression.met_target:
+                log.warning("part %s for job %s is %.1f MB — over the portal "
+                            "budget", kind, job_id, out.stat().st_size / 1024 / 1024)
+        else:
+            pdf.install_pdf(src, out)
+        parts.append({"kind": kind, "path": str(out),
+                      "pages": pdf.page_count(out),
+                      "bytes": out.stat().st_size,
+                      "sha256": pdf.sha256_of(out)})
+    return parts
 
 
 async def create_mappe(job_id: int) -> dict:

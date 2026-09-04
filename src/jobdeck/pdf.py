@@ -8,6 +8,7 @@ per German convention, ideally under 5 MB.
 """
 
 import dataclasses
+import hashlib
 import io
 import logging
 import pathlib
@@ -171,6 +172,38 @@ def merge_pdfs(parts: list[pathlib.Path], out_pdf: pathlib.Path) -> None:
 
 def page_count(pdf_path: pathlib.Path) -> int:
     return len(PdfReader(str(pdf_path)).pages)
+
+
+def extract_pages(src: pathlib.Path, out_pdf: pathlib.Path,
+                  first: int, last: int) -> None:
+    """Write pages `first`..`last` (1-based, inclusive) of `src` to `out_pdf`.
+
+    A range outside the document is a caller error and raises: silently
+    producing an empty PDF would hand a portal a blank Anschreiben."""
+    reader = PdfReader(str(src))
+    count = len(reader.pages)
+    if not (1 <= first <= last <= count):
+        raise PdfError(f"pages {first}–{last} do not exist in {src.name} "
+                       f"({count} pages)")
+    writer = PdfWriter()
+    for index in range(first - 1, last):
+        writer.add_page(reader.pages[index])
+    out_pdf.parent.mkdir(parents=True, exist_ok=True)
+    tmp_pdf = out_pdf.with_suffix(".pdf.part")
+    try:
+        with tmp_pdf.open("wb") as fh:
+            writer.write(fh)
+        tmp_pdf.replace(out_pdf)
+    finally:
+        tmp_pdf.unlink(missing_ok=True)
+
+
+def sha256_of(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _page_size_inches(page) -> tuple[float, float]:
