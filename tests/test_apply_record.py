@@ -11,7 +11,7 @@ import pathlib
 
 import pytest
 
-from jobdeck import attempts, db
+from jobdeck import attempts, config, db
 from jobdeck.services import apply_record, upload
 
 
@@ -588,3 +588,136 @@ def test_the_undo_never_reaches_a_letter_that_was_e_mailed(con, data_dir):
     db.unfile_draft(con, bewerbung_id)
 
     assert db.get_draft(con, draft_id)["status"] == "sent"
+
+
+# ---------------------------------------------------------------------------
+# The parts beside the Mappe follow it in and out of the upload folder
+# ---------------------------------------------------------------------------
+
+def _with_parts(con, data_dir, job_id):
+    """A form application after a build that made the portal package."""
+    archive, staged = _with_mappe(con, data_dir, job_id)
+    folder = archive.parent
+    docs = [{"kind": db.DOC_MAPPE, "path": str(archive),
+             "staged_path": str(staged)}]
+    for kind, name in ((db.DOC_ANSCHREIBEN, "Anschreiben_A_Formular.pdf"),
+                       (db.DOC_LEBENSLAUF, "Lebenslauf_A_Formular.pdf"),
+                       (db.DOC_ANLAGEN, "Anlagen_A_Formular.pdf")):
+        part = folder / name
+        part.write_bytes(b"%PDF-1.4 " + kind.encode())
+        docs.append({"kind": kind, "path": str(part),
+                     "staged_path": str(upload.stage(part))})
+    db.set_documents(con, job_id, docs)
+    con.commit()
+    return docs
+
+
+def test_recording_takes_every_part_out_of_the_upload_folder(con, data_dir):
+    """The picker must offer nothing of a finished application — the Mappe
+    AND the three files beside it. The rows stay: they are the record of
+    what was built for the application that just went out."""
+    job_id = _job(con)
+    docs = _with_parts(con, data_dir, job_id)
+
+    result = apply_record.record_form_application(job_id)
+
+    assert result["ok"]
+    assert list(pathlib.Path(config.UPLOAD_DIR).iterdir()) == []
+    rows = db.list_documents(con, job_id)
+    assert [r["kind"] for r in rows] == [d["kind"] for d in docs]
+    assert all(r["staged_path"] == "" for r in rows)
+    assert all(pathlib.Path(r["path"]).is_file() for r in rows)
+
+
+def test_undo_puts_every_part_back_for_the_picker(con, data_dir):
+    job_id = _job(con)
+    docs = _with_parts(con, data_dir, job_id)
+    result = apply_record.record_form_application(job_id)
+
+    apply_record.undo(job_id, result["bewerbung_id"], result["previous_status"])
+
+    rows = db.list_documents(con, job_id)
+    assert [r["kind"] for r in rows] == [d["kind"] for d in docs]
+    for row in rows:
+        staged = pathlib.Path(row["staged_path"])
+        assert staged.parent == pathlib.Path(config.UPLOAD_DIR)
+        assert staged.read_bytes() == pathlib.Path(row["path"]).read_bytes()
+    # the Mappe row and the job's own pointer name the same file
+    job = db.get_job(con, job_id)
+    assert rows[0]["staged_path"] == job["upload_path"]
+    assert len(list(pathlib.Path(config.UPLOAD_DIR).iterdir())) == 4
+
+
+def test_abandoning_a_form_takes_every_part_out_of_the_upload_folder(
+    con, data_dir
+):
+    job_id = _job(con)
+    _with_parts(con, data_dir, job_id)
+
+    apply_record.abandon_form(job_id)
+
+    assert list(pathlib.Path(config.UPLOAD_DIR).iterdir()) == []
+    assert all(r["staged_path"] == "" for r in db.list_documents(con, job_id))
+
+
+def test_an_undo_that_fails_in_the_ledger_takes_its_restaged_parts_back(
+    con, data_dir, monkeypatch
+):
+    """The three restaged parts are removed only by the failure path; the
+    panel found that path unpinned. An aborted undo must not leave four
+    `(restore-…)` files for an application that is still recorded."""
+    job_id = _job(con)
+    _with_parts(con, data_dir, job_id)
+    result = apply_record.record_form_application(job_id)
+    assert list(pathlib.Path(config.UPLOAD_DIR).iterdir()) == []
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("ledger down")
+    monkeypatch.setattr(db, "unrecord_application", boom)
+    with pytest.raises(RuntimeError):
+        apply_record.undo(job_id, result["bewerbung_id"], result["previous_status"])
+
+    assert list(pathlib.Path(config.UPLOAD_DIR).iterdir()) == []
+    assert db.get_bewerbung(con, result["bewerbung_id"]) is not None
+
+
+def test_a_retried_undo_lands_on_the_same_restore_names(
+    con, data_dir, monkeypatch
+):
+    job_id = _job(con)
+    _with_parts(con, data_dir, job_id)
+    result = apply_record.record_form_application(job_id)
+    real = db.unrecord_application
+    calls = {"n": 0}
+
+    def flaky(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("once")
+        return real(*args, **kwargs)
+    monkeypatch.setattr(db, "unrecord_application", flaky)
+    with pytest.raises(RuntimeError):
+        apply_record.undo(job_id, result["bewerbung_id"], result["previous_status"])
+    apply_record.undo(job_id, result["bewerbung_id"], result["previous_status"])
+
+    names = sorted(p.name for p in pathlib.Path(config.UPLOAD_DIR).iterdir())
+    assert len(names) == 4
+    assert all("(restore-" in n and "(2)" not in n for n in names)
+
+
+def test_undo_restages_the_parts_even_after_a_redraft_blanked_the_mappe_path(
+    con, data_dir
+):
+    """After a redraft the draft's pdf_path is '' while the part files still
+    exist; the parts are restaged on their own evidence."""
+    job_id = _job(con)
+    docs = _with_parts(con, data_dir, job_id)
+    result = apply_record.record_form_application(job_id)
+    db.upsert_draft(con, job_id, {"pdf_path": ""})
+    con.commit()
+
+    apply_record.undo(job_id, result["bewerbung_id"], result["previous_status"])
+
+    staged = sorted(p.name for p in pathlib.Path(config.UPLOAD_DIR).iterdir())
+    assert len(staged) == len(docs) - 1     # every part; the Mappe has no path
+    assert db.get_job(con, job_id)["upload_path"] == ""

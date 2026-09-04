@@ -560,8 +560,8 @@ def test_the_signed_setting_keys_are_exactly_the_ones_read(con, data_dir):
     assert len(mappe.BUILD_SETTING_KEYS) == len(set(mappe.BUILD_SETTING_KEYS))
     # and every field the build uses really comes from one of them
     assert set(settings) == {"applicant_name", "applicant_ort", "template_path",
-                             "anlagen_dir", "compress", "target_mb",
-                             "target_portal_mb"}
+                             "anlagen_dir", "cv_ats_path", "compress",
+                             "target_mb", "target_portal_mb"}
 
 
 @pytest.mark.parametrize(
@@ -614,3 +614,411 @@ async def test_an_email_application_is_never_staged_for_an_upload(con, data_dir)
     assert not any(pathlib.Path(config.UPLOAD_DIR).glob("*.pdf"))
     job = db.get_job(con, job_id)
     assert job["upload_path"] == "" and job["mappe_kind"] == ""
+
+
+# ---------------------------------------------------------------------------
+# The portal package: the parts a form asks for, beside the full Mappe
+# ---------------------------------------------------------------------------
+
+ATS_CV = "<html><body><h1>Lebenslauf</h1><p>Erika Muster</p></body></html>"
+
+
+def _with_ats_cv(con, data_dir):
+    cv_file = data_dir / "lebenslauf_ats.html"
+    cv_file.write_text(ATS_CV, encoding="utf-8")
+    db.set_setting(con, "cv_ats_path", str(cv_file))
+    con.commit()
+    return cv_file
+
+
+def test_the_letter_pages_are_cut_out_of_the_template_contract():
+    """Deckblatt · Anschreiben · Lebenslauf: with three or more pages the
+    letter is everything between the first and the last. Fewer pages have
+    no cover sheet or CV to strip, so the whole render is the letter — a
+    one-page template must not lose its only page to the rule."""
+    assert mappe.letter_page_range(1) == (1, 1)
+    assert mappe.letter_page_range(2) == (1, 2)
+    assert mappe.letter_page_range(3) == (2, 2)
+    assert mappe.letter_page_range(5) == (2, 4)
+
+
+def test_parts_are_wanted_for_a_form_regardless_of_the_channel_column():
+    assert mappe.wants_parts({"form_opened_at": "2026-09-04T10:00",
+                              "apply_channel": "direct_email"})
+    assert mappe.wants_parts({"form_opened_at": "", "apply_channel": "ats_form"})
+    assert mappe.wants_parts({"form_opened_at": "", "apply_channel": "board_apply"})
+    assert not mappe.wants_parts({"form_opened_at": "", "apply_channel": "direct_email"})
+    assert not mappe.wants_parts({"form_opened_at": "", "apply_channel": ""})
+
+
+async def test_a_form_application_gets_the_parts_a_portal_asks_for(con, data_dir):
+    """Sixty percent of his applications go through a portal, and a portal
+    form asks for the Lebenslauf, the Anschreiben and the Zeugnisse as
+    separate uploads. The build produces them beside the full Mappe, names
+    them the way a file dialog will show them, stages every one, and records
+    exactly what it produced."""
+    job_id = _setup(con, data_dir)
+    _with_ats_cv(con, data_dir)
+    db.mark_form_opened(con, job_id)
+    con.commit()
+
+    result = await mappe.create_mappe(job_id)
+
+    assert result["ok"], result["error"]
+    kinds = [d["kind"] for d in result["documents"]]
+    assert kinds == [db.DOC_MAPPE, db.DOC_ANSCHREIBEN, db.DOC_LEBENSLAUF,
+                     db.DOC_ANLAGEN]
+    by_kind = {d["kind"]: d for d in result["documents"]}
+    job_dir = pathlib.Path(result["pdf_path"]).parent
+    assert pathlib.Path(by_kind[db.DOC_ANSCHREIBEN]["path"]).name \
+        == "Anschreiben_Erika_Muster_Mueller_Soehne_GmbH.pdf"
+    assert pathlib.Path(by_kind[db.DOC_LEBENSLAUF]["path"]).name \
+        == "Lebenslauf_Erika_Muster_Mueller_Soehne_GmbH.pdf"
+    assert pathlib.Path(by_kind[db.DOC_ANLAGEN]["path"]).name \
+        == "Anlagen_Erika_Muster_Mueller_Soehne_GmbH.pdf"
+    for doc in result["documents"]:
+        archive = pathlib.Path(doc["path"])
+        assert archive.parent == job_dir and archive.is_file()
+        staged = pathlib.Path(doc["staged_path"])
+        assert staged.parent == pathlib.Path(config.UPLOAD_DIR)
+        assert staged.read_bytes() == archive.read_bytes()
+        assert doc["sha256"] == pdf.sha256_of(archive)
+        assert doc["pages"] == pdf.page_count(archive)
+    # the two Anlagen (2 + 1 pages) travel as one file
+    assert by_kind[db.DOC_ANLAGEN]["pages"] == 3
+    # the one-page test template has no cover sheet to strip: the whole
+    # render is the letter
+    assert by_kind[db.DOC_ANSCHREIBEN]["pages"] == 1
+    # and the database says the same as the result
+    rows = db.list_documents(con, job_id)
+    assert [(r["kind"], r["path"], r["staged_path"]) for r in rows] \
+        == [(d["kind"], d["path"], d["staged_path"]) for d in result["documents"]]
+
+
+async def test_an_e_mail_application_builds_only_the_mappe(con, data_dir):
+    """Nothing to upload, nothing to split: the e-mail path attaches one
+    Mappe and the archive folder holds exactly that."""
+    job_id = _setup(con, data_dir)
+    _with_ats_cv(con, data_dir)
+    con.commit()
+
+    result = await mappe.create_mappe(job_id)
+
+    assert result["ok"]
+    assert [d["kind"] for d in result["documents"]] == [db.DOC_MAPPE]
+    job_dir = pathlib.Path(result["pdf_path"]).parent
+    assert sorted(p.name for p in job_dir.iterdir()) \
+        == [pathlib.Path(result["pdf_path"]).name]
+    assert [r["kind"] for r in db.list_documents(con, job_id)] == [db.DOC_MAPPE]
+    # nothing staged either — no form was opened
+    assert db.list_documents(con, job_id)[0]["staged_path"] == ""
+
+
+async def test_without_an_ats_cv_and_a_one_page_template_no_cv_part_is_made(
+    con, data_dir
+):
+    """A one-page letter template has no CV page to fall back on, and a CV
+    part invented from nothing would be a blank upload."""
+    job_id = _setup(con, data_dir)
+    db.mark_form_opened(con, job_id)
+    con.commit()
+
+    result = await mappe.create_mappe(job_id)
+
+    assert result["ok"]
+    assert [d["kind"] for d in result["documents"]] \
+        == [db.DOC_MAPPE, db.DOC_ANSCHREIBEN, db.DOC_ANLAGEN]
+
+
+async def test_a_rebuilt_package_lands_on_its_own_staged_files(con, data_dir):
+    """The upload folder is flat and names collide by construction, so a
+    rebuild must reuse the links it made — not walk one "(2)" further and
+    leave the previous set behind for the picker to offer."""
+    job_id = _setup(con, data_dir)
+    _with_ats_cv(con, data_dir)
+    db.mark_form_opened(con, job_id)
+    con.commit()
+    first = await mappe.create_mappe(job_id)
+    db.upsert_draft(con, job_id, {"anschreiben_body": "Anrede,\n\nNEU."})
+    con.commit()
+
+    second = await mappe.create_mappe(job_id)
+
+    assert second["ok"]
+    assert [d["staged_path"] for d in first["documents"]] \
+        == [d["staged_path"] for d in second["documents"]]
+    staged_names = sorted(p.name for p in pathlib.Path(config.UPLOAD_DIR).iterdir())
+    assert staged_names == sorted(pathlib.Path(d["staged_path"]).name
+                                  for d in second["documents"])
+    # and the staged letter is the NEW bytes
+    brief = next(d for d in second["documents"] if d["kind"] == db.DOC_ANSCHREIBEN)
+    assert pathlib.Path(brief["staged_path"]).read_bytes() \
+        == pathlib.Path(brief["path"]).read_bytes()
+
+
+async def test_a_part_the_rebuild_no_longer_makes_leaves_the_upload_folder(
+    con, data_dir
+):
+    """He emptied the Anlagen folder between two builds: the Anlagen part is
+    gone from the strip, so it must be gone from the picker too."""
+    job_id = _setup(con, data_dir)
+    _with_ats_cv(con, data_dir)
+    db.mark_form_opened(con, job_id)
+    con.commit()
+    first = await mappe.create_mappe(job_id)
+    anlagen_staged = next(d["staged_path"] for d in first["documents"]
+                          if d["kind"] == db.DOC_ANLAGEN)
+    for f in (data_dir / "anlagen").iterdir():
+        f.unlink()
+
+    second = await mappe.create_mappe(job_id)
+
+    assert second["ok"]
+    assert db.DOC_ANLAGEN not in [d["kind"] for d in second["documents"]]
+    assert not pathlib.Path(anlagen_staged).exists()
+    assert db.DOC_ANLAGEN not in [r["kind"] for r in db.list_documents(con, job_id)]
+
+
+async def test_a_package_discarded_mid_render_leaves_no_part_behind(
+    con, data_dir, monkeypatch
+):
+    job_id = _setup(con, data_dir)
+    _with_ats_cv(con, data_dir)
+    db.mark_form_opened(con, job_id)
+    con.commit()
+    real_render = pdf.html_to_pdf
+    calls = {"n": 0}
+
+    def render_and_redraft(html, out):
+        real_render(html, out)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            with db.db() as c:
+                db.upsert_draft(c, job_id, {"anschreiben_body": "Anrede,\n\nX."})
+    monkeypatch.setattr(pdf, "html_to_pdf", render_and_redraft)
+
+    result = await mappe.create_mappe(job_id)
+
+    assert not result["ok"]
+    job_dir = pathlib.Path(config.OUTPUT_DIR) / f"job_{job_id}"
+    assert not job_dir.exists() or list(job_dir.iterdir()) == []
+    assert list(pathlib.Path(config.UPLOAD_DIR).iterdir()) == []
+    assert db.list_documents(con, job_id) == []
+
+
+# ---------------------------------------------------------------------------
+# The package under failure, and the letter cut by its text (review panel)
+# ---------------------------------------------------------------------------
+
+# A template shaped like his: a cover sheet, the letter, and a CV that may
+# spill onto a second page. Page breaks are explicit so Chrome renders exactly
+# three (or four) pages.
+TEMPLATE3 = """\
+<style>.page{page-break-after:always}</style>
+<div class="page"><h1>BEWERBUNG</h1><p>Deckblatt {{FIRMA}}</p></div>
+<div class="page">{{FIRMA}}<br>{{ANSPRECHPARTNER}}<br>{{STRASSE}}<br>{{PLZ_ORT}}
+<div>{{ORT}}, {{DATUM}}</div><h2>{{BETREFF}}</h2>{{ANSCHREIBEN_BODY}}
+<p>Mit freundlichen Grüßen</p></div>
+<div><h2>Berufserfahrung</h2><p>Praktikum Softwareentwicklung · 01/2025 – 07/2025</p>
+<h2>Kenntnisse</h2><p>Python, Django</p>__SPILL__</div>
+"""
+
+
+def _three_page_template(data_dir, spill=False):
+    body = TEMPLATE3.replace(
+        "__SPILL__",
+        '<div style="page-break-before:always"><h2>Ausbildung</h2>'
+        "<p>Fachinformatikerin · 08/2022 – 07/2025</p></div>" if spill else "")
+    template_file = data_dir / "template3.html"
+    template_file.write_text(body, encoding="utf-8")
+    return template_file
+
+
+async def _package(con, data_dir, **overrides):
+    """A form application after one successful package build."""
+    job_id = _setup(con, data_dir, **overrides)
+    _with_ats_cv(con, data_dir)
+    db.mark_form_opened(con, job_id)
+    con.commit()
+    first = await mappe.create_mappe(job_id)
+    assert first["ok"], first["error"]
+    return job_id, first
+
+
+def _snapshot(con, job_id, result):
+    """Everything a failed rebuild must leave alone."""
+    archive = pathlib.Path(result["pdf_path"])
+    return {
+        "archive": (archive.stat().st_ino, archive.read_bytes()),
+        "rows": [tuple(r) for r in db.list_documents(con, job_id)],
+        "staged": {p.name: p.read_bytes()
+                   for p in pathlib.Path(config.UPLOAD_DIR).iterdir()},
+        "job": (db.get_job(con, job_id)["upload_path"],
+                db.get_job(con, job_id)["mappe_kind"]),
+    }
+
+
+async def test_the_letter_is_cut_by_its_text_and_the_cv_takes_every_page_after_it(
+    con, data_dir
+):
+    """His template renders Deckblatt · Anschreiben · Lebenslauf. The
+    position rule ("everything between first and last page") breaks the day
+    the CV spills onto a second page: the portal would get an Anschreiben
+    holding half the CV and a Lebenslauf holding the other half. Cut by
+    text, the letter is the page carrying its body, and the CV is every
+    page after it — one or two."""
+    job_id = _setup(con, data_dir, template_path=str(_three_page_template(data_dir, spill=True)))
+    db.mark_form_opened(con, job_id)
+    con.commit()
+
+    result = await mappe.create_mappe(job_id)
+
+    assert result["ok"], result["error"]
+    by_kind = {d["kind"]: d for d in result["documents"]}
+    assert by_kind[db.DOC_MAPPE]["pages"] == 4 + 3      # template + Anlagen
+    assert by_kind[db.DOC_ANSCHREIBEN]["pages"] == 1
+    brief_text = pdf.PdfReader(by_kind[db.DOC_ANSCHREIBEN]["path"]).pages[0].extract_text()
+    assert "Absatz eins" in brief_text and "Deckblatt" not in brief_text
+    assert by_kind[db.DOC_LEBENSLAUF]["pages"] == 2
+    cv_text = "".join(p.extract_text() for p in
+                      pdf.PdfReader(by_kind[db.DOC_LEBENSLAUF]["path"]).pages)
+    assert "Berufserfahrung" in cv_text and "Ausbildung" in cv_text
+    assert "Absatz eins" not in cv_text
+
+
+async def test_letter_pages_are_found_by_text(con, data_dir, tmp_path):
+    job_id = _setup(con, data_dir, template_path=str(_three_page_template(data_dir)))
+    from jobdeck import templates
+    draft = db.get_draft_by_job(con, job_id)
+    job = db.get_job(con, job_id)
+    values = mappe.letter_values(job, draft, "Erika Muster", "Musterstadt")
+    values["anschreiben_body"] = draft["anschreiben_body"]
+    out = tmp_path / "t3.pdf"
+    pdf.html_to_pdf(templates.render_letter(
+        _three_page_template(data_dir).read_text(encoding="utf-8"), values), out)
+
+    assert pdf.page_count(out) == 3
+    assert mappe.letter_pages_by_text(out, draft["anschreiben_body"]) == (2, 2)
+    # a body the template does not print verbatim cannot be located
+    assert mappe.letter_pages_by_text(out, "Ganz anderer Text.") is None
+    assert mappe.letter_pages_by_text(out, "") is None
+
+
+async def test_a_cv_in_the_wrong_encoding_fails_the_build_and_changes_nothing(
+    con, data_dir
+):
+    """A German HTML CV saved by an editor as Windows-1252 raised straight
+    out of the press: UnicodeDecodeError is a ValueError, not an OSError.
+    The build must refuse with a sentence — and, because the Mappe used to
+    be installed BEFORE the parts were built, must leave the archive, the
+    rows and the staged links exactly as the previous build did."""
+    job_id, first = await _package(con, data_dir)
+    before = _snapshot(con, job_id, first)
+    (data_dir / "lebenslauf_ats.html").write_bytes(
+        "<html><body><p>Müller Straße</p></body></html>".encode("cp1252"))
+
+    second = await mappe.create_mappe(job_id)
+
+    assert not second["ok"]
+    assert "codec" in second["error"]
+    assert _snapshot(con, job_id, first) == before
+
+
+async def test_a_part_failing_leaves_the_previous_package_whole(
+    con, data_dir, monkeypatch
+):
+    """Reproduced by the panel: the archive held the NEW letter while the
+    rows and the picker's links still described the old one. Nothing is
+    installed until every part has succeeded."""
+    job_id, first = await _package(con, data_dir)
+    before = _snapshot(con, job_id, first)
+    db.upsert_draft(con, job_id, {"anschreiben_body": "Anrede,\n\nNEUER TEXT."})
+    con.commit()
+    real = pdf.extract_pages
+
+    def failing(*args, **kwargs):
+        raise pdf.PdfError("simulated part failure")
+    monkeypatch.setattr(pdf, "extract_pages", failing)
+
+    second = await mappe.create_mappe(job_id)
+
+    monkeypatch.setattr(pdf, "extract_pages", real)
+    assert not second["ok"] and "simulated" in second["error"]
+    assert _snapshot(con, job_id, first) == before
+    # and every recorded hash still matches its file
+    for row in db.list_documents(con, job_id):
+        assert row["sha256"] == pdf.sha256_of(pathlib.Path(row["path"]))
+
+
+async def test_a_form_taken_back_during_the_build_is_not_restaged(
+    con, data_dir, monkeypatch
+):
+    """"Bewerbung starten" opens the form and only then builds, a minute in
+    which "Doch nicht beworben" is live. A build that started before he
+    took the form back must not put the package into the picker's folder."""
+    from jobdeck.services import apply_record
+    job_id = _setup(con, data_dir)
+    _with_ats_cv(con, data_dir)
+    db.mark_form_opened(con, job_id)
+    con.commit()
+    real = pdf.html_to_pdf
+    calls = {"n": 0}
+
+    def render_then_abandon(html, out):
+        real(html, out)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            apply_record.abandon_form(job_id)
+    monkeypatch.setattr(pdf, "html_to_pdf", render_then_abandon)
+
+    result = await mappe.create_mappe(job_id)
+
+    assert result["ok"]
+    assert list(pathlib.Path(config.UPLOAD_DIR).iterdir()) == []
+    assert all(r["staged_path"] == "" for r in db.list_documents(con, job_id))
+    assert db.get_job(con, job_id)["upload_path"] == ""
+
+
+async def test_a_second_build_discarded_mid_render_clears_the_first_builds_parts(
+    con, data_dir, monkeypatch
+):
+    job_id, _first = await _package(con, data_dir)
+    db.upsert_draft(con, job_id, {"anschreiben_body": "Anrede,\n\nZWEITER."})
+    con.commit()
+    real = pdf.html_to_pdf
+    calls = {"n": 0}
+
+    def render_and_redraft(html, out):
+        real(html, out)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            with db.db() as c:
+                db.upsert_draft(c, job_id, {"anschreiben_body": "Anrede,\n\nDRITTER."})
+    monkeypatch.setattr(pdf, "html_to_pdf", render_and_redraft)
+
+    result = await mappe.create_mappe(job_id)
+
+    assert not result["ok"]
+    assert list(pathlib.Path(config.UPLOAD_DIR).iterdir()) == []
+    assert db.list_documents(con, job_id) == []
+    assert db.get_job(con, job_id)["mappe_kind"] == ""
+
+
+async def test_parts_are_built_with_compression_switched_off_too(con, data_dir):
+    job_id, first = await _package(con, data_dir, mappe_compress="0")
+    assert [d["kind"] for d in first["documents"]] == list(db.DOCUMENT_KINDS)
+    for d in first["documents"]:
+        assert pathlib.Path(d["path"]).is_file()
+
+
+def test_extract_pages_refuses_a_range_the_document_does_not_have(tmp_path):
+    src = _blank_pdf(tmp_path / "two.pdf", pages=2)
+    out = tmp_path / "out.pdf"
+    with pytest.raises(pdf.PdfError):
+        pdf.extract_pages(src, out, 0, 1)
+    with pytest.raises(pdf.PdfError):
+        pdf.extract_pages(src, out, 1, 3)
+    with pytest.raises(pdf.PdfError):
+        pdf.extract_pages(src, out, 2, 1)
+    pdf.extract_pages(src, out, 2, 2)
+    assert pdf.page_count(out) == 1

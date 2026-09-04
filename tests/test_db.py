@@ -947,3 +947,102 @@ def test_an_automatic_source_may_still_raise_a_status(con):
                          source="reply_auto") is True
     assert db.set_status(con, row_id, "Absage", source="reply_auto") is True
     assert db.get_bewerbung(con, row_id)["status"] == "Absage"
+
+
+# ---------------------------------------------------------------------------
+# application_documents — the build's record of what it produced
+# ---------------------------------------------------------------------------
+
+def _doc_job(con, external_id="doc-1"):
+    job_id = db.insert_job_if_new(con, {
+        "source": "arbeitnow", "external_id": external_id, "title": "Dev",
+        "company": "Beta GmbH", "description": "x"})
+    con.commit()
+    return job_id
+
+
+def test_documents_are_listed_in_the_order_a_portal_asks_for_them(con):
+    job_id = _doc_job(con)
+    db.set_documents(con, job_id, [
+        {"kind": db.DOC_ANLAGEN, "path": "/a/anlagen.pdf", "pages": 7},
+        {"kind": db.DOC_MAPPE, "path": "/a/mappe.pdf", "pages": 10,
+         "staged_path": "/u/mappe.pdf", "sha256": "abc", "bytes": 5},
+        {"kind": db.DOC_LEBENSLAUF, "path": "/a/cv.pdf", "pages": 1},
+        {"kind": db.DOC_ANSCHREIBEN, "path": "/a/brief.pdf", "pages": 1},
+    ])
+    con.commit()
+
+    rows = db.list_documents(con, job_id)
+
+    assert [r["kind"] for r in rows] == list(db.DOCUMENT_KINDS)
+    assert rows[0]["staged_path"] == "/u/mappe.pdf"
+    assert rows[0]["sha256"] == "abc" and rows[0]["bytes"] == 5
+    assert rows[0]["built_at"]
+
+
+def test_a_rebuild_replaces_the_documents_it_no_longer_produces(con):
+    """The channel changed or the CV template went away: the part's row must
+    go with it, or the strip keeps offering a file the build did not make."""
+    job_id = _doc_job(con)
+    db.set_documents(con, job_id, [
+        {"kind": db.DOC_MAPPE, "path": "/a/mappe.pdf"},
+        {"kind": db.DOC_LEBENSLAUF, "path": "/a/cv.pdf"},
+    ])
+    db.set_documents(con, job_id, [{"kind": db.DOC_MAPPE, "path": "/a/mappe2.pdf"}])
+    con.commit()
+
+    rows = db.list_documents(con, job_id)
+    assert [(r["kind"], r["path"]) for r in rows] == [(db.DOC_MAPPE, "/a/mappe2.pdf")]
+
+
+def test_documents_for_jobs_keys_by_posting_and_keeps_other_postings_apart(con):
+    a = _doc_job(con, "doc-a")
+    b = _doc_job(con, "doc-b")
+    db.set_documents(con, a, [{"kind": db.DOC_MAPPE, "path": "/a"}])
+    db.set_documents(con, b, [{"kind": db.DOC_MAPPE, "path": "/b"},
+                              {"kind": db.DOC_ANLAGEN, "path": "/b2"}])
+    con.commit()
+
+    by_job = db.documents_for_jobs(con, [a, b])
+
+    assert [d["path"] for d in by_job[a]] == ["/a"]
+    assert [d["kind"] for d in by_job[b]] == [db.DOC_MAPPE, db.DOC_ANLAGEN]
+    assert db.documents_for_jobs(con, []) == {}
+
+
+def test_clearing_documents_forgets_the_rows_and_only_the_rows(con):
+    job_id = _doc_job(con)
+    db.set_documents(con, job_id, [{"kind": db.DOC_MAPPE, "path": "/a"}])
+    db.clear_documents(con, job_id)
+    con.commit()
+    assert db.list_documents(con, job_id) == []
+
+
+def test_a_document_landing_or_leaving_the_upload_folder_moves_the_signature(con):
+    """The strip lists a chip per staged document, and the build writes those
+    rows from a worker thread while the page is open. A watcher blind to the
+    table would keep showing a strip without the file that just landed — and,
+    worse, one WITH a file that was just taken out."""
+    job_id = _doc_job(con)
+    before = db.data_signature(con)
+    db.set_documents(con, job_id, [{"kind": db.DOC_MAPPE, "path": "/a",
+                                    "staged_path": "/u/a"}])
+    con.commit()
+    landed = db.data_signature(con)
+    assert landed != before
+
+    db.set_document_staged(con, job_id, db.DOC_MAPPE, "")
+    con.commit()
+    assert db.data_signature(con) != landed
+
+
+def test_recent_letters_leave_out_the_postings_own_earlier_letter(con):
+    """A redraft keeps the old body until it finishes; compared with itself
+    every redraft would "open like an earlier letter"."""
+    a = _doc_job(con, "let-a")
+    b = _doc_job(con, "let-b")
+    db.upsert_draft(con, a, {"status": "ready", "anschreiben_body": "Brief A"})
+    db.upsert_draft(con, b, {"status": "ready", "anschreiben_body": "Brief B"})
+    con.commit()
+    assert db.recent_letter_bodies(con) == ["Brief B", "Brief A"]
+    assert db.recent_letter_bodies(con, exclude_job_id=a) == ["Brief B"]

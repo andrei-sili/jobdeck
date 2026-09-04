@@ -21,6 +21,7 @@ from jobdeck import config, db
 from jobdeck.ai import drafting as ai_drafting
 from jobdeck.ai import llm, profile
 from jobdeck.ai.drafting import resolve_refnr  # noqa: F401 — re-exported
+from jobdeck.services import upload
 
 log = logging.getLogger(__name__)
 
@@ -119,7 +120,19 @@ def _claim(job_id: int) -> str:
         # A regenerated draft invalidates any previously built Mappe — the
         # PDF on disk still holds the OLD Anschreiben.
         db.upsert_draft(con, job_id, {"status": "generating", "pdf_path": ""})
+        # And the package built from the OLD letter leaves circulation with
+        # it: a "⧉ Anschreiben" chip must never offer the text he just
+        # replaced. The strip reads "Mappe wird gebaut …" until the next
+        # build lands.
+        upload.withdraw(con, job_id)
         return ""
+
+
+def _previous_letters(job_id: int) -> list[str]:
+    """The letters already written for OTHER postings, so a new one is not
+    the same letter — and a redraft is not compared with itself."""
+    with db.db() as con:
+        return db.recent_letter_bodies(con, exclude_job_id=job_id)
 
 
 def _finish(job_id: int, values: dict, usage: llm.LLMResult | None) -> dict | None:
@@ -168,9 +181,11 @@ async def draft_for_job(job_id: int) -> dict:
         return _error(claim_error)
 
     refnr = resolve_refnr(job)
+    previous = await asyncio.to_thread(_previous_letters, job_id)
     try:
         anschreiben, email_body, stellenbezeichnung, usage = await asyncio.to_thread(
-            ai_drafting.draft_application, job, profile_text, refnr, applicant_name
+            ai_drafting.draft_application, job, profile_text, refnr,
+            applicant_name, previous,
         )
     except llm.LLMNotConfigured as exc:
         await asyncio.to_thread(

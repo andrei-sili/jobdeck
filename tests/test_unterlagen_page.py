@@ -1234,3 +1234,61 @@ async def test_the_screen_names_what_the_reading_cost(user: User, con,
         await user.should_see("0.0182 $")
     finally:
         claims_service.import_from_profile = saved
+
+
+# --------------------------------------------------------------------------
+# The ATS check
+# --------------------------------------------------------------------------
+LETTER_TEMPLATE = """<div>{{FIRMA}} {{ANSPRECHPARTNER}} {{STRASSE}} {{PLZ_ORT}}
+{{ORT}}, {{DATUM}} <h2>{{BETREFF}}</h2> {{ANSCHREIBEN_BODY}}
+<p>Mit freundlichen Grüßen — erika@example.org · +49 170 1234567</p></div>"""
+
+CV_ATS = """<html><body><h1>Erika Muster</h1><p>erika@example.org · +49 170 1234567</p>
+<h2>Berufserfahrung</h2><p>Praktikum Softwareentwicklung · 01/2025 – 07/2025.
+Backend-Entwicklung mit Python und Django, REST-Endpunkte, API-Testing, Docker.</p>
+<h2>Ausbildung</h2><p>Fachinformatikerin · 08/2022 – 07/2025</p>
+<h2>Kenntnisse</h2><p>Python, Django, PostgreSQL, Docker, Git, Linux, Pytest</p></body></html>"""
+
+
+def _buildable(con, data_dir):
+    template = data_dir / "vorlage.html"
+    template.write_text(LETTER_TEMPLATE, encoding="utf-8")
+    for key, value in (("applicant_name", "Erika Muster"),
+                       ("applicant_ort", "Musterstadt"),
+                       ("template_path", str(template))):
+        db.set_setting(con, key, value)
+    con.commit()
+
+
+async def test_the_ats_panel_says_what_is_not_measured_yet(
+        user: User, con, data_dir):
+    _posting(con)
+
+    await user.open("/unterlagen")
+
+    await user.should_see("ATS-Check")
+    await user.should_see("Noch nicht gebaut — „Neu bauen“ misst sie.")
+    await user.should_see("Kein Lebenslauf für Portale eingetragen")
+
+
+async def test_the_ats_panel_measures_the_built_files(user: User, con, data_dir):
+    """Measured on the PDFs, line by line: a portal's parser meets the
+    rendered file, and the properties it trips over exist only there."""
+    from jobdeck.services import unterlagen as unterlagen_service
+    job_id = _posting(con)
+    _buildable(con, data_dir)
+    cv = data_dir / "cv_ats.html"
+    cv.write_text(CV_ATS, encoding="utf-8")
+    db.set_setting(con, "cv_ats_path", str(cv))
+    con.commit()
+    result = await unterlagen_service.build(job_id)
+    assert result["ok"], result["error"]
+
+    await user.open("/unterlagen")
+
+    await user.should_see("Der Lebenslauf für Portale")
+    await user.should_see("✓ Schriften als TrueType eingebettet")
+    await user.should_see("✓ Standard-Überschriften gefunden")
+    # the Mappe is measured too, and a letter-only template has no CV
+    # headings — so that line is red there, and honestly so
+    await user.should_see("✗ Standard-Überschriften fehlen")

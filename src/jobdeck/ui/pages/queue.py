@@ -12,7 +12,8 @@ import logging
 
 from nicegui import run, ui
 
-from jobdeck import attempts, db
+from jobdeck import attempts, config, db
+from jobdeck.ai import letterquality
 from jobdeck.services import drafting, liveness, send
 from jobdeck.ui import draft_editor, helpers, live
 from jobdeck.ui.helpers import open_in_system, openable_url
@@ -109,12 +110,62 @@ def _signature_of(con) -> tuple:
     # The pipeline first, the sending mode after it — the same order every
     # loader here reads in, and the reason the rule that pins it exists.
     signature = db.data_signature(con)
-    return (signature, *sorted(db.send_mode(con).items()))
+    # The coverage line is measured against a CV file on disk, reached through
+    # two settings; neither is in any table, so both and the file itself join
+    # the signature — or an edited Lebenslauf never reaches the page.
+    cv_settings = tuple(db.get_setting(con, key, "").strip()
+                        for key in ("cv_ats_path", "template_path"))
+    return (signature, *sorted(db.send_mode(con).items()), cv_settings,
+            _cv_fingerprint(cv_settings))
+
+
+def _cv_fingerprint(paths: tuple[str, ...]) -> tuple:
+    """Size and mtime of the first readable CV file, as the loader picks it."""
+    for raw in paths:
+        path = config.user_path(raw)
+        if path is not None and path.is_file():
+            try:
+                stat = path.stat()
+            except OSError:
+                return ()
+            return (str(path), stat.st_size, stat.st_mtime_ns)
+    return ()
 
 
 def _signature() -> tuple:
     with db.db() as con:
         return _signature_of(con)
+
+
+def cv_text(con) -> str:
+    """The words of the CV a portal parses — the one-column Lebenslauf when
+    one is configured, else the letter template, which carries the Mappe's
+    CV page. '' when neither is readable, and the coverage line then counts
+    the letter alone rather than pretend to know the CV."""
+    for key in ("cv_ats_path", "template_path"):
+        path = config.user_path(db.get_setting(con, key, "").strip())
+        text = letterquality.text_of_html(path)
+        if text:
+            return text
+    return ""
+
+
+def quality_lines(row: dict, cv: str, previous: list[str] = ()) -> list[tuple[str, str]]:
+    """What the Postausgang says about a letter before he reads it: which of
+    the advert's terms it carries, and what a recruiter would hold against
+    it. (text, tone) pairs; empty for a draft with no letter yet."""
+    letter = row.get("anschreiben_body") or ""
+    if not letter.strip():
+        return []
+    posting = row.get("job_description") or ""
+    lines: list[tuple[str, str]] = []
+    line = letterquality.coverage(posting, letter, cv).line()
+    if line:
+        lines.append((line, ""))
+    for note in letterquality.notes(letter, posting, list(previous),
+                                    title=row.get("job_title") or ""):
+        lines.append((note.text, "warn"))
+    return lines
 
 
 def _load(filter_value: str) -> dict:
@@ -125,6 +176,15 @@ def _load(filter_value: str) -> dict:
         signature = _signature_of(con)
         rows = [dict(r) for r in
                 db.list_drafts_with_jobs(con, FILTER_STATUSES[filter_value])]
+        # The CV's words, read once per load: every row's coverage line is
+        # counted against the same file.
+        cv = cv_text(con)
+        # The same letters the drafting re-roll compares against — the newest
+        # on file, whatever their status — never this row's own.
+        recent = db.recent_letter_bodies(con, limit=40)
+        for row in rows:
+            others = [b for b in recent if b != row.get("anschreiben_body")]
+            row["quality"] = quality_lines(row, cv, others)
         # Asked of the identity rule itself, for the drafts on screen: the send
         # path refuses an application to a company still inside its
         # cooling-off window, and saying so HERE is what stops him building a
@@ -262,6 +322,13 @@ async def queue_page():
                          f"· geändert {row['updated_at'][:16]}") \
                     .classes("text-xs text-gray-500")
                 ui.label(row["betreff"]).classes("text-sm")
+                for text, tone in row.get("quality") or []:
+                    # Measured on the text, not promised by the prompt: the
+                    # advert's terms the letter carries, and the tells a
+                    # recruiter reads as generated — before he presses send.
+                    ui.label(text).classes(
+                        "text-xs " + ("text-amber-700" if tone == "warn"
+                                      else "text-gray-600"))
                 if row["job_liveness"] == liveness.LIVENESS_GONE:
                     checked = (row["job_liveness_checked_at"] or "")[:10]
                     ui.label(f"⚠ Die Anzeige war am {checked} nicht mehr "

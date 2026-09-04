@@ -390,3 +390,26 @@ async def test_opening_a_draft_twice_leaves_one_dialog_behind(
         assert len(dialogs()) == 1, f"{len(dialogs())} dialogs are alive at once"
         user.find("Schließen").click()
         await asyncio.sleep(0.1)
+
+
+async def test_the_queue_row_says_what_the_letter_carries(
+        user: User, con, data_dir):
+    """The parser gate ranks on the advert's own terms and a recruiter spots
+    a generated letter by its tells; both are printed on the row, measured
+    on the stored text, before he presses anything."""
+    job_id = _posting(con, description="Wir suchen Python und Docker.")
+    db.upsert_draft(con, job_id, {
+        "status": "ready", "recipient": "jobs@beispiel.example",
+        "betreff": "Bewerbung als Python Entwickler",
+        "email_body": "Guten Tag,\n\nanbei.",
+        "anschreiben_body": ("Sehr geehrte Damen und Herren,\n\nMit Python "
+                             "habe ich gearbeitet. Die Aufgabe reizt mich "
+                             "besonders."),
+    })
+    con.commit()
+
+    await user.open("/queue")
+
+    await user.should_see("Begriffe aus der Anzeige: 1 von 2 im Brief · "
+                          "nicht im Brief: Docker · Lebenslauf nicht lesbar")
+    await user.should_see("Floskel: „reizt mich besonders“")

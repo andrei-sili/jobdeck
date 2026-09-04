@@ -15,7 +15,7 @@ import pathlib
 from nicegui import run, ui
 
 from jobdeck import attempts, db
-from jobdeck.services import mappe, send
+from jobdeck.services import mappe, send, upload
 from jobdeck.ui import helpers
 from jobdeck.ui.helpers import open_in_system
 
@@ -56,6 +56,8 @@ def _save_draft(job_id: int, values: dict, clear_pdf: bool):
             )
         if clear_pdf:
             values = {**values, "pdf_path": ""}
+            # the staged package carried the letter he just edited
+            upload.withdraw(con, job_id)
         if current["status"] == "approved":
             # Approval is content-specific: auto-send must never transmit text
             # the user changed after approving it.

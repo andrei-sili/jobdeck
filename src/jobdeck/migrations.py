@@ -12,7 +12,7 @@ import sqlite3
 from jobdeck import constants, dates
 from jobdeck.dedupe import norm
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 # Legacy table, exactly as the previous tracker created it.
 BEWERBUNGEN_SQL = """
@@ -252,6 +252,27 @@ CREATE TABLE IF NOT EXISTS hidden_companies (
     hidden_at   TEXT NOT NULL,
     source      TEXT NOT NULL DEFAULT 'user'
 );
+
+-- The documents one build produced for one posting (schema v16). One row per
+-- KIND: the full Mappe, and — for a form application — the parts a portal
+-- asks for separately (Anschreiben, Lebenslauf, Anlagen). `path` is the
+-- archive under output/job_<id>/, `staged_path` the link offered in the
+-- upload folder ('' when nothing is staged). The hash and sizes are the
+-- beginning of the submission manifest ADR 0005 asks for; they are written
+-- by the build, never inferred from the disk.
+CREATE TABLE IF NOT EXISTS application_documents (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id      INTEGER NOT NULL REFERENCES jobs(id),
+    kind        TEXT NOT NULL,
+    path        TEXT NOT NULL,
+    staged_path TEXT NOT NULL DEFAULT '',
+    sha256      TEXT NOT NULL DEFAULT '',
+    bytes       INTEGER NOT NULL DEFAULT 0,
+    pages       INTEGER NOT NULL DEFAULT 0,
+    built_at    TEXT NOT NULL,
+    UNIQUE(job_id, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_documents_job ON application_documents(job_id);
 """
 
 

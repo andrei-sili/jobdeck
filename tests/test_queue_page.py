@@ -409,3 +409,142 @@ def test_the_two_ways_a_letter_can_have_gone_are_not_one_word():
     """"gesendet" beside a letter that went into an employer's upload field
     credits this app with an e-mail it never addressed."""
     assert queue.draft_state("filed") != queue.draft_state("sent")
+
+
+# -- what the Postausgang says about a letter before he reads it --------------
+
+def test_quality_lines_count_the_adverts_terms_and_name_the_tells():
+    row = {"id": 1,
+           "anschreiben_body": "Sehr geehrte Damen und Herren,\n\nMit Python und "
+                               "Docker habe ich bei Beispiel GmbH gearbeitet. Die "
+                               "Aufgabe reizt mich besonders.",
+           "job_description": "Wir suchen Python, Docker und Kubernetes."}
+
+    lines = queue.quality_lines(row, cv="Python · Kubernetes")
+
+    assert lines == [
+        ("Begriffe aus der Anzeige: 2 von 3 im Brief · 2 im Lebenslauf", ""),
+        ("Floskel: „reizt mich besonders“", "warn"),
+    ]
+
+
+def test_a_draft_without_a_letter_gets_no_quality_line():
+    assert queue.quality_lines({"id": 1, "anschreiben_body": "",
+                                "job_description": "Python"}, cv="") == []
+
+
+def test_the_loader_measures_every_row_against_the_other_rows(con, data_dir):
+    """The opening comparison runs against the OTHER letters on file — a
+    letter always opens like itself, and comparing it with itself would
+    flag every draft."""
+    job_a = _job_with_draft(con, anschreiben_body=(
+        "Sehr geehrte Damen und Herren,\n\nBei Beispiel GmbH habe ich REST-APIs "
+        "gebaut."))
+    job_b = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "j2", "title": "Dev",
+        "company": "Zweite GmbH", "description": "Python."})
+    db.upsert_draft(con, job_b, {"status": "ready", "anschreiben_body": (
+        "Sehr geehrte Frau Weber,\n\nBei Beispiel GmbH habe ich REST-APIs "
+        "gebaut und getestet.")})
+    con.commit()
+
+    rows = queue._load("open")["drafts"]
+
+    by_job = {r["job_id"]: r for r in rows}
+    assert any(t.startswith("Beginnt wie ein früherer Brief") and tone == "warn"
+               for t, tone in by_job[job_a]["quality"])
+    assert any(t.startswith("Beginnt wie ein früherer Brief") and tone == "warn"
+               for t, tone in by_job[job_b]["quality"])
+    # a discarded letter still counts — the drafting re-roll compares
+    # against the newest letters of any status, and so does the queue
+    db.upsert_draft(con, job_b, {"status": "discarded"})
+    con.commit()
+    rows = queue._load("open")["drafts"]
+    assert any(t.startswith("Beginnt wie") for r in rows for t, _tone in r["quality"])
+    # a letter with no body is nobody to open like
+    db.upsert_draft(con, job_b, {"anschreiben_body": ""})
+    con.commit()
+    rows = queue._load("open")["drafts"]
+    assert all(not t.startswith("Beginnt wie") for r in rows
+               for t, _tone in r["quality"])
+
+
+def test_the_loader_hands_every_row_the_posting_text_the_line_is_measured_on(
+    con, data_dir
+):
+    """Found live: the queue listing had its own SELECT without the posting
+    text, so every coverage line came out empty while the single-draft
+    reader had the column. One column list for both."""
+    job_id = _job_with_draft(con, anschreiben_body=(
+        "Sehr geehrte Damen und Herren,\n\nMit Python habe ich gearbeitet."))
+    db.set_job_contacts(con, job_id, {})
+    con.execute("UPDATE jobs SET description=? WHERE id=?",
+                ("Wir suchen Python und Docker.", job_id))
+    con.commit()
+
+    rows = queue._load("open")["drafts"]
+
+    assert rows[0]["job_description"] == "Wir suchen Python und Docker."
+    # no CV file is configured in this test: the line counts the letter
+    # alone and says so, rather than stating the CV lacks Docker
+    assert rows[0]["quality"][0] == (
+        "Begriffe aus der Anzeige: 1 von 2 im Brief · nicht im Brief: Docker · "
+        "Lebenslauf nicht lesbar", "")
+
+
+def test_an_editor_save_withdraws_the_package_built_from_the_old_text(con, data_dir):
+    from jobdeck import config
+    from jobdeck.services import upload
+    job_id = _job_with_draft(con)
+    db.mark_form_opened(con, job_id)
+    archive = pathlib.Path(data_dir) / "output" / f"job_{job_id}" / "Anschreiben_M_F.pdf"
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"%PDF-1.4 alt")
+    staged = upload.stage(archive)
+    db.set_upload(con, job_id, str(staged), "vollständig")
+    db.set_documents(con, job_id, [{"kind": db.DOC_ANSCHREIBEN, "path": str(archive),
+                                    "staged_path": str(staged)}])
+    con.commit()
+
+    _draft, error = draft_editor._save_draft(job_id, _edit(), clear_pdf=True)
+
+    assert error == ""
+    assert list(pathlib.Path(config.UPLOAD_DIR).iterdir()) == []
+    assert db.list_documents(con, job_id) == []
+    assert db.get_job(con, job_id)["mappe_kind"] == ""
+
+
+def test_cv_text_prefers_the_portal_cv_and_falls_back_to_the_template(con, data_dir):
+    template = pathlib.Path(data_dir) / "vorlage.html"
+    template.write_text("<p>Python Docker</p>", encoding="utf-8")
+    db.set_setting(con, "template_path", str(template))
+    con.commit()
+    assert "Docker" in queue.cv_text(con)
+    cv = pathlib.Path(data_dir) / "cv.html"
+    cv.write_text("<p>Kubernetes</p>", encoding="utf-8")
+    db.set_setting(con, "cv_ats_path", str(cv))
+    con.commit()
+    text = queue.cv_text(con)
+    assert "Kubernetes" in text and "Docker" not in text
+    # a configured path that leads nowhere falls back to the template
+    db.set_setting(con, "cv_ats_path", str(pathlib.Path(data_dir) / "weg.html"))
+    con.commit()
+    assert "Docker" in queue.cv_text(con)
+
+
+def test_the_queue_signature_sees_the_cv_file_and_its_settings_change(con, data_dir):
+    """The coverage line is measured against a file on disk reached through
+    two settings; neither is in a table, so the watcher was blind to an
+    edited Lebenslauf."""
+    _job_with_draft(con)
+    before = queue._signature_of(con)
+    cv = pathlib.Path(data_dir) / "cv.html"
+    cv.write_text("<p>Python</p>", encoding="utf-8")
+    db.set_setting(con, "cv_ats_path", str(cv))
+    con.commit()
+    configured = queue._signature_of(con)
+    assert configured != before
+    cv.write_text("<p>Python Docker</p>", encoding="utf-8")
+    import os
+    os.utime(cv, (1, 1))
+    assert queue._signature_of(con) != configured

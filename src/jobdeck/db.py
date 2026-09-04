@@ -592,6 +592,20 @@ def delete_claim(con: sqlite3.Connection, claim_id: int) -> None:
     con.execute("DELETE FROM claims WHERE id=?", (claim_id,))
 
 
+def recent_letter_bodies(con: sqlite3.Connection, limit: int = 20,
+                         exclude_job_id: int | None = None) -> list[str]:
+    """The newest letters, for the "opens like an earlier one" check — a
+    recruiter who received two of them sees the shared opening at once.
+
+    `exclude_job_id` leaves out the posting's own earlier letter: a redraft
+    keeps the old body until it finishes, and a letter always opens like
+    itself."""
+    return [row[0] for row in con.execute(
+        "SELECT anschreiben_body FROM drafts WHERE TRIM(anschreiben_body) <> '' "
+        "AND (? IS NULL OR job_id <> ?) ORDER BY id DESC LIMIT ?",
+        (exclude_job_id, exclude_job_id, limit))]
+
+
 def letter_bodies(con: sqlite3.Connection) -> list[str]:
     """Every Anschreiben this app has written, for the register's counters.
 
@@ -1431,6 +1445,85 @@ def clear_form_opened(con: sqlite3.Connection, job_id: int) -> None:
     )
 
 
+# What one build produced for one posting, by kind. The Mappe row exists for
+# every build; the three part rows only for a posting that is applied to
+# through a form, where a portal asks for the letter, the CV and the
+# certificates as separate files.
+DOC_MAPPE = "mappe"
+DOC_ANSCHREIBEN = "anschreiben"
+DOC_LEBENSLAUF = "lebenslauf"
+DOC_ANLAGEN = "anlagen"
+DOCUMENT_KINDS = (DOC_MAPPE, DOC_ANSCHREIBEN, DOC_LEBENSLAUF, DOC_ANLAGEN)
+
+
+def set_documents(con: sqlite3.Connection, job_id: int,
+                  documents: list[dict]) -> None:
+    """Record what a build produced for a posting — all of it, replacing what
+    the previous build recorded.
+
+    Replace rather than upsert: a rebuild that no longer produces a part (the
+    channel changed, the CV template was removed) must take that part's row
+    with it, or the strip keeps offering a file the build did not make."""
+    con.execute("DELETE FROM application_documents WHERE job_id=?", (job_id,))
+    now = _now()
+    for doc in documents:
+        con.execute(
+            "INSERT INTO application_documents (job_id, kind, path, "
+            "staged_path, sha256, bytes, pages, built_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (job_id, doc["kind"], doc["path"], doc.get("staged_path", ""),
+             doc.get("sha256", ""), int(doc.get("bytes", 0)),
+             int(doc.get("pages", 0)), now),
+        )
+
+
+def set_document_staged(con: sqlite3.Connection, job_id: int, kind: str,
+                        staged_path: str) -> None:
+    """Where one document is currently offered to a file picker, '' when
+    nowhere."""
+    con.execute(
+        "UPDATE application_documents SET staged_path=? WHERE job_id=? AND kind=?",
+        (staged_path, job_id, kind),
+    )
+
+
+def clear_documents(con: sqlite3.Connection, job_id: int) -> None:
+    """Forget a posting's documents. The FILES are the caller's business —
+    this layer never unlinks."""
+    con.execute("DELETE FROM application_documents WHERE job_id=?", (job_id,))
+
+
+def list_documents(con: sqlite3.Connection, job_id: int) -> list[sqlite3.Row]:
+    """A posting's documents in the order DOCUMENT_KINDS names them."""
+    order = " ".join(f"WHEN '{kind}' THEN {i}"
+                     for i, kind in enumerate(DOCUMENT_KINDS))
+    return con.execute(
+        "SELECT * FROM application_documents WHERE job_id=? "
+        f"ORDER BY CASE kind {order} ELSE 99 END, id",
+        (job_id,),
+    ).fetchall()
+
+
+def documents_for_jobs(con: sqlite3.Connection,
+                       job_ids: list[int]) -> dict[int, list[dict]]:
+    """The documents of several postings at once, keyed by job id — for the
+    strip, which lists every application under way on one render."""
+    if not job_ids:
+        return {}
+    order = " ".join(f"WHEN '{kind}' THEN {i}"
+                     for i, kind in enumerate(DOCUMENT_KINDS))
+    rows = con.execute(
+        "SELECT * FROM application_documents WHERE job_id IN ("
+        + ",".join("?" * len(job_ids)) + ") "
+        f"ORDER BY job_id, CASE kind {order} ELSE 99 END, id",
+        list(job_ids),
+    ).fetchall()
+    out: dict[int, list[dict]] = {}
+    for row in rows:
+        out.setdefault(row["job_id"], []).append(dict(row))
+    return out
+
+
 def set_upload(
     con: sqlite3.Connection, job_id: int, path: str, kind: str
 ) -> None:
@@ -2137,6 +2230,15 @@ _HIDDEN_SIGNATURE_SQL = (
     "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM hidden_companies"
 )
 
+# The strip lists a document per row, and a build writes those rows in the
+# background while the page is open. COUNT and MAX(id) see rows arriving (a
+# rebuild deletes and re-inserts, so its ids move); the staged total sees a
+# part being taken out of the upload folder without its row going anywhere.
+_DOCUMENTS_SIGNATURE_SQL = (
+    "SELECT COUNT(*), COALESCE(MAX(id), 0), TOTAL(staged_path<>'') "
+    "FROM application_documents"
+)
+
 
 def data_signature(con: sqlite3.Connection) -> tuple:
     """What the pipeline pages (inbox, queue, dashboard, applications, cockpit)
@@ -2152,6 +2254,7 @@ def data_signature(con: sqlite3.Connection) -> tuple:
         *con.execute(_APPLICATIONS_SIGNATURE_SQL).fetchone(),
         *con.execute(_EMAIL_SIGNATURE_SQL).fetchone(),
         *con.execute(_HIDDEN_SIGNATURE_SQL).fetchone(),
+        *con.execute(_DOCUMENTS_SIGNATURE_SQL).fetchone(),
     )
 
 
@@ -2404,7 +2507,8 @@ _DRAFT_WITH_JOB_COLUMNS = """
                j.location AS job_location, j.status AS job_status,
                j.contact_email AS job_contact_email,
                j.liveness AS job_liveness,
-               j.liveness_checked_at AS job_liveness_checked_at
+               j.liveness_checked_at AS job_liveness_checked_at,
+               j.description AS job_description
         FROM drafts d JOIN jobs j ON j.id = d.job_id
 """
 
@@ -2513,22 +2617,18 @@ def list_drafts_with_jobs(
     con: sqlite3.Connection, statuses: list[str]
 ) -> list[sqlite3.Row]:
     """Review-queue rows: drafts in the given statuses with their postings."""
+    # The same columns as the single-draft reader — the queue and the editor
+    # must describe one draft the same way, and a column added to one (the
+    # posting text the quality line is measured against) was missing from the
+    # other the first time, so the queue printed no line at all. The liveness
+    # columns are in there too: the queue is the last place before a
+    # Bewerbung leaves, and one draft (job 18) was written and a 2.1 MB Mappe
+    # built for an ad that had been gone forty days.
     placeholders = ",".join("?" * len(statuses))
     return con.execute(
-        f"""
-        SELECT d.*, j.title AS job_title, j.company AS job_company,
-               j.url AS job_url, j.match_score AS job_score,
-               j.location AS job_location, j.status AS job_status,
-               j.contact_email AS job_contact_email,
-               -- the queue is the last place before a Bewerbung leaves: one
-               -- draft (job 18) was written and a 2.1 MB Mappe built for an ad
-               -- that had been gone forty days
-               j.liveness AS job_liveness,
-               j.liveness_checked_at AS job_liveness_checked_at
-        FROM drafts d JOIN jobs j ON j.id = d.job_id
-        WHERE d.status IN ({placeholders})
-        ORDER BY d.updated_at DESC, d.id DESC
-        """,
+        _DRAFT_WITH_JOB_COLUMNS
+        + f" WHERE d.status IN ({placeholders})"
+        + " ORDER BY d.updated_at DESC, d.id DESC",
         statuses,
     ).fetchall()
 

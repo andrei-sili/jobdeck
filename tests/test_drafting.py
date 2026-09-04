@@ -516,7 +516,7 @@ def profile_file(data_dir):
     config.PROFILE_PATH.write_text("Python developer, 3 years", encoding="utf-8")
 
 
-def _must_not_be_called(job, profile_text, refnr="", applicant_name=""):
+def _must_not_be_called(job, profile_text, refnr="", applicant_name="", previous_letters=None):
     raise AssertionError("LLM called although a gate should have fired")
 
 
@@ -559,7 +559,7 @@ async def test_successful_draft_is_persisted_and_metered(
 
     monkeypatch.setattr(
         "jobdeck.ai.drafting.draft_application",
-        lambda job, profile_text, refnr="", applicant_name="":
+        lambda job, profile_text, refnr="", applicant_name="", previous_letters=None:
             ("Sehr geehrte Frau Weber,\n\nAbsatz.",
              "Guten Tag,\n\nanbei meine Bewerbung.\n\n"
              "Mit freundlichen Grüßen\nMax Muster",
@@ -594,7 +594,7 @@ async def test_drafted_email_carries_the_configured_signature(
     con.commit()
     monkeypatch.setattr(
         "jobdeck.ai.drafting.draft_application",
-        lambda job, profile_text, refnr="", applicant_name="":
+        lambda job, profile_text, refnr="", applicant_name="", previous_letters=None:
             ("Anrede,\n\nText.", "Guten Tag,\n\nanbei meine Bewerbung.\n\n"
                                  "Mit freundlichen Grüßen\nMax Muster", "", _usage()),
     )
@@ -613,7 +613,7 @@ async def test_no_signature_configured_leaves_the_email_untouched(
     con.commit()
     monkeypatch.setattr(
         "jobdeck.ai.drafting.draft_application",
-        lambda job, profile_text, refnr="", applicant_name="":
+        lambda job, profile_text, refnr="", applicant_name="", previous_letters=None:
             ("Anrede,\n\nText.", "Guten Tag,\n\nMit freundlichen Grüßen\nMax",
              "", _usage()),
     )
@@ -633,7 +633,7 @@ async def test_empty_stellenbezeichnung_falls_back_to_the_cleaned_job_title(
     con.commit()
     monkeypatch.setattr(
         "jobdeck.ai.drafting.draft_application",
-        lambda job, profile_text, refnr="", applicant_name="":
+        lambda job, profile_text, refnr="", applicant_name="", previous_letters=None:
             ("Anrede,\n\nText.", "Mail.", "", _usage()),  # empty stellenbezeichnung
     )
     result = await drafting.draft_for_job(job_id)
@@ -649,7 +649,7 @@ async def test_failed_draft_is_recorded_and_metered(
     job_id = _insert_job(con)
     con.commit()
 
-    def failing(job, profile_text, refnr="", applicant_name=""):
+    def failing(job, profile_text, refnr="", applicant_name="", previous_letters=None):
         raise llm.LLMError("unparseable", usage=_usage(cost=0.003))
 
     monkeypatch.setattr("jobdeck.ai.drafting.draft_application", failing)
@@ -664,7 +664,7 @@ async def test_failed_draft_is_recorded_and_metered(
     # a failed draft is re-claimable immediately — the user may retry
     monkeypatch.setattr(
         "jobdeck.ai.drafting.draft_application",
-        lambda job, profile_text, refnr="", applicant_name="":
+        lambda job, profile_text, refnr="", applicant_name="", previous_letters=None:
             ("Anrede,\n\nText.", "Mail.", "", _usage()),
     )
     result = await drafting.draft_for_job(job_id)
@@ -681,7 +681,7 @@ async def test_redraft_clears_stale_pdf_path(
     con.commit()
     monkeypatch.setattr(
         "jobdeck.ai.drafting.draft_application",
-        lambda job, profile_text, refnr="", applicant_name="":
+        lambda job, profile_text, refnr="", applicant_name="", previous_letters=None:
             ("Anrede,\n\nText.", "Mail.", "", _usage()),
     )
     assert (await drafting.draft_for_job(job_id))["ok"]
@@ -715,7 +715,7 @@ async def test_llm_not_configured_releases_claim_without_metering(
     job_id = _insert_job(con)
     con.commit()
 
-    def not_configured(job, profile_text, refnr="", applicant_name=""):
+    def not_configured(job, profile_text, refnr="", applicant_name="", previous_letters=None):
         raise llm.LLMNotConfigured("ANTHROPIC_API_KEY is not set")
 
     monkeypatch.setattr("jobdeck.ai.drafting.draft_application", not_configured)
@@ -788,7 +788,7 @@ async def test_finish_discards_result_when_claim_was_taken_away(
     job_id = _insert_job(con)
     con.commit()
 
-    def steal_then_draft(job, profile_text, refnr="", applicant_name=""):
+    def steal_then_draft(job, profile_text, refnr="", applicant_name="", previous_letters=None):
         # simulates a human resolving the draft while the LLM call runs
         with db.db() as other:
             db.upsert_draft(other, job_id, {"status": "discarded"})
@@ -817,7 +817,7 @@ async def test_abandoned_claim_is_reclaimed(
 
     monkeypatch.setattr(
         "jobdeck.ai.drafting.draft_application",
-        lambda job, profile_text, refnr="", applicant_name="":
+        lambda job, profile_text, refnr="", applicant_name="", previous_letters=None:
             ("Anrede,\n\nText.", "Mail.", "", _usage()),
     )
     result = await drafting.draft_for_job(job_id)
@@ -903,3 +903,63 @@ def test_the_draft_path_removes_a_closing_the_model_wrote_anyway(monkeypatch):
     assert "Grüßen" not in anschreiben
     # the E-MAIL closing is not the template's job and must stay
     assert email_body.endswith("Mit freundlichen Grüßen\nAndrei Sili")
+
+
+def test_a_redraft_withdraws_the_package_built_from_the_old_letter(con, data_dir):
+    """Found by the panel: a redraft cleared pdf_path and nothing else, so
+    the strip kept offering "⧉ Anschreiben" — the text he had just replaced
+    — under "Mappe bereit · auch einzeln" while the new letter was written."""
+    import pathlib
+
+    from jobdeck import config
+    from jobdeck.services import upload
+    job_id = _insert_job(con)
+    db.mark_form_opened(con, job_id)
+    archive = pathlib.Path(data_dir) / "output" / f"job_{job_id}" / "Anschreiben_E_F.pdf"
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"%PDF-1.4 alt")
+    staged = upload.stage(archive)
+    db.upsert_draft(con, job_id, {"status": "ready", "anschreiben_body": "alt",
+                                  "pdf_path": str(archive)})
+    db.set_upload(con, job_id, str(staged), "vollständig")
+    db.set_documents(con, job_id, [{"kind": db.DOC_ANSCHREIBEN, "path": str(archive),
+                                    "staged_path": str(staged)}])
+    con.commit()
+
+    assert drafting._claim(job_id) == ""
+
+    assert list(pathlib.Path(config.UPLOAD_DIR).iterdir()) == []
+    assert db.list_documents(con, job_id) == []
+    job = db.get_job(con, job_id)
+    assert job["upload_path"] == "" and job["mappe_kind"] == ""
+
+
+async def test_the_service_compares_against_other_postings_letters_only(
+    con, ai_on, applicant, profile_file, monkeypatch
+):
+    """A redraft keeps the old body until it finishes; compared with itself
+    every redraft would "open like an earlier letter" and pay a re-roll."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    job_id = _insert_job(con)
+    con.commit()
+    seen = {}
+    real = db.recent_letter_bodies
+
+    def spy(connection, limit=20, exclude_job_id=None):
+        seen["exclude"] = exclude_job_id
+        return real(connection, limit, exclude_job_id)
+    monkeypatch.setattr(db, "recent_letter_bodies", spy)
+    handed = {}
+
+    def fake(job, profile_text, refnr="", applicant_name="", previous_letters=None):
+        handed["previous"] = previous_letters
+        return ("Sehr geehrte Damen und Herren,\n\nAbsatz.",
+                "Guten Tag,\n\nanbei.\n\nMit freundlichen Grüßen\nMax Muster",
+                "Dev", _usage())
+    monkeypatch.setattr("jobdeck.ai.drafting.draft_application", fake)
+
+    result = await drafting.draft_for_job(job_id)
+
+    assert result["ok"], result["error"]
+    assert seen["exclude"] == job_id
+    assert handed["previous"] == []

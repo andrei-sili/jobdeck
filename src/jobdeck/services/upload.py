@@ -32,7 +32,7 @@ import re
 import shutil
 import tempfile
 
-from jobdeck import config
+from jobdeck import config, db
 
 log = logging.getLogger(__name__)
 
@@ -179,3 +179,22 @@ def clear(path: str | pathlib.Path) -> None:
         log.warning("upload: refusing to remove %s — outside %s", target, folder)
         return
     target.unlink(missing_ok=True)
+
+
+def withdraw(con, job_id: int) -> None:
+    """Take a posting's whole package out of circulation: every staged file
+    out of the folder, the document rows gone, the job's own pointer blank.
+
+    Called when the letter the package was built from stops being the
+    letter — a redraft, an edit in the editor, a build discarded mid-render.
+    Without it the strip kept printing "Mappe bereit · auch einzeln" and
+    offering a "⧉ Anschreiben" that carried the text he had just replaced.
+    The archive files under output/job_<id>/ are left alone; the next build
+    overwrites them."""
+    job = db.get_job(con, job_id)
+    if job is not None:
+        clear(job["upload_path"])
+    for row in db.list_documents(con, job_id):
+        clear(row["staged_path"])
+    db.clear_documents(con, job_id)
+    db.set_upload(con, job_id, "", "")

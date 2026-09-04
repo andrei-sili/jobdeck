@@ -699,7 +699,7 @@ def _load_jobs(view_key: str, page: int, search: str = "",
             # not a search result. It has to be on screen whichever view he is
             # in, on whatever page, however he has searched — the whole point
             # is that the app cannot lose the posting he started.
-            "started": [dict(r) for r in db.list_started_forms(con)],
+            "started": _started_with_documents(con),
             "counts": {
                 "mismatches": db.count_mismatches(con, view.status),
                 "dead": db.count_gone_jobs(con, view.status),
@@ -789,6 +789,28 @@ def started_line(job: dict, now: datetime.datetime | None = None) -> str:
     return f"Formular bei {company} — seit {minutes} Min."
 
 
+def _started_with_documents(con) -> list[dict]:
+    """The applications under way, each carrying the documents its build
+    staged — one query for all of them, not one per row."""
+    started = [dict(r) for r in db.list_started_forms(con)]
+    documents = db.documents_for_jobs(con, [r["id"] for r in started])
+    for row in started:
+        row["documents"] = [d for d in documents.get(row["id"], [])
+                            if d["staged_path"]]
+    return started
+
+
+# How the strip names each staged file. The kind, not the file name: four
+# forty-character names in one row say less than four words, and the press
+# puts the full path on the clipboard anyway.
+DOCUMENT_LABELS = {
+    db.DOC_MAPPE: "Mappe",
+    db.DOC_ANSCHREIBEN: "Anschreiben",
+    db.DOC_LEBENSLAUF: "Lebenslauf",
+    db.DOC_ANLAGEN: "Anlagen",
+}
+
+
 def mappe_line(job: dict) -> tuple[str, str]:
     """What the strip says about the documents, and how loudly.
 
@@ -797,6 +819,11 @@ def mappe_line(job: dict) -> tuple[str, str]:
     missing-package states; the target versioned selection is defined in ADR
     0005.
     """
+    parts = [d for d in job.get("documents") or [] if d["kind"] != db.DOC_MAPPE]
+    if job.get("mappe_kind") and parts:
+        # A portal that asks for the files one by one has them; one that
+        # takes the whole Mappe has that too.
+        return "Mappe bereit · auch einzeln", ""
     if job.get("mappe_kind"):
         return "Mappe bereit", ""
     if str(job.get("draft_status") or "") == "generating":
@@ -1809,7 +1836,9 @@ async def jobs_page():
             # it changes on writes neither of them cares about — a Mappe
             # landing in the background is the whole reason it self-updates.
             strip_state = [(r["id"], r["form_opened_at"], r["mappe_kind"],
-                            r["draft_status"], r["company"])
+                            r["draft_status"], r["company"],
+                            tuple((d["kind"], d["staged_path"])
+                                  for d in r.get("documents") or ()))
                            for r in view["started"]]
             list_same = not force and list_state == drawn.get("list")
             reader_same = not force and reader_state == drawn.get("reader")
@@ -1898,7 +1927,16 @@ async def jobs_page():
                     .classes("text-sm")
                 text, kind = mappe_line(job)
                 ui.label(text).classes(f"jd-meta {kind}")
-                if job["upload_path"]:
+                documents = job.get("documents") or []
+                if documents:
+                    # One press per file a portal can ask for: the whole
+                    # Mappe, and the letter, the CV and the certificates on
+                    # their own.
+                    for doc in documents:
+                        _mappe_path_control(
+                            doc["staged_path"],
+                            DOCUMENT_LABELS.get(doc["kind"], doc["kind"]))
+                elif job["upload_path"]:
                     # The one thing an upload dialog actually asks for, on
                     # screen. "Mappe bereit" is true and useless at the moment
                     # the form says "Datei auswählen": the file manager we open
@@ -1913,14 +1951,15 @@ async def jobs_page():
                     with ui.menu():
                         _started_menu(job)
 
-        def _mappe_path_control(path: str) -> None:
-            """The file name, and one press that puts the full path on the
-            clipboard — Ctrl+L, Ctrl+V is the way into any file dialog.
+        def _mappe_path_control(path: str, label: str = "") -> None:
+            """The file name (or the document's kind, when several stand in
+            one row), and one press that puts the full path on the clipboard —
+            Ctrl+L, Ctrl+V is the way into any file dialog.
 
             A button rather than an automatic copy: the Mappe lands about a
             minute after his press, and a browser refuses a clipboard write
             that far from a user gesture."""
-            name = pathlib.Path(path).name
+            name = label or pathlib.Path(path).name
             ui.button(f"⧉ {name}",
                       on_click=lambda p=path: (
                           ui.clipboard.write(p),
