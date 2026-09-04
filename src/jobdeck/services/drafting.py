@@ -209,7 +209,9 @@ async def draft_for_job(job_id: int) -> dict:
     # The LLM's clean Stellenbezeichnung feeds the Betreff (falling back to the
     # raw title); build_betreff injects the verified Refnr + name.
     betreff = ai_drafting.build_betreff(
-        stellenbezeichnung or job["title"], refnr, applicant_name
+        ai_drafting.align_gender_marker(stellenbezeichnung or job["title"],
+                                        job["title"]),
+        refnr, applicant_name,
     )
     signature = await asyncio.to_thread(_email_signature)
     draft = await asyncio.to_thread(

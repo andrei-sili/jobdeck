@@ -328,6 +328,31 @@ _TITLE_EMPLOYMENT = re.compile(
 )
 
 
+# The gender marker a German posting carries — "(m/w/d)", "(m/f/x)",
+# "(w/m/d)", "(all genders)" — is part of the Stellenbezeichnung HR matches
+# on. The model normalises it to the form it sees most ("(m/w/d)" for an
+# advert that wrote "(m/f/x)"), so the posting's own marker is put back.
+_GENDER_MARKER = re.compile(
+    r"\(\s*(?:[mwdfxhi*]\s*(?:[/|]\s*[mwdfxhi*]\s*)+|all\s+genders|alle\s+geschlechter)\s*\)",
+    re.I,
+)
+
+
+def align_gender_marker(stellenbezeichnung: str, posting_title: str) -> str:
+    """The clean title with the POSTING's gender marker, exactly as written.
+
+    A marker the model wrote is replaced by the advert's; a marker the model
+    dropped is appended; a title without one is left alone."""
+    wanted = _GENDER_MARKER.search(posting_title or "")
+    if wanted is None:
+        return stellenbezeichnung
+    marker = wanted.group(0)
+    text = _clean(stellenbezeichnung)
+    if _GENDER_MARKER.search(text):
+        return _GENDER_MARKER.sub(marker, text, count=1)
+    return f"{text} {marker}".strip()
+
+
 def clean_title(title: str) -> str:
     """Strip job-board noise (urgency prefixes like 'Ab sofort:',
     employment-type tokens like 'Vollzeit') so the subject reads as a clean

@@ -811,6 +811,11 @@ DOCUMENT_LABELS = {
 }
 
 
+# Which staged file goes into which kind of form.
+UPLOAD_HINT = ("Ein Feld für Dateien: die Mappe. Eigenes Feld fürs Anschreiben: "
+               "Lebenslauf, Anschreiben und Anlagen einzeln.")
+
+
 def mappe_line(job: dict) -> tuple[str, str]:
     """What the strip says about the documents, and how loudly.
 
@@ -1936,6 +1941,13 @@ async def jobs_page():
                         _mappe_path_control(
                             doc["staged_path"],
                             DOCUMENT_LABELS.get(doc["kind"], doc["kind"]))
+                    if len(documents) > 1:
+                        # Learned on the first real JOIN form: it asked for
+                        # ONE file, "CV" — and the CV alone meant the letter
+                        # and the Zeugnisse never reached anyone. Which file
+                        # goes where is decided by the form, so the rule
+                        # stands beside the files.
+                        ui.label(UPLOAD_HINT).classes("jd-meta text-xs w-full")
                 elif job["upload_path"]:
                     # The one thing an upload dialog actually asks for, on
                     # screen. "Mappe bereit" is true and useless at the moment

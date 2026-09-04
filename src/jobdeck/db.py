@@ -144,6 +144,12 @@ def bootstrap() -> backup.BackupResult | None:
         recovered = upload.recover_interrupted_undos(con)
         if recovered:
             log.info("upload: removed %s interrupted undo artifacts", recovered)
+        # And the files no row offers any more — the leftovers a picker would
+        # hand to the next application. Rule, not hand-cleaning.
+        swept = upload.sweep_orphans(con)
+        if swept:
+            log.info("upload: swept %s orphaned file(s): %s", len(swept),
+                     ", ".join(swept))
         # Beside it, and for the same reason: a reservation whose process died
         # would hide an employer for good. Evidence-driven — a draft still in
         # `sending` IS a live claim and keeps its company held for him to

@@ -196,3 +196,57 @@ def test_a_rebuild_lands_on_its_own_file_rather_than_walking_along(data_dir):
     assert again == mine
     assert again.read_bytes() == b"B zwei"
     assert len(list(pathlib.Path(config.UPLOAD_DIR).glob("*.pdf"))) == 2
+
+
+def test_the_sweep_removes_only_what_no_row_offers(con, data_dir):
+    """The real folder held 22 Mappen from August applications recorded
+    before staging was taken back on record. A file is kept exactly while a
+    job's upload_path or a document row's staged_path names it."""
+    from jobdeck import db
+    folder = pathlib.Path(config.UPLOAD_DIR)
+    folder.mkdir(parents=True, exist_ok=True)
+    kept_job = _pdf(folder / "Bewerbung_A_Firma.pdf", "job")
+    kept_doc = _pdf(folder / "Lebenslauf_A_Firma.pdf", "doc")
+    orphan = _pdf(folder / "Bewerbung_A_Alt.pdf", "alt")
+    partial = _pdf(folder / ".Bewerbung_A_X.pdf.abc.part", "part")
+    job_id = db.insert_job_if_new(con, {"source": "stub", "external_id": "s1",
+                                        "title": "Dev", "company": "Firma"})
+    db.mark_form_opened(con, job_id)
+    db.set_upload(con, job_id, str(kept_job), "vollständig")
+    db.set_documents(con, job_id, [{"kind": db.DOC_LEBENSLAUF, "path": "/x",
+                                    "staged_path": str(kept_doc)}])
+    con.commit()
+
+    removed = upload.sweep_orphans(con)
+
+    assert removed == ["Bewerbung_A_Alt.pdf"]
+    assert kept_job.exists() and kept_doc.exists() and partial.exists()
+    assert not orphan.exists()
+    assert upload.sweep_orphans(con) == []
+
+    # A staged file for a form never opened (an older flow staged ahead of
+    # the press) is shown on no strip: swept. So is one whose job has long
+    # since been applied to — 20 of the 21 leftovers in the real folder.
+    con.execute("UPDATE jobs SET form_opened_at='' WHERE id=?", (job_id,))
+    con.commit()
+    kept_job.write_bytes(b"job")
+    kept_doc.write_bytes(b"doc")
+    assert sorted(upload.sweep_orphans(con)) == ["Bewerbung_A_Firma.pdf",
+                                                 "Lebenslauf_A_Firma.pdf"]
+    db.mark_form_opened(con, job_id)
+    con.execute("UPDATE jobs SET status='applied' WHERE id=?", (job_id,))
+    con.commit()
+    kept_job.write_bytes(b"job")
+    kept_doc.write_bytes(b"doc")
+    assert sorted(upload.sweep_orphans(con)) == ["Bewerbung_A_Firma.pdf",
+                                                 "Lebenslauf_A_Firma.pdf"]
+
+
+def test_the_sweep_runs_at_startup(con, data_dir):
+    from jobdeck import db
+    folder = pathlib.Path(config.UPLOAD_DIR)
+    folder.mkdir(parents=True, exist_ok=True)
+    orphan = _pdf(folder / "Bewerbung_A_Alt.pdf", "alt")
+    db.connect().close()
+    db.bootstrap()
+    assert not orphan.exists()

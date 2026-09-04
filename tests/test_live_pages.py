@@ -1728,3 +1728,31 @@ async def test_a_part_landing_in_the_background_reaches_the_strip(
     await _tick(user)
 
     await user.should_see("⧉ Lebenslauf")
+
+
+async def test_the_strip_says_which_file_goes_into_which_form(
+        user: User, con, data_dir):
+    """The first real JOIN form asked for ONE file, "CV", and the CV alone
+    meant the letter and the Zeugnisse never reached anyone. The rule stands
+    beside the files, and only when there are files to choose between."""
+    from jobdeck import config
+    from jobdeck.ui.pages import jobs as jobs_page
+    job_id = _posting(con)
+    db.mark_form_opened(con, job_id)
+    folder = config.UPLOAD_DIR
+    db.set_upload(con, job_id, f"{folder}/Bewerbung_A_B.pdf", "vollständig")
+    db.set_documents(con, job_id, [
+        {"kind": db.DOC_MAPPE, "path": "/x/B.pdf", "staged_path": f"{folder}/Bewerbung_A_B.pdf"},
+        {"kind": db.DOC_LEBENSLAUF, "path": "/x/L.pdf",
+         "staged_path": f"{folder}/Lebenslauf_A_B.pdf"},
+    ])
+    con.commit()
+
+    await user.open("/")
+    await user.should_see(jobs_page.UPLOAD_HINT)
+
+    db.set_documents(con, job_id, [
+        {"kind": db.DOC_MAPPE, "path": "/x/B.pdf", "staged_path": f"{folder}/Bewerbung_A_B.pdf"}])
+    con.commit()
+    await user.open("/")
+    await user.should_not_see(jobs_page.UPLOAD_HINT)
