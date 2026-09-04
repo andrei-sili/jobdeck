@@ -21,6 +21,7 @@ from jobdeck import config, db
 from jobdeck.ai import drafting as ai_drafting
 from jobdeck.ai import llm, profile
 from jobdeck.ai.drafting import resolve_refnr  # noqa: F401 — re-exported
+from jobdeck.services import upload
 
 log = logging.getLogger(__name__)
 
@@ -119,6 +120,11 @@ def _claim(job_id: int) -> str:
         # A regenerated draft invalidates any previously built Mappe — the
         # PDF on disk still holds the OLD Anschreiben.
         db.upsert_draft(con, job_id, {"status": "generating", "pdf_path": ""})
+        # And the package built from the OLD letter leaves circulation with
+        # it: a "⧉ Anschreiben" chip must never offer the text he just
+        # replaced. The strip reads "Mappe wird gebaut …" until the next
+        # build lands.
+        upload.withdraw(con, job_id)
         return ""
 
 

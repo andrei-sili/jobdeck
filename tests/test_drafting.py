@@ -903,3 +903,63 @@ def test_the_draft_path_removes_a_closing_the_model_wrote_anyway(monkeypatch):
     assert "Grüßen" not in anschreiben
     # the E-MAIL closing is not the template's job and must stay
     assert email_body.endswith("Mit freundlichen Grüßen\nAndrei Sili")
+
+
+def test_a_redraft_withdraws_the_package_built_from_the_old_letter(con, data_dir):
+    """Found by the panel: a redraft cleared pdf_path and nothing else, so
+    the strip kept offering "⧉ Anschreiben" — the text he had just replaced
+    — under "Mappe bereit · auch einzeln" while the new letter was written."""
+    import pathlib
+
+    from jobdeck import config
+    from jobdeck.services import upload
+    job_id = _insert_job(con)
+    db.mark_form_opened(con, job_id)
+    archive = pathlib.Path(data_dir) / "output" / f"job_{job_id}" / "Anschreiben_E_F.pdf"
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"%PDF-1.4 alt")
+    staged = upload.stage(archive)
+    db.upsert_draft(con, job_id, {"status": "ready", "anschreiben_body": "alt",
+                                  "pdf_path": str(archive)})
+    db.set_upload(con, job_id, str(staged), "vollständig")
+    db.set_documents(con, job_id, [{"kind": db.DOC_ANSCHREIBEN, "path": str(archive),
+                                    "staged_path": str(staged)}])
+    con.commit()
+
+    assert drafting._claim(job_id) == ""
+
+    assert list(pathlib.Path(config.UPLOAD_DIR).iterdir()) == []
+    assert db.list_documents(con, job_id) == []
+    job = db.get_job(con, job_id)
+    assert job["upload_path"] == "" and job["mappe_kind"] == ""
+
+
+async def test_the_service_compares_against_other_postings_letters_only(
+    con, ai_on, applicant, profile_file, monkeypatch
+):
+    """A redraft keeps the old body until it finishes; compared with itself
+    every redraft would "open like an earlier letter" and pay a re-roll."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    job_id = _insert_job(con)
+    con.commit()
+    seen = {}
+    real = db.recent_letter_bodies
+
+    def spy(connection, limit=20, exclude_job_id=None):
+        seen["exclude"] = exclude_job_id
+        return real(connection, limit, exclude_job_id)
+    monkeypatch.setattr(db, "recent_letter_bodies", spy)
+    handed = {}
+
+    def fake(job, profile_text, refnr="", applicant_name="", previous_letters=None):
+        handed["previous"] = previous_letters
+        return ("Sehr geehrte Damen und Herren,\n\nAbsatz.",
+                "Guten Tag,\n\nanbei.\n\nMit freundlichen Grüßen\nMax Muster",
+                "Dev", _usage())
+    monkeypatch.setattr("jobdeck.ai.drafting.draft_application", fake)
+
+    result = await drafting.draft_for_job(job_id)
+
+    assert result["ok"], result["error"]
+    assert seen["exclude"] == job_id
+    assert handed["previous"] == []

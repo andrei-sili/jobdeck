@@ -17,6 +17,8 @@ import logging
 import pathlib
 import tempfile
 
+from pypdf import PdfReader
+
 from jobdeck import apply_channel, config, db, pdf, templates
 from jobdeck import settings as app_settings
 from jobdeck.ai import drafting as ai_drafting
@@ -245,29 +247,50 @@ def _build_mappe(job_id: int) -> dict:
         budget = target_bytes(settings, job["apply_channel"] or "")
         parts: list[dict] = []
         with tempfile.TemporaryDirectory(prefix="jobdeck_mappe_") as tmp:
-            letter_pdf = pathlib.Path(tmp) / "anschreiben.pdf"
+            tmp_dir = pathlib.Path(tmp)
+            letter_pdf = tmp_dir / "anschreiben.pdf"
             pdf.html_to_pdf(letter_html, letter_pdf)
             # Merged in the temp dir, then fitted to the budget on the way
             # out: the Anlagen the user curated are only ever READ, and the
             # compression works on the same bytes that will be attached.
-            merged = pathlib.Path(tmp) / "mappe.pdf"
+            merged = tmp_dir / "mappe.pdf"
             pdf.merge_pdfs([letter_pdf, *anlagen], merged)
+            # EVERYTHING is finished in the temp dir and installed at the very
+            # end, in one place. The Mappe used to be installed before the
+            # parts were built, so a part failing (a second Chrome render
+            # timing out, a CV file in the wrong encoding) left the archive
+            # holding the NEW letter while the rows and the staged links still
+            # described the old one — the picker then offered a file the
+            # manifest could not vouch for. Now a failure anywhere leaves the
+            # archive, the rows and the links exactly as the last build did.
+            fitted = tmp_dir / "mappe_fitted.pdf"
             if settings["compress"]:
-                compression = pdf.compress_to_target(merged, out_path, budget)
+                compression = pdf.compress_to_target(merged, fitted, budget)
             else:
-                pdf.install_pdf(merged, out_path)
+                pdf.install_pdf(merged, fitted)
                 merged_size = merged.stat().st_size
                 compression = pdf.Compression(
                     size_bytes=merged_size, original_bytes=merged_size,
                     met_target=merged_size <= budget,
                 )
+            pending = []
             if wants_parts(job):
-                parts = _build_parts(job_id, settings, letter_pdf, anlagen,
-                                     pathlib.Path(tmp), out_path.parent,
-                                     name_part, firma_part)
+                pending = _build_parts(job_id, settings, letter_pdf,
+                                       draft["anschreiben_body"], anlagen,
+                                       tmp_dir, out_path.parent,
+                                       name_part, firma_part)
+            pdf.install_pdf(fitted, out_path)
+            for part in pending:
+                pdf.install_pdf(part["tmp"], pathlib.Path(part["path"]))
+                parts.append(_measure(part["kind"], pathlib.Path(part["path"])))
         size = out_path.stat().st_size
         pages = pdf.page_count(out_path)
-    except (templates.TemplateError, pdf.PdfError, OSError) as exc:
+    except (templates.TemplateError, pdf.PdfError, OSError,
+            UnicodeDecodeError) as exc:
+        # UnicodeDecodeError is a ValueError, not an OSError: a CV template
+        # saved by an editor as Windows-1252 used to raise straight out of
+        # the press, which a NiceGUI handler turns into a log line and a
+        # button that stays disabled.
         return _error(str(exc))
 
     if compression.applied:
@@ -292,9 +315,14 @@ def _build_mappe(job_id: int) -> dict:
 
     with db.db() as con:
         current = db.get_draft_by_job(con, job_id)
+        # The job is read AGAIN here, not reused from before the renders: a
+        # form he took back during the minute Chrome needs ("Doch nicht
+        # beworben") must not be restaged by a build that started earlier.
+        job_now = db.get_job(con, job_id)
         # updated_at has second resolution — also compare the text the PDF
         # actually rendered, which is the invariant it must match.
-        if (current is None or current["status"] not in EDITABLE_STATUS
+        if (current is None or job_now is None
+                or current["status"] not in EDITABLE_STATUS
                 or current["updated_at"] != draft_revision
                 or current["anschreiben_body"] != draft["anschreiben_body"]
                 or current["betreff"] != draft["betreff"]):
@@ -303,17 +331,11 @@ def _build_mappe(job_id: int) -> dict:
             out_path.unlink(missing_ok=True)
             for part in parts:
                 pathlib.Path(part["path"]).unlink(missing_ok=True)
-            upload.clear(job["upload_path"])
-            for row in db.list_documents(con, job_id):
-                upload.clear(row["staged_path"])
-            db.clear_documents(con, job_id)
-            db.set_upload(con, job_id, "", "")
+            upload.withdraw(con, job_id)
             return _error("the draft changed while the Mappe was rendering "
                           "— create the PDF again for the new text")
         db.upsert_draft(con, job_id, {"pdf_path": str(out_path)})
-        documents = [{"kind": db.DOC_MAPPE, "path": str(out_path),
-                      "pages": pages, "bytes": size,
-                      "sha256": pdf.sha256_of(out_path)}, *parts]
+        documents = [_measure(db.DOC_MAPPE, out_path), *parts]
         # Where the previous build's files were offered, so a rebuild lands on
         # its own links instead of walking one "(2)" further every time.
         previously = {row["kind"]: row["staged_path"]
@@ -333,8 +355,8 @@ def _build_mappe(job_id: int) -> dict:
         # would keep the unlinked inode ALIVE: the upload folder would hold a
         # complete, plausible Mappe carrying the OLD letter while the app
         # reported the build failed — and that is the file the picker offers.
-        if job["form_opened_at"]:
-            staged = upload.stage(out_path, job["upload_path"])
+        if job_now["form_opened_at"]:
+            staged = upload.stage(out_path, job_now["upload_path"])
             db.set_upload(con, job_id, str(staged), MAPPE_COMPLETE)
             for doc in documents:
                 if doc["kind"] == db.DOC_MAPPE:
@@ -350,6 +372,11 @@ def _build_mappe(job_id: int) -> dict:
             for kind, old_path in previously.items():
                 if old_path and kind not in {d["kind"] for d in documents}:
                     upload.clear(old_path)
+        else:
+            # The form was taken back while this build ran: nothing of it
+            # may be offered, including what an earlier build had staged.
+            for old_path in previously.values():
+                upload.clear(old_path)
         db.set_documents(con, job_id, documents)
     return {"ok": True, "error": "", "pdf_path": str(out_path),
             "warning": warning, "pages": pages, "size_bytes": size,
@@ -359,19 +386,69 @@ def _build_mappe(job_id: int) -> dict:
             "documents": documents}
 
 
+def _measure(kind: str, path: pathlib.Path) -> dict:
+    """What the manifest records about an INSTALLED file — measured on the
+    file at its final path, never on a temp copy."""
+    return {"kind": kind, "path": str(path), "pages": pdf.page_count(path),
+            "bytes": path.stat().st_size, "sha256": pdf.sha256_of(path)}
+
+
+# The template's own closing line, printed under the letter body. It is what
+# tells the letter's LAST page from the CV pages behind it.
+LETTER_CLOSING = "Mit freundlichen Grüßen"
+
+
+def letter_pages_by_text(letter_pdf: pathlib.Path, body: str) -> tuple[int, int] | None:
+    """The 1-based page range the Anschreiben occupies, found by its TEXT.
+
+    The first page is the one carrying the opening of the letter body, the
+    last the one carrying the template's closing formula after it. Found by
+    text rather than by position because the position rule ("everything
+    between the first and the last page") silently breaks the day the CV
+    spills onto a second page — the portal would then be handed a
+    Lebenslauf_*.pdf holding half a CV and an Anschreiben_*.pdf holding the
+    other half. None when the body cannot be located (a template that does
+    not print the body verbatim); the caller then falls back to the position
+    rule and says so."""
+    opening = " ".join((body or "").split())[:60]
+    if not opening:
+        return None
+    pages = [" ".join((page.extract_text() or "").split())
+             for page in PdfReader(str(letter_pdf)).pages]
+    first = next((i + 1 for i, text in enumerate(pages) if opening in text), None)
+    if first is None:
+        return None
+    closing = LETTER_CLOSING.lower()
+    last = first
+    for i in range(first - 1, len(pages)):
+        if closing in pages[i].lower():
+            last = i + 1
+            break
+    return first, last
+
+
 def _build_parts(job_id: int, settings: dict, letter_pdf: pathlib.Path,
-                 anlagen: list[pathlib.Path], tmp: pathlib.Path,
+                 body: str, anlagen: list[pathlib.Path], tmp: pathlib.Path,
                  job_dir: pathlib.Path, name_part: str,
                  firma_part: str) -> list[dict]:
-    """The three files a portal's form asks for, beside the full Mappe.
+    """The three files a portal's form asks for, beside the full Mappe —
+    finished in `tmp`, NOT installed: the caller installs everything at
+    once, after every part has succeeded.
 
-    Each is fitted to the PORTAL budget on its own — upload forms cap per file
-    — and lands in the same per-job archive folder as the Mappe. The CV is the
-    one-column ATS Lebenslauf when one is configured; otherwise the Mappe's
-    own CV page, so a portal never gets no CV at all.
+    Each is fitted to the PORTAL budget on its own (upload forms cap per
+    file). The CV is the one-column ATS Lebenslauf when one is configured;
+    otherwise the template's pages after the letter, so a portal never gets
+    no CV at all. Returns [{kind, tmp, path}].
     """
     rendered = pdf.page_count(letter_pdf)
-    first, last = letter_page_range(rendered)
+    found = letter_pages_by_text(letter_pdf, body)
+    if found is None:
+        first, last = letter_page_range(rendered)
+        log.warning("job %s: letter body not found in the rendered template, "
+                    "cutting the Anschreiben by position (pages %s-%s)",
+                    job_id, first, last)
+    else:
+        first, last = found
     sources: list[tuple[str, pathlib.Path]] = []
     brief = tmp / "brief.pdf"
     pdf.extract_pages(letter_pdf, brief, first, last)
@@ -382,8 +459,9 @@ def _build_parts(job_id: int, settings: dict, letter_pdf: pathlib.Path,
     if cv_file is not None and cv_file.is_file():
         pdf.html_to_pdf(cv_file.read_text(encoding="utf-8"), cv)
         sources.append((db.DOC_LEBENSLAUF, cv))
-    elif rendered >= 3:
-        pdf.extract_pages(letter_pdf, cv, rendered, rendered)
+    elif last < rendered:
+        # every page after the letter — one or two, whatever the CV needs
+        pdf.extract_pages(letter_pdf, cv, last + 1, rendered)
         sources.append((db.DOC_LEBENSLAUF, cv))
     if anlagen:
         merged = tmp / "anlagen.pdf"
@@ -396,17 +474,16 @@ def _build_parts(job_id: int, settings: dict, letter_pdf: pathlib.Path,
         out = job_dir / "_".join(
             p for p in (PART_STEMS[kind], name_part, firma_part) if p)
         out = out.with_suffix(".pdf")
+        fitted = tmp / f"{kind}_fitted.pdf"
         if settings["compress"]:
-            compression = pdf.compress_to_target(src, out, budget)
+            compression = pdf.compress_to_target(src, fitted, budget)
             if not compression.met_target:
                 log.warning("part %s for job %s is %.1f MB — over the portal "
-                            "budget", kind, job_id, out.stat().st_size / 1024 / 1024)
+                            "budget", kind, job_id,
+                            fitted.stat().st_size / 1024 / 1024)
         else:
-            pdf.install_pdf(src, out)
-        parts.append({"kind": kind, "path": str(out),
-                      "pages": pdf.page_count(out),
-                      "bytes": out.stat().st_size,
-                      "sha256": pdf.sha256_of(out)})
+            pdf.install_pdf(src, fitted)
+        parts.append({"kind": kind, "tmp": fitted, "path": str(out)})
     return parts
 
 

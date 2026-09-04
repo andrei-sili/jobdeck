@@ -178,15 +178,17 @@ def undo(job_id: int, bewerbung_id: int, previous_status: str) -> None:
         job = db.get_job(con, job_id)
         draft = db.get_draft_by_job(con, job_id)
         archive = str((draft["pdf_path"] if draft is not None else "") or "")
-        if job is not None and job["form_opened_at"] and archive:
-            source = pathlib.Path(archive)
-            if source.is_file():
+        if job is not None and job["form_opened_at"]:
+            source = pathlib.Path(archive) if archive else None
+            if source is not None and source.is_file():
                 staged = upload.stage(
                     source,
                     previous=str(
                         upload.undo_staged_path(source, job_id, bewerbung_id)
                     ),
                 )
+            # The parts are restaged on their own evidence: after a redraft
+            # the draft's pdf_path is blank while the part files still exist.
             for row in db.list_documents(con, job_id):
                 if row["kind"] == db.DOC_MAPPE:
                     if staged is not None:
