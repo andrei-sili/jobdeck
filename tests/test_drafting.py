@@ -963,3 +963,43 @@ async def test_the_service_compares_against_other_postings_letters_only(
     assert result["ok"], result["error"]
     assert seen["exclude"] == job_id
     assert handed["previous"] == []
+
+
+def test_the_betreff_keeps_the_postings_own_gender_marker():
+    """Found on the first real JOIN application: the advert wrote
+    "(m/f/x)" and the model normalised it to "(m/w/d)". HR matches on the
+    Stellenbezeichnung as written."""
+    align = ai_drafting.align_gender_marker
+    assert align("Backend Developer (m/w/d)", "Backend Developer (m/f/x)") \
+        == "Backend Developer (m/f/x)"
+    assert align("Backend Developer", "Backend Developer (m/f/x)") \
+        == "Backend Developer (m/f/x)"
+    assert align("Java Entwickler (m/w/d)", "Java Entwickler (w/m/d) – Berlin") \
+        == "Java Entwickler (w/m/d)"
+    assert align("Engineer (m/w/d)", "Software Engineer (all genders)") \
+        == "Engineer (all genders)"
+    # a posting without a marker leaves the model's title alone
+    assert align("Python Entwickler (m/w/d)", "Python Entwickler") \
+        == "Python Entwickler (m/w/d)"
+    assert align("Python Entwickler", "Python Entwickler") == "Python Entwickler"
+
+
+async def test_the_service_writes_the_postings_marker_into_the_betreff(
+    con, ai_on, applicant, profile_file, monkeypatch
+):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    job_id = _insert_job(con)
+    con.execute("UPDATE jobs SET title=? WHERE id=?", ("Backend Developer (m/f/x)", job_id))
+    con.commit()
+    monkeypatch.setattr(
+        "jobdeck.ai.drafting.draft_application",
+        lambda job, profile_text, refnr="", applicant_name="", previous_letters=None:
+            ("Sehr geehrte Damen und Herren,\n\nAbsatz.",
+             "Guten Tag,\n\nanbei.\n\nMit freundlichen Grüßen\nMax Muster",
+             "Backend Developer (m/w/d)", _usage()),
+    )
+
+    result = await drafting.draft_for_job(job_id)
+
+    assert result["ok"], result["error"]
+    assert result["draft"]["betreff"].startswith("Bewerbung als Backend Developer (m/f/x)")
