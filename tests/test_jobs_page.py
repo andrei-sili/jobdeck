@@ -1965,6 +1965,16 @@ def test_a_form_opened_before_the_app_could_stamp_it_says_so():
 @pytest.mark.parametrize("job, expected, kind", [
     ({"mappe_kind": "vollständig", "draft_status": "ready"},
      "Mappe bereit", ""),
+    # A form application whose build also made the separate parts: a portal
+    # that asks for the files one by one has them, one that takes the whole
+    # Mappe has that too. The Mappe row alone does not make it "einzeln".
+    ({"mappe_kind": "vollständig", "draft_status": "ready",
+      "documents": [{"kind": "mappe", "staged_path": "/u/m.pdf"},
+                    {"kind": "lebenslauf", "staged_path": "/u/l.pdf"}]},
+     "Mappe bereit · auch einzeln", ""),
+    ({"mappe_kind": "vollständig", "draft_status": "ready",
+      "documents": [{"kind": "mappe", "staged_path": "/u/m.pdf"}]},
+     "Mappe bereit", ""),
     ({"mappe_kind": "", "draft_status": "generating"},
      "Mappe wird gebaut …", ""),
     # The legacy flow exposes complete-package or missing-package states, so a

@@ -1668,3 +1668,63 @@ async def test_a_permanent_block_offers_no_way_out(user: User, con, data_dir):
 
     with pytest.raises(AssertionError):
         user.find("Trotzdem bewerben", kind=ui.button)
+
+
+async def test_the_strip_offers_every_part_a_portal_asks_for(
+        user: User, con, data_dir):
+    """A portal form asks for the Lebenslauf, the Anschreiben and the
+    Zeugnisse one upload field each. The strip carries one press per file,
+    named by what it is — four forty-character file names in one row say
+    less than four words, and the press puts the full path on the clipboard
+    anyway."""
+    from jobdeck import config
+    job_id = _posting(con)
+    db.mark_form_opened(con, job_id)
+    folder = config.UPLOAD_DIR
+    db.set_upload(con, job_id, f"{folder}/Bewerbung_A_B.pdf", "vollständig")
+    db.set_documents(con, job_id, [
+        {"kind": db.DOC_MAPPE, "path": "/x/Bewerbung_A_B.pdf",
+         "staged_path": f"{folder}/Bewerbung_A_B.pdf"},
+        {"kind": db.DOC_ANSCHREIBEN, "path": "/x/Anschreiben_A_B.pdf",
+         "staged_path": f"{folder}/Anschreiben_A_B.pdf"},
+        {"kind": db.DOC_LEBENSLAUF, "path": "/x/Lebenslauf_A_B.pdf",
+         "staged_path": f"{folder}/Lebenslauf_A_B.pdf"},
+        {"kind": db.DOC_ANLAGEN, "path": "/x/Anlagen_A_B.pdf",
+         "staged_path": ""},   # taken out of the folder: no press for it
+    ])
+    con.commit()
+
+    await user.open("/")
+
+    await user.should_see("Mappe bereit · auch einzeln")
+    chips = [str(e.text) for e in user.client.elements.values()
+             if isinstance(e, ui.button) and str(e.text).startswith("⧉")]
+    assert chips == ["⧉ Mappe", "⧉ Anschreiben", "⧉ Lebenslauf"]
+
+
+async def test_a_part_landing_in_the_background_reaches_the_strip(
+        user: User, con, data_dir):
+    """The build runs in a worker thread while the page is open: the strip
+    has to pick up a part that was staged after the page was drawn, without
+    anything else about the posting changing."""
+    from jobdeck import config
+    job_id = _posting(con)
+    db.mark_form_opened(con, job_id)
+    folder = config.UPLOAD_DIR
+    db.set_upload(con, job_id, f"{folder}/Bewerbung_A_B.pdf", "vollständig")
+    db.set_documents(con, job_id, [
+        {"kind": db.DOC_MAPPE, "path": "/x/Bewerbung_A_B.pdf",
+         "staged_path": f"{folder}/Bewerbung_A_B.pdf"}])
+    con.commit()
+    await user.open("/")
+    await user.should_see("⧉ Mappe")
+
+    db.set_documents(con, job_id, [
+        {"kind": db.DOC_MAPPE, "path": "/x/Bewerbung_A_B.pdf",
+         "staged_path": f"{folder}/Bewerbung_A_B.pdf"},
+        {"kind": db.DOC_LEBENSLAUF, "path": "/x/Lebenslauf_A_B.pdf",
+         "staged_path": f"{folder}/Lebenslauf_A_B.pdf"}])
+    con.commit()
+    await _tick(user)
+
+    await user.should_see("⧉ Lebenslauf")
