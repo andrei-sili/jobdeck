@@ -2611,22 +2611,18 @@ def list_drafts_with_jobs(
     con: sqlite3.Connection, statuses: list[str]
 ) -> list[sqlite3.Row]:
     """Review-queue rows: drafts in the given statuses with their postings."""
+    # The same columns as the single-draft reader — the queue and the editor
+    # must describe one draft the same way, and a column added to one (the
+    # posting text the quality line is measured against) was missing from the
+    # other the first time, so the queue printed no line at all. The liveness
+    # columns are in there too: the queue is the last place before a
+    # Bewerbung leaves, and one draft (job 18) was written and a 2.1 MB Mappe
+    # built for an ad that had been gone forty days.
     placeholders = ",".join("?" * len(statuses))
     return con.execute(
-        f"""
-        SELECT d.*, j.title AS job_title, j.company AS job_company,
-               j.url AS job_url, j.match_score AS job_score,
-               j.location AS job_location, j.status AS job_status,
-               j.contact_email AS job_contact_email,
-               -- the queue is the last place before a Bewerbung leaves: one
-               -- draft (job 18) was written and a 2.1 MB Mappe built for an ad
-               -- that had been gone forty days
-               j.liveness AS job_liveness,
-               j.liveness_checked_at AS job_liveness_checked_at
-        FROM drafts d JOIN jobs j ON j.id = d.job_id
-        WHERE d.status IN ({placeholders})
-        ORDER BY d.updated_at DESC, d.id DESC
-        """,
+        _DRAFT_WITH_JOB_COLUMNS
+        + f" WHERE d.status IN ({placeholders})"
+        + " ORDER BY d.updated_at DESC, d.id DESC",
         statuses,
     ).fetchall()
 

@@ -459,3 +459,24 @@ def test_the_loader_measures_every_row_against_the_other_rows(con, data_dir):
     rows = queue._load("open")["drafts"]
     assert all(("Beginnt wie ein früherer Brief", "warn") not in r["quality"]
                for r in rows)
+
+
+def test_the_loader_hands_every_row_the_posting_text_the_line_is_measured_on(
+    con, data_dir
+):
+    """Found live: the queue listing had its own SELECT without the posting
+    text, so every coverage line came out empty while the single-draft
+    reader had the column. One column list for both."""
+    job_id = _job_with_draft(con, anschreiben_body=(
+        "Sehr geehrte Damen und Herren,\n\nMit Python habe ich gearbeitet."))
+    db.set_job_contacts(con, job_id, {})
+    con.execute("UPDATE jobs SET description=? WHERE id=?",
+                ("Wir suchen Python und Docker.", job_id))
+    con.commit()
+
+    rows = queue._load("open")["drafts"]
+
+    assert rows[0]["job_description"] == "Wir suchen Python und Docker."
+    assert rows[0]["quality"][0] == (
+        "Begriffe aus der Anzeige: 1 von 2 im Brief · 0 im Lebenslauf · "
+        "in keinem: Docker", "")
