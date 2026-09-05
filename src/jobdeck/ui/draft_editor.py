@@ -111,8 +111,8 @@ def open_editor(row: dict, *, overlay, say, on_change) -> None:
         # The CV's profile line for this posting — two sentences under the
         # name, printed on the Mappe's CV page and on the portal Lebenslauf.
         # Empty keeps the template's fixed line.
-        profil = ui.textarea("Profil (zwei Sätze unter dem Namen im Lebenslauf; "
-                             "leer = die feste Zeile der Vorlage)",
+        profil = ui.textarea("Profilzeile im Lebenslauf (zwei Sätze unter dem Namen; "
+                             "leer lassen = die feste Zeile der Vorlage bleibt)",
                              value=row.get("profil") or "") \
             .classes("w-full").props("autogrow")
         pdf_label = ui.label(

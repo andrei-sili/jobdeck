@@ -251,16 +251,19 @@ Rules:
   role name and its "(m/w/d)" marker intact, HR matches on it. Do NOT add a
   Referenznummer or the candidate's name; code appends those.
 - profil: the two-sentence profile line printed under the candidate's name
-  on the CV page, written for THIS posting. German, no Anrede, no "ich":
-  the first sentence names who he is and the qualification (the profile
-  gives it), the second names the two or three competences the advert
-  weights most that the profile supports, in the advert's own terms and
-  with the project or employer each sits under, then his availability if
-  the profile states one. Exactly two sentences, 25-40 words, at most 300
-  characters: it sits on two lines under the name and a third line pushes
-  the CV onto a second page. Attribution and vocabulary rules apply here
-  exactly as in the letter, and nothing that is not in the profile. No
-  Floskeln, no adjectives about himself; facts and terms only.
+  on the CV page, written for THIS posting. German, Nominalstil, no Anrede,
+  no "ich" ("fundierte Kenntnisse in ...", "Backend-Entwicklung mit ... bei
+  <Arbeitgeber>"): the first sentence names his own qualification as the
+  profile states it (never the advert's title) and, when the profile states
+  one, his availability ("..., ab sofort verfügbar."); the second names the
+  two or three competences the advert weights most that the profile
+  supports, in the advert's own terms and each with the project or employer
+  it sits under. Never name the employer applied to. Exactly two sentences,
+  22-30 words and at most 230 characters including spaces: it has two lines
+  under the name and a third line pushes the one-page CV onto a second.
+  Attribution and vocabulary rules apply here exactly as in the letter, and
+  nothing that is not in the profile. No Floskeln, no adjectives about
+  himself; facts and terms only.
 - anschreiben_body: the body of the Anschreiben (cover letter). German,
   Sie-Form, roughly half a page (150-220 words). First line is the Anrede:
   "Sehr geehrte Frau <Name>," / "Sehr geehrter Herr <Name>," when an

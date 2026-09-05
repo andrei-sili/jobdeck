@@ -193,13 +193,19 @@ class Coverage:
             return ""
         n = len(self.terms)
         text = f"Begriffe aus der Anzeige: {len(self.in_letter)} von {n} im Brief"
-        if self.profil_known:
-            text += f" · {len(self.in_profil)} im Profil"
+        # "Profilzeile", never "Profil": in this app "Profil" is profile.md,
+        # and the line is part of the CV, so its count is stated as such.
         if not self.cv_known:
+            if self.profil_known:
+                text += f" · {len(self.in_profil)} in der Profilzeile"
             if self.missing:
-                text += " · nicht im Brief: " + ", ".join(self.missing)
+                text += ((" · weder im Brief noch in der Profilzeile: "
+                          if self.profil_known else " · nicht im Brief: ")
+                         + ", ".join(self.missing))
             return text + " · Lebenslauf nicht lesbar"
         text += f" · {len(self.in_cv)} im Lebenslauf"
+        if self.profil_known:
+            text += f", davon {len(self.in_profil)} in der Profilzeile"
         if self.missing:
             text += (" · weder im Brief noch im Lebenslauf: "
                      + ", ".join(self.missing))
@@ -377,11 +383,14 @@ class Note:
     text: str
 
 
-# The profile line sits on two lines under the name on a one-page CV; the
-# fixed line it replaces is 232 characters. Past this a third line appears
-# and the CV spills onto a second page, which every parser and every reader
-# takes worse than a shorter line.
-PROFIL_MAX_CHARS = 320
+# The profile line has two lines under the name on a one-page CV, and the
+# one-column portal Lebenslauf is full at that: measured on his real
+# templates (2026-09-05), the 232-character fixed line fits, and every line
+# of 251 characters or more wraps to a third line and pushes that CV onto a
+# second page, which every parser and every reader takes worse than a shorter
+# line. Only the length is enforced here; sentence count, first person and
+# the employer's name are prompt rules the Postausgang does not check.
+PROFIL_MAX_CHARS = 240
 
 
 def notes(letter: str, posting: str, previous: list[str] = (),
@@ -406,14 +415,18 @@ def notes(letter: str, posting: str, previous: list[str] = (),
                         + opening_text(letter) + "“"))
     stock = floskeln(profil)
     if stock:
-        out.append(Note("floskel", "Floskel im Profil: „" + "“, „".join(stock) + "“"))
+        label = "Floskel" if len(stock) == 1 else "Floskeln"
+        out.append(Note("floskel", f"{label} in der Profilzeile: „"
+                        + "“, „".join(stock) + "“"))
     copies = copied_spans(profil, posting, allowed=title)
     if copies:
         shown = copies[0] if len(copies[0]) <= 60 else copies[0][:57] + "…"
-        out.append(Note("kopie", f"Wörtlich aus der Anzeige im Profil: „{shown}“"))
+        out.append(Note("kopie", "In der Profilzeile wörtlich aus der Anzeige: "
+                        f"„{shown}“"))
     if len(_flat(profil)) > PROFIL_MAX_CHARS:
         out.append(Note("profil_lang", f"Profilzeile zu lang: {len(_flat(profil))} "
-                        f"Zeichen, unter dem Namen passen {PROFIL_MAX_CHARS}"))
+                        f"Zeichen, unter den Namen passen höchstens "
+                        f"{PROFIL_MAX_CHARS}"))
     return out
 
 
@@ -431,12 +444,11 @@ def retry_hint(found: list[Note]) -> str:
     """The English instruction appended to the prompt for the one re-roll."""
     parts = []
     for note in found:
+        where = " in the profile line" if "Profilzeile" in note.text else ""
         if note.kind == "floskel":
-            where = " in the profile line" if note.text.startswith("Floskel im Profil") else ""
             parts.append(f"stock phrases a recruiter reads as generated text{where}: "
                          + note.text.split(": ", 1)[1])
         elif note.kind == "kopie":
-            where = " in the profile line" if "im Profil" in note.text else ""
             parts.append(f"a sentence copied from the advert{where}: "
                          + note.text.split(": ", 1)[1])
         elif note.kind == "einstieg":
@@ -444,8 +456,9 @@ def retry_hint(found: list[Note]) -> str:
                          + note.text.split(": ", 1)[1]
                          + " (take a different one of the three angles)")
         elif note.kind == "profil_lang":
-            parts.append(f"a profile line longer than {PROFIL_MAX_CHARS} characters "
-                         "(two sentences, 25-40 words, fit under the name)")
+            parts.append(f"a profile line of more than {PROFIL_MAX_CHARS} characters; "
+                         "the target is two sentences, 22-30 words, at most 230 "
+                         "characters including spaces")
     return ("\n\nNote: your previous draft contained " + "; ".join(parts)
             + ". Write it again without them, keeping every rule above. "
             "Say the same facts in your own words: a plain sentence about "

@@ -1025,7 +1025,8 @@ def test_the_prompt_asks_for_the_profile_line_and_bounds_it():
     assert "===PROFIL===" in spec
     assert spec.index("===STELLENBEZEICHNUNG===") < spec.index("===PROFIL===") \
         < spec.index("===ANSCHREIBEN_BODY===")
-    assert "- profil:" in spec and "at most 300" in spec
+    assert "- profil:" in spec and "at most 230 characters" in spec
+    assert "Never name the employer applied to" in spec
 
 
 def test_draft_application_carries_the_profile_line_as_one_clean_paragraph(monkeypatch):

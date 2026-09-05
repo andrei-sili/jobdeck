@@ -144,5 +144,5 @@ def test_a_profile_line_that_spills_to_a_third_line_is_re_rolled_once(monkeypatc
 
     drafted = drafting.draft_application(JOB, "profile")
 
-    assert len(seen) == 2 and "profile line longer than" in seen[1]
+    assert len(seen) == 2 and "profile line of more than" in seen[1]
     assert drafted.profil == "Entwickler. Python bei Beispiel GmbH."

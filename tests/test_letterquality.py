@@ -197,8 +197,8 @@ def test_the_profile_line_is_checked_for_phrases_copies_and_length():
     found = lq.notes(LETTER, POSTING, profil=profil)
 
     assert [n.kind for n in found] == ["floskel", "kopie"]
-    assert found[0].text == "Floskel im Profil: „Hochmotiviert“"
-    assert found[1].text.startswith("Wörtlich aus der Anzeige im Profil: „Sie entwickeln")
+    assert found[0].text == "Floskel in der Profilzeile: „Hochmotiviert“"
+    assert found[1].text.startswith("In der Profilzeile wörtlich aus der Anzeige: „Sie entwickeln")
     hint = lq.retry_hint(found)
     assert "in the profile line: „Hochmotiviert“" in hint
     assert "copied from the advert in the profile line: „Sie entwickeln" in hint
@@ -207,8 +207,13 @@ def test_the_profile_line_is_checked_for_phrases_copies_and_length():
     assert len(too_long) > lq.PROFIL_MAX_CHARS
     found = lq.notes(LETTER, POSTING, profil=too_long)
     assert [n.kind for n in found] == ["profil_lang"]
-    assert found[0].text.startswith(f"Profilzeile zu lang: {len(too_long)} Zeichen")
-    assert f"longer than {lq.PROFIL_MAX_CHARS} characters" in lq.retry_hint(found)
+    assert found[0].text == (f"Profilzeile zu lang: {len(too_long)} Zeichen, unter den "
+                             f"Namen passen höchstens {lq.PROFIL_MAX_CHARS}")
+    assert f"more than {lq.PROFIL_MAX_CHARS} characters" in lq.retry_hint(found)
+    # a line that still fits both CV layouts (measured on the real templates:
+    # 248 characters fit, 251 spill) is not a note
+    fits = ("Entwickler. " + "Python bei Beispiel GmbH, " * 9)[:lq.PROFIL_MAX_CHARS]
+    assert lq.notes(LETTER, POSTING, profil=fits) == []
 
 
 def test_a_clean_profile_line_adds_no_note():
@@ -227,13 +232,17 @@ def test_coverage_names_the_profile_line_and_counts_it_into_the_cv():
     assert cov.in_profil == ("Backend", "Python", "CI/CD")
     assert cov.in_cv == ("Backend", "Python", "Docker", "CI/CD")
     assert cov.missing == ("Englisch", "Agil")
-    assert cov.line() == ("Begriffe aus der Anzeige: 6 von 10 im Brief · 3 im Profil "
-                          "· 4 im Lebenslauf · weder im Brief noch im Lebenslauf: "
-                          "Englisch, Agil")
-    # no CV file, but a profile line: it is still named and still counted
+    # "Profilzeile", and as a part of the CV count: "Profil" alone would read
+    # as profile.md, and a third document beside the CV
+    assert cov.line() == ("Begriffe aus der Anzeige: 6 von 10 im Brief · 4 im Lebenslauf, "
+                          "davon 3 in der Profilzeile · weder im Brief noch im "
+                          "Lebenslauf: Englisch, Agil")
+    # no CV file, but a profile line: it is still named and still counted,
+    # and what is missing is missing from BOTH texts the line counted
     cov = lq.coverage(POSTING, LETTER, profil="Backend-Entwickler mit CI/CD.")
-    assert cov.line() == ("Begriffe aus der Anzeige: 6 von 10 im Brief · 2 im Profil "
-                          "· nicht im Brief: Englisch, Agil · Lebenslauf nicht lesbar")
+    assert cov.line() == ("Begriffe aus der Anzeige: 6 von 10 im Brief · 2 in der "
+                          "Profilzeile · weder im Brief noch in der Profilzeile: "
+                          "Englisch, Agil · Lebenslauf nicht lesbar")
     # None is "the draft wrote none": nothing named, the line reads as before
     assert lq.coverage(POSTING, LETTER, cv_text="Python", profil=None).line() \
         == lq.coverage(POSTING, LETTER, cv_text="Python").line()

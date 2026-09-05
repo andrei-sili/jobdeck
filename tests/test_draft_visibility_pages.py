@@ -432,7 +432,7 @@ async def test_the_editor_offers_the_profile_line_and_saving_it_invalidates_the_
     con.commit()
     await user.open("/queue")
     user.find("Prüfen und senden").click()
-    await user.should_see("Profil (zwei Sätze")
+    await user.should_see("Profilzeile im Lebenslauf (zwei Sätze")
     field = next(e for e in user.client.elements.values()
                  if isinstance(e, ui.textarea)
                  and str(e.props.get("label", "")).startswith("Profil"))

@@ -549,9 +549,9 @@ def test_the_coverage_line_counts_the_drafts_profile_line_as_part_of_the_cv():
 
     with_profil = queue.quality_lines({**row, "profil": "Entwickler. Docker bei "
                                                         "Beispiel GmbH."}, cv)
-    assert with_profil == [("Begriffe aus der Anzeige: 1 von 4 im Brief · 1 im "
-                            "Profil · 3 im Lebenslauf · weder im Brief noch im "
-                            "Lebenslauf: Git", "")]
+    assert with_profil == [("Begriffe aus der Anzeige: 1 von 4 im Brief · 3 im "
+                            "Lebenslauf, davon 1 in der Profilzeile · weder im Brief "
+                            "noch im Lebenslauf: Git", "")]
 
     without = queue.quality_lines({**row, "profil": ""}, cv)
     assert without == [("Begriffe aus der Anzeige: 1 von 4 im Brief · 3 im "
