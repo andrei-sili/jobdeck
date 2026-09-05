@@ -374,7 +374,8 @@ async def test_opening_a_draft_twice_leaves_one_dialog_behind(
             "recipient": "jobs@beispiel.example",
             "betreff": "Bewerbung als Python Entwickler",
             "email_body": "Sehr geehrte Damen und Herren,",
-            "anschreiben_body": "…", "llm_model": "stub", "pdf_path": ""}}
+            "anschreiben_body": "…", "profil": "", "llm_model": "stub",
+            "pdf_path": ""}}
 
     monkeypatch.setattr(jobs_page.drafting, "draft_for_job", finished_draft)
     _posting(con)
@@ -413,3 +414,35 @@ async def test_the_queue_row_says_what_the_letter_carries(
     await user.should_see("Begriffe aus der Anzeige: 1 von 2 im Brief · "
                           "nicht im Brief: Docker · Lebenslauf nicht lesbar")
     await user.should_see("Floskel: „reizt mich besonders“")
+
+
+async def test_the_editor_offers_the_profile_line_and_saving_it_invalidates_the_mappe(
+        user: User, con, data_dir):
+    """The two sentences under the name are the draft's text like the
+    letter: editable in the same dialog, and an edit clears the built PDF
+    because the PDF prints them."""
+    from nicegui import ui
+    job_id = _posting(con)
+    db.upsert_draft(con, job_id, {
+        "status": "ready", "recipient": "jobs@beispiel.example",
+        "betreff": "Bewerbung als Python Entwickler",
+        "email_body": "Guten Tag,\n\nanbei.\n\nMit freundlichen Grüßen\nMax",
+        "anschreiben_body": "Sehr geehrte Damen und Herren,\n\nAbsatz.",
+        "profil": "Entwickler. Python bei Beispiel GmbH.",
+        "pdf_path": str(data_dir / "alt.pdf")})
+    con.commit()
+    await user.open("/queue")
+    user.find("Prüfen und senden").click()
+    await user.should_see("Profilzeile im Lebenslauf (zwei Sätze")
+    field = next(e for e in user.client.elements.values()
+                 if isinstance(e, ui.textarea)
+                 and str(e.props.get("label", "")).startswith("Profil"))
+    assert field.value == "Entwickler. Python bei Beispiel GmbH."
+
+    field.value = "Entwicklerin.\n  Django bei Beispiel GmbH. "
+    user.find("Speichern").click()
+    await user.should_see("Gespeichert")
+
+    row = db.get_draft_by_job(con, job_id)
+    assert row["profil"] == "Entwicklerin. Django bei Beispiel GmbH."
+    assert row["pdf_path"] == ""

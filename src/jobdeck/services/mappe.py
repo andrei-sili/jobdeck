@@ -68,6 +68,9 @@ def letter_values(job, draft, applicant_name: str, applicant_ort: str) -> dict:
     strasse, plz_ort = templates.letter_address(job)
     betreff = draft["betreff"] if draft is not None else ""
     return {
+        # The CV page's profile line, written for this posting; '' keeps the
+        # template's own fixed line (the specimen, an older draft).
+        "profil": draft["profil"] if draft is not None else "",
         "firma": job["company"],
         "ansprechpartner": job["ansprechpartner"],
         "strasse": strasse,
@@ -278,7 +281,8 @@ def _build_mappe(job_id: int) -> dict:
                 pending = _build_parts(job_id, settings, letter_pdf,
                                        draft["anschreiben_body"], anlagen,
                                        tmp_dir, out_path.parent,
-                                       name_part, firma_part)
+                                       name_part, firma_part,
+                                       profil=draft["profil"])
             pdf.install_pdf(fitted, out_path)
             for part in pending:
                 pdf.install_pdf(part["tmp"], pathlib.Path(part["path"]))
@@ -325,6 +329,7 @@ def _build_mappe(job_id: int) -> dict:
                 or current["status"] not in EDITABLE_STATUS
                 or current["updated_at"] != draft_revision
                 or current["anschreiben_body"] != draft["anschreiben_body"]
+                or current["profil"] != draft["profil"]
                 or current["betreff"] != draft["betreff"]):
             # The draft was regenerated while Chrome rendered — this PDF
             # holds the OLD text and must not be linked to the new draft.
@@ -430,15 +435,16 @@ def letter_pages_by_text(letter_pdf: pathlib.Path, body: str) -> tuple[int, int]
 def _build_parts(job_id: int, settings: dict, letter_pdf: pathlib.Path,
                  body: str, anlagen: list[pathlib.Path], tmp: pathlib.Path,
                  job_dir: pathlib.Path, name_part: str,
-                 firma_part: str) -> list[dict]:
+                 firma_part: str, profil: str = "") -> list[dict]:
     """The three files a portal's form asks for, beside the full Mappe —
     finished in `tmp`, NOT installed: the caller installs everything at
     once, after every part has succeeded.
 
     Each is fitted to the PORTAL budget on its own (upload forms cap per
-    file). The CV is the one-column ATS Lebenslauf when one is configured;
-    otherwise the template's pages after the letter, so a portal never gets
-    no CV at all. Returns [{kind, tmp, path}].
+    file). The CV is the one-column ATS Lebenslauf when one is configured,
+    rendered with this draft's profile line in its PROFIL region (the same
+    fill the Mappe's CV page gets); otherwise the template's pages after the
+    letter, so a portal never gets no CV at all. Returns [{kind, tmp, path}].
     """
     rendered = pdf.page_count(letter_pdf)
     found = letter_pages_by_text(letter_pdf, body)
@@ -457,7 +463,8 @@ def _build_parts(job_id: int, settings: dict, letter_pdf: pathlib.Path,
     cv_file = config.user_path(settings["cv_ats_path"])
     cv = tmp / "lebenslauf.pdf"
     if cv_file is not None and cv_file.is_file():
-        pdf.html_to_pdf(cv_file.read_text(encoding="utf-8"), cv)
+        pdf.html_to_pdf(templates.fill_profil(cv_file.read_text(encoding="utf-8"),
+                                              profil), cv)
         sources.append((db.DOC_LEBENSLAUF, cv))
     elif last < rendered:
         # every page after the letter — one or two, whatever the CV needs

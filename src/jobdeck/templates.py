@@ -9,11 +9,21 @@ template_path setting) — never in this repository. The token contract:
   {{DECKBLATT_ROLLE}}                                      cover-sheet role
   {{BETREFF}}                                              letter subject
   {{ANSCHREIBEN_BODY}}                                     letter body
+  <!--PROFIL-->fixed profile line<!--/PROFIL-->            CV profile line
 
 All values are HTML-escaped (LLM output and posting-derived data are
 untrusted for HTML purposes). An empty address token swallows one directly
 following <br> so the block does not render blank lines. The body is plain
 text with blank-line-separated paragraphs; each becomes a styled <p>.
+
+The profile line is a REGION rather than a token, because it has a fallback
+the app cannot know: the two sentences under the name on the CV page are
+written per posting when a draft carries them, and stay the template's own
+fixed text otherwise (the specimen Mappe, a draft written before this
+existed, a template without the region). Keeping the fixed text inside the
+markers means the template stays a complete document on its own, and the
+one-column CV template carries the same region without acquiring a token
+its own build script asserts it has none of.
 """
 
 import html
@@ -68,14 +78,60 @@ _TOKEN_RE = re.compile(
     r"\{\{(" + "|".join((*SIMPLE_TOKENS, "ANSCHREIBEN_BODY")) + r")\}\}(<br>)?"
 )
 
+_TAG_RE = re.compile(r"<[^>]+>")
+PROFIL_OPEN = "<!--PROFIL-->"
+PROFIL_CLOSE = "<!--/PROFIL-->"
+_PROFIL_RE = re.compile(re.escape(PROFIL_OPEN) + r"(.*?)" + re.escape(PROFIL_CLOSE),
+                        re.S)
+
+
+def profil_default(template_html: str) -> str:
+    """The fixed profile line a template carries between its PROFIL markers,
+    as plain text; '' when the template has no such region."""
+    match = _PROFIL_RE.search(template_html)
+    if match is None:
+        return ""
+    return " ".join(html.unescape(_TAG_RE.sub(" ", match.group(1))).split())
+
+
+def has_profil_region(template_html: str) -> bool:
+    """Whether a draft's profile line would be printed by this template at
+    all — the question every count of that line has to ask first."""
+    return _PROFIL_RE.search(template_html) is not None
+
+
+def strip_profil(template_html: str) -> str:
+    """The template without its PROFIL regions, markers and text — for
+    counting the CV's words apart from the line a draft replaces."""
+    return _PROFIL_RE.sub(" ", template_html)
+
+
+def fill_profil(template_html: str, profil: str | None) -> str:
+    """The template with every PROFIL region carrying `profil` instead of
+    the fixed text (a template may print the line on more than one page).
+    An empty `profil` or a template without the region leaves the document
+    exactly as it is — the fixed line IS the fallback.
+
+    The value is HTML-escaped and flattened to one paragraph: it is LLM
+    output, and the region sits inside a single <p>."""
+    text = " ".join((profil or "").split())
+    if not text:
+        return template_html
+    replacement = PROFIL_OPEN + html.escape(text) + PROFIL_CLOSE
+    return _PROFIL_RE.sub(lambda _m: replacement, template_html)
+
 
 def render_letter(template_html: str, values: dict) -> str:
     """Fill the token contract. `values` keys are lowercase token names
-    (firma, ansprechpartner, ..., betreff, anschreiben_body).
+    (firma, ansprechpartner, ..., betreff, anschreiben_body, profil).
 
     Substitution is a single pass over the template: a substituted value
     that itself contains token-shaped text stays literal instead of being
-    re-substituted (values are posting/LLM-derived and untrusted)."""
+    re-substituted (values are posting/LLM-derived and untrusted). The
+    profile region is filled AFTER that pass for the same reason in the
+    other direction: a profile line containing token-shaped text must not
+    meet the token pass, and every token value is escaped before the region
+    pass, so neither can open the other."""
     if "{{ANSCHREIBEN_BODY}}" not in template_html:
         raise TemplateError(
             "template has no {{ANSCHREIBEN_BODY}} token — re-run the "
@@ -92,4 +148,4 @@ def render_letter(template_html: str, values: dict) -> str:
         # empty address lines collapse instead of leaving gaps.
         return value + br if value else ""
 
-    return _TOKEN_RE.sub(fill, template_html)
+    return fill_profil(_TOKEN_RE.sub(fill, template_html), values.get("profil"))

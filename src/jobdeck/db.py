@@ -2408,7 +2408,7 @@ def get_draft_by_job(con: sqlite3.Connection, job_id: int) -> sqlite3.Row | None
 
 
 _DRAFT_FIELDS = ("status", "recipient", "betreff", "email_body",
-                 "anschreiben_body", "pdf_path", "llm_model", "error")
+                 "anschreiben_body", "profil", "pdf_path", "llm_model", "error")
 
 
 def upsert_draft(con: sqlite3.Connection, job_id: int, values: dict) -> int:
@@ -2424,9 +2424,9 @@ def upsert_draft(con: sqlite3.Connection, job_id: int, values: dict) -> int:
             """
             INSERT INTO drafts
                 (job_id, status, recipient, betreff, email_body,
-                 anschreiben_body, pdf_path, llm_model, error,
+                 anschreiben_body, profil, pdf_path, llm_model, error,
                  created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (job_id, *(fields[f] for f in _DRAFT_FIELDS), _now(), _now()),
         )
@@ -2514,7 +2514,9 @@ _DRAFT_WITH_JOB_COLUMNS = """
                j.contact_email AS job_contact_email,
                j.liveness AS job_liveness,
                j.liveness_checked_at AS job_liveness_checked_at,
-               j.description AS job_description
+               j.description AS job_description,
+               j.apply_channel AS job_apply_channel,
+               j.form_opened_at AS job_form_opened_at
         FROM drafts d JOIN jobs j ON j.id = d.job_id
 """
 

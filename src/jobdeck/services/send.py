@@ -45,7 +45,7 @@ SNIPPET_CHARS = 120
 # Content fields that define the message. A change to any of them makes an
 # earlier approval (or a pre-send snapshot) describe a different e-mail.
 CONTENT_FIELDS = ("updated_at", "recipient", "betreff", "email_body",
-                  "anschreiben_body", "pdf_path")
+                  "anschreiben_body", "profil", "pdf_path")
 
 
 def identity_refusal(decision) -> str:

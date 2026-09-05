@@ -23,6 +23,9 @@ import dataclasses
 import html
 import pathlib
 import re
+import typing
+
+from jobdeck import templates
 
 # The vocabulary a German software posting is written in, and the spelling
 # each term is matched by. Matching is case-insensitive on word boundaries;
@@ -157,51 +160,79 @@ def terms_in(text: str) -> list[str]:
 
 @dataclasses.dataclass(frozen=True)
 class Coverage:
-    """Which of the posting's terms the letter and the CV carry.
+    """Which of the posting's terms the letter, the profile line and the CV
+    carry.
 
     `cv_known` is False when no CV text could be read at all: the line then
     counts the letter alone and says so, instead of stating as fact that the
-    CV lacks every term."""
+    CV lacks every term. `in_profil` is the draft's own profile line, the
+    two sentences under the name that a parser weighs as the summary field;
+    it is printed INTO the CV, so its terms count in `in_cv` too, and the
+    line names it separately only when the draft wrote one (`profil_known`)."""
 
     terms: tuple[str, ...]
     in_letter: tuple[str, ...]
     in_cv: tuple[str, ...]
     cv_known: bool = True
+    in_profil: tuple[str, ...] = ()
+    profil_known: bool = False
 
     @property
     def missing(self) -> tuple[str, ...]:
-        carried = set(self.in_letter) | (set(self.in_cv) if self.cv_known else set())
+        carried = set(self.in_letter) | set(self.in_profil)
+        if self.cv_known:
+            carried |= set(self.in_cv)
         return tuple(t for t in self.terms if t not in carried)
 
     def line(self) -> str:
         """The sentence the Postausgang prints. Empty when the posting
         names no term this vocabulary knows — a count of zero of zero says
         nothing. The letter argues with three or four terms; the CV carries
-        the rest, which is why both counts stand side by side."""
+        the rest, which is why the counts stand side by side."""
         if not self.terms:
             return ""
         n = len(self.terms)
         text = f"Begriffe aus der Anzeige: {len(self.in_letter)} von {n} im Brief"
+        # "Profilzeile", never "Profil": in this app "Profil" is profile.md,
+        # and the line is part of the CV, so its count is stated as such.
         if not self.cv_known:
+            if self.profil_known:
+                text += f" · {len(self.in_profil)} in der Profilzeile"
             if self.missing:
-                text += " · nicht im Brief: " + ", ".join(self.missing)
+                text += ((" · weder im Brief noch in der Profilzeile: "
+                          if self.profil_known else " · nicht im Brief: ")
+                         + ", ".join(self.missing))
             return text + " · Lebenslauf nicht lesbar"
         text += f" · {len(self.in_cv)} im Lebenslauf"
+        if self.profil_known:
+            text += f", davon {len(self.in_profil)} in der Profilzeile"
         if self.missing:
             text += (" · weder im Brief noch im Lebenslauf: "
                      + ", ".join(self.missing))
         return text
 
 
-def coverage(posting: str, letter: str, cv_text: str = "") -> Coverage:
+def coverage(posting: str, letter: str, cv_text: str = "",
+             profil: str | None = None) -> Coverage:
+    """`cv_text` is the CV's words WITHOUT the profile line; `profil` is the
+    line printed under the name — the draft's own, or None when the draft
+    has none (the template's fixed line then belongs in `cv_text`)."""
     terms = terms_in(posting)
     letter_terms = set(terms_in(letter))
+    profil_terms = set(terms_in(profil or ""))
+    # The profile line is printed INTO the CV, so its terms are CV terms —
+    # but only of a CV that exists: with no readable CV, in_cv stays empty
+    # and cv_known False mean the same thing.
     cv_terms = set(terms_in(cv_text))
+    if (cv_text or "").strip():
+        cv_terms |= profil_terms
     return Coverage(
         terms=tuple(terms),
         in_letter=tuple(t for t in terms if t in letter_terms),
         in_cv=tuple(t for t in terms if t in cv_terms),
         cv_known=bool((cv_text or "").strip()),
+        in_profil=tuple(t for t in terms if t in profil_terms),
+        profil_known=profil is not None,
     )
 
 
@@ -351,17 +382,33 @@ def repeats_an_opening(text: str, previous: list[str], words: int = 6) -> bool:
 
 @dataclasses.dataclass(frozen=True)
 class Note:
-    """One thing a reader would notice, and the sentence that says it."""
+    """One thing a reader would notice, and the sentence that says it.
+    `scope` says which text it was found in, so the retry hint names the
+    field without reading it back out of the German sentence."""
 
     kind: str
     text: str
+    scope: str = "letter"  # or "profil"
+
+
+# The profile line has two lines under the name on a one-page CV, and the
+# one-column portal Lebenslauf is full at that: measured on his real
+# templates (2026-09-05), the 232-character fixed line fits, and every line
+# of 251 characters or more wraps to a third line and pushes that CV onto a
+# second page, which every parser and every reader takes worse than a shorter
+# line. Only the length is enforced here; sentence count, first person and
+# the employer's name are prompt rules the Postausgang does not check.
+PROFIL_MAX_CHARS = 240
 
 
 def notes(letter: str, posting: str, previous: list[str] = (),
-          title: str = "") -> list[Note]:
+          title: str = "", profil: str = "") -> list[Note]:
     """What a person would hold against this letter, in German, for the
     Postausgang. Empty when nothing was found. `title` is the posting's
-    Stellenbezeichnung, which the letter may repeat verbatim."""
+    Stellenbezeichnung, which the letter may repeat verbatim. `profil` is
+    the CV's profile line written with the letter: it meets the same reader
+    and the same parser, so it is held to the same phrases and, being
+    printed under the name on a one-page CV, to a length."""
     out: list[Note] = []
     stock = floskeln(letter)
     if stock:
@@ -374,6 +421,20 @@ def notes(letter: str, posting: str, previous: list[str] = (),
     if repeats_an_opening(letter, list(previous)):
         out.append(Note("einstieg", "Beginnt wie ein früherer Brief: „"
                         + opening_text(letter) + "“"))
+    stock = floskeln(profil)
+    if stock:
+        label = "Floskel" if len(stock) == 1 else "Floskeln"
+        out.append(Note("floskel", f"{label} in der Profilzeile: „"
+                        + "“, „".join(stock) + "“", scope="profil"))
+    copies = copied_spans(profil, posting, allowed=title)
+    if copies:
+        shown = copies[0] if len(copies[0]) <= 60 else copies[0][:57] + "…"
+        out.append(Note("kopie", "In der Profilzeile wörtlich aus der Anzeige: "
+                        f"„{shown}“", scope="profil"))
+    if len(_flat(profil)) > PROFIL_MAX_CHARS:
+        out.append(Note("profil_lang", f"Profilzeile zu lang: {len(_flat(profil))} "
+                        f"Zeichen, unter den Namen passen höchstens "
+                        f"{PROFIL_MAX_CHARS}", scope="profil"))
     return out
 
 
@@ -391,16 +452,21 @@ def retry_hint(found: list[Note]) -> str:
     """The English instruction appended to the prompt for the one re-roll."""
     parts = []
     for note in found:
+        where = " in the profile line" if note.scope == "profil" else ""
         if note.kind == "floskel":
-            parts.append("stock phrases a recruiter reads as generated text: "
+            parts.append(f"stock phrases a recruiter reads as generated text{where}: "
                          + note.text.split(": ", 1)[1])
         elif note.kind == "kopie":
-            parts.append("a sentence copied from the advert: "
-                         + note.text.removeprefix("Wörtlich aus der Anzeige: "))
+            parts.append(f"a sentence copied from the advert{where}: "
+                         + note.text.split(": ", 1)[1])
         elif note.kind == "einstieg":
             parts.append("the same opening as an earlier letter, "
                          + note.text.split(": ", 1)[1]
                          + " (take a different one of the three angles)")
+        elif note.kind == "profil_lang":
+            parts.append(f"a profile line of more than {PROFIL_MAX_CHARS} characters; "
+                         "the target is two sentences, 22-30 words, at most 230 "
+                         "characters including spaces")
     return ("\n\nNote: your previous draft contained " + "; ".join(parts)
             + ". Write it again without them, keeping every rule above. "
             "Say the same facts in your own words: a plain sentence about "
@@ -411,14 +477,32 @@ _TAG_RE = re.compile(r"<[^>]+>")
 _STYLE_RE = re.compile(r"<(style|script)\b.*?</\1>", re.S | re.I)
 
 
-def text_of_html(path: pathlib.Path | None) -> str:
-    """The words of a CV template, for the coverage count. '' when there is
-    no readable file — the count then honestly says nothing about the CV."""
+class CvWords(typing.NamedTuple):
+    """A CV template's words, apart from the profile line a draft replaces."""
+
+    text: str    # every word outside the PROFIL region
+    profil: str  # the region's fixed line, what a draft without its own prints
+    # Whether the template prints a draft's line at all. Without the region
+    # the draft's profile never reaches the CV, so counting its terms there
+    # would credit the CV with words the employer never sees.
+    has_region: bool = False
+
+
+def text_of_markup(raw: str) -> str:
+    return html.unescape(_TAG_RE.sub(" ", _STYLE_RE.sub(" ", raw)))
+
+
+def cv_words(path: pathlib.Path | None) -> CvWords:
+    """The words of a CV template, for the coverage count, with the profile
+    line held apart: the count of the CV as rendered is `text` plus the line
+    this draft prints there. ('', '') when there is no readable file — the
+    count then honestly says nothing about the CV."""
     if path is None or not path.is_file():
-        return ""
+        return CvWords("", "")
     try:
         raw = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
-        return ""
-    raw = _STYLE_RE.sub(" ", raw)
-    return html.unescape(_TAG_RE.sub(" ", raw))
+        return CvWords("", "")
+    return CvWords(text_of_markup(templates.strip_profil(raw)),
+                   templates.profil_default(raw),
+                   templates.has_profil_region(raw))

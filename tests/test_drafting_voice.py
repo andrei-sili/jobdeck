@@ -15,6 +15,7 @@ def _response(anschreiben: str, email: str = "Guten Tag,",
     return (
         "===ANALYSIS===\nnotes\n"
         f"===STELLENBEZEICHNUNG===\n{titel}\n"
+        "===PROFIL===\nEntwickler. Python bei Beispiel GmbH.\n"
         f"===ANSCHREIBEN_BODY===\n{anschreiben}\n"
         f"===EMAIL_BODY===\n{email}\n"
         "===END===\n"

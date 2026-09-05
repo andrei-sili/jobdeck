@@ -1298,3 +1298,43 @@ def test_v16_migration_is_repeatable(data_dir):
     assert {"job_id", "kind", "path", "staged_path", "sha256", "bytes",
             "pages", "built_at"} <= set(cols)
     con.close()
+
+
+# ---------------------------------------------------------------------------
+# v17 — drafts.profil: the CV's profile line written for one posting
+# ---------------------------------------------------------------------------
+
+def test_v16_becomes_v17_with_an_empty_profile_line_on_every_existing_draft(data_dir):
+    """Additive. An existing draft gains profil = '', which is what it
+    rendered all along (the template's fixed line); every other column of
+    the row is carried across unchanged."""
+    con = db.connect()
+    migrations.migrate(con)
+    job_id = db.insert_job_if_new(con, {
+        "source": "arbeitnow", "external_id": "d-1", "title": "Dev",
+        "company": "Alpha GmbH", "description": "x"})
+    db.upsert_draft(con, job_id, {"status": "ready",
+                                  "anschreiben_body": "Anrede,\n\nText."})
+    # a v16 table: the column does not exist yet
+    con.execute("ALTER TABLE drafts DROP COLUMN profil")
+    con.execute("PRAGMA user_version = 16")
+    con.commit()
+    before = dict(con.execute("SELECT * FROM drafts").fetchone())
+    assert "profil" not in before
+
+    migrations.migrate(con)
+
+    # the literal, not the constant: a test comparing the constant with
+    # itself would stay green with the bump forgotten
+    assert migrations.SCHEMA_VERSION == 17
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 17
+    after = dict(con.execute("SELECT * FROM drafts").fetchone())
+    assert after.pop("profil") == ""
+    assert after == before
+    # and the column is a draft field from here on: written, read, kept
+    db.upsert_draft(con, job_id, {"profil": "Zwei Sätze."})
+    assert db.get_draft_by_job(con, job_id)["profil"] == "Zwei Sätze."
+    db.upsert_draft(con, job_id, {"status": "approved"})
+    assert db.get_draft_by_job(con, job_id)["profil"] == "Zwei Sätze."
+    migrations.migrate(con)  # repeatable
+    con.close()
