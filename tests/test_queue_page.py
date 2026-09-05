@@ -420,7 +420,8 @@ def test_quality_lines_count_the_adverts_terms_and_name_the_tells():
                                "Aufgabe reizt mich besonders.",
            "job_description": "Wir suchen Python, Docker und Kubernetes."}
 
-    lines = queue.quality_lines(row, cv="Python · Kubernetes")
+    lines = queue.quality_lines(row, cv=queue.letterquality.CvWords(
+        "Python · Kubernetes", ""))
 
     assert lines == [
         ("Begriffe aus der Anzeige: 2 von 3 im Brief · 2 im Lebenslauf", ""),
@@ -430,7 +431,8 @@ def test_quality_lines_count_the_adverts_terms_and_name_the_tells():
 
 def test_a_draft_without_a_letter_gets_no_quality_line():
     assert queue.quality_lines({"id": 1, "anschreiben_body": "",
-                                "job_description": "Python"}, cv="") == []
+                                "job_description": "Python"},
+                               cv=queue.letterquality.CvWords("", "")) == []
 
 
 def test_the_loader_measures_every_row_against_the_other_rows(con, data_dir):
@@ -514,22 +516,46 @@ def test_an_editor_save_withdraws_the_package_built_from_the_old_text(con, data_
     assert db.get_job(con, job_id)["mappe_kind"] == ""
 
 
-def test_cv_text_prefers_the_portal_cv_and_falls_back_to_the_template(con, data_dir):
+def test_cv_words_prefer_the_portal_cv_and_fall_back_to_the_template(con, data_dir):
     template = pathlib.Path(data_dir) / "vorlage.html"
     template.write_text("<p>Python Docker</p>", encoding="utf-8")
     db.set_setting(con, "template_path", str(template))
     con.commit()
-    assert "Docker" in queue.cv_text(con)
+    assert "Docker" in queue.cv_words(con).text
     cv = pathlib.Path(data_dir) / "cv.html"
-    cv.write_text("<p>Kubernetes</p>", encoding="utf-8")
+    cv.write_text("<p>Kubernetes</p><p><!--PROFIL-->Feste Zeile mit Git.<!--/PROFIL--></p>",
+                  encoding="utf-8")
     db.set_setting(con, "cv_ats_path", str(cv))
     con.commit()
-    text = queue.cv_text(con)
-    assert "Kubernetes" in text and "Docker" not in text
+    words = queue.cv_words(con)
+    assert "Kubernetes" in words.text and "Docker" not in words.text
+    # the profile line is held apart: a draft prints its own there
+    assert "Git" not in words.text and words.profil == "Feste Zeile mit Git."
     # a configured path that leads nowhere falls back to the template
     db.set_setting(con, "cv_ats_path", str(pathlib.Path(data_dir) / "weg.html"))
     con.commit()
-    assert "Docker" in queue.cv_text(con)
+    assert "Docker" in queue.cv_words(con).text
+
+
+def test_the_coverage_line_counts_the_drafts_profile_line_as_part_of_the_cv():
+    """A draft with its own profile line: the line names it, and the CV
+    count is the CV as rendered — template words plus THAT line, not the
+    fixed one it replaces. A draft without one renders the fixed line, so
+    that is what its CV count carries, and nothing is named."""
+    cv = queue.letterquality.CvWords("Python · Kubernetes", "Feste Zeile mit Git.")
+    row = {"id": 1, "job_description": "Wir suchen Python, Docker, Git und Kubernetes.",
+           "anschreiben_body": "Sehr geehrte Damen und Herren,\n\nMit Python habe "
+                               "ich bei Beispiel GmbH gearbeitet."}
+
+    with_profil = queue.quality_lines({**row, "profil": "Entwickler. Docker bei "
+                                                        "Beispiel GmbH."}, cv)
+    assert with_profil == [("Begriffe aus der Anzeige: 1 von 4 im Brief · 1 im "
+                            "Profil · 3 im Lebenslauf · weder im Brief noch im "
+                            "Lebenslauf: Git", "")]
+
+    without = queue.quality_lines({**row, "profil": ""}, cv)
+    assert without == [("Begriffe aus der Anzeige: 1 von 4 im Brief · 3 im "
+                        "Lebenslauf · weder im Brief noch im Lebenslauf: Docker", "")]
 
 
 def test_the_queue_signature_sees_the_cv_file_and_its_settings_change(con, data_dir):

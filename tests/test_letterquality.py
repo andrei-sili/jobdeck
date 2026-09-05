@@ -146,14 +146,14 @@ def test_the_retry_hint_names_what_to_avoid_and_nothing_else():
     assert "different one of the three angles" in again
 
 
-def test_cv_text_strips_markup_and_style_and_tolerates_a_missing_file(tmp_path):
+def test_cv_words_strip_markup_and_style_and_tolerate_a_missing_file(tmp_path):
     page = tmp_path / "cv.html"
     page.write_text("<style>body{color:red}</style><h1>Erika &amp; Co</h1>"
                     "<p>Python, <b>Docker</b></p>", encoding="utf-8")
-    text = lq.text_of_html(page)
+    text = lq.cv_words(page).text
     assert "Erika & Co" in text and "Docker" in text and "color" not in text
-    assert lq.text_of_html(tmp_path / "nein.html") == ""
-    assert lq.text_of_html(None) == ""
+    assert lq.cv_words(tmp_path / "nein.html") == ("", "")
+    assert lq.cv_words(None) == ("", "")
 
 
 def test_without_a_cv_the_line_counts_the_letter_alone_and_says_so():
@@ -215,3 +215,38 @@ def test_a_clean_profile_line_adds_no_note():
     assert lq.notes(LETTER, POSTING, profil="Fachinformatiker. Python bei "
                                              "Beispiel GmbH, ab sofort.") == []
     assert lq.notes(LETTER, POSTING) == []  # no profile line at all
+
+
+def test_coverage_names_the_profile_line_and_counts_it_into_the_cv():
+    """The profile line is printed into the CV, so its terms are CV terms —
+    and it is named on its own, because it is the field a parser weighs as
+    the summary and the draft wrote it for this advert."""
+    cov = lq.coverage(POSTING, LETTER, cv_text="Python · Docker",
+                      profil="Backend-Entwickler. CI/CD und Python bei Beispiel GmbH.")
+
+    assert cov.in_profil == ("Backend", "Python", "CI/CD")
+    assert cov.in_cv == ("Backend", "Python", "Docker", "CI/CD")
+    assert cov.missing == ("Englisch", "Agil")
+    assert cov.line() == ("Begriffe aus der Anzeige: 6 von 10 im Brief · 3 im Profil "
+                          "· 4 im Lebenslauf · weder im Brief noch im Lebenslauf: "
+                          "Englisch, Agil")
+    # no CV file, but a profile line: it is still named and still counted
+    cov = lq.coverage(POSTING, LETTER, profil="Backend-Entwickler mit CI/CD.")
+    assert cov.line() == ("Begriffe aus der Anzeige: 6 von 10 im Brief · 2 im Profil "
+                          "· nicht im Brief: Englisch, Agil · Lebenslauf nicht lesbar")
+    # None is "the draft wrote none": nothing named, the line reads as before
+    assert lq.coverage(POSTING, LETTER, cv_text="Python", profil=None).line() \
+        == lq.coverage(POSTING, LETTER, cv_text="Python").line()
+
+
+def test_cv_words_hold_the_profile_region_apart(tmp_path):
+    path = tmp_path / "cv.html"
+    path.write_text("<style>p{}</style><p>Python &amp; Docker</p>"
+                    "<p><!--PROFIL-->Feste Zeile mit Git.<!--/PROFIL--></p>",
+                    encoding="utf-8")
+    words = lq.cv_words(path)
+    assert "Docker" in words.text and "Git" not in words.text and "p{}" not in words.text
+    assert words.profil == "Feste Zeile mit Git."
+    assert lq.cv_words(tmp_path / "fehlt.html") == ("", "")
+    path.write_bytes(b"\xff\xfe not utf-8")
+    assert lq.cv_words(path) == ("", "")

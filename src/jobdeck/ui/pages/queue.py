@@ -137,33 +137,43 @@ def _signature() -> tuple:
         return _signature_of(con)
 
 
-def cv_text(con) -> str:
+def cv_words(con) -> letterquality.CvWords:
     """The words of the CV a portal parses — the one-column Lebenslauf when
     one is configured, else the letter template, which carries the Mappe's
-    CV page. '' when neither is readable, and the coverage line then counts
-    the letter alone rather than pretend to know the CV."""
+    CV page — with the profile line held apart, because each draft prints
+    its own there. Empty when neither is readable, and the coverage line
+    then counts the letter alone rather than pretend to know the CV."""
     for key in ("cv_ats_path", "template_path"):
         path = config.user_path(db.get_setting(con, key, "").strip())
-        text = letterquality.text_of_html(path)
-        if text:
-            return text
-    return ""
+        words = letterquality.cv_words(path)
+        if words.text:
+            return words
+    return letterquality.CvWords("", "")
 
 
-def quality_lines(row: dict, cv: str, previous: list[str] = ()) -> list[tuple[str, str]]:
+def quality_lines(row: dict, cv: letterquality.CvWords,
+                  previous: list[str] = ()) -> list[tuple[str, str]]:
     """What the Postausgang says about a letter before he reads it: which of
     the advert's terms it carries, and what a recruiter would hold against
-    it. (text, tone) pairs; empty for a draft with no letter yet."""
+    it. (text, tone) pairs; empty for a draft with no letter yet.
+
+    The CV is counted as THIS draft renders it: the template's words plus
+    the draft's own profile line, or the template's fixed line when the
+    draft has none — and only a draft's own line is named in the count."""
     letter = row.get("anschreiben_body") or ""
     if not letter.strip():
         return []
     posting = row.get("job_description") or ""
+    profil = " ".join((row.get("profil") or "").split())
+    cv_text = cv.text if profil else f"{cv.text} {cv.profil}".strip()
     lines: list[tuple[str, str]] = []
-    line = letterquality.coverage(posting, letter, cv).line()
+    line = letterquality.coverage(posting, letter, cv_text,
+                                  profil=profil or None).line()
     if line:
         lines.append((line, ""))
     for note in letterquality.notes(letter, posting, list(previous),
-                                    title=row.get("job_title") or ""):
+                                    title=row.get("job_title") or "",
+                                    profil=profil):
         lines.append((note.text, "warn"))
     return lines
 
@@ -178,7 +188,7 @@ def _load(filter_value: str) -> dict:
                 db.list_drafts_with_jobs(con, FILTER_STATUSES[filter_value])]
         # The CV's words, read once per load: every row's coverage line is
         # counted against the same file.
-        cv = cv_text(con)
+        cv = cv_words(con)
         # The same letters the drafting re-roll compares against — the newest
         # on file, whatever their status — never this row's own.
         recent = db.recent_letter_bodies(con, limit=40)
