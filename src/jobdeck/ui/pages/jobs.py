@@ -2996,6 +2996,12 @@ async def jobs_page():
                     .classes("w-full").props("readonly autogrow")
                 ui.textarea("Anschreiben", value=draft_row["anschreiben_body"]) \
                     .classes("w-full").props("readonly autogrow")
+                # The line under his name on the CV page — printed by the
+                # Mappe this dialog builds, so it is shown where the Mappe is.
+                ui.textarea("Profilzeile im Lebenslauf",
+                            value=draft_row["profil"]
+                            or "(leer — die feste Zeile der Vorlage bleibt)") \
+                    .classes("w-full").props("readonly autogrow")
                 ui.label(
                     f"Modell: {draft_row['llm_model']} · bearbeiten und senden "
                     f"im Postausgang"

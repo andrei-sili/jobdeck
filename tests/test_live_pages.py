@@ -276,7 +276,7 @@ async def test_an_open_dialog_defers_the_rebuild(user: User, con, data_dir,
     async def finished_draft(job_id):
         return {"ok": True, "error": "", "draft": {
             "recipient": "jobs@beispiel.example", "betreff": "Bewerbung",
-            "email_body": "…", "anschreiben_body": "…", "llm_model": "stub",
+            "email_body": "…", "anschreiben_body": "…", "profil": "", "llm_model": "stub",
             "pdf_path": ""}}
 
     monkeypatch.setattr(jobs_page.drafting, "draft_for_job", finished_draft)
@@ -331,7 +331,7 @@ async def test_a_closed_dialog_does_not_freeze_the_page(user: User, con,
     async def finished_draft(job_id):
         return {"ok": True, "error": "", "draft": {
             "recipient": "jobs@beispiel.example", "betreff": "Bewerbung",
-            "email_body": "…", "anschreiben_body": "…", "llm_model": "stub",
+            "email_body": "…", "anschreiben_body": "…", "profil": "", "llm_model": "stub",
             "pdf_path": ""}}
 
     monkeypatch.setattr(jobs_page.drafting, "draft_for_job", finished_draft)
@@ -644,7 +644,7 @@ async def test_a_key_under_an_open_dialog_never_reaches_the_list(
     async def finished_draft(job_id):
         return {"ok": True, "error": "", "draft": {
             "recipient": "jobs@beispiel.example", "betreff": "Bewerbung",
-            "email_body": "…", "anschreiben_body": "…", "llm_model": "stub",
+            "email_body": "…", "anschreiben_body": "…", "profil": "", "llm_model": "stub",
             "pdf_path": ""}}
 
     monkeypatch.setattr(jobs_page.drafting, "draft_for_job", finished_draft)

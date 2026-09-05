@@ -374,7 +374,8 @@ async def test_opening_a_draft_twice_leaves_one_dialog_behind(
             "recipient": "jobs@beispiel.example",
             "betreff": "Bewerbung als Python Entwickler",
             "email_body": "Sehr geehrte Damen und Herren,",
-            "anschreiben_body": "…", "llm_model": "stub", "pdf_path": ""}}
+            "anschreiben_body": "…", "profil": "", "llm_model": "stub",
+            "pdf_path": ""}}
 
     monkeypatch.setattr(jobs_page.drafting, "draft_for_job", finished_draft)
     _posting(con)
