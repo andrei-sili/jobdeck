@@ -120,3 +120,61 @@ def test_a_half_stated_posting_address_is_not_completed_from_the_board():
     assert templates.letter_address(_job_row(
         contact_plz_ort="12345 Musterstadt", work_strasse="Musterstraße 26",
         work_plz_ort="54321 Beispielstadt")) == ("", "12345 Musterstadt")
+
+
+# -- the CV's profile line: a region with its own fallback --------------------
+CV_TEMPLATE = (TEMPLATE
+               + '<p class="profil"><!--PROFIL-->Fachkraft mit &amp; Erfahrung.'
+                 '<!--/PROFIL--></p>\n')
+
+
+def test_a_draft_profile_line_replaces_the_fixed_one_escaped():
+    out = templates.render_letter(
+        CV_TEMPLATE, _values(profil="Zwei Sätze <über> Django & REST.\nAb sofort."))
+    assert ("<!--PROFIL-->Zwei Sätze &lt;über&gt; Django &amp; REST. Ab sofort."
+            "<!--/PROFIL-->") in out
+    assert "Fachkraft mit" not in out
+
+
+@pytest.mark.parametrize("profil", ["", "   \n", None])
+def test_without_a_draft_profile_line_the_fixed_text_stays(profil):
+    values = _values()
+    if profil is not None:
+        values["profil"] = profil
+    out = templates.render_letter(CV_TEMPLATE, values)
+    assert "<!--PROFIL-->Fachkraft mit &amp; Erfahrung.<!--/PROFIL-->" in out
+
+
+def test_a_template_without_the_region_renders_unchanged_by_a_profile_line():
+    with_profil = templates.render_letter(TEMPLATE, _values(profil="Neu."))
+    without = templates.render_letter(TEMPLATE, _values())
+    assert with_profil == without and "Neu." not in with_profil
+
+
+def test_profil_default_reads_the_fixed_line_as_text():
+    assert templates.profil_default(CV_TEMPLATE) == "Fachkraft mit & Erfahrung."
+    assert templates.profil_default(TEMPLATE) == ""
+    assert templates.profil_default(
+        "<!--PROFIL-->A <b>b</b>\n  c<!--/PROFIL-->") == "A b c"
+
+
+def test_a_letter_body_cannot_open_a_profile_region():
+    """The body is escaped before the region pass, so a marker inside the
+    LLM's text is prose, not a region — and the real region is the one
+    filled."""
+    body = "Anrede,\n\n<!--PROFIL-->x<!--/PROFIL-->"
+    out = templates.render_letter(CV_TEMPLATE, _values(anschreiben_body=body,
+                                                        profil="Neu."))
+    assert "&lt;!--PROFIL--&gt;x&lt;!--/PROFIL--&gt;" in out
+    assert out.count("<!--PROFIL-->Neu.<!--/PROFIL-->") == 1
+
+
+def test_a_profile_line_with_token_shaped_text_stays_literal():
+    out = templates.render_letter(CV_TEMPLATE, _values(profil="Siehe {{BETREFF}}."))
+    assert "<!--PROFIL-->Siehe {{BETREFF}}.<!--/PROFIL-->" in out
+
+
+def test_fill_profil_fills_every_region_a_template_prints():
+    twice = "<!--PROFIL-->a<!--/PROFIL--> <!--PROFIL-->b<!--/PROFIL-->"
+    assert templates.fill_profil(twice, "n") == \
+        "<!--PROFIL-->n<!--/PROFIL--> <!--PROFIL-->n<!--/PROFIL-->"
