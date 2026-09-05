@@ -542,7 +542,8 @@ def test_the_coverage_line_counts_the_drafts_profile_line_as_part_of_the_cv():
     count is the CV as rendered — template words plus THAT line, not the
     fixed one it replaces. A draft without one renders the fixed line, so
     that is what its CV count carries, and nothing is named."""
-    cv = queue.letterquality.CvWords("Python · Kubernetes", "Feste Zeile mit Git.")
+    cv = queue.letterquality.CvWords("Python · Kubernetes", "Feste Zeile mit Git.",
+                                     has_region=True)
     row = {"id": 1, "job_description": "Wir suchen Python, Docker, Git und Kubernetes.",
            "anschreiben_body": "Sehr geehrte Damen und Herren,\n\nMit Python habe "
                                "ich bei Beispiel GmbH gearbeitet."}
@@ -574,3 +575,95 @@ def test_the_queue_signature_sees_the_cv_file_and_its_settings_change(con, data_
     import os
     os.utime(cv, (1, 1))
     assert queue._signature_of(con) != configured
+
+
+def test_a_template_without_the_region_never_gets_credit_for_the_profile_line():
+    """Found by the review panel: a draft's line is printed only where the
+    template has a PROFIL region. Without one the CV the employer gets is
+    the file as it stands, so the line must neither count the draft's
+    terms as CV terms nor name a profile line at all."""
+    cv = queue.letterquality.CvWords("Python · Kubernetes", "", has_region=False)
+    row = {"id": 1, "job_description": "Wir suchen Python, Docker und Kubernetes.",
+           "anschreiben_body": "Sehr geehrte Damen und Herren,\n\nMit Python habe "
+                               "ich bei Beispiel GmbH gearbeitet.",
+           "profil": "Entwickler. Docker bei Beispiel GmbH."}
+    assert queue.quality_lines(row, cv) == [
+        ("Begriffe aus der Anzeige: 1 von 3 im Brief · 2 im Lebenslauf · weder im "
+         "Brief noch im Lebenslauf: Docker", "")]
+    # and with no readable CV at all nothing is claimed about the line either
+    assert queue.quality_lines(row, queue.letterquality.CvWords("", "")) == [
+        ("Begriffe aus der Anzeige: 1 von 3 im Brief · nicht im Brief: Docker, "
+         "Kubernetes · Lebenslauf nicht lesbar", "")]
+
+
+def test_each_row_is_counted_against_the_cv_its_employer_receives(con, data_dir):
+    """An e-mail application attaches the Mappe (letter template); a form
+    application uploads the portal Lebenslauf. Two files with different
+    words must give two different lines."""
+    ats = pathlib.Path(data_dir) / "cv.html"
+    ats.write_text("<p>Kubernetes</p><p><!--PROFIL-->fix<!--/PROFIL--></p>", encoding="utf-8")
+    template = pathlib.Path(data_dir) / "vorlage.html"
+    template.write_text("<p>Docker</p><p><!--PROFIL-->fix<!--/PROFIL--></p>", encoding="utf-8")
+    db.set_setting(con, "cv_ats_path", str(ats))
+    db.set_setting(con, "template_path", str(template))
+    con.commit()
+    portal = queue.cv_words(con, queue.CV_KEYS_PORTAL)
+    email = queue.cv_words(con, queue.CV_KEYS_EMAIL)
+    assert "Kubernetes" in portal.text and "Docker" in email.text
+    assert queue.cv_for_row({"job_form_opened_at": "", "job_apply_channel": "direct_email"},
+                            portal, email) is email
+    assert queue.cv_for_row({"job_form_opened_at": "", "job_apply_channel": "ats_form"},
+                            portal, email) is portal
+    assert queue.cv_for_row({"job_form_opened_at": "2026-09-05T10:00",
+                             "job_apply_channel": "direct_email"}, portal, email) is portal
+
+
+def test_a_profile_line_edit_alone_moves_the_queue_signature(con, data_dir):
+    """The line "davon K in der Profilzeile" is derived from drafts.profil,
+    so an edit to it in another tab has to reach the page. It does through
+    updated_at, which every upsert rewrites — with second resolution, so the
+    fixture's draft is aged first, as a real one always is."""
+    job_id = _job_with_draft(con)
+    con.execute("UPDATE drafts SET updated_at='2026-09-01T10:00:00' WHERE job_id=?", (job_id,))
+    con.commit()
+    before = queue._signature()
+    db.upsert_draft(con, job_id, {"profil": "Neue Zeile."})
+    con.commit()
+    assert queue._signature() != before
+
+
+def test_the_queue_signature_watches_every_configured_cv_file(con, data_dir):
+    """The loader falls back from an unreadable portal CV to the letter
+    template, so an edit to the template must move the signature even while
+    a (broken) portal CV is configured."""
+    broken = pathlib.Path(data_dir) / "kaputt.html"
+    broken.write_bytes(b"\xff\xfe")
+    template = pathlib.Path(data_dir) / "vorlage.html"
+    template.write_text("<p>Docker</p>", encoding="utf-8")
+    db.set_setting(con, "cv_ats_path", str(broken))
+    db.set_setting(con, "template_path", str(template))
+    con.commit()
+    _job_with_draft(con)
+    before = queue._signature()
+    template.write_text("<p>Docker Kubernetes</p>", encoding="utf-8")
+    assert queue._signature() != before
+
+
+def test_the_editor_pins_every_content_field_the_send_compares():
+    """The confirmation dialog's expect= must name every field the send
+    gate compares, or an edit to the unnamed one slips between the
+    confirmation and the transmission. A structural check, because no test
+    drives the dialog's Abschicken path end to end."""
+    import ast
+    import inspect
+
+    from jobdeck.services import send
+    tree = ast.parse(inspect.getsource(draft_editor))
+    pinned = None
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and ast.unparse(node.func).endswith("send_draft")):
+            for kw in node.keywords:
+                if kw.arg == "expect" and isinstance(kw.value, ast.Dict):
+                    pinned = {ast.literal_eval(k) for k in kw.value.keys}
+    assert pinned is not None
+    assert set(send.CONTENT_FIELDS) <= pinned

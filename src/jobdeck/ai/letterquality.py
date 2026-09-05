@@ -220,7 +220,12 @@ def coverage(posting: str, letter: str, cv_text: str = "",
     terms = terms_in(posting)
     letter_terms = set(terms_in(letter))
     profil_terms = set(terms_in(profil or ""))
-    cv_terms = set(terms_in(cv_text)) | profil_terms
+    # The profile line is printed INTO the CV, so its terms are CV terms —
+    # but only of a CV that exists: with no readable CV, in_cv stays empty
+    # and cv_known False mean the same thing.
+    cv_terms = set(terms_in(cv_text))
+    if (cv_text or "").strip():
+        cv_terms |= profil_terms
     return Coverage(
         terms=tuple(terms),
         in_letter=tuple(t for t in terms if t in letter_terms),
@@ -377,10 +382,13 @@ def repeats_an_opening(text: str, previous: list[str], words: int = 6) -> bool:
 
 @dataclasses.dataclass(frozen=True)
 class Note:
-    """One thing a reader would notice, and the sentence that says it."""
+    """One thing a reader would notice, and the sentence that says it.
+    `scope` says which text it was found in, so the retry hint names the
+    field without reading it back out of the German sentence."""
 
     kind: str
     text: str
+    scope: str = "letter"  # or "profil"
 
 
 # The profile line has two lines under the name on a one-page CV, and the
@@ -417,16 +425,16 @@ def notes(letter: str, posting: str, previous: list[str] = (),
     if stock:
         label = "Floskel" if len(stock) == 1 else "Floskeln"
         out.append(Note("floskel", f"{label} in der Profilzeile: „"
-                        + "“, „".join(stock) + "“"))
+                        + "“, „".join(stock) + "“", scope="profil"))
     copies = copied_spans(profil, posting, allowed=title)
     if copies:
         shown = copies[0] if len(copies[0]) <= 60 else copies[0][:57] + "…"
         out.append(Note("kopie", "In der Profilzeile wörtlich aus der Anzeige: "
-                        f"„{shown}“"))
+                        f"„{shown}“", scope="profil"))
     if len(_flat(profil)) > PROFIL_MAX_CHARS:
         out.append(Note("profil_lang", f"Profilzeile zu lang: {len(_flat(profil))} "
                         f"Zeichen, unter den Namen passen höchstens "
-                        f"{PROFIL_MAX_CHARS}"))
+                        f"{PROFIL_MAX_CHARS}", scope="profil"))
     return out
 
 
@@ -444,7 +452,7 @@ def retry_hint(found: list[Note]) -> str:
     """The English instruction appended to the prompt for the one re-roll."""
     parts = []
     for note in found:
-        where = " in the profile line" if "Profilzeile" in note.text else ""
+        where = " in the profile line" if note.scope == "profil" else ""
         if note.kind == "floskel":
             parts.append(f"stock phrases a recruiter reads as generated text{where}: "
                          + note.text.split(": ", 1)[1])
@@ -474,6 +482,10 @@ class CvWords(typing.NamedTuple):
 
     text: str    # every word outside the PROFIL region
     profil: str  # the region's fixed line, what a draft without its own prints
+    # Whether the template prints a draft's line at all. Without the region
+    # the draft's profile never reaches the CV, so counting its terms there
+    # would credit the CV with words the employer never sees.
+    has_region: bool = False
 
 
 def text_of_markup(raw: str) -> str:
@@ -492,4 +504,5 @@ def cv_words(path: pathlib.Path | None) -> CvWords:
     except (OSError, UnicodeDecodeError):
         return CvWords("", "")
     return CvWords(text_of_markup(templates.strip_profil(raw)),
-                   templates.profil_default(raw))
+                   templates.profil_default(raw),
+                   templates.has_profil_region(raw))

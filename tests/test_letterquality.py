@@ -152,8 +152,8 @@ def test_cv_words_strip_markup_and_style_and_tolerate_a_missing_file(tmp_path):
                     "<p>Python, <b>Docker</b></p>", encoding="utf-8")
     text = lq.cv_words(page).text
     assert "Erika & Co" in text and "Docker" in text and "color" not in text
-    assert lq.cv_words(tmp_path / "nein.html") == ("", "")
-    assert lq.cv_words(None) == ("", "")
+    assert lq.cv_words(tmp_path / "nein.html") == lq.CvWords("", "")
+    assert lq.cv_words(None) == lq.CvWords("", "")
 
 
 def test_without_a_cv_the_line_counts_the_letter_alone_and_says_so():
@@ -255,7 +255,42 @@ def test_cv_words_hold_the_profile_region_apart(tmp_path):
                     encoding="utf-8")
     words = lq.cv_words(path)
     assert "Docker" in words.text and "Git" not in words.text and "p{}" not in words.text
-    assert words.profil == "Feste Zeile mit Git."
-    assert lq.cv_words(tmp_path / "fehlt.html") == ("", "")
+    assert words.profil == "Feste Zeile mit Git." and words.has_region is True
+    assert lq.cv_words(tmp_path / "fehlt.html") == lq.CvWords("", "")
     path.write_bytes(b"\xff\xfe not utf-8")
-    assert lq.cv_words(path) == ("", "")
+    assert lq.cv_words(path) == lq.CvWords("", "")
+    path.write_text("<p>Ohne Region</p>", encoding="utf-8")
+    plain = lq.cv_words(path)
+    assert (plain.text.strip(), plain.profil, plain.has_region) == ("Ohne Region", "", False)
+
+
+def test_the_profile_length_bound_is_the_measured_one():
+    """240 is a measurement, not a guess: on his real one-column template
+    248 characters fit under the name and 251 spill onto a second page
+    (2026-09-05). Pinned as a literal, with the boundary on both sides,
+    because a fixture derived from the constant cannot notice it moving."""
+    assert lq.PROFIL_MAX_CHARS == 240
+    fits = ("Entwickler. " + "Python bei Beispiel GmbH, " * 12)[:240]
+    assert len(fits) == 240
+    assert lq.notes(LETTER, POSTING, profil=fits) == []
+    spills = fits + "x"
+    assert len(spills) == 241
+    assert [n.kind for n in lq.notes(LETTER, POSTING, profil=spills)] == ["profil_lang"]
+
+
+def test_without_a_readable_cv_the_profile_terms_are_not_cv_terms():
+    cov = lq.coverage(POSTING, LETTER, cv_text="", profil="Backend-Entwickler mit CI/CD.")
+    assert cov.cv_known is False and cov.in_cv == ()
+    assert cov.in_profil == ("Backend", "CI/CD")
+
+
+def test_the_retry_hint_names_the_field_from_the_note_not_from_its_words():
+    """A letter sentence copied from an advert that itself says
+    'Profilzeile' must not be reported as a profile-line problem."""
+    letter_note = lq.Note("kopie", "Wörtlich aus der Anzeige: „die Profilzeile unter dem Namen“")
+    assert "in the profile line" not in lq.retry_hint([letter_note])
+    profil_note = lq.Note("kopie", "In der Profilzeile wörtlich aus der Anzeige: „x“",
+                          scope="profil")
+    assert "in the profile line" in lq.retry_hint([profil_note])
+    found = lq.notes(LETTER, POSTING, profil="Hochmotivierter Entwickler.")
+    assert [n.scope for n in found] == ["profil"]

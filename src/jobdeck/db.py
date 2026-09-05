@@ -2514,7 +2514,9 @@ _DRAFT_WITH_JOB_COLUMNS = """
                j.contact_email AS job_contact_email,
                j.liveness AS job_liveness,
                j.liveness_checked_at AS job_liveness_checked_at,
-               j.description AS job_description
+               j.description AS job_description,
+               j.apply_channel AS job_apply_channel,
+               j.form_opened_at AS job_form_opened_at
         FROM drafts d JOIN jobs j ON j.id = d.job_id
 """
 

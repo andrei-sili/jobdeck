@@ -94,6 +94,12 @@ def profil_default(template_html: str) -> str:
     return " ".join(html.unescape(_TAG_RE.sub(" ", match.group(1))).split())
 
 
+def has_profil_region(template_html: str) -> bool:
+    """Whether a draft's profile line would be printed by this template at
+    all — the question every count of that line has to ask first."""
+    return _PROFIL_RE.search(template_html) is not None
+
+
 def strip_profil(template_html: str) -> str:
     """The template without its PROFIL regions, markers and text — for
     counting the CV's words apart from the line a draft replaces."""

@@ -14,7 +14,7 @@ from nicegui import run, ui
 
 from jobdeck import attempts, config, db
 from jobdeck.ai import letterquality
-from jobdeck.services import drafting, liveness, send
+from jobdeck.services import drafting, liveness, mappe, send
 from jobdeck.ui import draft_editor, helpers, live
 from jobdeck.ui.helpers import open_in_system, openable_url
 from jobdeck.ui.layout import BEWERBUNGEN_TABS, frame, tabs
@@ -120,16 +120,23 @@ def _signature_of(con) -> tuple:
 
 
 def _cv_fingerprint(paths: tuple[str, ...]) -> tuple:
-    """Size and mtime of the first readable CV file, as the loader picks it."""
+    """Size and mtime of EVERY configured CV file that exists.
+
+    Both, not "the first": the loader reads the portal CV for a form draft
+    and the letter template for an e-mail draft, and falls back from an
+    unreadable file to the next — so an edit to either file changes what
+    some row states."""
+    seen = []
     for raw in paths:
         path = config.user_path(raw)
         if path is not None and path.is_file():
             try:
                 stat = path.stat()
             except OSError:
-                return ()
-            return (str(path), stat.st_size, stat.st_mtime_ns)
-    return ()
+                seen.append((str(path), "unreadable"))
+                continue
+            seen.append((str(path), stat.st_size, stat.st_mtime_ns))
+    return tuple(seen)
 
 
 def _signature() -> tuple:
@@ -137,18 +144,35 @@ def _signature() -> tuple:
         return _signature_of(con)
 
 
-def cv_words(con) -> letterquality.CvWords:
-    """The words of the CV a portal parses — the one-column Lebenslauf when
-    one is configured, else the letter template, which carries the Mappe's
-    CV page — with the profile line held apart, because each draft prints
-    its own there. Empty when neither is readable, and the coverage line
-    then counts the letter alone rather than pretend to know the CV."""
-    for key in ("cv_ats_path", "template_path"):
+# Which CV file each draft's employer actually reads. A form application
+# uploads the one-column Lebenslauf when one is configured (else the Mappe's
+# CV page); an e-mail application attaches the Mappe, rendered from the
+# letter template. Keyed by the file settings in the order the build falls
+# back through them.
+CV_KEYS_PORTAL = ("cv_ats_path", "template_path")
+CV_KEYS_EMAIL = ("template_path",)
+
+
+def cv_words(con, keys: tuple[str, ...] = CV_KEYS_PORTAL) -> letterquality.CvWords:
+    """The words of the first readable CV file among `keys`, with the profile
+    line held apart because each draft prints its own there. Empty when none
+    is readable, and the coverage line then counts the letter alone rather
+    than pretend to know the CV."""
+    for key in keys:
         path = config.user_path(db.get_setting(con, key, "").strip())
         words = letterquality.cv_words(path)
         if words.text:
             return words
     return letterquality.CvWords("", "")
+
+
+def cv_for_row(row: dict, portal: letterquality.CvWords,
+               email: letterquality.CvWords) -> letterquality.CvWords:
+    """The CV this draft's employer receives — the same rule the build uses
+    to decide whether the portal parts are made (`mappe.wants_parts`)."""
+    goes_by_form = mappe.wants_parts({"form_opened_at": row.get("job_form_opened_at"),
+                                      "apply_channel": row.get("job_apply_channel")})
+    return portal if goes_by_form else email
 
 
 def quality_lines(row: dict, cv: letterquality.CvWords,
@@ -158,17 +182,20 @@ def quality_lines(row: dict, cv: letterquality.CvWords,
     it. (text, tone) pairs; empty for a draft with no letter yet.
 
     The CV is counted as THIS draft renders it: the template's words plus
-    the draft's own profile line, or the template's fixed line when the
-    draft has none — and only a draft's own line is named in the count."""
+    the draft's own profile line where the template has a PROFIL region, or
+    the template's fixed line otherwise — a draft's line is named only when
+    that CV actually prints it. With no readable CV nothing is claimed about
+    either."""
     letter = row.get("anschreiben_body") or ""
     if not letter.strip():
         return []
     posting = row.get("job_description") or ""
     profil = " ".join((row.get("profil") or "").split())
-    cv_text = cv.text if profil else f"{cv.text} {cv.profil}".strip()
+    printed = profil if (cv.has_region and cv.text) else ""
+    cv_text = cv.text if printed else f"{cv.text} {cv.profil}".strip()
     lines: list[tuple[str, str]] = []
     line = letterquality.coverage(posting, letter, cv_text,
-                                  profil=profil or None).line()
+                                  profil=printed or None).line()
     if line:
         lines.append((line, ""))
     for note in letterquality.notes(letter, posting, list(previous),
@@ -186,15 +213,17 @@ def _load(filter_value: str) -> dict:
         signature = _signature_of(con)
         rows = [dict(r) for r in
                 db.list_drafts_with_jobs(con, FILTER_STATUSES[filter_value])]
-        # The CV's words, read once per load: every row's coverage line is
-        # counted against the same file.
-        cv = cv_words(con)
+        # The CV files' words, read once per load; each row is counted
+        # against the file its own employer receives.
+        portal_cv = cv_words(con, CV_KEYS_PORTAL)
+        email_cv = cv_words(con, CV_KEYS_EMAIL)
         # The same letters the drafting re-roll compares against — the newest
         # on file, whatever their status — never this row's own.
         recent = db.recent_letter_bodies(con, limit=40)
         for row in rows:
             others = [b for b in recent if b != row.get("anschreiben_body")]
-            row["quality"] = quality_lines(row, cv, others)
+            row["quality"] = quality_lines(row, cv_for_row(row, portal_cv, email_cv),
+                                           others)
         # Asked of the identity rule itself, for the drafts on screen: the send
         # path refuses an application to a company still inside its
         # cooling-off window, and saying so HERE is what stops him building a
