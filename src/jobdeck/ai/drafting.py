@@ -45,7 +45,12 @@ from jobdeck.ai.scoring import (  # noqa: F401 — re-exported for callers/tests
 # actually produced, not on the cap — so this only ever buys room.
 log = logging.getLogger(__name__)
 
-DRAFT_MAX_TOKENS = 12000
+# 20000, not 12000: measured on 2026-09-05, one of two real drafts hit 12000
+# mid-thought (the profile line joined the call), so a whole Sonnet attempt
+# was billed and thrown away before the retry at 24000 succeeded. A draft that
+# stops early costs the same under either cap; only a draft that needs the
+# room is affected, and for it one call replaces two.
+DRAFT_MAX_TOKENS = 20000
 # One escalation for a draft that needs more room than that. Beyond it, a
 # one-page letter is pathological and more budget is just a bigger bill.
 DRAFT_MAX_TOKENS_CEILING = 24000

@@ -321,7 +321,7 @@ def test_a_truncated_attempt_is_retried_with_MORE_ROOM(monkeypatch):
     monkeypatch.setattr(llm, "complete", fake_complete)
     anschreiben, _, stellen, usage, _profil = ai_drafting.draft_application(_job(), "profil")
     assert anschreiben.startswith("Anrede,") and stellen == "Dev"
-    assert caps == [ai_drafting.DRAFT_MAX_TOKENS, ai_drafting.DRAFT_MAX_TOKENS * 2]
+    assert caps == [ai_drafting.DRAFT_MAX_TOKENS, ai_drafting.DRAFT_MAX_TOKENS_CEILING]
     assert usage.output_tokens == 12000 + 300
     assert usage.cost_usd == pytest.approx(0.12 + 0.006)
 
@@ -844,7 +844,7 @@ def test_the_drafting_budget_leaves_room_for_thinking():
     cap, so the five drafts that already succeed at ~2000 cost exactly what
     they did before."""
     assert ai_drafting.DRAFT_MAX_TOKENS >= 10000
-    assert ai_drafting.DRAFT_MAX_TOKENS_CEILING >= ai_drafting.DRAFT_MAX_TOKENS * 2
+    assert ai_drafting.DRAFT_MAX_TOKENS_CEILING > ai_drafting.DRAFT_MAX_TOKENS
 
 
 def test_a_truncation_is_typed_not_matched_on_its_message():
