@@ -1100,7 +1100,12 @@ async def test_a_profile_line_edited_mid_render_discards_the_build(
     def render_and_edit(html_text, out_pdf):
         real_render(html_text, out_pdf)
         with db.db() as c:
+            before = db.get_draft_by_job(c, job_id)["updated_at"]
             db.upsert_draft(c, job_id, {"profil": "Andere Zeile."})
+            # Put the timestamp back: within one wall-clock second the
+            # updated_at clause would catch the edit on its own, and the
+            # profil clause could be deleted with this test green.
+            c.execute("UPDATE drafts SET updated_at=? WHERE job_id=?", (before, job_id))
 
     monkeypatch.setattr(pdf, "html_to_pdf", render_and_edit)
     result = await mappe.create_mappe(job_id)

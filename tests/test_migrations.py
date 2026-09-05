@@ -1324,8 +1324,10 @@ def test_v16_becomes_v17_with_an_empty_profile_line_on_every_existing_draft(data
 
     migrations.migrate(con)
 
-    assert (con.execute("PRAGMA user_version").fetchone()[0]
-            == migrations.SCHEMA_VERSION)
+    # the literal, not the constant: a test comparing the constant with
+    # itself would stay green with the bump forgotten
+    assert migrations.SCHEMA_VERSION == 17
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 17
     after = dict(con.execute("SELECT * FROM drafts").fetchone())
     assert after.pop("profil") == ""
     assert after == before
