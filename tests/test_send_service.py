@@ -1026,3 +1026,21 @@ def test_resolving_a_stuck_send_as_not_sent_hands_the_company_back(
         assert own.execute(
             "SELECT state FROM application_attempts").fetchone()[0] == (
             attempts.RELEASED)
+
+
+async def test_a_profile_line_edited_after_the_confirmation_refuses_the_send(
+    con, gmail_connected, tmp_path, monkeypatch
+):
+    """The PDF carries the profile line, so it is content the confirmation
+    described — pinned on its own, so this proves the field itself is
+    compared and not merely the timestamp every edit moves."""
+    monkeypatch.setattr(gmail, "send_message", _must_not_send)
+    job_id = _insert_job(con)
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path), profil="Alte Zeile.")
+    _settings(con, test_recipient=TEST_INBOX)
+
+    _ready_draft(con, job_id, pdf_path=_pdf(tmp_path), profil="Neue Zeile.")
+
+    result = await send.send_draft(job_id, expect={"profil": "Alte Zeile."})
+    assert not result["ok"] and "changed since you reviewed" in result["error"]
+    assert db.get_draft_by_job(con, job_id)["status"] == "ready"

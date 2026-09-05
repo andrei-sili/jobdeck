@@ -108,6 +108,13 @@ def open_editor(row: dict, *, overlay, say, on_change) -> None:
         anschreiben = ui.textarea("Anschreiben",
                                   value=row["anschreiben_body"]) \
             .classes("w-full").props("autogrow")
+        # The CV's profile line for this posting — two sentences under the
+        # name, printed on the Mappe's CV page and on the portal Lebenslauf.
+        # Empty keeps the template's fixed line.
+        profil = ui.textarea("Profil (zwei Sätze unter dem Namen im Lebenslauf; "
+                             "leer = die feste Zeile der Vorlage)",
+                             value=row.get("profil") or "") \
+            .classes("w-full").props("autogrow")
         pdf_label = ui.label(
             f"Mappe: {row['pdf_path']}" if row["pdf_path"]
             else "Noch keine Bewerbungsmappe — ohne sie geht nichts raus."
@@ -119,14 +126,16 @@ def open_editor(row: dict, *, overlay, say, on_change) -> None:
                 "betreff": betreff.value.strip(),
                 "email_body": email_body.value,
                 "anschreiben_body": anschreiben.value,
+                "profil": " ".join(profil.value.split()),
             }
             if all(current[k] == v for k, v in values.items()):
                 return True
-            # The Mappe PDF renders both the letter text and the
-            # Betreff: editing either invalidates a built PDF.
+            # The Mappe PDF renders the letter text, the Betreff and the
+            # profile line: editing any of them invalidates a built PDF.
             clear_pdf = bool(current["pdf_path"] and (
                 values["anschreiben_body"] != current["anschreiben_body"]
                 or values["betreff"] != current["betreff"]
+                or values["profil"] != current["profil"]
             ))
             was_approved = current["status"] == "approved"
             updated, error = await run.io_bound(
@@ -264,6 +273,7 @@ def open_editor(row: dict, *, overlay, say, on_change) -> None:
                 "betreff": current["betreff"],
                 "email_body": current["email_body"],
                 "anschreiben_body": current["anschreiben_body"],
+                "profil": current["profil"],
                 "pdf_path": current["pdf_path"],
                 "test_mode": test_mode,
                 "recipient_shown": final,
