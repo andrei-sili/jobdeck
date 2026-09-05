@@ -2408,7 +2408,7 @@ def get_draft_by_job(con: sqlite3.Connection, job_id: int) -> sqlite3.Row | None
 
 
 _DRAFT_FIELDS = ("status", "recipient", "betreff", "email_body",
-                 "anschreiben_body", "pdf_path", "llm_model", "error")
+                 "anschreiben_body", "profil", "pdf_path", "llm_model", "error")
 
 
 def upsert_draft(con: sqlite3.Connection, job_id: int, values: dict) -> int:
@@ -2424,9 +2424,9 @@ def upsert_draft(con: sqlite3.Connection, job_id: int, values: dict) -> int:
             """
             INSERT INTO drafts
                 (job_id, status, recipient, betreff, email_body,
-                 anschreiben_body, pdf_path, llm_model, error,
+                 anschreiben_body, profil, pdf_path, llm_model, error,
                  created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (job_id, *(fields[f] for f in _DRAFT_FIELDS), _now(), _now()),
         )

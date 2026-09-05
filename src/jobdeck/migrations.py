@@ -12,7 +12,7 @@ import sqlite3
 from jobdeck import constants, dates
 from jobdeck.dedupe import norm
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 # Legacy table, exactly as the previous tracker created it.
 BEWERBUNGEN_SQL = """
@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS drafts (
     gmail_thread_id  TEXT NOT NULL DEFAULT '',
     bewerbung_id     INTEGER REFERENCES bewerbungen(id),
     sending_test     INTEGER NOT NULL DEFAULT 0,
+    profil           TEXT NOT NULL DEFAULT '',
     created_at       TEXT NOT NULL,
     updated_at       TEXT NOT NULL
 );
@@ -585,15 +586,23 @@ def _ensure_email_log_columns(con: sqlite3.Connection) -> None:
 
 
 def _ensure_draft_columns(con: sqlite3.Connection) -> None:
-    """Send-tracking columns added in schema v4 (additive only).
+    """Columns added to drafts after v1 (additive only).
 
-    sending_test records whether an in-flight claim is a test send, so a
-    stuck one can never be resolved into a real application record."""
+    sending_test (v4) records whether an in-flight claim is a test send, so
+    a stuck one can never be resolved into a real application record.
+
+    profil (v17) is the CV's profile line written for THIS posting, the
+    draft's text like anschreiben_body. Empty means "the template's own fixed
+    line", which is exactly what every draft written before v17 rendered, so
+    the default states the truth about an existing row and no backfill
+    decides anything."""
     existing = [row[1] for row in con.execute("PRAGMA table_info(drafts)")]
     if "sending_test" not in existing:
         con.execute(
             "ALTER TABLE drafts ADD COLUMN sending_test INTEGER NOT NULL DEFAULT 0"
         )
+    if "profil" not in existing:
+        con.execute("ALTER TABLE drafts ADD COLUMN profil TEXT NOT NULL DEFAULT ''")
 
 
 def _ensure_claim_fact_columns(con: sqlite3.Connection) -> None:
