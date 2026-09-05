@@ -54,7 +54,11 @@ DRAFT_MAX_TOKENS = 20000
 # One escalation for a draft that needs more room than that. Beyond it, a
 # one-page letter is pathological and more budget is just a bigger bill.
 DRAFT_MAX_TOKENS_CEILING = 24000
-DRAFT_TIMEOUT_S = 240.0
+# Long enough for the ceiling: measured 2026-09-05, Sonnet produced ~115
+# output tokens/s, so 24000 tokens is ~210 s of generation — a 240 s read
+# timeout would have cut exactly the drafts the raised cap exists for, and a
+# timeout is a plain error the retry loop re-rolls unmetered at the same cap.
+DRAFT_TIMEOUT_S = 360.0
 # Retries are for what a fresh SAMPLE can fix — an unparseable or cut-off
 # response. A truncation is not that: it is the cap biting, and re-rolling the
 # identical request at the identical cap is the one retry guaranteed to fail
