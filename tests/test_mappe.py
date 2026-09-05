@@ -1,7 +1,7 @@
 import pathlib
 
 import pytest
-from pypdf import PdfWriter
+from pypdf import PdfReader, PdfWriter
 
 from jobdeck import config, db, pdf
 from jobdeck.services import mappe
@@ -1022,3 +1022,87 @@ def test_extract_pages_refuses_a_range_the_document_does_not_have(tmp_path):
         pdf.extract_pages(src, out, 2, 1)
     pdf.extract_pages(src, out, 2, 2)
     assert pdf.page_count(out) == 1
+
+
+# ---------------------------------------------------------------------------
+# The profile line under the name is the draft's, on both CV layouts
+# ---------------------------------------------------------------------------
+
+PROFIL_TEMPLATE = TEMPLATE + (
+    '<p><!--PROFIL-->Fachkraft mit fester Zeile.<!--/PROFIL--></p>\n')
+PROFIL_ATS_CV = ("<html><body><h1>Lebenslauf</h1><p>Erika Muster</p>"
+                 "<p><!--PROFIL-->Fachkraft mit fester Zeile.<!--/PROFIL--></p>"
+                 "</body></html>")
+
+
+def _text_of(path) -> str:
+    return " ".join(" ".join((page.extract_text() or "").split())
+                    for page in PdfReader(str(path)).pages)
+
+
+async def test_the_mappe_prints_the_drafts_profile_line_in_place_of_the_fixed_one(
+    con, data_dir
+):
+    """The two sentences under the name are the first thing a parser weighs
+    and a person reads; a draft that carries them for this posting puts
+    them on the CV page, and one that does not keeps the template's line."""
+    job_id = _setup(con, data_dir, with_anlagen=False)
+    (data_dir / "template.html").write_text(PROFIL_TEMPLATE, encoding="utf-8")
+    db.upsert_draft(con, job_id, {"profil": "Fachinformatikerin. Python bei "
+                                            "Beispiel GmbH, ab sofort."})
+    con.commit()
+
+    result = await mappe.create_mappe(job_id)
+    assert result["ok"], result["error"]
+    text = _text_of(result["pdf_path"])
+    assert "Fachinformatikerin. Python bei Beispiel GmbH, ab sofort." in text
+    assert "Fachkraft mit fester Zeile." not in text
+
+    db.upsert_draft(con, job_id, {"profil": ""})
+    con.commit()
+    result = await mappe.create_mappe(job_id)
+    assert result["ok"], result["error"]
+    assert "Fachkraft mit fester Zeile." in _text_of(result["pdf_path"])
+
+
+async def test_the_portal_cv_carries_the_same_profile_line(con, data_dir):
+    """The one-column Lebenslauf is no longer rendered "unverändert": its
+    PROFIL region takes the draft's line exactly as the Mappe's CV page
+    does, so a portal and an e-mail recipient read the same summary."""
+    job_id = _setup(con, data_dir, with_anlagen=False)
+    cv_file = data_dir / "lebenslauf_ats.html"
+    cv_file.write_text(PROFIL_ATS_CV, encoding="utf-8")
+    db.set_setting(con, "cv_ats_path", str(cv_file))
+    db.mark_form_opened(con, job_id)
+    db.upsert_draft(con, job_id, {"profil": "Fachinformatikerin. Django bei "
+                                            "Beispiel GmbH."})
+    con.commit()
+
+    result = await mappe.create_mappe(job_id)
+    assert result["ok"], result["error"]
+    cv = {d["kind"]: d for d in result["documents"]}[db.DOC_LEBENSLAUF]
+    text = _text_of(cv["path"])
+    assert "Fachinformatikerin. Django bei Beispiel GmbH." in text
+    assert "Fachkraft mit fester Zeile." not in text
+    # the file on disk is untouched: the fill happens on the way to Chrome
+    assert cv_file.read_text(encoding="utf-8") == PROFIL_ATS_CV
+
+
+async def test_a_profile_line_edited_mid_render_discards_the_build(
+    con, data_dir, monkeypatch
+):
+    """The PDF carries the profile line, so a change to it during the
+    render is a change to what the PDF says — the same guard as the
+    letter and the Betreff."""
+    job_id = _setup(con, data_dir, with_anlagen=False)
+    real_render = pdf.html_to_pdf
+
+    def render_and_edit(html_text, out_pdf):
+        real_render(html_text, out_pdf)
+        with db.db() as c:
+            db.upsert_draft(c, job_id, {"profil": "Andere Zeile."})
+
+    monkeypatch.setattr(pdf, "html_to_pdf", render_and_edit)
+    result = await mappe.create_mappe(job_id)
+    assert not result["ok"] and "changed while the Mappe was rendering" in result["error"]
+    assert db.get_draft_by_job(con, job_id)["pdf_path"] == ""
