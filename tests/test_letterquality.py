@@ -188,3 +188,30 @@ def test_the_title_rule_needs_the_whole_span_inside_the_title():
               "Team gehören zu den Aufgaben, sagt Ihre Anzeige.")
     # the copied sentence merely SHARES words with the title — it is not it
     assert lq.copied_spans(letter, posting, allowed=title) != []
+
+
+# -- the profile line is held to the same reader --------------------------------
+def test_the_profile_line_is_checked_for_phrases_copies_and_length():
+    profil = ("Hochmotivierter Fachinformatiker. Sie entwickeln REST-APIs mit "
+              "Python und Django REST Framework, arbeiten mit PostgreSQL und Docker.")
+    found = lq.notes(LETTER, POSTING, profil=profil)
+
+    assert [n.kind for n in found] == ["floskel", "kopie"]
+    assert found[0].text == "Floskel im Profil: „Hochmotiviert“"
+    assert found[1].text.startswith("Wörtlich aus der Anzeige im Profil: „Sie entwickeln")
+    hint = lq.retry_hint(found)
+    assert "in the profile line: „Hochmotiviert“" in hint
+    assert "copied from the advert in the profile line: „Sie entwickeln" in hint
+
+    too_long = ("Entwickler. " + "Python bei Beispiel GmbH, " * 14).strip()
+    assert len(too_long) > lq.PROFIL_MAX_CHARS
+    found = lq.notes(LETTER, POSTING, profil=too_long)
+    assert [n.kind for n in found] == ["profil_lang"]
+    assert found[0].text.startswith(f"Profilzeile zu lang: {len(too_long)} Zeichen")
+    assert f"longer than {lq.PROFIL_MAX_CHARS} characters" in lq.retry_hint(found)
+
+
+def test_a_clean_profile_line_adds_no_note():
+    assert lq.notes(LETTER, POSTING, profil="Fachinformatiker. Python bei "
+                                             "Beispiel GmbH, ab sofort.") == []
+    assert lq.notes(LETTER, POSTING) == []  # no profile line at all

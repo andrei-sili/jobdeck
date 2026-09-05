@@ -183,7 +183,7 @@ async def draft_for_job(job_id: int) -> dict:
     refnr = resolve_refnr(job)
     previous = await asyncio.to_thread(_previous_letters, job_id)
     try:
-        anschreiben, email_body, stellenbezeichnung, usage = await asyncio.to_thread(
+        drafted = await asyncio.to_thread(
             ai_drafting.draft_application, job, profile_text, refnr,
             applicant_name, previous,
         )
@@ -209,7 +209,7 @@ async def draft_for_job(job_id: int) -> dict:
     # The LLM's clean Stellenbezeichnung feeds the Betreff (falling back to the
     # raw title); build_betreff injects the verified Refnr + name.
     betreff = ai_drafting.build_betreff(
-        ai_drafting.align_gender_marker(stellenbezeichnung or job["title"],
+        ai_drafting.align_gender_marker(drafted.stellenbezeichnung or job["title"],
                                         job["title"]),
         refnr, applicant_name,
     )
@@ -221,11 +221,12 @@ async def draft_for_job(job_id: int) -> dict:
             "status": "ready",
             "recipient": job["contact_email"] or "",
             "betreff": betreff,
-            "email_body": ai_drafting.append_signature(email_body, signature),
-            "anschreiben_body": anschreiben,
-            "llm_model": usage.model,
+            "email_body": ai_drafting.append_signature(drafted.email_body, signature),
+            "anschreiben_body": drafted.anschreiben_body,
+            "profil": drafted.profil,
+            "llm_model": drafted.usage.model,
         },
-        usage,
+        drafted.usage,
     )
     if draft is None:
         return _error("the draft changed while it was being generated — "

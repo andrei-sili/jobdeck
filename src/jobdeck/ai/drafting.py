@@ -21,6 +21,7 @@ Refnr) and no reviewer reliably spots a mistyped one.
 
 import logging
 import re
+import typing
 
 from jobdeck import config
 from jobdeck.ai import letterquality, llm
@@ -74,13 +75,29 @@ DRAFT_ATTEMPTS = 4
 # rather than silently resolved last-wins; and a trailing ===END=== bounds the
 # e-mail body so a code fence or trailing model chatter cannot leak into the
 # sent e-mail. Any of these missing/ambiguous → None → the caller retries.
-DRAFT_FIELDS = ("analysis", "stellenbezeichnung", "anschreiben_body", "email_body")
+DRAFT_FIELDS = ("analysis", "stellenbezeichnung", "profil", "anschreiben_body",
+                "email_body")
 _SECTION_RE = re.compile(
     r"^[ \t]*={3,}[ \t]*"
-    r"(ANALYSIS|STELLENBEZEICHNUNG|ANSCHREIBEN_BODY|EMAIL_BODY|END)"
+    r"(ANALYSIS|STELLENBEZEICHNUNG|PROFIL|ANSCHREIBEN_BODY|EMAIL_BODY|END)"
     r"[ \t]*={3,}[ \t]*$",
     re.M,
 )
+
+
+class Draft(typing.NamedTuple):
+    """What one drafting call produced, metered in full."""
+
+    anschreiben_body: str
+    email_body: str
+    stellenbezeichnung: str
+    usage: llm.LLMResult
+    # The CV's profile line for THIS posting — the two sentences under the
+    # name, which a parser weighs as the summary field and a person reads in
+    # the first seconds. Same rules as the letter; rendered into the CV page
+    # of the Mappe and into the one-column Lebenslauf in place of the
+    # template's fixed line.
+    profil: str
 
 
 def parse_draft_sections(text: str) -> dict[str, str] | None:
@@ -99,7 +116,7 @@ def parse_draft_sections(text: str) -> dict[str, str] | None:
     # every content field must be present, and ===END=== must bound the e-mail
     if not all(field in sections for field in DRAFT_FIELDS) or "end" not in sections:
         return None
-    for field in ("anschreiben_body", "email_body"):
+    for field in ("profil", "anschreiben_body", "email_body"):
         sections[field] = plain_dashes(sections[field],
                                        keep=sections["stellenbezeichnung"])
     return sections
@@ -233,6 +250,17 @@ Rules:
   tokens like "Vollzeit"/"Teilzeit", fix glued spacing). Keep the genuine
   role name and its "(m/w/d)" marker intact, HR matches on it. Do NOT add a
   Referenznummer or the candidate's name; code appends those.
+- profil: the two-sentence profile line printed under the candidate's name
+  on the CV page, written for THIS posting. German, no Anrede, no "ich":
+  the first sentence names who he is and the qualification (the profile
+  gives it), the second names the two or three competences the advert
+  weights most that the profile supports, in the advert's own terms and
+  with the project or employer each sits under, then his availability if
+  the profile states one. Exactly two sentences, 25-40 words, at most 300
+  characters: it sits on two lines under the name and a third line pushes
+  the CV onto a second page. Attribution and vocabulary rules apply here
+  exactly as in the letter, and nothing that is not in the profile. No
+  Floskeln, no adjectives about himself; facts and terms only.
 - anschreiben_body: the body of the Anschreiben (cover letter). German,
   Sie-Form, roughly half a page (150-220 words). First line is the Anrede:
   "Sehr geehrte Frau <Name>," / "Sehr geehrter Herr <Name>," when an
@@ -302,6 +330,8 @@ is unambiguously terminated.
 <the analysis>
 ===STELLENBEZEICHNUNG===
 <the clean Stellenbezeichnung>
+===PROFIL===
+<the two-sentence profile line>
 ===ANSCHREIBEN_BODY===
 <the Anschreiben body>
 ===EMAIL_BODY===
@@ -551,12 +581,12 @@ QUALITY_RETRIES = 1
 def draft_application(
     job, profile_text: str, refnr: str = "", applicant_name: str = "",
     previous_letters: list[str] | None = None,
-) -> tuple[str, str, str, llm.LLMResult]:
+) -> Draft:
     """Analyse the posting and draft it for the candidate.
 
-    Returns (anschreiben_body, email_body, stellenbezeichnung, usage). The
-    stellenbezeichnung is the LLM's clean job title for the Betreff; the
-    internal `analysis` field is parsed off and discarded. Runs on the stronger
+    Returns a `Draft`. The stellenbezeichnung is the LLM's clean job title
+    for the Betreff; the profil is the CV's profile line for this posting;
+    the internal `analysis` field is parsed off and discarded. Runs on the stronger
     drafting model (Sonnet by default). A truncated or unparseable response
     (Sonnet's occasional degenerate loop) is retried up to DRAFT_ATTEMPTS
     times; the returned usage sums every attempt so the retries are metered in
@@ -605,7 +635,10 @@ def draft_application(
             sections["anschreiben_body"], applicant_name)
         email_body = sections["email_body"]
         stellenbezeichnung = sections["stellenbezeichnung"]
-        if not anschreiben or not email_body:
+        # One paragraph under the name: a newline the model put between the
+        # two sentences would render as a third line.
+        profil = _clean(sections["profil"])
+        if not anschreiben or not email_body or not profil:
             last_error = "drafting returned empty text"
             continue
         if "grüßen" not in email_body.lower():
@@ -616,7 +649,7 @@ def draft_application(
             continue
         found = letterquality.notes(anschreiben, job["description"] or "",
                                     list(previous_letters or []),
-                                    title=job["title"] or "")
+                                    title=job["title"] or "", profil=profil)
         if found and quality_retries > 0:
             quality_retries -= 1
             attempts_left += 1  # a re-roll is not a failed attempt
@@ -624,9 +657,8 @@ def draft_application(
                      "; ".join(n.text for n in found))
             user_content = base_content + letterquality.retry_hint(found)
             continue
-        return anschreiben, email_body, stellenbezeichnung, _combined_usage(
-            result.model, billed
-        )
+        return Draft(anschreiben, email_body, stellenbezeichnung,
+                     _combined_usage(result.model, billed), profil)
     raise llm.LLMError(
         f"drafting failed after {DRAFT_ATTEMPTS} attempts: {last_error}",
         usage=_combined_usage(model, billed) if billed else None,

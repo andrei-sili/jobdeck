@@ -357,11 +357,21 @@ class Note:
     text: str
 
 
+# The profile line sits on two lines under the name on a one-page CV; the
+# fixed line it replaces is 232 characters. Past this a third line appears
+# and the CV spills onto a second page, which every parser and every reader
+# takes worse than a shorter line.
+PROFIL_MAX_CHARS = 320
+
+
 def notes(letter: str, posting: str, previous: list[str] = (),
-          title: str = "") -> list[Note]:
+          title: str = "", profil: str = "") -> list[Note]:
     """What a person would hold against this letter, in German, for the
     Postausgang. Empty when nothing was found. `title` is the posting's
-    Stellenbezeichnung, which the letter may repeat verbatim."""
+    Stellenbezeichnung, which the letter may repeat verbatim. `profil` is
+    the CV's profile line written with the letter: it meets the same reader
+    and the same parser, so it is held to the same phrases and, being
+    printed under the name on a one-page CV, to a length."""
     out: list[Note] = []
     stock = floskeln(letter)
     if stock:
@@ -374,6 +384,16 @@ def notes(letter: str, posting: str, previous: list[str] = (),
     if repeats_an_opening(letter, list(previous)):
         out.append(Note("einstieg", "Beginnt wie ein früherer Brief: „"
                         + opening_text(letter) + "“"))
+    stock = floskeln(profil)
+    if stock:
+        out.append(Note("floskel", "Floskel im Profil: „" + "“, „".join(stock) + "“"))
+    copies = copied_spans(profil, posting, allowed=title)
+    if copies:
+        shown = copies[0] if len(copies[0]) <= 60 else copies[0][:57] + "…"
+        out.append(Note("kopie", f"Wörtlich aus der Anzeige im Profil: „{shown}“"))
+    if len(_flat(profil)) > PROFIL_MAX_CHARS:
+        out.append(Note("profil_lang", f"Profilzeile zu lang: {len(_flat(profil))} "
+                        f"Zeichen, unter dem Namen passen {PROFIL_MAX_CHARS}"))
     return out
 
 
@@ -392,15 +412,20 @@ def retry_hint(found: list[Note]) -> str:
     parts = []
     for note in found:
         if note.kind == "floskel":
-            parts.append("stock phrases a recruiter reads as generated text: "
+            where = " in the profile line" if note.text.startswith("Floskel im Profil") else ""
+            parts.append(f"stock phrases a recruiter reads as generated text{where}: "
                          + note.text.split(": ", 1)[1])
         elif note.kind == "kopie":
-            parts.append("a sentence copied from the advert: "
-                         + note.text.removeprefix("Wörtlich aus der Anzeige: "))
+            where = " in the profile line" if "im Profil" in note.text else ""
+            parts.append(f"a sentence copied from the advert{where}: "
+                         + note.text.split(": ", 1)[1])
         elif note.kind == "einstieg":
             parts.append("the same opening as an earlier letter, "
                          + note.text.split(": ", 1)[1]
                          + " (take a different one of the three angles)")
+        elif note.kind == "profil_lang":
+            parts.append(f"a profile line longer than {PROFIL_MAX_CHARS} characters "
+                         "(two sentences, 25-40 words, fit under the name)")
     return ("\n\nNote: your previous draft contained " + "; ".join(parts)
             + ". Write it again without them, keeping every rule above. "
             "Say the same facts in your own words: a plain sentence about "

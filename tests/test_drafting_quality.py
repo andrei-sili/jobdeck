@@ -9,10 +9,12 @@ then accepts what comes back, leaving the rest to the Postausgang.
 from jobdeck.ai import drafting, llm
 
 
-def _response(anschreiben: str) -> str:
+def _response(anschreiben: str,
+              profil: str = "Entwickler. Python bei Beispiel GmbH.") -> str:
     return (
         "===ANALYSIS===\nnotes\n"
         "===STELLENBEZEICHNUNG===\nPython Entwickler (m/w/d)\n"
+        f"===PROFIL===\n{profil}\n"
         f"===ANSCHREIBEN_BODY===\n{anschreiben}\n"
         "===EMAIL_BODY===\nGuten Tag,\n\nanbei.\n\nMit freundlichen Grüßen\nErika\n"
         "===END===\n"
@@ -43,7 +45,7 @@ def test_a_stock_phrase_costs_exactly_one_more_sample(monkeypatch):
     monkeypatch.setattr(llm, "complete",
                         _fake([_response(FLOSKEL), _response(CLEAN)], seen))
 
-    body, _mail, _titel, usage = drafting.draft_application(JOB, "profile")
+    body, _mail, _titel, usage, _profil = drafting.draft_application(JOB, "profile")
 
     assert body == CLEAN
     assert len(seen) == 2
@@ -117,3 +119,30 @@ def test_a_re_roll_does_not_eat_a_parse_attempt(monkeypatch):
 
     assert body == CLEAN
     assert len(seen) == 5
+
+
+def test_a_stock_phrase_in_the_profile_line_costs_the_same_one_re_roll(monkeypatch):
+    """The profile line meets the same reader as the letter, and the hint
+    says WHERE the phrase sat so the re-roll fixes the right field."""
+    seen: list[str] = []
+    monkeypatch.setattr(llm, "complete", _fake([
+        _response(CLEAN, profil="Hochmotivierter Entwickler. Python bei Beispiel GmbH."),
+        _response(CLEAN, profil="Entwickler. Python bei Beispiel GmbH.")], seen))
+
+    drafted = drafting.draft_application(JOB, "profile")
+
+    assert drafted.profil == "Entwickler. Python bei Beispiel GmbH."
+    assert len(seen) == 2
+    assert "in the profile line" in seen[1] and "Hochmotiviert" in seen[1]
+
+
+def test_a_profile_line_that_spills_to_a_third_line_is_re_rolled_once(monkeypatch):
+    seen: list[str] = []
+    long = "Entwickler. " + "Python und Django bei Beispiel GmbH, " * 12
+    monkeypatch.setattr(llm, "complete",
+                        _fake([_response(CLEAN, profil=long), _response(CLEAN)], seen))
+
+    drafted = drafting.draft_application(JOB, "profile")
+
+    assert len(seen) == 2 and "profile line longer than" in seen[1]
+    assert drafted.profil == "Entwickler. Python bei Beispiel GmbH."
