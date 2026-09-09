@@ -88,6 +88,9 @@ def _whole(raw: object) -> int | None:
         return None
     if isinstance(raw, int):
         return raw
+    # A number input hands over 30.0 for 30; a genuine fraction is no weight.
+    if isinstance(raw, float):
+        return int(raw) if raw.is_integer() else None
     try:
         text = str(raw).strip()
         return int(text) if text else None

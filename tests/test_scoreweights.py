@@ -83,3 +83,10 @@ def test_rounding_is_to_the_nearest_whole_number():
     assert scoreweights.weighted({"role": 50, "stack": 51}, weights) == 51  # 50.5 up
     assert scoreweights.weighted({"role": 50, "stack": 50}, weights) == 50
     assert scoreweights.weighted({"role": 33, "stack": 34}, weights) == 34  # 33.5 up
+
+
+def test_a_whole_float_is_a_number_and_a_fraction_is_not():
+    """A number input hands over 30.0 for 30."""
+    assert scoreweights.parse_weights({"stack": 70.0})["stack"] == 70
+    assert scoreweights.parse_weights({"stack": 2.5})["stack"] == 30  # default
+    assert scoreweights.clamp_subscores({"role": 80.0})["role"] == 80
