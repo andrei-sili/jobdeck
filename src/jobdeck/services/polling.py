@@ -14,7 +14,8 @@ from dataclasses import dataclass
 
 import httpx
 
-from jobdeck import attempts, db
+from jobdeck import attempts, db, freshness
+from jobdeck.ai import scoring as ai_scoring
 from jobdeck.dedupe import find_duplicate_job
 from jobdeck.sources import get_sources
 from jobdeck.sources.base import JobPosting, SearchQuery, SourceUnavailable
@@ -149,20 +150,33 @@ def store_posting(profile_id: int | None, posting: JobPosting) -> Stored:
 async def poll_profile(profile) -> dict[str, int]:
     """Poll one profile across its sources. Returns outcome counters."""
     sources = get_sources(http_client())
-    wanted = json.loads(profile["sources"] or "[]")
+    wanted = [name for name in json.loads(profile["sources"] or "[]")
+              if name in sources]
+    # The rule the scorer's knock-out reads, asked at the source: a board that
+    # can withhold what would be zeroed anyway is not asked for it. Derived
+    # from the candidate's OWN requirements, global and per profile, by the
+    # same function the scorer uses — never assumed by an adapter.
+    global_tags, max_age_days = await asyncio.to_thread(_discovery_settings)
+    criteria = ai_scoring.criteria_from_profile(profile, global_tags)
     query = SearchQuery(
         keywords=profile["keywords"],
         location=profile["location"] or "",
         radius_km=profile["radius_km"] or 0,
+        exclude_training=criteria is not None
+        and ai_scoring.forbids_training(criteria.hard_tags),
+        # The age past which the list files a posting under "Alt", parsed by
+        # the rule the list uses: discovery asks the board for the same
+        # window, so the first poll of a query does not drag in its history.
+        max_age_days=max_age_days,
     )
     results = await asyncio.gather(
-        *(sources[name].search(query) for name in wanted if name in sources),
+        *(sources[name].search(query) for name in wanted),
         return_exceptions=True,
     )
 
     counters = {NEW: 0, DUPLICATE: 0, KNOWN: 0}
     errors: list[str] = []
-    for outcome in results:
+    for name, outcome in zip(wanted, results, strict=True):
         if isinstance(outcome, SourceUnavailable):
             errors.append(str(outcome))
             continue
@@ -170,7 +184,22 @@ async def poll_profile(profile) -> dict[str, int]:
             log.exception("poll failed", exc_info=outcome)
             errors.append(str(outcome))
             continue
+        # One question per result list, before any detail request: a posting
+        # the corpus already holds is counted and never asked about again. The
+        # adapters stamp `source=self.name`, so the registry key is the column.
+        known = await asyncio.to_thread(
+            _known_ids, name, [posting.external_id for posting in outcome])
+        seen: set[str] = set()
         for posting in outcome:
+            # Listed twice in one pass — a board whose ordering shifts while
+            # its pages are being read — is one posting, fetched and stored
+            # once.
+            if posting.external_id in seen:
+                continue
+            seen.add(posting.external_id)
+            if posting.external_id in known:
+                counters[KNOWN] += 1
+                continue
             # Enrich before storing so dedupe sees the contact email.
             if not posting.description:
                 source = sources.get(posting.source)
@@ -192,6 +221,21 @@ async def poll_profile(profile) -> dict[str, int]:
 def _mark_polled(profile_id: int, error: str | None) -> None:
     with db.db() as con:
         db.mark_profile_polled(con, profile_id, error)
+
+
+def _known_ids(source: str, external_ids: list[str]) -> set[str]:
+    with db.db() as con:
+        return db.known_external_ids(con, source, external_ids)
+
+
+def _discovery_settings() -> tuple[str, int]:
+    """The two settings a query is shaped by: the global hard requirements
+    and the age threshold, read on one connection."""
+    with db.db() as con:
+        return (
+            db.get_setting(con, ai_scoring.GLOBAL_HARD_TAGS_SETTING, ""),
+            freshness.stale_age_setting(db.get_setting(con, "stale_age_days", "")),
+        )
 
 
 async def poll_all_profiles(force: bool = False) -> dict[str, int]:

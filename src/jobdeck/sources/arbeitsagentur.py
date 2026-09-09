@@ -30,6 +30,26 @@ log = logging.getLogger(__name__)
 BASE_URL = "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service"
 API_KEY = "jobboerse-jobsuche"  # public static client id used by the Jobsuche app
 PAGE_SIZE = 100
+# Pages read per query. The v6 search does NOT order by date — probed live
+# 2026-09-09: postings published that day sat on pages 2 and 3 behind
+# three-year-old ones — so reading the first page alone missed roughly half of
+# every query's matches, fresh ones included. Twenty pages hold any keyword
+# narrow enough to be worth scoring; a broader one is a search-profile problem,
+# not a paging one.
+MAX_SEARCH_PAGES = 20
+# `angebotsart`: 1 Arbeit, 2 Selbständigkeit, 4 Ausbildung/Duales Studium,
+# 34 Praktikum/Trainee. Verified live 2026-09-09: the values partition a
+# query's result count, and of a 300-posting sample of value 4, 80 sat in the
+# corpus with score 0 — knock-outs the board would have withheld for free.
+OFFER_KIND_EMPLOYMENT = 1
+# `veroeffentlichtseit`: days since publication. The API honours exactly the
+# windows its own site offers and silently ignores any other value — probed
+# 2026-09-09: 0, 1, 7, 14 and 28 filter, 2..6, 8..13, 15..27 and 29+ return
+# the unfiltered total. It measures the FIRST publication, so a re-published
+# old advert falls outside the window; the hourly cadence makes that a
+# first-poll question only. Without any window the first poll of a query
+# brings the board's whole history: 910 unknown postings for one keyword.
+PUBLISHED_WITHIN_DAYS = (1, 7, 14, 28)
 # Search moved to v6 (v4 and v5 answer 404); the DETAIL route did not move and
 # has no v6 — every v6/v5/v2/v1 jobdetails path answers 403 as an unregistered
 # route. Verified live 2026-08-05, and it matches bundesAPI/jobsuche-api.
@@ -233,6 +253,31 @@ def posting_facts(payload) -> dict:
     }
 
 
+def published_within(max_age_days: int) -> int | None:
+    """The largest window the API honours that fits inside `max_age_days`;
+    the smallest one for a threshold below it, None for no threshold."""
+    if max_age_days <= 0:
+        return None
+    fitting = [days for days in PUBLISHED_WITHIN_DAYS if days <= max_age_days]
+    return max(fitting) if fitting else min(PUBLISHED_WITHIN_DAYS)
+
+
+def _all_listed(payload: dict, page: int) -> bool:
+    """Whether `page` reached the total the envelope states, when it states
+    one. A missing or unreadable total is not a reason to stop: a short page
+    is."""
+    total = payload.get("maxErgebnisse")
+    # Whole numbers only, whether the board sends them as a number or a
+    # string: int() would quietly read 2.5 as 2 and stop after the first page.
+    if isinstance(total, bool) or not isinstance(total, (int, str)):
+        return False
+    try:
+        total = int(total)
+    except ValueError:
+        return False
+    return page * PAGE_SIZE >= total
+
+
 class ArbeitsagenturSource:
     name = SOURCE_NAME
 
@@ -240,61 +285,79 @@ class ArbeitsagenturSource:
         self._client = client
 
     async def search(self, query: SearchQuery) -> list[JobPosting]:
-        params: dict[str, str | int] = {"was": query.keywords, "size": PAGE_SIZE, "page": 1}
+        params: dict[str, str | int] = {"was": query.keywords, "size": PAGE_SIZE}
         if query.location:
             params["wo"] = query.location
             if query.radius_km:
                 params["umkreis"] = query.radius_km
-        try:
-            resp = await self._client.get(
-                f"{BASE_URL}{SEARCH_PATH}",
-                params=params,
-                headers={"X-API-Key": API_KEY},
-            )
-            resp.raise_for_status()
-            payload = resp.json()
-        except (httpx.HTTPError, ValueError) as ex:
-            raise SourceUnavailable(self.name, str(ex)) from ex
-
+        if query.exclude_training:
+            params["angebotsart"] = OFFER_KIND_EMPLOYMENT
+        window = published_within(query.max_age_days)
+        if window is not None:
+            params["veroeffentlichtseit"] = window
         postings: list[JobPosting] = []
-        # v6 renamed the envelope key, and omits it entirely on zero hits
-        # rather than sending an empty list.
-        for item in payload.get("ergebnisliste") or []:
+        seen: set[str] = set()
+        for page in range(1, MAX_SEARCH_PAGES + 1):
             try:
-                refnr = item.get("referenznummer", "")
-                if not refnr:
-                    continue
-                # `stellenangebotsTitel` is the EMPLOYER'S title;
-                # `hauptberuf`/`alleBerufe` are standardised BERUFENET labels.
-                # The old fallback to the profession label is what stored 18
-                # postings as the generic "Fachinformatiker/in -
-                # Anwendungsentwicklung" — losing the one line that says what
-                # the job actually is, and feeding that loss straight into the
-                # match score. There is deliberately no fallback now: the
-                # field was populated in 1600 of 1600 sampled items, and a
-                # posting with no title of its own is better skipped than
-                # stored under a label that misdescribes it.
-                title = item.get("stellenangebotsTitel") or ""
-                if not title:
-                    continue
-                postings.append(
-                    JobPosting(
-                        source=self.name,
-                        external_id=refnr,
-                        title=title,
-                        company=item.get("firma", "") or "",
-                        location=_place(item),
-                        # v6 exposes the home-office flag at search level; v4
-                        # only had it on the detail payload.
-                        remote=bool(item.get("homeofficemoeglich"))
-                        or looks_remote(title),
-                        url=f"https://www.arbeitsagentur.de/jobsuche/jobdetail/{refnr}",
-                        published_at=publication_start(item),
-                        raw=item,
-                    )
+                resp = await self._client.get(
+                    f"{BASE_URL}{SEARCH_PATH}",
+                    params={**params, "page": page},
+                    headers={"X-API-Key": API_KEY},
                 )
-            except (AttributeError, TypeError) as ex:
-                log.warning("arbeitsagentur: skipping malformed item: %s", ex)
+                resp.raise_for_status()
+                payload = resp.json()
+            except (httpx.HTTPError, ValueError) as ex:
+                if page == 1:
+                    raise SourceUnavailable(self.name, str(ex)) from ex
+                # The first page proved the source is up; a later one failing
+                # loses that page for this hour and nothing else.
+                log.warning("arbeitsagentur: page %d unavailable, keeping %d "
+                            "postings: %s", page, len(postings), ex)
+                break
+            # v6 renamed the envelope key, and omits it entirely on zero hits
+            # rather than sending an empty list.
+            items = payload.get("ergebnisliste") or []
+            for item in items:
+                try:
+                    refnr = item.get("referenznummer", "")
+                    # A relevance order can shift between two page reads and
+                    # list one posting twice; it is one posting.
+                    if not refnr or refnr in seen:
+                        continue
+                    seen.add(refnr)
+                    # `stellenangebotsTitel` is the EMPLOYER'S title;
+                    # `hauptberuf`/`alleBerufe` are standardised BERUFENET labels.
+                    # The old fallback to the profession label is what stored 18
+                    # postings as the generic "Fachinformatiker/in -
+                    # Anwendungsentwicklung" — losing the one line that says what
+                    # the job actually is, and feeding that loss straight into the
+                    # match score. There is deliberately no fallback now: the
+                    # field was populated in 1600 of 1600 sampled items, and a
+                    # posting with no title of its own is better skipped than
+                    # stored under a label that misdescribes it.
+                    title = item.get("stellenangebotsTitel") or ""
+                    if not title:
+                        continue
+                    postings.append(
+                        JobPosting(
+                            source=self.name,
+                            external_id=refnr,
+                            title=title,
+                            company=item.get("firma", "") or "",
+                            location=_place(item),
+                            # v6 exposes the home-office flag at search level; v4
+                            # only had it on the detail payload.
+                            remote=bool(item.get("homeofficemoeglich"))
+                            or looks_remote(title),
+                            url=f"https://www.arbeitsagentur.de/jobsuche/jobdetail/{refnr}",
+                            published_at=publication_start(item),
+                            raw=item,
+                        )
+                    )
+                except (AttributeError, TypeError) as ex:
+                    log.warning("arbeitsagentur: skipping malformed item: %s", ex)
+            if len(items) < PAGE_SIZE or _all_listed(payload, page):
+                break
         return postings
 
     async def fetch_details(self, posting: JobPosting) -> JobPosting:

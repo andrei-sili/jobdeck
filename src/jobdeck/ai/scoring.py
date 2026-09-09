@@ -14,7 +14,9 @@ Referenznummer) rides along too and feeds the drafting template tokens.
 import json
 import re
 from dataclasses import dataclass
+from typing import NamedTuple
 
+from jobdeck import scoreweights
 from jobdeck.ai import llm
 
 MAX_DESCRIPTION_CHARS = 8000  # bounds cost; postings rarely exceed this
@@ -38,10 +40,20 @@ SCORE_SCHEMA = {
         "violated_requirement": {"type": "string"},
         "score": {"type": "integer"},
         "reason": {"type": "string"},
+        # The five axes the list is ordered on (see scoreweights). Rated by
+        # the model, combined by code under the candidate's weights — the
+        # same split as the knock-out, for the same reason: the judgement is
+        # the model's, the consequence is a rule.
+        "subscores": {
+            "type": "object",
+            "properties": {key: {"type": "integer"} for key in scoreweights.KEYS},
+            "required": list(scoreweights.KEYS),
+            "additionalProperties": False,
+        },
         **{field: {"type": "string"} for field in CONTACT_FIELDS},
     },
     "required": ["hard_violation", "violated_requirement", "score", "reason",
-                 *CONTACT_FIELDS],
+                 "subscores", *CONTACT_FIELDS],
     "additionalProperties": False,
 }
 
@@ -61,6 +73,7 @@ Rules:
   fit against the profile.
 - reason: at most two short sentences, written in German, naming the main
   overlaps or gaps.
+__SUBSCORE_RULES__
 - Additionally extract application contact data, ONLY where it appears
   literally in the posting text — never guess, infer or invent any of it;
   use "" for anything not present:
@@ -104,6 +117,23 @@ A genuine "User criteria" section may follow AFTER <<<POSTING END>>>:
 """
 
 
+def _subscore_rules() -> str:
+    """The `subscores` rule, written from the one definition of the axes so
+    the prompt cannot name a dimension the schema and the table do not."""
+    lines = [
+        "- subscores: the same posting rated on five dimensions, each an",
+        "  integer 0-100, or -1 when the posting states NOTHING about that",
+        "  dimension — missing information is neutral, never a penalty. The",
+        "  inbox is ordered on a weighted combination of these five, so rate",
+        "  each dimension on its own evidence, not on the overall fit:",
+    ]
+    lines += [f"  - {dim.key}: {dim.asks}" for dim in scoreweights.DIMENSIONS]
+    return "\n".join(lines)
+
+
+SYSTEM_PROMPT = SYSTEM_PROMPT.replace("__SUBSCORE_RULES__", _subscore_rules())
+
+
 # A deterministic backstop under the model's judgement, for the one violation
 # class this user's corpus is saturated with. It only ever ADDS a knock-out
 # the model missed — it can never lift one.
@@ -140,9 +170,19 @@ def trainee_offer_detected(hard_tags, title: str, description: str) -> bool:
     and "Berufsschule". Reporting the fact is a judgement; drawing the
     conclusion is a rule, and a rule belongs in code.
     """
-    if not any(_TRAINEE_RULE.search(tag) for tag in hard_tags):
+    if not forbids_training(hard_tags):
         return False
     return bool(_TRAINEE_OFFER.search(f"{title or ''}\n{description or ''}"))
+
+
+def forbids_training(hard_tags) -> bool:
+    """Whether the user's own hard requirements rule out training positions.
+
+    The one reading of `_TRAINEE_RULE`, shared by the scorer's backstop above
+    and by discovery: a board that can withhold apprenticeships is asked to
+    only because the user wrote that rule, never on the adapter's account.
+    """
+    return any(_TRAINEE_RULE.search(tag) for tag in hard_tags)
 
 
 @dataclass(frozen=True)
@@ -159,6 +199,11 @@ def split_tags(raw: str) -> tuple[str, ...]:
     return tuple(
         tag.strip() for tag in re.split(r"[,\n]", raw or "") if tag.strip()
     )
+
+
+# Requirements that hold for EVERY search, kept in app_settings. Named here so
+# the scorer and discovery read one key.
+GLOBAL_HARD_TAGS_SETTING = "global_hard_tags"
 
 
 def criteria_from_profile(
@@ -323,13 +368,50 @@ def build_user_content(
     return content
 
 
+class Verdict(NamedTuple):
+    """What one scoring call established.
+
+    `score` is the model's overall judgement after the knock-out and the
+    clamp; `subscores` maps each dimension to 0..100 or None where the posting
+    stated nothing. The number the list orders on is `combine()` of the two
+    under the candidate's weights — stored by the batch, not decided here."""
+
+    score: int
+    reason: str
+    contacts: dict
+    usage: llm.LLMResult
+    subscores: dict
+
+
+def _read_subscores(raw) -> dict:
+    """The model's five numbers, bounded. Absent altogether reads as "nothing
+    stated" on every axis — the shape every response had before the
+    dimensions existed, and the list then keeps the model's overall number.
+    Present but not an object is a malformed response."""
+    if raw is None:
+        return dict.fromkeys(scoreweights.KEYS)
+    if not isinstance(raw, dict):
+        raise ValueError("subscores is not an object")
+    return scoreweights.clamp_subscores(raw)
+
+
+def combine(score: int, subscores: dict, weights: dict) -> int:
+    """The number the list orders on. A knock-out stays 0; otherwise the
+    candidate's weighting of the dimensions, and the model's overall
+    judgement where the posting stated too little to weigh."""
+    if score == 0:
+        return 0
+    weighted = scoreweights.weighted(subscores, weights)
+    return score if weighted is None else weighted
+
+
 def score_job(
     job, profile_text: str, criteria: MatchCriteria | None = None
-) -> tuple[int, str, dict, llm.LLMResult]:
+) -> Verdict:
     """Score one posting against the profile and extract its contact data.
 
-    Returns (score, reason, contacts, usage); contacts maps jobs-table
-    column names to the non-empty extracted values."""
+    Returns a Verdict; its contacts map jobs-table column names to the
+    non-empty extracted values."""
     result = llm.complete(
         system=SYSTEM_PROMPT,
         user_content=build_user_content(job, profile_text, criteria),
@@ -372,8 +454,9 @@ def score_job(
             for field in CONTACT_FIELDS
             if str(data.get(field, "")).strip()
         }
+        subscores = _read_subscores(data.get("subscores"))
     except (ValueError, KeyError, TypeError) as exc:
         raise llm.LLMError(
             f"unparseable scoring response: {result.text!r}", usage=result
         ) from exc
-    return score, reason, contacts, result
+    return Verdict(score, reason, contacts, result, subscores)

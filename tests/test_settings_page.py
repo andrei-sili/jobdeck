@@ -100,3 +100,30 @@ def test_the_portal_cv_path_round_trips_and_defaults_to_empty(con, data_dir):
     db.set_setting(con, "cv_ats_path", "~/Dokumente/Lebenslauf_ATS.html")
     con.commit()
     assert settings._get_settings()["cv_ats_path"] == "~/Dokumente/Lebenslauf_ATS.html"
+
+
+def test_score_weights_are_loaded_through_the_combining_rule(con, data_dir):
+    assert settings._get_settings()["score_weights"] == {
+        "role": 30, "stack": 30, "level": 20, "language": 10, "conditions": 10}
+    db.set_setting(con, "score_weight_stack", "70")
+    db.set_setting(con, "score_weight_level", "viele")  # hand-edited: its default
+    con.commit()
+    loaded = settings._get_settings()["score_weights"]
+    assert loaded["stack"] == 70 and loaded["level"] == 20
+
+
+def test_saving_weights_from_the_page_takes_what_a_number_input_holds(con, data_dir):
+    """NiceGUI's number input hands over 30.0 for 30; that is a weight."""
+    job_id = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "j1", "title": "Dev", "company": "F"})
+    db.set_job_score(con, job_id, 80, "weil", {
+        "role": 80, "stack": 60, "level": 100, "language": 100,
+        "conditions": None})
+    con.commit()
+    changed = settings._save_score_weights(
+        {"role": 0.0, "stack": 100.0, "level": 20.0, "language": 10.0,
+         "conditions": None})
+    assert changed == 1
+    assert db.get_job(con, job_id)["match_score"] == 69
+    assert db.score_weights(con)["stack"] == 100
+    assert db.score_weights(con)["conditions"] == 10  # None → its default

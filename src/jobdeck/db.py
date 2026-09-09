@@ -12,7 +12,16 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-from jobdeck import apply_channel, backup, config, dates, freshness, identity, migrations
+from jobdeck import (
+    apply_channel,
+    backup,
+    config,
+    dates,
+    freshness,
+    identity,
+    migrations,
+    scoreweights,
+)
 from jobdeck import claims as claims_lib
 from jobdeck import settings as app_settings
 from jobdeck.constants import (
@@ -698,6 +707,38 @@ def insert_job_if_new(con: sqlite3.Connection, values: dict) -> int | None:
     # them looking like form jobs.
     resolve_email_channels(con, job_id)
     return job_id
+
+
+# Bound IN-lists are chunked well below SQLite's parameter ceiling (999 on
+# older builds): a full Arbeitsagentur query is up to 2000 postings.
+_IN_CHUNK = 500
+
+
+def known_external_ids(
+    con: sqlite3.Connection, source: str, external_ids
+) -> set[str]:
+    """Which of these ids of `source` the corpus already holds, whatever their
+    status.
+
+    Asked ONCE per search result, BEFORE any detail request. The Arbeitsagentur
+    search answers with the same hundred postings hour after hour, and the poll
+    used to fetch a detail page for every one of them and only then learn from
+    the insert that the row was already here: ~200 requests an hour to a source
+    used on sufferance, almost all for text already stored. Status is
+    deliberately not a filter — a posting filed as a duplicate or skipped is
+    still one the corpus knows, and asking the board about it again buys
+    nothing."""
+    wanted = sorted({str(value) for value in external_ids if value})
+    known: set[str] = set()
+    for start in range(0, len(wanted), _IN_CHUNK):
+        chunk = wanted[start:start + _IN_CHUNK]
+        rows = con.execute(
+            "SELECT external_id FROM jobs WHERE source=? AND external_id IN "
+            f"({','.join('?' * len(chunk))})",
+            (source, *chunk),
+        ).fetchall()
+        known.update(str(row[0]) for row in rows)
+    return known
 
 
 # Score 0 is reserved for hard-criteria violations (see ai/scoring.py); the
@@ -1545,13 +1586,78 @@ def set_upload(
     )
 
 
+_SUBSCORE_SET_SQL = ", ".join(f"{col}=?" for col in scoreweights.COLUMNS)
+
+
 def set_job_score(
-    con: sqlite3.Connection, job_id: int, score: int, reason: str
+    con: sqlite3.Connection, job_id: int, score: int, reason: str,
+    subscores: dict | None = None,
 ) -> None:
+    """Store the verdict: the number the list orders on, the reason, and the
+    five dimensions behind the number.
+
+    `subscores` maps dimension keys to 0..100, or None where the posting
+    stated nothing. Omitted, the five columns are CLEARED: a score written
+    without dimensions is the model's single number, and dimensions from an
+    earlier verdict must not stay beside it for a weight change to re-derive
+    something the reason never argued."""
+    values = {col: None for col in scoreweights.COLUMNS}
+    if subscores:
+        for dim in scoreweights.DIMENSIONS:
+            values[dim.column] = subscores.get(dim.key)
     con.execute(
-        "UPDATE jobs SET match_score=?, match_reason=? WHERE id=?",
-        (score, reason, job_id),
+        f"UPDATE jobs SET match_score=?, match_reason=?, {_SUBSCORE_SET_SQL} "
+        "WHERE id=?",
+        (score, reason, *(values[col] for col in scoreweights.COLUMNS), job_id),
     )
+
+
+def score_weights(con: sqlite3.Connection) -> dict[str, int]:
+    """The candidate's weights, one setting per dimension, parsed by the rule
+    that combines them so a hand-edited value shows the weight really used."""
+    return scoreweights.parse_weights({
+        dim.key: get_setting(con, scoreweights.setting_key(dim.key), "")
+        for dim in scoreweights.DIMENSIONS
+    })
+
+
+def recompute_scores(con: sqlite3.Connection, weights: dict[str, int]) -> int:
+    """Re-derive `match_score` from the stored dimensions under `weights`.
+    Returns how many rows changed.
+
+    No model call: the numbers are already here, only their combination
+    moves. Rows without dimensions keep the model's single number, a
+    knock-out stays 0, and only postings still 'new' are touched — a posting
+    already applied to or set aside keeps the score it was acted on with, the
+    same line `reset_job_scores` draws."""
+    columns = ", ".join(scoreweights.COLUMNS)
+    known = " OR ".join(f"{col} IS NOT NULL" for col in scoreweights.COLUMNS)
+    rows = con.execute(
+        f"SELECT id, match_score, {columns} FROM jobs "
+        f"WHERE status='new' AND match_score IS NOT NULL AND match_score<>0 "
+        f"AND ({known})"
+    ).fetchall()
+    changes = []
+    for row in rows:
+        subscores = {dim.key: row[dim.column] for dim in scoreweights.DIMENSIONS}
+        new = scoreweights.weighted(subscores, weights)
+        if new is not None and new != row["match_score"]:
+            changes.append((new, row["id"]))
+    con.executemany("UPDATE jobs SET match_score=? WHERE id=?", changes)
+    return len(changes)
+
+
+def save_score_weights(con: sqlite3.Connection, raw: dict) -> int:
+    """Store the weights the settings page hands over and re-derive every
+    score they reach, in the caller's transaction. Returns the rows changed.
+
+    Parsed before storing, so what is written is what will be read back: a
+    blank or absurd field lands as its default, not as a string the reader
+    has to guess at."""
+    weights = scoreweights.parse_weights(raw)
+    for dim in scoreweights.DIMENSIONS:
+        set_setting(con, scoreweights.setting_key(dim.key), str(weights[dim.key]))
+    return recompute_scores(con, weights)
 
 
 def set_job_contacts(con: sqlite3.Connection, job_id: int, contacts: dict) -> None:
@@ -1583,10 +1689,14 @@ def set_job_contacts(con: sqlite3.Connection, job_id: int, contacts: dict) -> No
 def list_unscored_jobs(
     con: sqlite3.Connection, limit: int = 20, exclude_ids: set[int] | None = None
 ) -> list[sqlite3.Row]:
-    """New postings that have not been match-scored yet, oldest first.
+    """New postings that have not been match-scored yet, newest first.
 
-    exclude_ids skips postings the caller has given up on (retry cap), so
-    they cannot starve the batch."""
+    Newest by publication date, then in order of arrival: a poll that reads
+    every page of a board brings a few hundred postings at once, and the ones
+    worth reading first are the ones published last — a posting with no date
+    waits behind every dated one, and among equals the earlier arrival keeps
+    its turn. exclude_ids skips postings the caller has given up on (retry
+    cap), so they cannot starve the batch."""
     excluded = sorted(exclude_ids or ())
     extra = f" AND id NOT IN ({','.join('?' * len(excluded))})" if excluded else ""
     return con.execute(
@@ -1595,7 +1705,7 @@ def list_unscored_jobs(
         # a paid call: the batch would go on spending haiku on every advert a
         # nineteen-branch staffing agency posts, for ever.
         f" AND NOT {HIDDEN_FIRM_SQL}"
-        + extra + " ORDER BY id LIMIT ?",
+        + extra + " ORDER BY COALESCE(published_on, '') DESC, id LIMIT ?",
         (*excluded, limit),
     ).fetchall()
 
@@ -1611,8 +1721,9 @@ def reset_job_scores(con: sqlite3.Connection, job_ids: list[int]) -> int:
     if not job_ids:
         return 0
     placeholders = ",".join("?" * len(job_ids))  # ids bound, never interpolated
+    cleared = ", ".join(f"{col}=NULL" for col in scoreweights.COLUMNS)
     cur = con.execute(
-        f"UPDATE jobs SET match_score=NULL, match_reason='' "
+        f"UPDATE jobs SET match_score=NULL, match_reason='', {cleared} "
         f"WHERE status='new' AND id IN ({placeholders})",
         job_ids,
     )
@@ -2155,6 +2266,10 @@ def liveness_progress(
 # change — the one thing about a bewerbung a job row quotes.
 _JOBS_SIGNATURE_SQL = """
 SELECT COUNT(*), MAX(id), COUNT(match_score), TOTAL(match_score),
+       -- A weight change re-derives scores in place: two rows trading
+       -- values keep the total, and the watcher would leave the list in the
+       -- old order. The id-weighted sum moves whenever any row's number does.
+       TOTAL(match_score * id),
        MAX(liveness_checked_at), TOTAL(liveness=?),
        TOTAL(status='new'), TOTAL(status='applied'),
        TOTAL(status='skipped'), TOTAL(status='duplicate'),

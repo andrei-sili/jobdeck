@@ -31,6 +31,21 @@ class SearchQuery:
     keywords: str
     location: str = ""  # empty = nationwide
     radius_km: int = 0  # 0 = no radius restriction
+    # The candidate's own hard requirements rule out training positions — an
+    # apprenticeship, a dual study place, an internship, a working-student job.
+    # An adapter whose board can withhold those asks it to; one whose board
+    # cannot ignores the flag, and the scorer's knock-out stands behind both.
+    # Never set on an adapter's own account: a school-leaver running this app
+    # wants exactly those postings.
+    exclude_training: bool = False
+    # Postings older than this many days leave the working list for a pile of
+    # their own, so discovery need not bring them in the first place: a board
+    # that can be asked for a publication window is asked for the one that
+    # fits inside this. 0 means no limit. An hourly poll sees every posting
+    # within an hour of publication anyway; the window only decides what the
+    # FIRST poll of a query drags in, which without it is the board's whole
+    # history of matches.
+    max_age_days: int = 0
 
 
 @dataclass

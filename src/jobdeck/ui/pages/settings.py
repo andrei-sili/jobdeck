@@ -4,7 +4,7 @@ import asyncio
 
 from nicegui import run, ui
 
-from jobdeck import apply_form, backup, config, db, freshness, gmail, identity
+from jobdeck import apply_form, backup, config, db, freshness, gmail, identity, scoreweights
 from jobdeck import settings as app_settings
 from jobdeck.constants import DEFAULT_SILENCE_CLOSES_DAYS
 from jobdeck.services import (
@@ -72,6 +72,7 @@ def _get_settings():
                 db.get_setting(con, "mappe_target_portal_mb", ""),
                 mappe.DEFAULT_PORTAL_TARGET_MB),
             "global_hard_tags": db.get_setting(con, "global_hard_tags", ""),
+            "score_weights": db.score_weights(con),
             "real_send_enabled": app_settings.boolean(
                 con, "real_send_enabled", False
             ),
@@ -126,6 +127,13 @@ def _prepare_filter():
 def _set_setting(key, value):
     with db.db() as con:
         db.set_setting(con, key, value)
+
+
+def _save_score_weights(raw: dict) -> int:
+    """Store the weights and re-derive every score they reach; the rows
+    changed, for the notification."""
+    with db.db() as con:
+        return db.save_score_weights(con, raw)
 
 
 def _get_setting(key, default=""):
@@ -642,6 +650,34 @@ async def settings_page():
                           type="positive")
 
             ui.button("Save", on_click=save_global_tags).props("outline")
+
+            ui.label("Gewichtung der Bewertung").classes("font-bold mt-4")
+            ui.label(
+                "Die Bewertung setzt sich aus fünf Teilwerten zusammen, die "
+                "das Modell einzeln vergibt. Die Gewichte sind deine: Speichern "
+                "ordnet die Liste aus den gespeicherten Zahlen neu, ohne einen "
+                "neuen Aufruf. Nennt eine Anzeige zu einer Dimension nichts, "
+                "zählt die Dimension bei ihr nicht mit. Alle auf 0 heißt: die "
+                "Voreinstellung."
+            ).classes("text-xs text-gray-500")
+            weight_fields = {}
+            with ui.row().classes("gap-4 items-end"):
+                for dim in scoreweights.DIMENSIONS:
+                    weight_fields[dim.key] = ui.number(
+                        dim.label, value=settings["score_weights"][dim.key],
+                        min=0, max=scoreweights.MAX_WEIGHT,
+                    ).classes("w-24").mark(f"weight-{dim.key}")
+
+            async def save_weights():
+                raw = {key: field.value for key, field in weight_fields.items()}
+                changed = await run.io_bound(_save_score_weights, raw)
+                ui.notify(
+                    f"Gewichtung gespeichert · {changed} "
+                    f"{'Bewertung' if changed == 1 else 'Bewertungen'} neu "
+                    f"berechnet", type="positive")
+
+            ui.button("Gewichtung speichern", on_click=save_weights) \
+                .props("outline").mark("save-weights")
             meter_label = ui.label().classes("text-sm")
             ui.label(
                 f"Model: {config.anthropic_model()} (set ANTHROPIC_MODEL to change). "

@@ -49,7 +49,7 @@ async def test_scores_unscored_new_jobs(con, profile_file, ai_on, monkeypatch):
 
     monkeypatch.setattr(
         "jobdeck.ai.scoring.score_job",
-        lambda job, profile_text, criteria=None: (66, "Guter Fit.", {}, _usage()),
+        lambda job, profile_text, criteria=None: (66, "Guter Fit.", {}, _usage(), {}),
     )
 
     counters = await scoring.score_new_jobs()
@@ -74,7 +74,7 @@ async def test_second_run_has_nothing_left_to_score(con, profile_file, ai_on, mo
     con.commit()
     monkeypatch.setattr(
         "jobdeck.ai.scoring.score_job",
-        lambda job, profile_text, criteria=None: (50, "Ok.", {}, _usage()),
+        lambda job, profile_text, criteria=None: (50, "Ok.", {}, _usage(), {}),
     )
 
     assert (await scoring.score_new_jobs())["scored"] == 1
@@ -130,7 +130,7 @@ async def test_one_failure_does_not_block_the_rest(con, profile_file, ai_on, mon
     def fake_score(job, profile_text, criteria=None):
         if job["external_id"] == "bad":
             raise llm.LLMError("boom")
-        return (80, "Passt.", {}, _usage())
+        return (80, "Passt.", {}, _usage(), {})
 
     monkeypatch.setattr("jobdeck.ai.scoring.score_job", fake_score)
 
@@ -148,7 +148,7 @@ async def test_batch_limit_caps_llm_calls_per_run(con, profile_file, ai_on, monk
     con.commit()
     monkeypatch.setattr(
         "jobdeck.ai.scoring.score_job",
-        lambda job, profile_text, criteria=None: (50, "Ok.", {}, _usage()),
+        lambda job, profile_text, criteria=None: (50, "Ok.", {}, _usage(), {}),
     )
 
     assert (await scoring.score_new_jobs(limit=2))["scored"] == 2
@@ -170,7 +170,7 @@ async def test_concurrent_runs_never_double_score(con, profile_file, ai_on, monk
     def slow_score(job, profile_text, criteria=None):
         calls.append(job["id"])
         time.sleep(0.02)  # widen the overlap window
-        return (60, "Ok.", {}, _usage())
+        return (60, "Ok.", {}, _usage(), {})
 
     monkeypatch.setattr("jobdeck.ai.scoring.score_job", slow_score)
 
@@ -210,6 +210,7 @@ async def test_extracted_contacts_are_persisted(con, profile_file, ai_on, monkey
             {"ansprechpartner": "Frau Weber", "contact_email": "jobs@firma.de",
              "refnr": "K-2026-17"},
             _usage(),
+            {},
         ),
     )
 
@@ -237,7 +238,7 @@ async def test_kill_switch_stops_an_in_flight_batch(
         calls.append(job["id"])
         with db.db() as c:  # the Settings switch writes from another thread
             db.set_setting(c, "ai_enabled", "0")
-        return (60, "Ok.", {}, _usage())
+        return (60, "Ok.", {}, _usage(), {})
 
     monkeypatch.setattr("jobdeck.ai.scoring.score_job", flip_off_after_first)
 
@@ -267,7 +268,7 @@ async def test_profile_criteria_reach_the_scoring_call(
 
     def fake_score(job, profile_text, criteria=None):
         received[job["external_id"]] = criteria
-        return (60, "Ok.", {}, _usage())
+        return (60, "Ok.", {}, _usage(), {})
 
     monkeypatch.setattr("jobdeck.ai.scoring.score_job", fake_score)
 
@@ -292,7 +293,7 @@ async def test_retry_cap_gives_up_and_stops_starving_the_batch(
         if job["external_id"] == "always-bad":
             attempts.append(job["id"])
             raise llm.LLMError("boom")
-        return (70, "Ok.", {}, _usage())
+        return (70, "Ok.", {}, _usage(), {})
 
     monkeypatch.setattr("jobdeck.ai.scoring.score_job", fake_score)
 
@@ -310,14 +311,25 @@ async def test_retry_cap_gives_up_and_stops_starving_the_batch(
 
 
 def test_list_unscored_jobs_orders_limits_and_excludes(con):
-    ids = [_insert_job(con, f"j{i}") for i in range(3)]
+    """Newest publication first, then the latest arrival; a posting without a
+    date waits behind every dated one."""
+    old = _insert_job(con, "old", published_at="2026-08-01")
+    newest = _insert_job(con, "newest", published_at="2026-09-09")
+    undated = _insert_job(con, "undated")
+    recent = _insert_job(con, "recent", published_at="2026-09-08")
     con.commit()
 
-    rows = db.list_unscored_jobs(con, limit=2)
-    assert [r["id"] for r in rows] == ids[:2]  # oldest first, capped
+    rows = db.list_unscored_jobs(con, limit=3)
+    assert [r["id"] for r in rows] == [newest, recent, old]  # capped
 
-    rows = db.list_unscored_jobs(con, limit=2, exclude_ids={ids[0]})
-    assert [r["id"] for r in rows] == ids[1:3]
+    rows = db.list_unscored_jobs(con, limit=3, exclude_ids={newest})
+    assert [r["id"] for r in rows] == [recent, old, undated]
+
+
+def test_the_batch_is_forty_a_run():
+    """Every ten minutes, so a poll that brings four hundred fresh postings
+    is scored within two hours rather than three and a half."""
+    assert scoring.BATCH_LIMIT == 40
 
 
 # ---------------------------------------------------------------------------
@@ -353,3 +365,30 @@ def test_the_screen_and_the_batch_ask_the_same_question(con, monkeypatch):
     config.PROFILE_PATH.write_text("# Profil\n", encoding="utf-8")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     assert scoring.is_ready(con) is False, "no key, no call"
+
+
+async def test_the_stored_score_is_the_weighted_combination_and_the_dimensions_are_kept(
+        con, profile_file, ai_on, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    _insert_job(con, "j1")
+    _insert_job(con, "ko")
+    db.set_setting(con, "score_weight_stack", "100")
+    db.set_setting(con, "score_weight_role", "0")
+    con.commit()
+    subs = {"role": 80, "stack": 60, "level": 100, "language": 100,
+            "conditions": None}
+
+    def fake_score(job, profile_text, criteria=None):
+        if job["external_id"] == "ko":
+            return (0, "Ausbildungsplatz.", {}, _usage(), subs)
+        return (70, "Ok.", {}, _usage(), subs)
+
+    monkeypatch.setattr("jobdeck.ai.scoring.score_job", fake_score)
+    assert (await scoring.score_new_jobs())["scored"] == 2
+    jobs = {j["external_id"]: j for j in db.list_jobs(con, mismatches="include")}
+    # (100*60 + 20*100 + 10*100) / 130 = 69.23 → 69, not the model's 70
+    assert jobs["j1"]["match_score"] == 69
+    assert jobs["j1"]["score_stack"] == 60
+    assert jobs["j1"]["score_conditions"] is None
+    assert jobs["ko"]["match_score"] == 0  # the knock-out is not weighed away
+    assert jobs["ko"]["score_role"] == 80

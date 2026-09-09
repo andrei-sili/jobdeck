@@ -21,7 +21,7 @@ from jobdeck.ai import scoring as ai_scoring
 
 log = logging.getLogger(__name__)
 
-BATCH_LIMIT = 20  # per run; the interval job drains any backlog over time
+BATCH_LIMIT = 40  # per run, every 10 min; a full-page poll can bring hundreds
 MAX_ATTEMPTS = 3  # per process — an app restart re-enables given-up jobs
 
 _lock = asyncio.Lock()
@@ -73,14 +73,20 @@ def _profiles_by_id():
 def _global_hard_tags() -> str:
     """Requirements that hold for every search, whatever the profile."""
     with db.db() as con:
-        return db.get_setting(con, "global_hard_tags", "")
+        return db.get_setting(con, ai_scoring.GLOBAL_HARD_TAGS_SETTING, "")
+
+
+def _score_weights() -> dict[str, int]:
+    with db.db() as con:
+        return db.score_weights(con)
 
 
 def _persist_score(
-    job_id: int, score: int, reason: str, contacts: dict, usage: llm.LLMResult
+    job_id: int, score: int, reason: str, contacts: dict, usage: llm.LLMResult,
+    subscores: dict | None = None,
 ) -> None:
     with db.db() as con:
-        db.set_job_score(con, job_id, score, reason)
+        db.set_job_score(con, job_id, score, reason, subscores)
         db.set_job_contacts(con, job_id, contacts)
         db.record_llm_usage(con, usage.input_tokens, usage.output_tokens, usage.cost_usd)
 
@@ -108,6 +114,10 @@ async def score_new_jobs(limit: int = BATCH_LIMIT) -> dict[str, int]:
         # from the next run — deliberate, keeps a batch internally consistent.
         profiles = await asyncio.to_thread(_profiles_by_id) if jobs else {}
         global_tags = await asyncio.to_thread(_global_hard_tags) if jobs else ""
+        # Read once per batch like the criteria: the number stored is the
+        # candidate's weighting of the model's five dimensions, and a weight
+        # edited mid-batch applies from the next run.
+        weights = await asyncio.to_thread(_score_weights) if jobs else {}
         for job in jobs:
             # Re-check the kill switch before every paid call: flipping it
             # off mid-batch (or while queued behind the lock) must stop the
@@ -120,7 +130,7 @@ async def score_new_jobs(limit: int = BATCH_LIMIT) -> dict[str, int]:
                 profiles.get(job["profile_id"]), global_tags
             )
             try:
-                score, reason, contacts, usage = await asyncio.to_thread(
+                score, reason, contacts, usage, subscores = await asyncio.to_thread(
                     ai_scoring.score_job, job, profile_text, criteria
                 )
             except llm.LLMNotConfigured:
@@ -140,7 +150,9 @@ async def score_new_jobs(limit: int = BATCH_LIMIT) -> dict[str, int]:
                 continue
             _attempts.pop(job["id"], None)
             await asyncio.to_thread(
-                _persist_score, job["id"], score, reason, contacts, usage
+                _persist_score, job["id"],
+                ai_scoring.combine(score, subscores, weights), reason, contacts,
+                usage, subscores,
             )
             counters["scored"] += 1
 

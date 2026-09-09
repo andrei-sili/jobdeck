@@ -2147,3 +2147,28 @@ def test_the_republication_filter_agrees_with_the_rule_on_every_shape(
     assert by_rule, "the corpus produced no matches — the check would be vacuous"
     assert by_rule != {j[0] for j in con.execute("SELECT id FROM jobs")}, \
         "everything matched — the check would pass on a filter that never hides"
+
+
+def test_the_pane_names_the_five_dimensions_behind_the_number():
+    """In the order and with the labels Einstellungen weighs them under, so
+    what he reads here and what he tunes there are visibly the same five."""
+    job = {"score_role": 80, "score_stack": 60, "score_level": 100,
+           "score_language": 100, "score_conditions": None}
+    assert jobs._subscore_line(job) == \
+        "Rolle 80 · Stack 60 · Niveau 100 · Sprache 100 · Rahmen —"
+    # a row scored before the dimensions existed: the pane says nothing it
+    # does not hold
+    assert jobs._subscore_line({"match_score": 70}) == ""
+    assert jobs._subscore_line({"score_role": None, "score_stack": None,
+                                "score_level": None, "score_language": None,
+                                "score_conditions": None}) == ""
+
+
+def test_a_re_derived_dimension_reaches_an_open_reader():
+    """A weight change rewrites the five in place; the reader that prints
+    them has to redraw, so they are part of what the row is fingerprinted on."""
+    base = {"id": 1, "score_role": 80, "score_stack": 60, "score_level": 100,
+            "score_language": 100, "score_conditions": None}
+    moved = {**base, "score_stack": 90}
+    assert jobs._row_fingerprint(base) != jobs._row_fingerprint(moved)
+    assert jobs._row_fingerprint(base) == jobs._row_fingerprint(dict(base))

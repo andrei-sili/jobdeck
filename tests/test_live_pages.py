@@ -1756,3 +1756,23 @@ async def test_the_strip_says_which_file_goes_into_which_form(
     con.commit()
     await user.open("/")
     await user.should_not_see(jobs_page.UPLOAD_HINT)
+
+
+async def test_the_pane_prints_the_five_dimensions_under_the_verdict(
+        user: User, con, data_dir):
+    """What the number is made of, before the prose that argues it — and
+    nothing for a row scored before the dimensions existed."""
+    job_id = _posting(con)
+    db.set_job_score(con, job_id, 77, "Passt gut.", {
+        "role": 80, "stack": 60, "level": 100, "language": 100,
+        "conditions": None})
+    con.commit()
+    await user.open("/")
+    await user.should_see("WARUM 77")
+    await user.should_see("Rolle 80 · Stack 60 · Niveau 100 · Sprache 100 · Rahmen —")
+
+    db.set_job_score(con, job_id, 77, "Passt gut.")
+    con.commit()
+    await user.open("/")
+    await user.should_see("WARUM 77")
+    await user.should_not_see("Niveau")
