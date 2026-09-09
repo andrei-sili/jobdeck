@@ -306,3 +306,89 @@ def test_an_unreadable_receipt_never_takes_the_page_down(con, data_dir, stored):
     report = polling.last_poll(con)
 
     assert report["new"] == 0 and report["profiles"] == 0
+
+
+class CountingSource(StubSource):
+    """A source that remembers how often it was asked for a detail page."""
+
+    def __init__(self, name, postings):
+        super().__init__(name, postings)
+        self.detail_calls = 0
+
+    async def fetch_details(self, posting):
+        self.detail_calls += 1
+        return posting
+
+
+async def test_a_posting_already_stored_is_neither_fetched_nor_stored_again(
+        con, profile, monkeypatch):
+    """The Arbeitsagentur search answers with the same hundred postings hour
+    after hour, and each of them cost a detail request before the insert said
+    'already here' — ~200 requests an hour for text already stored."""
+    stub = CountingSource("stub", [
+        _posting(description=""),
+        _posting(external_id="j2", company="Firma B", description=""),
+    ])
+    monkeypatch.setattr(polling, "get_sources", lambda client: {"stub": stub})
+
+    assert (await polling.poll_profile(profile))["new"] == 2
+    assert stub.detail_calls == 2
+
+    counters = await polling.poll_profile(profile)
+    assert counters == {"new": 0, "duplicate": 0, "known": 2}
+    assert stub.detail_calls == 2  # not a single request more
+    assert len(db.list_jobs(con)) == 2
+
+
+async def test_a_posting_listed_twice_in_one_pass_is_handled_once(
+        con, profile, monkeypatch):
+    """A board whose ordering shifts while its pages are read can list one
+    posting on two pages; that is one posting, fetched and stored once."""
+    stub = CountingSource("stub", [_posting(description=""),
+                                   _posting(description="")])
+    monkeypatch.setattr(polling, "get_sources", lambda client: {"stub": stub})
+
+    counters = await polling.poll_profile(profile)
+    assert counters == {"new": 1, "duplicate": 0, "known": 0}
+    assert stub.detail_calls == 1
+    assert len(db.list_jobs(con)) == 1
+
+
+async def test_a_known_id_of_another_source_is_still_fetched(
+        con, profile, monkeypatch):
+    """`UNIQUE(source, external_id)` is per source, and so is the question."""
+    first = StubSource("stub", [_posting(external_id="shared")])
+    monkeypatch.setattr(polling, "get_sources", lambda client: {"stub": first})
+    await polling.poll_profile(profile)
+
+    other = CountingSource("broken", [
+        _posting(source="broken", external_id="shared", company="Firma Z",
+                 title="Other Role", description=""),
+    ])
+    monkeypatch.setattr(polling, "get_sources", lambda client: {"broken": other})
+    counters = await polling.poll_profile(profile)
+    assert other.detail_calls == 1
+    assert counters["new"] == 1
+
+
+def test_known_external_ids_answers_beyond_the_parameter_ceiling(con):
+    ids = [f"id-{i}" for i in range(1200)]
+    for i in (0, 599, 1199):
+        db.insert_job_if_new(con, {"source": "stub", "external_id": ids[i],
+                                   "title": "T", "company": f"Firma {i}"})
+    con.commit()
+    assert db.known_external_ids(con, "stub", ids) == {ids[0], ids[599], ids[1199]}
+    assert db.known_external_ids(con, "other", ids) == set()
+    assert db.known_external_ids(con, "stub", []) == set()
+    assert db.known_external_ids(con, "stub", ["", None]) == set()
+
+
+def test_a_filed_away_posting_still_counts_as_known(con):
+    """Status is not a filter: a duplicate or skipped row is one the corpus
+    knows, and asking the board about it again buys nothing."""
+    job_id = db.insert_job_if_new(con, {"source": "stub", "external_id": "d1",
+                                        "title": "T", "company": "Firma",
+                                        "status": "duplicate"})
+    db.set_job_status(con, job_id, "skipped")
+    con.commit()
+    assert db.known_external_ids(con, "stub", ["d1"]) == {"d1"}

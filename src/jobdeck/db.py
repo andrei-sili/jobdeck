@@ -700,6 +700,38 @@ def insert_job_if_new(con: sqlite3.Connection, values: dict) -> int | None:
     return job_id
 
 
+# Bound IN-lists are chunked well below SQLite's parameter ceiling (999 on
+# older builds): a full Arbeitsagentur query is up to 2000 postings.
+_IN_CHUNK = 500
+
+
+def known_external_ids(
+    con: sqlite3.Connection, source: str, external_ids
+) -> set[str]:
+    """Which of these ids of `source` the corpus already holds, whatever their
+    status.
+
+    Asked ONCE per search result, BEFORE any detail request. The Arbeitsagentur
+    search answers with the same hundred postings hour after hour, and the poll
+    used to fetch a detail page for every one of them and only then learn from
+    the insert that the row was already here: ~200 requests an hour to a source
+    used on sufferance, almost all for text already stored. Status is
+    deliberately not a filter — a posting filed as a duplicate or skipped is
+    still one the corpus knows, and asking the board about it again buys
+    nothing."""
+    wanted = sorted({str(value) for value in external_ids if value})
+    known: set[str] = set()
+    for start in range(0, len(wanted), _IN_CHUNK):
+        chunk = wanted[start:start + _IN_CHUNK]
+        rows = con.execute(
+            "SELECT external_id FROM jobs WHERE source=? AND external_id IN "
+            f"({','.join('?' * len(chunk))})",
+            (source, *chunk),
+        ).fetchall()
+        known.update(str(row[0]) for row in rows)
+    return known
+
+
 # Score 0 is reserved for hard-criteria violations (see ai/scoring.py); the
 # inbox hides those rows by default but they are never deleted.
 MISMATCH_SQL = "match_score=0"

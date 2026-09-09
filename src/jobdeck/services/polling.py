@@ -149,20 +149,21 @@ def store_posting(profile_id: int | None, posting: JobPosting) -> Stored:
 async def poll_profile(profile) -> dict[str, int]:
     """Poll one profile across its sources. Returns outcome counters."""
     sources = get_sources(http_client())
-    wanted = json.loads(profile["sources"] or "[]")
+    wanted = [name for name in json.loads(profile["sources"] or "[]")
+              if name in sources]
     query = SearchQuery(
         keywords=profile["keywords"],
         location=profile["location"] or "",
         radius_km=profile["radius_km"] or 0,
     )
     results = await asyncio.gather(
-        *(sources[name].search(query) for name in wanted if name in sources),
+        *(sources[name].search(query) for name in wanted),
         return_exceptions=True,
     )
 
     counters = {NEW: 0, DUPLICATE: 0, KNOWN: 0}
     errors: list[str] = []
-    for outcome in results:
+    for name, outcome in zip(wanted, results, strict=True):
         if isinstance(outcome, SourceUnavailable):
             errors.append(str(outcome))
             continue
@@ -170,7 +171,22 @@ async def poll_profile(profile) -> dict[str, int]:
             log.exception("poll failed", exc_info=outcome)
             errors.append(str(outcome))
             continue
+        # One question per result list, before any detail request: a posting
+        # the corpus already holds is counted and never asked about again. The
+        # adapters stamp `source=self.name`, so the registry key is the column.
+        known = await asyncio.to_thread(
+            _known_ids, name, [posting.external_id for posting in outcome])
+        seen: set[str] = set()
         for posting in outcome:
+            # Listed twice in one pass — a board whose ordering shifts while
+            # its pages are being read — is one posting, fetched and stored
+            # once.
+            if posting.external_id in seen:
+                continue
+            seen.add(posting.external_id)
+            if posting.external_id in known:
+                counters[KNOWN] += 1
+                continue
             # Enrich before storing so dedupe sees the contact email.
             if not posting.description:
                 source = sources.get(posting.source)
@@ -192,6 +208,11 @@ async def poll_profile(profile) -> dict[str, int]:
 def _mark_polled(profile_id: int, error: str | None) -> None:
     with db.db() as con:
         db.mark_profile_polled(con, profile_id, error)
+
+
+def _known_ids(source: str, external_ids: list[str]) -> set[str]:
+    with db.db() as con:
+        return db.known_external_ids(con, source, external_ids)
 
 
 async def poll_all_profiles(force: bool = False) -> dict[str, int]:
