@@ -9,10 +9,10 @@ import datetime
 import pathlib
 import sqlite3
 
-from jobdeck import constants, dates
+from jobdeck import constants, dates, scoreweights
 from jobdeck.dedupe import norm
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 # Legacy table, exactly as the previous tracker created it.
 BEWERBUNGEN_SQL = """
@@ -724,6 +724,24 @@ def _attempt_records_for_existing_applications(con: sqlite3.Connection) -> None:
     )
 
 
+def _ensure_subscore_columns(con: sqlite3.Connection) -> None:
+    """The five dimensions behind a match score (schema v18, additive).
+
+    Nullable and without a default, deliberately: a row scored before v18
+    holds the model's single number and no dimensions, and every reader treats
+    NULL as "not rated on this axis" — the list keeps ordering on
+    `match_score`, and a weight change re-derives only the rows that hold the
+    five. The model's "the posting states nothing about this" arrives as NULL
+    too; -1 is never stored. The column names come from `scoreweights`, the
+    one place the dimensions are defined, so a dimension added there reaches
+    the table with the prompt and the screen.
+    """
+    existing = [row[1] for row in con.execute("PRAGMA table_info(jobs)")]
+    for col in scoreweights.COLUMNS:
+        if col not in existing:
+            con.execute(f"ALTER TABLE jobs ADD COLUMN {col} INTEGER")
+
+
 def migrate(con: sqlite3.Connection) -> None:
     """Bring the database to the current schema. Safe to run repeatedly."""
     version = con.execute("PRAGMA user_version").fetchone()[0]
@@ -740,6 +758,7 @@ def migrate(con: sqlite3.Connection) -> None:
     _ensure_draft_columns(con)
     _ensure_email_log_columns(con)
     _ensure_claim_fact_columns(con)
+    _ensure_subscore_columns(con)
     _backfill_published_on(con)
     _backfill_application_documents(con)
     if version < 14:
