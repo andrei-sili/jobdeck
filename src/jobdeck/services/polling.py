@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import httpx
 
 from jobdeck import attempts, db
+from jobdeck.ai import scoring as ai_scoring
 from jobdeck.dedupe import find_duplicate_job
 from jobdeck.sources import get_sources
 from jobdeck.sources.base import JobPosting, SearchQuery, SourceUnavailable
@@ -151,10 +152,18 @@ async def poll_profile(profile) -> dict[str, int]:
     sources = get_sources(http_client())
     wanted = [name for name in json.loads(profile["sources"] or "[]")
               if name in sources]
+    # The rule the scorer's knock-out reads, asked at the source: a board that
+    # can withhold what would be zeroed anyway is not asked for it. Derived
+    # from the candidate's OWN requirements, global and per profile, by the
+    # same function the scorer uses — never assumed by an adapter.
+    criteria = ai_scoring.criteria_from_profile(
+        profile, await asyncio.to_thread(_global_hard_tags))
     query = SearchQuery(
         keywords=profile["keywords"],
         location=profile["location"] or "",
         radius_km=profile["radius_km"] or 0,
+        exclude_training=criteria is not None
+        and ai_scoring.forbids_training(criteria.hard_tags),
     )
     results = await asyncio.gather(
         *(sources[name].search(query) for name in wanted),
@@ -213,6 +222,11 @@ def _mark_polled(profile_id: int, error: str | None) -> None:
 def _known_ids(source: str, external_ids: list[str]) -> set[str]:
     with db.db() as con:
         return db.known_external_ids(con, source, external_ids)
+
+
+def _global_hard_tags() -> str:
+    with db.db() as con:
+        return db.get_setting(con, ai_scoring.GLOBAL_HARD_TAGS_SETTING, "")
 
 
 async def poll_all_profiles(force: bool = False) -> dict[str, int]:

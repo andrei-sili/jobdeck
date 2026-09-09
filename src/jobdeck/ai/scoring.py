@@ -140,9 +140,19 @@ def trainee_offer_detected(hard_tags, title: str, description: str) -> bool:
     and "Berufsschule". Reporting the fact is a judgement; drawing the
     conclusion is a rule, and a rule belongs in code.
     """
-    if not any(_TRAINEE_RULE.search(tag) for tag in hard_tags):
+    if not forbids_training(hard_tags):
         return False
     return bool(_TRAINEE_OFFER.search(f"{title or ''}\n{description or ''}"))
+
+
+def forbids_training(hard_tags) -> bool:
+    """Whether the user's own hard requirements rule out training positions.
+
+    The one reading of `_TRAINEE_RULE`, shared by the scorer's backstop above
+    and by discovery: a board that can withhold apprenticeships is asked to
+    only because the user wrote that rule, never on the adapter's account.
+    """
+    return any(_TRAINEE_RULE.search(tag) for tag in hard_tags)
 
 
 @dataclass(frozen=True)
@@ -159,6 +169,11 @@ def split_tags(raw: str) -> tuple[str, ...]:
     return tuple(
         tag.strip() for tag in re.split(r"[,\n]", raw or "") if tag.strip()
     )
+
+
+# Requirements that hold for EVERY search, kept in app_settings. Named here so
+# the scorer and discovery read one key.
+GLOBAL_HARD_TAGS_SETTING = "global_hard_tags"
 
 
 def criteria_from_profile(

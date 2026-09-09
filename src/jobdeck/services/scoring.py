@@ -73,7 +73,7 @@ def _profiles_by_id():
 def _global_hard_tags() -> str:
     """Requirements that hold for every search, whatever the profile."""
     with db.db() as con:
-        return db.get_setting(con, "global_hard_tags", "")
+        return db.get_setting(con, ai_scoring.GLOBAL_HARD_TAGS_SETTING, "")
 
 
 def _persist_score(

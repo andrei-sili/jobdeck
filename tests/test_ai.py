@@ -566,3 +566,13 @@ def test_the_backstop_spares_a_posting_that_requires_a_finished_apprenticeship()
         "Erfolgreich abgeschlossene Ausbildung oder Studium im IT-Bereich",
     ):
         assert not scoring.trainee_offer_detected(tags, "Entwickler (m/w/d)", body), body
+
+
+def test_forbids_training_reads_only_the_candidates_own_rules():
+    """Shared by the scorer's backstop and by discovery, so both answer the
+    same question about the same words."""
+    assert scoring.forbids_training(("Festanstellung im Junior-Einstieg",))
+    assert scoring.forbids_training(("Kein duales Studium",))
+    assert scoring.forbids_training(("Gehalt ab 40000", "keine Umschulung"))
+    assert not scoring.forbids_training(("Gehalt ab 40000", "Remote"))
+    assert not scoring.forbids_training(())

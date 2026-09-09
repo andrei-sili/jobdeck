@@ -31,6 +31,13 @@ class SearchQuery:
     keywords: str
     location: str = ""  # empty = nationwide
     radius_km: int = 0  # 0 = no radius restriction
+    # The candidate's own hard requirements rule out training positions — an
+    # apprenticeship, a dual study place, an internship, a working-student job.
+    # An adapter whose board can withhold those asks it to; one whose board
+    # cannot ignores the flag, and the scorer's knock-out stands behind both.
+    # Never set on an adapter's own account: a school-leaver running this app
+    # wants exactly those postings.
+    exclude_training: bool = False
 
 
 @dataclass

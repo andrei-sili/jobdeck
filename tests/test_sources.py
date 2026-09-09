@@ -784,3 +784,126 @@ def test_posting_facts_speak_only_the_jobs_table_vocabulary():
     from jobdeck import db as db_module
     facts = arbeitsagentur.posting_facts({"gehaltsspanneVon": 1})
     assert set(facts) <= set(db_module.JOB_FACT_COLUMNS)
+
+
+def _ba_page(page: int, size: int, total: int | None = None) -> dict:
+    items = [
+        {"referenznummer": f"10001-{page}-{i}",
+         "stellenangebotsTitel": f"Entwickler {page}-{i}", "firma": "Firma"}
+        for i in range(size)
+    ]
+    payload = {"ergebnisliste": items}
+    if total is not None:
+        payload["maxErgebnisse"] = total
+    return payload
+
+
+async def test_arbeitsagentur_reads_every_page_and_asks_for_employment_only():
+    """The v6 search does not order by date — probed 2026-09-09, postings
+    published that day sat on pages 2 and 3 — so one page an hour missed about
+    half of every query's matches. And the board can withhold training offers
+    itself, which is where a knock-out is cheapest."""
+    seen = []
+
+    def handler(request):
+        page = int(request.url.params["page"])
+        seen.append((page, request.url.params.get("angebotsart")))
+        size = arbeitsagentur.PAGE_SIZE if page < 3 else 7
+        return httpx.Response(200, json=_ba_page(page, size, total=207))
+
+    source = ArbeitsagenturSource(make_client(handler))
+    postings = await source.search(
+        SearchQuery(keywords="Python", exclude_training=True))
+    assert [page for page, _ in seen] == [1, 2, 3]
+    assert {kind for _, kind in seen} == {str(arbeitsagentur.OFFER_KIND_EMPLOYMENT)}
+    assert len(postings) == 207
+    assert len({p.external_id for p in postings}) == 207
+
+
+async def test_arbeitsagentur_asks_for_every_offer_kind_unless_the_rules_say_otherwise():
+    """Never on the adapter's own account: a school-leaver wants exactly the
+    apprenticeships this user's rules exclude."""
+    params = []
+
+    def handler(request):
+        params.append(dict(request.url.params))
+        return httpx.Response(200, json=BA_SEARCH)
+
+    source = ArbeitsagenturSource(make_client(handler))
+    await source.search(SearchQuery(keywords="Python"))
+    assert "angebotsart" not in params[0]
+    assert params[0]["page"] == "1"
+
+
+async def test_arbeitsagentur_stops_at_the_total_the_board_states():
+    seen = []
+
+    def handler(request):
+        page = int(request.url.params["page"])
+        seen.append(page)
+        return httpx.Response(
+            200, json=_ba_page(page, arbeitsagentur.PAGE_SIZE, total=200))
+
+    source = ArbeitsagenturSource(make_client(handler))
+    postings = await source.search(SearchQuery(keywords="Python"))
+    assert seen == [1, 2]  # two full pages cover a total of 200
+    assert len(postings) == 200
+
+
+async def test_arbeitsagentur_stops_at_the_page_cap_when_no_total_is_stated():
+    seen = []
+
+    def handler(request):
+        page = int(request.url.params["page"])
+        seen.append(page)
+        return httpx.Response(200, json=_ba_page(page, arbeitsagentur.PAGE_SIZE))
+
+    source = ArbeitsagenturSource(make_client(handler))
+    await source.search(SearchQuery(keywords="Python"))
+    assert seen == list(range(1, arbeitsagentur.MAX_SEARCH_PAGES + 1))
+
+
+@pytest.mark.parametrize("total", ["viele", None, 2.5])
+async def test_arbeitsagentur_an_unreadable_total_is_not_a_reason_to_stop(total):
+    seen = []
+
+    def handler(request):
+        page = int(request.url.params["page"])
+        seen.append(page)
+        size = arbeitsagentur.PAGE_SIZE if page == 1 else 3
+        payload = _ba_page(page, size)
+        payload["maxErgebnisse"] = total
+        return httpx.Response(200, json=payload)
+
+    source = ArbeitsagenturSource(make_client(handler))
+    postings = await source.search(SearchQuery(keywords="Python"))
+    assert seen == [1, 2]  # the short page stopped it, not the total
+    assert len(postings) == 103
+
+
+async def test_arbeitsagentur_a_later_page_failing_keeps_the_pages_before_it():
+    def handler(request):
+        page = int(request.url.params["page"])
+        if page == 2:
+            return httpx.Response(503)
+        return httpx.Response(
+            200, json=_ba_page(page, arbeitsagentur.PAGE_SIZE, total=250))
+
+    source = ArbeitsagenturSource(make_client(handler))
+    postings = await source.search(SearchQuery(keywords="Python"))
+    assert len(postings) == 100  # page 1 kept, no exception
+
+
+async def test_arbeitsagentur_a_posting_listed_on_two_pages_is_one_posting():
+    def handler(request):
+        page = int(request.url.params["page"])
+        payload = _ba_page(page, arbeitsagentur.PAGE_SIZE if page == 1 else 2)
+        if page == 2:
+            # a relevance order shifted between the two reads
+            payload["ergebnisliste"][0]["referenznummer"] = "10001-1-0"
+        return httpx.Response(200, json=payload)
+
+    source = ArbeitsagenturSource(make_client(handler))
+    postings = await source.search(SearchQuery(keywords="Python"))
+    assert len(postings) == 101
+    assert len({p.external_id for p in postings}) == 101

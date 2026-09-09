@@ -392,3 +392,40 @@ def test_a_filed_away_posting_still_counts_as_known(con):
     db.set_job_status(con, job_id, "skipped")
     con.commit()
     assert db.known_external_ids(con, "stub", ["d1"]) == {"d1"}
+
+
+class RecordingSource(StubSource):
+    """A source that writes down the query it was given."""
+
+    def __init__(self, name):
+        super().__init__(name)
+        self.queries = []
+
+    async def search(self, query: SearchQuery):
+        self.queries.append(query)
+        return []
+
+
+async def test_the_board_is_asked_to_withhold_training_only_when_his_rules_do(
+        con, profile, monkeypatch):
+    """Derived from the candidate's own hard requirements — global or per
+    profile — by the function the scorer reads, never assumed by an adapter."""
+    stub = RecordingSource("stub")
+    monkeypatch.setattr(polling, "get_sources", lambda client: {"stub": stub})
+
+    await polling.poll_profile(profile)
+    db.set_setting(con, "global_hard_tags",
+                   "Festanstellung — ein Ausbildungsplatz verletzt das")
+    con.commit()
+    await polling.poll_profile(profile)
+    db.set_setting(con, "global_hard_tags", "Gehalt ab 40000")
+    values = {"name": "Test", "keywords": "python", "sources": ["stub"]}
+    db.update_profile(con, profile["id"], {**values, "hard_tags": "Kein Praktikum"})
+    con.commit()
+    await polling.poll_profile(db.list_profiles(con)[0])
+    db.update_profile(con, profile["id"], {**values, "hard_tags": ""})
+    con.commit()
+    await polling.poll_profile(db.list_profiles(con)[0])
+
+    assert [q.exclude_training for q in stub.queries] == [False, True, True, False]
+    assert stub.queries[0].keywords == "python"
