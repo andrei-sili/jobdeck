@@ -17,6 +17,7 @@ from jobdeck import (
     db,
     freshness,
     identity,
+    scoreweights,
 )
 from jobdeck.ai import scoring
 from jobdeck.ai.drafting import clean_title
@@ -1313,6 +1314,20 @@ def reader_facts(job: dict) -> list[tuple[str, str]]:
     ]
 
 
+def _subscore_line(job: dict) -> str:
+    """'Rolle 80 · Stack 60 · Niveau 100 · Sprache 100 · Rahmen —': the five
+    dimensions the number above it was combined from, in the order and with
+    the labels Einstellungen weighs them under. Empty for a row scored before
+    the dimensions existed, so the pane states nothing it does not hold."""
+    if all(job.get(dim.column) is None for dim in scoreweights.DIMENSIONS):
+        return ""
+    return " · ".join(
+        f"{dim.label} "
+        f"{'—' if job.get(dim.column) is None else job[dim.column]}"
+        for dim in scoreweights.DIMENSIONS
+    )
+
+
 def _verdict_heading(job: dict) -> str:
     """'WARUM 92' — and 'WARUM 92 · durch das Alter noch 72' when age moved it.
 
@@ -1585,6 +1600,9 @@ def _row_fingerprint(job: dict) -> tuple:
         "opened_at", "bookmarked_at", "temp_agency", "salary_from", "salary_to",
         "salary_period", "description", "refnr", "location", "published_on",
         "fetched_at", "source", "company_count", "company_key",
+        # The five dimensions the pane prints under the verdict: a weight
+        # change re-derives them in place and has to reach an open reader.
+        *scoreweights.COLUMNS,
         # Anything the reading pane STATES has to be in here or it is never
         # redrawn: he presses the button, the write lands, and the pane goes on
         # offering the press he already made until he clicks another row.
@@ -2270,9 +2288,16 @@ async def jobs_page():
                 # out what the machine thought. And a score stored with an
                 # empty reason renders neither arm, so hanging the caveat off
                 # the reason paragraph would drop it exactly there.
-                if job["match_reason"] or caveat or job["match_score"] is None:
+                dimensions = _subscore_line(job)
+                if (job["match_reason"] or caveat or dimensions
+                        or job["match_score"] is None):
                     with ui.element("div").classes("jd-why"):
                         ui.label(_verdict_heading(job)).classes("jd-meta")
+                        if dimensions:
+                            # What the number is made of, before the prose
+                            # that argues it: the weights in Einstellungen
+                            # act on exactly these five.
+                            ui.label(dimensions).classes("jd-meta mt-1")
                         if job["match_reason"]:
                             ui.label(job["match_reason"]).classes("text-sm mt-1")
                         elif job["match_score"] is None:
