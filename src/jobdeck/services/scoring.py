@@ -21,7 +21,7 @@ from jobdeck.ai import scoring as ai_scoring
 
 log = logging.getLogger(__name__)
 
-BATCH_LIMIT = 20  # per run; the interval job drains any backlog over time
+BATCH_LIMIT = 40  # per run, every 10 min; a full-page poll can bring hundreds
 MAX_ATTEMPTS = 3  # per process — an app restart re-enables given-up jobs
 
 _lock = asyncio.Lock()

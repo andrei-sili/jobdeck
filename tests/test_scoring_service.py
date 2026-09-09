@@ -310,14 +310,25 @@ async def test_retry_cap_gives_up_and_stops_starving_the_batch(
 
 
 def test_list_unscored_jobs_orders_limits_and_excludes(con):
-    ids = [_insert_job(con, f"j{i}") for i in range(3)]
+    """Newest publication first, then the latest arrival; a posting without a
+    date waits behind every dated one."""
+    old = _insert_job(con, "old", published_at="2026-08-01")
+    newest = _insert_job(con, "newest", published_at="2026-09-09")
+    undated = _insert_job(con, "undated")
+    recent = _insert_job(con, "recent", published_at="2026-09-08")
     con.commit()
 
-    rows = db.list_unscored_jobs(con, limit=2)
-    assert [r["id"] for r in rows] == ids[:2]  # oldest first, capped
+    rows = db.list_unscored_jobs(con, limit=3)
+    assert [r["id"] for r in rows] == [newest, recent, old]  # capped
 
-    rows = db.list_unscored_jobs(con, limit=2, exclude_ids={ids[0]})
-    assert [r["id"] for r in rows] == ids[1:3]
+    rows = db.list_unscored_jobs(con, limit=3, exclude_ids={newest})
+    assert [r["id"] for r in rows] == [recent, old, undated]
+
+
+def test_the_batch_is_forty_a_run():
+    """Every ten minutes, so a poll that brings four hundred fresh postings
+    is scored within two hours rather than three and a half."""
+    assert scoring.BATCH_LIMIT == 40
 
 
 # ---------------------------------------------------------------------------

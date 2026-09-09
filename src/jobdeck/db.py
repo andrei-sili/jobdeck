@@ -1615,10 +1615,14 @@ def set_job_contacts(con: sqlite3.Connection, job_id: int, contacts: dict) -> No
 def list_unscored_jobs(
     con: sqlite3.Connection, limit: int = 20, exclude_ids: set[int] | None = None
 ) -> list[sqlite3.Row]:
-    """New postings that have not been match-scored yet, oldest first.
+    """New postings that have not been match-scored yet, newest first.
 
-    exclude_ids skips postings the caller has given up on (retry cap), so
-    they cannot starve the batch."""
+    Newest by publication date, then in order of arrival: a poll that reads
+    every page of a board brings a few hundred postings at once, and the ones
+    worth reading first are the ones published last — a posting with no date
+    waits behind every dated one, and among equals the earlier arrival keeps
+    its turn. exclude_ids skips postings the caller has given up on (retry
+    cap), so they cannot starve the batch."""
     excluded = sorted(exclude_ids or ())
     extra = f" AND id NOT IN ({','.join('?' * len(excluded))})" if excluded else ""
     return con.execute(
@@ -1627,7 +1631,7 @@ def list_unscored_jobs(
         # a paid call: the batch would go on spending haiku on every advert a
         # nineteen-branch staffing agency posts, for ever.
         f" AND NOT {HIDDEN_FIRM_SQL}"
-        + extra + " ORDER BY id LIMIT ?",
+        + extra + " ORDER BY COALESCE(published_on, '') DESC, id LIMIT ?",
         (*excluded, limit),
     ).fetchall()
 
