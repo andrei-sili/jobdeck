@@ -170,7 +170,7 @@ def test_score_job_parses_clamps_and_strips(monkeypatch):
         )
 
     monkeypatch.setattr(llm, "complete", fake_complete)
-    score, reason, contacts, usage = scoring.score_job(_job(), "profile text")
+    score, reason, contacts, usage, _ = scoring.score_job(_job(), "profile text")
     assert score == 100
     assert reason == "Sehr guter Fit."
     assert contacts == {}  # nothing extracted → nothing to persist
@@ -188,7 +188,7 @@ def test_score_job_returns_only_nonempty_contacts(monkeypatch):
         )
 
     monkeypatch.setattr(llm, "complete", fake_complete)
-    _, _, contacts, _ = scoring.score_job(_job(), "profile text")
+    _, _, contacts, _, _ = scoring.score_job(_job(), "profile text")
     assert contacts == {
         "ansprechpartner": "Frau Weber", "contact_strasse": "Weg 1",
         "contact_plz_ort": "52062 Aachen", "refnr": "K-17",
@@ -333,7 +333,7 @@ def test_score_zero_is_reserved_for_hard_tag_violations(monkeypatch):
     monkeypatch.setattr(llm, "complete",
                         complete_returning(92, violation=True,
                                            requirement="Festanstellung"))
-    score, reason, _, _ = scoring.score_job(_job(), "profile", hard)
+    score, reason, _, _, _ = scoring.score_job(_job(), "profile", hard)
     assert score == 0
     assert "Festanstellung" in reason  # the inbox shows only the reason
 
@@ -384,7 +384,7 @@ def test_a_posting_requiring_a_held_qualification_is_never_hidden(monkeypatch):
         )
     monkeypatch.setattr(llm, "complete", fake_complete)
     hard = scoring.MatchCriteria(hard_tags=("Festanstellung im Junior-Einstieg",))
-    score, reason, _, _ = scoring.score_job(_job(), "profile", hard)
+    score, reason, _, _, _ = scoring.score_job(_job(), "profile", hard)
     assert score == 79
     assert reason == "Abgeschlossene Ausbildung gefordert."  # unprefixed
 
@@ -398,7 +398,7 @@ def test_the_violated_requirement_is_not_duplicated_into_the_reason(monkeypatch)
         )
     monkeypatch.setattr(llm, "complete", fake_complete)
     hard = scoring.MatchCriteria(hard_tags=("Festanstellung",))
-    score, reason, _, _ = scoring.score_job(_job(), "profile", hard)
+    score, reason, _, _, _ = scoring.score_job(_job(), "profile", hard)
     assert score == 0
     assert reason == "Festanstellung verletzt: Ausbildungsplatz."
 
@@ -576,3 +576,62 @@ def test_forbids_training_reads_only_the_candidates_own_rules():
     assert scoring.forbids_training(("Gehalt ab 40000", "keine Umschulung"))
     assert not scoring.forbids_training(("Gehalt ab 40000", "Remote"))
     assert not scoring.forbids_training(())
+def test_the_five_dimensions_are_parsed_bounded_and_unknown_becomes_none(monkeypatch):
+    def fake_complete(**kwargs):
+        return llm.LLMResult(
+            text='{"score": 70, "reason": "Ok.", "subscores": {"role": 80, '
+                 '"stack": 130, "level": -1, "language": 90, "conditions": 40}}',
+            model="m", input_tokens=1, output_tokens=1, cost_usd=0.0,
+        )
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    verdict = scoring.score_job(_job(), "profile")
+    assert verdict.score == 70
+    assert verdict.subscores == {"role": 80, "stack": 100, "level": None,
+                                 "language": 90, "conditions": 40}
+
+
+def test_a_response_without_dimensions_still_scores(monkeypatch):
+    """The shape every response had before the dimensions existed: the list
+    keeps the model's overall number for such a row."""
+    def fake_complete(**kwargs):
+        return llm.LLMResult(
+            text='{"score": 64, "reason": "Ok."}',
+            model="m", input_tokens=1, output_tokens=1, cost_usd=0.0,
+        )
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    verdict = scoring.score_job(_job(), "profile")
+    assert verdict.subscores == dict.fromkeys(scoring.scoreweights.KEYS)
+    assert scoring.combine(verdict.score, verdict.subscores,
+                           scoring.scoreweights.default_weights()) == 64
+
+
+def test_dimensions_that_are_not_an_object_are_an_unparseable_response(monkeypatch):
+    def fake_complete(**kwargs):
+        return llm.LLMResult(
+            text='{"score": 64, "reason": "Ok.", "subscores": "viele"}',
+            model="m", input_tokens=1, output_tokens=1, cost_usd=0.0,
+        )
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    with pytest.raises(llm.LLMError):
+        scoring.score_job(_job(), "profile")
+
+
+def test_combine_weighs_the_dimensions_and_keeps_the_knock_out():
+    weights = scoring.scoreweights.default_weights()
+    subs = {"role": 80, "stack": 60, "level": 100, "language": 100,
+            "conditions": 50}
+    assert scoring.combine(70, subs, weights) == 77  # not the model's 70
+    assert scoring.combine(0, subs, weights) == 0    # a violated rule stays 0
+    assert scoring.combine(70, dict.fromkeys(scoring.scoreweights.KEYS),
+                           weights) == 70
+
+
+def test_the_prompt_and_the_schema_name_every_dimension_from_one_definition():
+    for dim in scoring.scoreweights.DIMENSIONS:
+        assert f"  - {dim.key}: {dim.asks}" in scoring.SYSTEM_PROMPT
+    assert "-1 when the posting states NOTHING" in scoring.SYSTEM_PROMPT
+    assert "__SUBSCORE_RULES__" not in scoring.SYSTEM_PROMPT
+    subschema = scoring.SCORE_SCHEMA["properties"]["subscores"]
+    assert subschema["required"] == list(scoring.scoreweights.KEYS)
+    assert subschema["additionalProperties"] is False
+    assert "subscores" in scoring.SCORE_SCHEMA["required"]
