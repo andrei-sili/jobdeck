@@ -907,3 +907,31 @@ async def test_arbeitsagentur_a_posting_listed_on_two_pages_is_one_posting():
     postings = await source.search(SearchQuery(keywords="Python"))
     assert len(postings) == 101
     assert len({p.external_id for p in postings}) == 101
+
+
+@pytest.mark.parametrize("max_age_days, expected", [
+    (0, None), (-5, None),        # no threshold: no window
+    (1, 1), (3, 1), (6, 1),       # below the first honoured window: the smallest
+    (7, 7), (13, 7), (14, 14), (27, 14), (28, 28), (30, 28), (45, 28),
+    (3650, 28),
+])
+def test_the_publication_window_is_one_the_api_honours(max_age_days, expected):
+    """Probed 2026-09-09: 0, 1, 7, 14 and 28 filter; every other value is
+    silently ignored and returns the whole history."""
+    assert arbeitsagentur.published_within(max_age_days) == expected
+
+
+async def test_arbeitsagentur_asks_for_the_publication_window_that_fits_the_threshold():
+    params = []
+
+    def handler(request):
+        params.append(dict(request.url.params))
+        return httpx.Response(200, json=BA_SEARCH)
+
+    source = ArbeitsagenturSource(make_client(handler))
+    await source.search(SearchQuery(keywords="Python", max_age_days=30))
+    assert params[-1]["veroeffentlichtseit"] == "28"
+    await source.search(SearchQuery(keywords="Python", max_age_days=10))
+    assert params[-1]["veroeffentlichtseit"] == "7"
+    await source.search(SearchQuery(keywords="Python"))
+    assert "veroeffentlichtseit" not in params[-1]

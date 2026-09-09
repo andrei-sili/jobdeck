@@ -42,6 +42,14 @@ MAX_SEARCH_PAGES = 20
 # query's result count, and of a 300-posting sample of value 4, 80 sat in the
 # corpus with score 0 — knock-outs the board would have withheld for free.
 OFFER_KIND_EMPLOYMENT = 1
+# `veroeffentlichtseit`: days since publication. The API honours exactly the
+# windows its own site offers and silently ignores any other value — probed
+# 2026-09-09: 0, 1, 7, 14 and 28 filter, 2..6, 8..13, 15..27 and 29+ return
+# the unfiltered total. It measures the FIRST publication, so a re-published
+# old advert falls outside the window; the hourly cadence makes that a
+# first-poll question only. Without any window the first poll of a query
+# brings the board's whole history: 910 unknown postings for one keyword.
+PUBLISHED_WITHIN_DAYS = (1, 7, 14, 28)
 # Search moved to v6 (v4 and v5 answer 404); the DETAIL route did not move and
 # has no v6 — every v6/v5/v2/v1 jobdetails path answers 403 as an unregistered
 # route. Verified live 2026-08-05, and it matches bundesAPI/jobsuche-api.
@@ -245,6 +253,15 @@ def posting_facts(payload) -> dict:
     }
 
 
+def published_within(max_age_days: int) -> int | None:
+    """The largest window the API honours that fits inside `max_age_days`;
+    the smallest one for a threshold below it, None for no threshold."""
+    if max_age_days <= 0:
+        return None
+    fitting = [days for days in PUBLISHED_WITHIN_DAYS if days <= max_age_days]
+    return max(fitting) if fitting else min(PUBLISHED_WITHIN_DAYS)
+
+
 def _all_listed(payload: dict, page: int) -> bool:
     """Whether `page` reached the total the envelope states, when it states
     one. A missing or unreadable total is not a reason to stop: a short page
@@ -275,6 +292,9 @@ class ArbeitsagenturSource:
                 params["umkreis"] = query.radius_km
         if query.exclude_training:
             params["angebotsart"] = OFFER_KIND_EMPLOYMENT
+        window = published_within(query.max_age_days)
+        if window is not None:
+            params["veroeffentlichtseit"] = window
         postings: list[JobPosting] = []
         seen: set[str] = set()
         for page in range(1, MAX_SEARCH_PAGES + 1):

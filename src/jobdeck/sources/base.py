@@ -38,6 +38,14 @@ class SearchQuery:
     # Never set on an adapter's own account: a school-leaver running this app
     # wants exactly those postings.
     exclude_training: bool = False
+    # Postings older than this many days leave the working list for a pile of
+    # their own, so discovery need not bring them in the first place: a board
+    # that can be asked for a publication window is asked for the one that
+    # fits inside this. 0 means no limit. An hourly poll sees every posting
+    # within an hour of publication anyway; the window only decides what the
+    # FIRST poll of a query drags in, which without it is the board's whole
+    # history of matches.
+    max_age_days: int = 0
 
 
 @dataclass

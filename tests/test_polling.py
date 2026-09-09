@@ -429,3 +429,21 @@ async def test_the_board_is_asked_to_withhold_training_only_when_his_rules_do(
 
     assert [q.exclude_training for q in stub.queries] == [False, True, True, False]
     assert stub.queries[0].keywords == "python"
+
+
+async def test_the_query_carries_the_age_threshold_the_list_files_under_alt(
+        con, profile, monkeypatch):
+    """The same number, parsed by the same rule, so a posting discovery would
+    bring in is one the list would show as current."""
+    stub = RecordingSource("stub")
+    monkeypatch.setattr(polling, "get_sources", lambda client: {"stub": stub})
+
+    await polling.poll_profile(profile)
+    db.set_setting(con, "stale_age_days", "10")
+    con.commit()
+    await polling.poll_profile(profile)
+    db.set_setting(con, "stale_age_days", "not a number")
+    con.commit()
+    await polling.poll_profile(profile)
+
+    assert [q.max_age_days for q in stub.queries] == [45, 10, 45]

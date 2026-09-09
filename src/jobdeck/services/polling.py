@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from jobdeck import attempts, db
+from jobdeck import attempts, db, freshness
 from jobdeck.ai import scoring as ai_scoring
 from jobdeck.dedupe import find_duplicate_job
 from jobdeck.sources import get_sources
@@ -156,14 +156,18 @@ async def poll_profile(profile) -> dict[str, int]:
     # can withhold what would be zeroed anyway is not asked for it. Derived
     # from the candidate's OWN requirements, global and per profile, by the
     # same function the scorer uses — never assumed by an adapter.
-    criteria = ai_scoring.criteria_from_profile(
-        profile, await asyncio.to_thread(_global_hard_tags))
+    global_tags, max_age_days = await asyncio.to_thread(_discovery_settings)
+    criteria = ai_scoring.criteria_from_profile(profile, global_tags)
     query = SearchQuery(
         keywords=profile["keywords"],
         location=profile["location"] or "",
         radius_km=profile["radius_km"] or 0,
         exclude_training=criteria is not None
         and ai_scoring.forbids_training(criteria.hard_tags),
+        # The age past which the list files a posting under "Alt", parsed by
+        # the rule the list uses: discovery asks the board for the same
+        # window, so the first poll of a query does not drag in its history.
+        max_age_days=max_age_days,
     )
     results = await asyncio.gather(
         *(sources[name].search(query) for name in wanted),
@@ -224,9 +228,14 @@ def _known_ids(source: str, external_ids: list[str]) -> set[str]:
         return db.known_external_ids(con, source, external_ids)
 
 
-def _global_hard_tags() -> str:
+def _discovery_settings() -> tuple[str, int]:
+    """The two settings a query is shaped by: the global hard requirements
+    and the age threshold, read on one connection."""
     with db.db() as con:
-        return db.get_setting(con, ai_scoring.GLOBAL_HARD_TAGS_SETTING, "")
+        return (
+            db.get_setting(con, ai_scoring.GLOBAL_HARD_TAGS_SETTING, ""),
+            freshness.stale_age_setting(db.get_setting(con, "stale_age_days", "")),
+        )
 
 
 async def poll_all_profiles(force: bool = False) -> dict[str, int]:
