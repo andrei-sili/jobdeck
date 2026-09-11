@@ -1123,6 +1123,25 @@ async def test_a_form_application_is_reachable_by_the_company_name(inbox, con):
     assert db.get_bewerbung(con, bewerbung_id)["status"] == "Gesendet"
 
 
+async def test_a_vendor_domain_reaches_the_tenant_not_a_lookalike(inbox, con):
+    """Measured on his mailbox 2026-09-11: five Personio-sent mails from four
+    different employers, two of them rejections, were proposed for one
+    application whose name shares its first six letters — a six-character prefix of
+    `personio` matched it. The employer of a vendor's mail is in the tenant
+    slot, and the look-alike must not be touched."""
+    lookalike = _form_application(con, firma="Personalfrage Beispiel GmbH")
+    tenant = _form_application(con, firma="Beispiel GmbH")
+    inbox.add("m-1", from_header="Recruiting Team <beispiel-jobs@m.personio.de>",
+              body=ABSAGE_BODY)
+
+    await service.ingest_replies()
+
+    row = _inbound_rows(con)[0]
+    assert (row["bewerbung_id"], row["matched_by"]) == (tenant, "name")
+    assert row["bewerbung_id"] != lookalike
+    assert row["needs_review"] == 1
+
+
 async def test_two_applications_at_one_name_are_refused_not_guessed(inbox, con):
     """Ambiguity is exactly where a guess costs more than the question."""
     _form_application(con)

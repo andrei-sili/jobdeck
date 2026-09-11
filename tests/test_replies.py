@@ -733,10 +733,63 @@ def test_a_rejection_that_also_mentions_an_event_stays_a_rejection():
     ("Firma Beispiel GmbH", "hr@ganz-anders.de", False),
     # too short to compare: "IT GmbH" would otherwise reach italia.de
     ("IT GmbH", "kontakt@italia.de", False),
+    # A vendor's domain names the vendor, never the employer. The first
+    # version compared six-character prefixes and read `personio` as an
+    # employer sharing its first six letters and `experteer` the same way
+    # — sixteen of his real mails, two of them rejections, proposed
+    # for applications they had nothing to do with.
+    ("Personalfrage Beispiel GmbH", "beispiel-jobs@m.personio.de", False),
+    ("Expertise Systeme GmbH", "news@email.experteer.de", False),
+    # ...and on an employer's own domain the names compare whole: a shared
+    # first six letters are not a shared name
+    ("Expertise Systeme GmbH", "hr@expertenrunde.de", False),
+    # the employer in the vendor's tenant slot, in the shapes vendors use
+    ("Beispiel GmbH", "beispiel-jobs@m.personio.de", True),
+    ("Beispiel AG", "candidate-ry1@beispiel.dvinci-easy.com", True),
+    ("Beispiel GmbH", "jobs@beispiel.beesite.de", True),
+    ("Musterhaus Softwarebau GmbH",
+     "e+ab12cd34ef56gh.musterhaussoftwarebaugmbh@recruitee-inbox.com", True),
+    # routing words alone name nobody
+    ("Beispiel GmbH", "no-reply@hire.eu.lever.co", False),
+    # a label of four letters may abbreviate a long name; three may not
+    ("FBRZ – Firma Beispiel Rechenwerk", "bewerbung@fbrz.de", True),
+    ("Amtconnect GmbH", "post@amt.de", False),
+    # a short key compares by equality only
+    ("AQE GmbH", "jobs@aqe.de", True),
+    ("AQE GmbH", "jobs@aqeon.de", False),
 ])
 def test_the_company_name_arm_recognises_only_its_own_sender(
         firma, sender, expected):
     assert replies.company_in_sender(firma, f"HR <{sender}>", sender) is expected
+
+
+def test_a_short_name_is_read_by_equality_where_a_prefix_would_be_noise():
+    """"ZWEI GmbH" has four letters: too short to be a prefix of anything
+    safely — 28 of his 172 open applications are this short — which the first
+    version answered by refusing them all, so a reply to any of them was
+    unmatchable by construction. Equality is exact evidence; a prefix is not."""
+    assert replies.company_in_sender(
+        "ZWEI GmbH", "Recruiting Team <zwei-jobs@m.personio.de>",
+        "zwei-jobs@m.personio.de")
+    assert replies.company_in_sender(
+        "Kern", "Kern <no-reply@ashbyhq.com>", "no-reply@ashbyhq.com")
+    assert not replies.company_in_sender(
+        "Kern", "Kernberg Recruiting <hr@kernberg.de>", "hr@kernberg.de")
+
+
+@pytest.mark.parametrize("addr, tokens", [
+    ("beispiel-jobs@m.personio.de", ["beispiel"]),
+    ("e+9x8y7z6w5v4u3t2s.musterdaten@recruitee-inbox.com", ["musterdaten"]),
+    ("candidate-1@beispiel.dvinci-easy.com", ["beispiel"]),
+    ("no-reply-mueller-schulze@concludis.de", ["mueller", "schulze"]),
+    ("no-reply@hire.eu.lever.co", []),
+    ("notifications@app.softgarden.io", []),
+])
+def test_the_tenant_slot_of_a_vendor_sender_is_read_without_its_noise(
+        addr, tokens):
+    """Routing words, sub-domain labels and tracking ids are the vendor's;
+    what is left names the employer."""
+    assert replies.sender_tenant_tokens(addr) == tokens
 
 
 def test_the_display_name_carries_the_employer_when_the_domain_cannot():

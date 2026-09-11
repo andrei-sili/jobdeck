@@ -99,6 +99,11 @@ _BOARDS = (
     ("XING", ("xing.com",)),
     ("LinkedIn", ("linkedin.com",)),
     ("AMS", ("jobs.ams.at",)),
+    # boards that write to him (newsletters, recommendations) — a board's
+    # domain must never be read as an employer's, see is_vendor_domain
+    ("Experteer", ("experteer.de", "experteer.com")),
+    ("hokify", ("hokify.com", "hokify.at")),
+    ("Empfehlungsbund", ("empfehlungsbund.de",)),
 )
 _BOARD_RULES = tuple(
     (label,
@@ -230,6 +235,66 @@ def is_board_domain(domain: str) -> bool:
         return True
     return any(domain == host or domain.endswith("." + host)
                for host in _BOARD_HOSTS)
+
+
+# Where ATS vendors SEND from, keyed by the vendor label used in _ATS so a new
+# page entry cannot be added without its mail domains (a test pins the two
+# in step). A vendor's page host and its mail host are rarely the same
+# registrable name: Personio's pages live at jobs.personio.de and its mail
+# arrives from m.personio.de; Workday's pages at myworkdayjobs.com, its mail
+# from myworkday.com; Recruitee's pages at recruitee.com, its mail from
+# recruitee-inbox.com, recruitee-mail.com and recruitee-mailbox.com. The
+# page registry above therefore cannot answer "is this SENDER a vendor?",
+# and the company-name arm of reply matching has to ask exactly that.
+_ATS_MAIL = {
+    "Personio": ("personio.de", "personio.com"),
+    "softgarden": ("softgarden.de", "softgarden.io"),
+    "concludis": ("concludis.de",),
+    "rexx systems": ("rexx-systems.com",),
+    "d.vinci": ("dvinci-hr.com", "dvinci-easy.com"),
+    "onlyfy": ("onlyfy.jobs", "jobbase.io", "prescreen.io"),
+    "HR4YOU": ("hr4you.org",),
+    "BeeSite": ("beesite.de",),
+    "Kenjo": ("kenjo.io",),
+    "JOIN": ("join.com",),
+    "BITE": ("bewerbermanagement.net",),
+    "EmmySoft": ("emmysoft.com",),
+    "Workday": ("myworkdayjobs.com", "myworkday.com"),
+    "SuccessFactors": ("successfactors.eu", "successfactors.com"),
+    "Greenhouse": ("greenhouse.io", "greenhouse-mail.io"),
+    "Lever": ("lever.co",),
+    "SmartRecruiters": ("smartrecruiters.com",),
+    "Ashby": ("ashbyhq.com",),
+    "Recruitee": ("recruitee.com", "recruitee-inbox.com",
+                  "recruitee-mail.com", "recruitee-mailbox.com"),
+    "Teamtailor": ("teamtailor.com",),
+    "iCIMS": ("icims.com",),
+    "Taleo": ("taleo.net",),
+    "Workable": ("workable.com", "workablemail.com"),
+}
+# Vendors met only as senders so far — no career-page host is known for them,
+# so they have no _ATS entry to hang off.
+_MAIL_ONLY_VENDORS = ("hrworks.de",)
+_VENDOR_MAIL_DOMAINS = frozenset(
+    d for domains in _ATS_MAIL.values() for d in domains
+) | frozenset(_MAIL_ONLY_VENDORS)
+
+
+def is_vendor_domain(domain: str) -> bool:
+    """Does a job board or an ATS vendor own this registrable domain?
+
+    Asked by the company-name arm of reply matching BEFORE it compares an
+    employer's name with a sender's domain: a vendor's domain names the
+    vendor and never the employer writing through it — the employer sits in
+    the display name or in the vendor's tenant slot instead. Measured on his
+    real mailbox 2026-09-11: every Personio-hosted employer wrote from
+    m.personio.de, and a prefix comparison read that domain as an employer
+    whose name shares its first six letters.
+    """
+    domain = (domain or "").strip().lower().rstrip(".")
+    if not domain:
+        return False
+    return domain in _VENDOR_MAIL_DOMAINS or is_board_domain(domain)
 
 
 # Vendor fingerprints for PAGE CONTENT (form-action / script-src / iframe-src

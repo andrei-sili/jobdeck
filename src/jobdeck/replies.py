@@ -20,6 +20,7 @@ import email.utils
 import re
 from dataclasses import dataclass
 
+from jobdeck import apply_channel
 from jobdeck.contact_resolve import registrable_domain
 from jobdeck.sources.base import strip_html
 
@@ -663,8 +664,29 @@ _LEGAL_FORM = re.compile(
     r"co|company|holding|group|gruppe|deutschland|international|"
     r"and|und|the)\b", re.IGNORECASE)
 _NOT_ALNUM = re.compile(r"[^a-z0-9]+")
-# Below this, a prefix comparison is noise: "IT GmbH" would match "italia.de".
+# A prefix comparison needs room on both sides. Below six characters a
+# company key is an abbreviation ("IT GmbH") that any domain can start with;
+# below four a domain label is one ("gov", "www", "hr") that any company can
+# start with. Equality has no such floor: "aqe" is "aqe".
 _MIN_COMPANY_KEY = 6
+_MIN_DOMAIN_STEM = 4
+_MIN_EXACT_KEY = 3
+# What a vendor's sender slot carries BESIDE the employer: the routing words
+# of "beispiel-jobs@m.personio.de" or "no-reply-beispiel@concludis.de" and the
+# labels a mail host adds below its registrable name. Dropped before the
+# tenant is read.
+_SENDER_NOISE = frozenset({
+    "no", "noreply", "reply", "donotreply", "do", "not", "mail", "mailer",
+    "mailing", "email", "app", "msg", "hire", "eu", "www", "m", "e",
+    "jobs", "job", "karriere", "career", "careers", "bewerbung",
+    "bewerbungen", "recruiting", "recruitment", "recruit", "hr", "personal",
+    "personalabteilung", "info", "team", "people", "notifications",
+    "notification", "news", "newsletter", "hello", "hi", "kontakt",
+    "contact", "talent", "talents", "apply", "application", "applications",
+    "candidate", "candidates", "bewerber", "service", "support", "system",
+    "office", "welcome", "auto", "communication", "de", "com",
+})
+_TRACKING_ID = re.compile(r"\d")
 
 
 def company_key(name: str) -> str:
@@ -680,34 +702,93 @@ def company_key(name: str) -> str:
     return _NOT_ALNUM.sub("", _LEGAL_FORM.sub(" ", lowered))
 
 
+def sender_tenant_tokens(from_addr: str, registrable: str = "") -> list[str]:
+    """The pieces of a vendor sender that can name the employer.
+
+    A vendor writes from its own domain and puts the tenant somewhere in
+    front of it: "beispiel-jobs@m.personio.de" yields "beispiel",
+    "e+9x8y7z6w5v4u3t2s.musterdaten@recruitee-inbox.com" yields "musterdaten",
+    "candidate-1@beispiel.dvinci-easy.com" yields "beispiel". Routing words
+    and tracking ids are dropped; what remains is keyed like a company name.
+    """
+    local, _, host = from_addr.strip().lower().rpartition("@")
+    registrable = registrable or registrable_domain(host) or ""
+    sub = ""
+    if registrable and host.endswith(registrable):
+        sub = host[: -len(registrable)].rstrip(".")
+    tokens = []
+    for piece in re.split(r"[^a-z0-9]+", f"{local} {sub}"):
+        if len(piece) < _MIN_EXACT_KEY or piece in _SENDER_NOISE:
+            continue
+        if len(piece) >= _MIN_COMPANY_KEY and _TRACKING_ID.search(piece):
+            continue
+        key = company_key(piece)
+        if key:
+            tokens.append(key)
+    return tokens
+
+
 def company_in_sender(firma: str, from_header: str, from_addr: str) -> bool:
     """Whether the sender plausibly IS this company.
 
     The weakest arm in the cascade by design, and the only one that reaches a
     form application — those carry no address at all, so nothing else can
-    ever tie a reply to them. Measured against the applications whose true
-    address IS known: the company name is recognisable in the sender's domain
-    in 30 of 35. It therefore proposes and never writes: `matched_by` is not
-    in the tier that may set a status.
+    ever tie a reply to them. It therefore proposes and never writes:
+    `matched_by` is not in the tier that may set a status.
+
+    Three readings of the sender, in order:
+
+    * an employer's own domain — its first label against the company key,
+      whole against whole. The first version truncated both to six
+      characters, and on his real mailbox that read the ATS domain
+      `personio` as an employer whose name shares its first six letters and the
+      board `experteer` as one the same way: sixteen mails, two
+      of them rejections, proposed for applications they had nothing to do
+      with. A short label may still abbreviate a long name ("fbrz" for a
+      Rechenwerk), so a label of four or more is accepted as a prefix;
+      below that ("gov") it is not.
+    * a vendor's tenant slot — a job board's or ATS vendor's domain names
+      the vendor, never the employer (`apply_channel.is_vendor_domain`), so
+      the employer is read from the local part and the sub-domain instead:
+      "beispiel-jobs@m.personio.de", "candidate-1@beispiel.dvinci-easy.com".
+    * the display name — "Personalabteilung Beispiel GmbH <no-reply@ats.com>".
+
+    A short company key ("AQE", "X24") compares by equality only: too short
+    to be a prefix of anything safely, and equality is exact evidence. The
+    first version refused every such name outright, which left 28 of his
+    172 open applications unreachable by construction. Measured on his 102
+    applications with a known address, this recognises 81 by name where
+    the truncating version recognised 74.
 
     Freemail is refused through matchable_domain — half the small employers
     in a mailbox write from gmx.de, and the domain says nothing about who
     they are.
     """
     key = company_key(firma)
-    if len(key) < _MIN_COMPANY_KEY:
+    if len(key) < _MIN_EXACT_KEY:
         return False
+    long_key = len(key) >= _MIN_COMPANY_KEY
     domain = matchable_domain(from_addr)
-    if domain:
+    if domain and apply_channel.is_vendor_domain(domain):
+        for token in sender_tenant_tokens(from_addr, domain):
+            if token == key:
+                return True
+            if (long_key and len(token) >= _MIN_COMPANY_KEY
+                    and (key.startswith(token) or token.startswith(key))):
+                return True
+    elif domain:
         stem = company_key(domain.split(".")[0])
-        if stem and (key.startswith(stem[:_MIN_COMPANY_KEY])
-                     or stem.startswith(key[:_MIN_COMPANY_KEY])):
+        if stem and stem == key:
             return True
-    # "Personalabteilung Beispiel GmbH <no-reply@ats-vendor.com>" — an ATS
-    # sends from its own domain and puts the employer in the display name.
+        if long_key and stem and (
+                (len(stem) >= _MIN_DOMAIN_STEM and key.startswith(stem))
+                or stem.startswith(key)):
+            return True
     display = from_header.rpartition("<")[0] or from_header
     display_key = company_key(display)
-    return len(display_key) >= _MIN_COMPANY_KEY and key in display_key
+    if not display_key:
+        return False
+    return display_key == key or (long_key and key in display_key)
 
 
 def refnr_in_text(refnr: str, subject: str, body: str) -> bool:
