@@ -3177,7 +3177,8 @@ def count_name_proposals(con: sqlite3.Connection, since: str) -> int:
 
 
 def forget_name_proposals(
-    con: sqlite3.Connection, since: str, message_ids: list[str]
+    con: sqlite3.Connection, since: str, message_ids: list[str],
+    *, everything_listed: bool = False,
 ) -> list[str]:
     """Drop the name proposals AMONG these Gmail ids, so the pass that listed
     them reads them afresh.
@@ -3185,9 +3186,26 @@ def forget_name_proposals(
     Only among the listed ids, never the whole window: a full sync lists the
     newest messages up to its bound, and a row dropped for a message the sync
     does not list would be gone for good — body, classification and link,
-    with no message. Returns the Gmail ids dropped, so the caller can take
-    their labels down."""
+    with no message. The one exception is a listing that was NOT cut off
+    (`everything_listed`): then every message of the window is in it, and a
+    qualifying row whose message is not is a row for mail that has left the
+    mailbox — trashed, spam, deleted — which nothing can ever read again.
+    Such a row is dropped too: its proposal answers to nothing. Returns the
+    Gmail ids dropped, so the caller can take their labels down."""
     dropped: list[str] = []
+    if everything_listed:
+        rows = con.execute(
+            "SELECT e.id, e.gmail_message_id" + _NAME_PROPOSALS_SQL,
+            (EMAIL_INBOUND, since),
+        ).fetchall()
+        if rows:
+            row_ids = [int(row["id"]) for row in rows]
+            con.execute(
+                f"DELETE FROM email_log WHERE id IN ({','.join('?' * len(row_ids))})",
+                row_ids,
+            )
+            dropped.extend(str(row["gmail_message_id"]) for row in rows)
+        return dropped
     ids = [message_id for message_id in message_ids if message_id]
     for offset in range(0, len(ids), 400):
         chunk = ids[offset:offset + 400]

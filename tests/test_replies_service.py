@@ -1350,7 +1350,8 @@ async def test_a_rescan_keeps_the_name_rows_he_judged_or_that_wrote_a_status(
     assert untouched not in ids
 
 
-async def test_a_rescan_drops_only_what_the_next_sync_lists(inbox, con):
+async def test_a_cut_off_listing_drops_only_what_it_lists(
+        inbox, con, monkeypatch):
     """A full sync lists the newest messages of the window up to its bound.
     A row dropped for a message it does not list would be gone for good —
     body, classification and link — with no message. So the rescan only
@@ -1358,7 +1359,8 @@ async def test_a_rescan_drops_only_what_the_next_sync_lists(inbox, con):
     bewerbung_id = _form_application(con)
     listed = _name_proposal(con, bewerbung_id, "m-listed")
     unlisted = _name_proposal(con, bewerbung_id, "m-unlisted")
-    inbox.add("m-listed", body=ABSAGE_BODY)     # the sync lists only this one
+    inbox.add("m-listed", body=ABSAGE_BODY)
+    monkeypatch.setattr(service, "LIST_AHEAD", 1)   # the bound cut it off
 
     result = service.rescan()
     assert result["rejudged"] == 2               # what qualifies: a bound
@@ -1369,6 +1371,27 @@ async def test_a_rescan_drops_only_what_the_next_sync_lists(inbox, con):
     assert unlisted in ids and listed not in ids
     assert db.get_email_log(con, unlisted)["bewerbung_id"] == bewerbung_id
     assert db.get_setting(con, service.REJUDGE_KEY, "") == ""
+
+
+async def test_a_complete_listing_drops_the_proposals_for_mail_that_is_gone(
+        inbox, con):
+    """A listing the bound did not cut off holds every message of the
+    window. A qualifying row it does not hold is for mail that has left the
+    mailbox — on his data 18 of 59 were newsletters he had since deleted —
+    and nothing can ever read it again; it goes too, and no label call is
+    made for a message that is not there."""
+    bewerbung_id = _form_application(con)
+    listed = _name_proposal(con, bewerbung_id, "m-listed")
+    gone = _name_proposal(con, bewerbung_id, "m-gone")
+    inbox.add("m-listed", body=ABSAGE_BODY)      # one message, bound 500
+
+    service.rescan()
+    await service.ingest_replies()
+
+    ids = {row["id"] for row in _inbound_rows(con)}
+    assert gone not in ids and listed not in ids
+    labelled = {call[0] for call in inbox.label_calls}
+    assert "m-listed" in labelled and "m-gone" not in labelled
 
 
 async def test_a_rescan_keeps_a_name_row_outside_the_window(inbox, con):

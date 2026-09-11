@@ -153,13 +153,32 @@ def _ingest() -> dict:
             # The re-judge a rescan recorded, done here on purpose: only a
             # row whose message THIS listing holds is dropped, right before
             # it is read again, so nothing is dropped and never re-read.
-            dropped = db.forget_name_proposals(con, pending, message_ids)
+            # A listing the bound did not cut off holds every message of
+            # the window; a qualifying row it does not hold is for mail
+            # that has left the mailbox, and goes too — measured on his
+            # data: 18 of 59 were newsletters he had since deleted.
+            complete = len(message_ids) < LIST_AHEAD
+            floor = pending
+            if complete:
+                # The listing's cutoff is later than the rescan's by the
+                # time between them; a row in that sliver was never listed
+                # and must not be read as gone.
+                days = _lookback_days(con)
+                floor = max(pending, (datetime.datetime.now()
+                                      - datetime.timedelta(days=days)
+                                      ).isoformat(timespec="seconds"))
+            dropped = db.forget_name_proposals(
+                con, floor, message_ids, everything_listed=complete)
             db.set_setting(con, REJUDGE_KEY, "")
         known = db.known_gmail_ids(con, message_ids)
     if dropped:
-        _strip_labels(dropped)
-        log.info("reply ingestion: %d name proposal(s) dropped for re-judging",
-                 len(dropped))
+        listed = set(message_ids)
+        # only what is still in the mailbox can carry a label
+        _strip_labels([message_id for message_id in dropped
+                       if message_id in listed])
+        log.info("reply ingestion: %d name proposal(s) dropped for "
+                 "re-judging, %d of them for mail no longer in the mailbox",
+                 len(dropped), sum(1 for m in dropped if m not in listed))
     # OLDEST first. `messages.list` answers newest-first, and processing in
     # that order lets an older mail be read after a newer one — which, with
     # statuses, means an old invitation landing on top of a fresh rejection.
