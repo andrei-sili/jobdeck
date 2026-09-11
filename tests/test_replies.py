@@ -795,6 +795,30 @@ def test_leading_keys_are_the_forms_a_domain_label_can_take():
     assert replies.leading_keys("AB Beispiel") == {"abbeispiel"}
 
 
+def test_a_sender_is_read_once_and_a_label_has_a_bound():
+    """A sender is compared with every application he has — the reading is
+    computed once per message, and each part is capped: a 24 KB hyphenated
+    label held the ingestion pass for minutes per message before."""
+    import time
+    label = "ab-" * 8000 + "ab"
+    addr = f"x@{label}.de"
+    reading = replies.read_sender(f"HR <{addr}>", addr)
+    assert reading.label_keys == frozenset()          # longer than a DNS label
+    assert len(replies.leading_keys("-".join("abcdefghijkl"))) <= 8
+    assert len(replies.sender_tenant_tokens(
+        "-".join(f"tok{i}" for i in range(40)) + "@m.personio.de")) <= 8
+    started = time.perf_counter()
+    for _ in range(50):
+        replies.company_in_sender("Beispiel GmbH", f"HR <{addr}>", addr)
+    replies.read_sender("x" * 1_000_000 + f" <{addr}>", addr)
+    assert time.perf_counter() - started < 1.0
+    # and reading once is the same answer as reading per call
+    header = "Beispiel GmbH <beispiel-jobs@m.personio.de>"
+    once = replies.read_sender(header, "beispiel-jobs@m.personio.de")
+    assert replies.company_matches("Beispiel GmbH", once)
+    assert not replies.company_matches("Andere Firma GmbH", once)
+
+
 @pytest.mark.parametrize("addr, tokens", [
     ("beispiel-jobs@m.personio.de", ["beispiel"]),
     ("e+9x8y7z6w5v4u3t2s.musterdaten@recruitee-inbox.com", ["musterdaten"]),

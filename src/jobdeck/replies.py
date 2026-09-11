@@ -670,6 +670,19 @@ _NOT_ALNUM = re.compile(r"[^a-z0-9]+")
 # too much to count.
 _MIN_COMPANY_KEY = 6
 _MIN_EXACT_KEY = 3
+# Bounds on what one sender may cost. A sender is compared with every
+# application he has, so its reading is computed once per message (see
+# `read_sender`) and each part is capped: a DNS label longer than 63 octets
+# cannot resolve and is nobody's domain; more than eight leading words or
+# tenant tokens name nothing a company name would; a display name past a
+# couple of hundred characters is not a company name either. Without these,
+# one crafted From header — a 24 KB hyphenated label, measured — held the
+# ingestion pass for minutes per message.
+_MAX_LABEL_OCTETS = 63
+_MAX_LEADING_WORDS = 8
+_MAX_TENANT_TOKENS = 8
+_MAX_LOCAL_CHARS = 256
+_MAX_DISPLAY_CHARS = 200
 # What a vendor's sender slot carries BESIDE the employer: the routing words
 # of "beispiel-jobs@m.personio.de" or "no-reply-beispiel@concludis.de" and the
 # labels a mail host adds below its registrable name. Dropped before the
@@ -721,6 +734,7 @@ def leading_keys(name: str, *, noise: bool = False) -> frozenset[str]:
     words = [w for w in _WORD_SPLIT.split(name or "") if w]
     if noise:
         words = [w for w in words if w.lower() not in _SENDER_NOISE]
+    words = words[:_MAX_LEADING_WORDS]
     keys = set()
     for count in range(1, len(words) + 1):
         key = company_key(" ".join(words[:count]))
@@ -739,11 +753,12 @@ def sender_tenant_tokens(from_addr: str, registrable: str = "") -> list[str]:
     and tracking ids are dropped; what remains is keyed like a company name.
     """
     local, _, host = from_addr.strip().lower().rpartition("@")
+    local = local[:_MAX_LOCAL_CHARS]
     registrable = registrable or registrable_domain(host) or ""
     sub = ""
     if registrable and host.endswith(registrable):
-        sub = host[: -len(registrable)].rstrip(".")
-    tokens = []
+        sub = host[: -len(registrable)].rstrip(".")[:_MAX_LOCAL_CHARS]
+    tokens: list[str] = []
     for piece in re.split(r"[^a-z0-9]+", f"{local} {sub}"):
         if len(piece) < _MIN_EXACT_KEY or piece in _SENDER_NOISE:
             continue
@@ -752,7 +767,55 @@ def sender_tenant_tokens(from_addr: str, registrable: str = "") -> list[str]:
         key = company_key(piece)
         if key:
             tokens.append(key)
+        if len(tokens) >= _MAX_TENANT_TOKENS:
+            break
     return tokens
+
+
+@dataclass(frozen=True)
+class SenderReading:
+    """What `company_in_sender` learns about a sender that does not depend
+    on the application it is compared with — computed once per message and
+    then compared with every application he has (`company_matches`)."""
+    tenant_tokens: tuple[str, ...]   # on a vendor domain: the tenant slot
+    label_keys: frozenset[str]       # on an employer domain: its label's runs
+    display_key: str
+
+
+def read_sender(from_header: str, from_addr: str) -> SenderReading:
+    """Read a sender once. See `company_in_sender` for what each part means."""
+    domain = matchable_domain(from_addr)
+    tenant_tokens: tuple[str, ...] = ()
+    label_keys: frozenset[str] = frozenset()
+    if domain and apply_channel.is_vendor_domain(domain):
+        tenant_tokens = tuple(sender_tenant_tokens(from_addr, domain))
+    elif domain:
+        label = domain.split(".")[0]
+        if len(label) <= _MAX_LABEL_OCTETS:
+            label_keys = leading_keys(label, noise=True)
+    display = from_header.rpartition("<")[0] or from_header
+    return SenderReading(tenant_tokens, label_keys,
+                         company_key(display[:_MAX_DISPLAY_CHARS]))
+
+
+def company_matches(firma: str, reading: SenderReading) -> bool:
+    """Whether a sender, read once, plausibly IS this company."""
+    key = company_key(firma)
+    if len(key) < _MIN_EXACT_KEY:
+        return False
+    long_key = len(key) >= _MIN_COMPANY_KEY
+    for token in reading.tenant_tokens:
+        if token == key:
+            return True
+        if (long_key and len(token) >= _MIN_COMPANY_KEY
+                and (key.startswith(token) or token.startswith(key))):
+            return True
+    if reading.label_keys and leading_keys(firma) & reading.label_keys:
+        return True
+    if not reading.display_key:
+        return False
+    return reading.display_key == key or (long_key
+                                          and key in reading.display_key)
 
 
 def company_in_sender(firma: str, from_header: str, from_addr: str) -> bool:
@@ -793,27 +856,7 @@ def company_in_sender(firma: str, from_header: str, from_addr: str) -> bool:
     in a mailbox write from gmx.de, and the domain says nothing about who
     they are.
     """
-    key = company_key(firma)
-    if len(key) < _MIN_EXACT_KEY:
-        return False
-    long_key = len(key) >= _MIN_COMPANY_KEY
-    domain = matchable_domain(from_addr)
-    if domain and apply_channel.is_vendor_domain(domain):
-        for token in sender_tenant_tokens(from_addr, domain):
-            if token == key:
-                return True
-            if (long_key and len(token) >= _MIN_COMPANY_KEY
-                    and (key.startswith(token) or token.startswith(key))):
-                return True
-    elif domain:
-        label = domain.split(".")[0]
-        if leading_keys(firma) & leading_keys(label, noise=True):
-            return True
-    display = from_header.rpartition("<")[0] or from_header
-    display_key = company_key(display)
-    if not display_key:
-        return False
-    return display_key == key or (long_key and key in display_key)
+    return company_matches(firma, read_sender(from_header, from_addr))
 
 
 def refnr_in_text(refnr: str, subject: str, body: str) -> bool:

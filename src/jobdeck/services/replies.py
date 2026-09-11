@@ -416,10 +416,12 @@ def _name_match(con, meta: dict, from_addr: str) -> dict | None:
     where a guess would be worse than the question.
     """
     from_header = str(meta["headers"].get("from", ""))
+    # Read once, compare with every application: the sender-side work is
+    # bounded and paid a single time, not once per row.
+    reading = replies.read_sender(from_header, from_addr)
     rows = db.bewerbungen_for_name_match(con)
     hits = [row for row in rows
-            if replies.company_in_sender(str(row["firma"] or ""),
-                                         from_header, from_addr)]
+            if replies.company_matches(str(row["firma"] or ""), reading)]
     if not hits:
         return None
     # An employer writes about the application that is still open; a settled
