@@ -751,9 +751,16 @@ def test_a_rejection_that_also_mentions_an_event_stays_a_rejection():
      "e+ab12cd34ef56gh.musterhaussoftwarebaugmbh@recruitee-inbox.com", True),
     # routing words alone name nobody
     ("Beispiel GmbH", "no-reply@hire.eu.lever.co", False),
-    # a label of four letters may abbreviate a long name; three may not
+    # a domain label must equal a leading run of the name's WORDS: the real
+    # abbreviations do, a prefix of the letters does not
     ("FBRZ – Firma Beispiel Rechenwerk", "bewerbung@fbrz.de", True),
+    ("BIL Beispiel Institut für Lebensmittel e.V.", "bewerbung@bil-ev.de", True),
+    ("Beispiel Institut für Software", "hr@beispiel-software.de", True),
+    ("Beispiel GmbH", "hr@jobs-beispiel.de", True),
     ("Amtconnect GmbH", "post@amt.de", False),
+    ("Musterpace AG", "info@muster.eu", False),
+    # two letters are a prefix of too much to be evidence
+    ("AB Beispiel GmbH", "kontakt@ab.de", False),
     # a short key compares by equality only
     ("AQE GmbH", "jobs@aqe.de", True),
     ("AQE GmbH", "jobs@aqeon.de", False),
@@ -775,6 +782,17 @@ def test_a_short_name_is_read_by_equality_where_a_prefix_would_be_noise():
         "Kern", "Kern <no-reply@ashbyhq.com>", "no-reply@ashbyhq.com")
     assert not replies.company_in_sender(
         "Kern", "Kernberg Recruiting <hr@kernberg.de>", "hr@kernberg.de")
+
+
+def test_leading_keys_are_the_forms_a_domain_label_can_take():
+    assert replies.leading_keys("Beispiel Institut für Software") == {
+        "beispiel", "beispielinstitut", "beispielinstitutfuer",
+        "beispielinstitutfuersoftware"}
+    assert replies.leading_keys("Müller & Co. KG") == {"mueller"}
+    assert replies.leading_keys("beispiel-software") == {
+        "beispiel", "beispielsoftware"}
+    assert replies.leading_keys("jobs-beispiel", noise=True) == {"beispiel"}
+    assert replies.leading_keys("AB Beispiel") == {"abbeispiel"}
 
 
 @pytest.mark.parametrize("addr, tokens", [

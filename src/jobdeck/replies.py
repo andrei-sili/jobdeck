@@ -664,12 +664,11 @@ _LEGAL_FORM = re.compile(
     r"co|company|holding|group|gruppe|deutschland|international|"
     r"and|und|the)\b", re.IGNORECASE)
 _NOT_ALNUM = re.compile(r"[^a-z0-9]+")
-# A prefix comparison needs room on both sides. Below six characters a
-# company key is an abbreviation ("IT GmbH") that any domain can start with;
-# below four a domain label is one ("gov", "www", "hr") that any company can
-# start with. Equality has no such floor: "aqe" is "aqe".
+# A prefix comparison needs room: below six characters a company key is an
+# abbreviation ("IT GmbH") that any longer word can start with. Equality has
+# a lower floor — "aqe" is "aqe" — but two letters ("fi", "sd") collide with
+# too much to count.
 _MIN_COMPANY_KEY = 6
-_MIN_DOMAIN_STEM = 4
 _MIN_EXACT_KEY = 3
 # What a vendor's sender slot carries BESIDE the employer: the routing words
 # of "beispiel-jobs@m.personio.de" or "no-reply-beispiel@concludis.de" and the
@@ -700,6 +699,34 @@ def company_key(name: str) -> str:
     for umlaut, plain in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss")):
         lowered = lowered.replace(umlaut, plain)
     return _NOT_ALNUM.sub("", _LEGAL_FORM.sub(" ", lowered))
+
+
+_WORD_SPLIT = re.compile(r"[^0-9a-zA-Z\u00e4\u00f6\u00fc\u00c4\u00d6\u00dc\u00df]+")
+
+
+def leading_keys(name: str, *, noise: bool = False) -> frozenset[str]:
+    """The key of every leading run of a name's words.
+
+    "Beispiel Institut für Software" gives beispiel, beispielinstitut,
+    beispielinstitutfuer and beispielinstitutfuersoftware — the forms a
+    domain label can take when it abbreviates the name to its first words,
+    which is how German employers register: `fbrz.de`, `bil-ev.de`,
+    `beispiel-software.com`. A domain label is read the same way, its hyphens
+    as word breaks, so `beispiel-software` meets `Beispiel Institut für
+    Software` on the word they share. With `noise` the routing words a
+    domain sometimes leads with ("jobs-beispiel") are dropped first.
+    Runs shorter than three characters are left out: "fi" and "sd" are
+    prefixes of too much to be evidence of anything.
+    """
+    words = [w for w in _WORD_SPLIT.split(name or "") if w]
+    if noise:
+        words = [w for w in words if w.lower() not in _SENDER_NOISE]
+    keys = set()
+    for count in range(1, len(words) + 1):
+        key = company_key(" ".join(words[:count]))
+        if len(key) >= _MIN_EXACT_KEY:
+            keys.add(key)
+    return frozenset(keys)
 
 
 def sender_tenant_tokens(from_addr: str, registrable: str = "") -> list[str]:
@@ -738,15 +765,17 @@ def company_in_sender(firma: str, from_header: str, from_addr: str) -> bool:
 
     Three readings of the sender, in order:
 
-    * an employer's own domain — its first label against the company key,
-      whole against whole. The first version truncated both to six
-      characters, and on his real mailbox that read the ATS domain
-      `personio` as an employer whose name shares its first six letters and the
-      board `experteer` as one the same way: sixteen mails, two
-      of them rejections, proposed for applications they had nothing to do
-      with. A short label may still abbreviate a long name ("fbrz" for a
-      Rechenwerk), so a label of four or more is accepted as a prefix;
-      below that ("gov") it is not.
+    * an employer's own domain — its first label must equal a leading run
+      of the company's WORDS (`leading_keys`), never merely a prefix of its
+      letters. The first version truncated both sides to six characters,
+      and on his real mailbox that read the ATS domain `personio` as an
+      employer whose name shares its first six letters and the board `experteer`
+      as one the same way: sixteen mails, two of them
+      rejections, proposed for applications they had nothing to do with.
+      A whole-label prefix was tried next and still let an agency's
+      `muster` reach a company named "Musterpace". Word equality keeps the
+      real abbreviations (`fbrz`, `bil-ev`, `xyz-ag`, `beispiel-software`)
+      and refuses those.
     * a vendor's tenant slot — a job board's or ATS vendor's domain names
       the vendor, never the employer (`apply_channel.is_vendor_domain`), so
       the employer is read from the local part and the sub-domain instead:
@@ -757,7 +786,7 @@ def company_in_sender(firma: str, from_header: str, from_addr: str) -> bool:
     to be a prefix of anything safely, and equality is exact evidence. The
     first version refused every such name outright, which left 28 of his
     172 open applications unreachable by construction. Measured on his 102
-    applications with a known address, this recognises 81 by name where
+    applications with a known address, this recognises 86 by name where
     the truncating version recognised 74.
 
     Freemail is refused through matchable_domain — half the small employers
@@ -777,12 +806,8 @@ def company_in_sender(firma: str, from_header: str, from_addr: str) -> bool:
                     and (key.startswith(token) or token.startswith(key))):
                 return True
     elif domain:
-        stem = company_key(domain.split(".")[0])
-        if stem and stem == key:
-            return True
-        if long_key and stem and (
-                (len(stem) >= _MIN_DOMAIN_STEM and key.startswith(stem))
-                or stem.startswith(key)):
+        label = domain.split(".")[0]
+        if leading_keys(firma) & leading_keys(label, noise=True):
             return True
     display = from_header.rpartition("<")[0] or from_header
     display_key = company_key(display)
