@@ -1142,6 +1142,30 @@ async def test_a_vendor_domain_reaches_the_tenant_not_a_lookalike(inbox, con):
     assert row["needs_review"] == 1
 
 
+async def test_the_next_mail_of_a_proposed_thread_is_a_proposal_too(inbox, con):
+    """A name proposal must not become an automatic write one mail later:
+    the follow-up in the same thread matched by `thread` — the tier that
+    writes, without DMARC — and would have filed a rejection on whatever
+    application the resemblance had picked."""
+    bewerbung_id = _form_application(con)
+    inbox.add("m-1", from_header="Firma Beispiel GmbH <hr@irgendwo-anders.de>",
+              subject="Ihre Bewerbung", body="Vielen Dank, wir melden uns.",
+              thread="t-shared")
+    await service.ingest_replies()
+    first = _inbound_rows(con)[0]
+    assert (first["matched_by"], first["needs_review"]) == ("name", 1)
+
+    inbox.add("m-2", from_header="Firma Beispiel GmbH <hr@irgendwo-anders.de>",
+              subject="AW: Ihre Bewerbung", body=ABSAGE_BODY, thread="t-shared")
+    outcome = await service.ingest_replies()
+
+    second = _inbound_rows(con)[-1]
+    assert second["matched_by"] != "thread"
+    assert second["needs_review"] == 1
+    assert outcome["auto_status"] == 0
+    assert db.get_bewerbung(con, bewerbung_id)["status"] == "Gesendet"
+
+
 async def test_two_applications_at_one_name_are_refused_not_guessed(inbox, con):
     """Ambiguity is exactly where a guess costs more than the question."""
     _form_application(con)

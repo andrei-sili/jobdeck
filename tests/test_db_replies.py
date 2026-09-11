@@ -7,6 +7,8 @@ and that the shared signature SEES review actions that add no rows.
 
 import datetime
 
+import pytest
+
 from jobdeck import db
 
 
@@ -59,6 +61,36 @@ def test_a_test_send_can_never_match_a_reply_to_an_application(con):
                            "gmail_thread_id": "t-test"})
     con.commit()
     assert db.find_bewerbung_by_thread(con, "t-test") is None
+
+
+@pytest.mark.parametrize("arm", ["name", "domain"])
+def test_a_proposal_never_anchors_a_thread(con, arm):
+    """The name and domain arms only propose, but a thread match writes —
+    without DMARC. A mail placed on the wrong application by a resemblance
+    must not make the next mail of its thread write that application's
+    status. His verdict on the row is what turns it into an anchor."""
+    bewerbung_id = _bewerbung(con)
+    row_id = db.add_email_log(con, {
+        "direction": "inbound", "gmail_message_id": "m-p",
+        "gmail_thread_id": "t-p", "bewerbung_id": bewerbung_id,
+        "matched_by": arm, "needs_review": 1})
+    con.commit()
+    assert db.find_bewerbung_by_thread(con, "t-p") is None
+
+    db.classify_reply_row(con, row_id, "eingang", "reply_manual", 0)
+    con.commit()
+    assert db.find_bewerbung_by_thread(con, "t-p") == bewerbung_id
+
+
+@pytest.mark.parametrize("arm", ["thread", "address", "receipt", "receipt_known"])
+def test_a_row_a_writing_tier_matched_does_anchor(con, arm):
+    bewerbung_id = _bewerbung(con)
+    db.add_email_log(con, {
+        "direction": "inbound", "gmail_message_id": "m-a",
+        "gmail_thread_id": "t-a", "bewerbung_id": bewerbung_id,
+        "matched_by": arm, "needs_review": 1})
+    con.commit()
+    assert db.find_bewerbung_by_thread(con, "t-a") == bewerbung_id
 
 
 def test_thread_match_falls_back_to_the_draft_row(con):

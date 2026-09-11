@@ -3023,11 +3023,19 @@ def find_bewerbung_by_thread(con: sqlite3.Connection, thread_id: str) -> int | N
     # their eventual rejection was being dropped as unmatched.
     # `bewerbung_id IS NOT NULL` is what keeps rehearsal traffic out: a test
     # send never records one.
+    # A PROPOSAL does not anchor. The name and domain arms only ever propose
+    # — their tier may not write a status — but a thread match may, and
+    # without DMARC: so a mail put on the wrong application by a resemblance
+    # would have made the next mail of its thread write that application's
+    # status automatically. Only rows he judged, or that a writing tier
+    # matched, carry a thread.
     row = con.execute(
         "SELECT bewerbung_id FROM email_log "
         " WHERE gmail_thread_id=? AND bewerbung_id IS NOT NULL "
+        "   AND NOT (direction=? AND matched_by IN ('name', 'domain') "
+        "            AND COALESCE(classified_by, '') <> 'reply_manual') "
         " ORDER BY id DESC LIMIT 1",
-        (thread_id,),
+        (thread_id, EMAIL_INBOUND),
     ).fetchone()
     if row is not None:
         return int(row[0])
