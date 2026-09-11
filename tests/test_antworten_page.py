@@ -250,6 +250,12 @@ async def test_the_page_offers_to_re_read_what_it_skipped(
     await user.open("/antworten")
     await user.should_see("3 Nachrichten wurden keiner Bewerbung zugeordnet")
     await user.should_see("Alle Nachrichten neu prüfen")
+    # ...and says what the re-read does with a guess it made itself: the
+    # name arm's proposals he has not answered are re-placed, his verdicts
+    # are not
+    user.find("Alle Nachrichten neu prüfen").click()
+    await user.should_see("wartet, wird beim nächsten Lauf neu zugeordnet")
+    await user.should_see("Mails, die du schon beurteilt hast, bleiben")
 
 
 async def test_the_page_stays_quiet_when_nothing_was_skipped(

@@ -1123,6 +1123,49 @@ async def test_a_form_application_is_reachable_by_the_company_name(inbox, con):
     assert db.get_bewerbung(con, bewerbung_id)["status"] == "Gesendet"
 
 
+async def test_a_vendor_domain_reaches_the_tenant_not_a_lookalike(inbox, con):
+    """Measured on his mailbox 2026-09-11: five Personio-sent mails from four
+    different employers, two of them rejections, were proposed for one
+    application whose name shares its first six letters — a six-character prefix of
+    `personio` matched it. The employer of a vendor's mail is in the tenant
+    slot, and the look-alike must not be touched."""
+    lookalike = _form_application(con, firma="Personalfrage Beispiel GmbH")
+    tenant = _form_application(con, firma="Beispiel GmbH")
+    inbox.add("m-1", from_header="Recruiting Team <beispiel-jobs@m.personio.de>",
+              body=ABSAGE_BODY)
+
+    await service.ingest_replies()
+
+    row = _inbound_rows(con)[0]
+    assert (row["bewerbung_id"], row["matched_by"]) == (tenant, "name")
+    assert row["bewerbung_id"] != lookalike
+    assert row["needs_review"] == 1
+
+
+async def test_the_next_mail_of_a_proposed_thread_is_a_proposal_too(inbox, con):
+    """A name proposal must not become an automatic write one mail later:
+    the follow-up in the same thread matched by `thread` — the tier that
+    writes, without DMARC — and would have filed a rejection on whatever
+    application the resemblance had picked."""
+    bewerbung_id = _form_application(con)
+    inbox.add("m-1", from_header="Firma Beispiel GmbH <hr@irgendwo-anders.de>",
+              subject="Ihre Bewerbung", body="Vielen Dank, wir melden uns.",
+              thread="t-shared")
+    await service.ingest_replies()
+    first = _inbound_rows(con)[0]
+    assert (first["matched_by"], first["needs_review"]) == ("name", 1)
+
+    inbox.add("m-2", from_header="Firma Beispiel GmbH <hr@irgendwo-anders.de>",
+              subject="AW: Ihre Bewerbung", body=ABSAGE_BODY, thread="t-shared")
+    outcome = await service.ingest_replies()
+
+    second = _inbound_rows(con)[-1]
+    assert second["matched_by"] != "thread"
+    assert second["needs_review"] == 1
+    assert outcome["auto_status"] == 0
+    assert db.get_bewerbung(con, bewerbung_id)["status"] == "Gesendet"
+
+
 async def test_two_applications_at_one_name_are_refused_not_guessed(inbox, con):
     """Ambiguity is exactly where a guess costs more than the question."""
     _form_application(con)
@@ -1144,6 +1187,19 @@ async def test_the_name_arm_prefers_the_application_still_waiting(inbox, con):
     row = _inbound_rows(con)[0]
     assert row["bewerbung_id"] == open_one
     assert row["bewerbung_id"] != settled
+
+
+async def test_a_vendor_domain_never_domain_matches(inbox, con):
+    """A vendor address stored as an application's contact — a JOIN inbox,
+    a Personio no-reply — would make every mail from that vendor look like
+    that application's. The domain names the vendor, not the employer."""
+    _sent_application(con, email_addr="jobs@join.com")
+    inbox.add("m-1", from_header="Andere Firma <no-reply@msg.join.com>",
+              body=ABSAGE_BODY)
+
+    await service.ingest_replies()
+
+    assert _inbound_rows(con) == []
 
 
 async def test_an_exact_address_still_beats_the_company_name(inbox, con):
@@ -1223,6 +1279,220 @@ async def test_a_rescan_never_files_a_matched_message_twice(inbox, con):
     absagen = [h for h in db.list_status_history(con, bewerbung_id)
                if h["new_status"] == "Absage"]
     assert len(absagen) == 1, "the rejection was filed twice"
+
+
+def _name_proposal(con, bewerbung_id: int, message_id: str, *,
+                   days_ago: float = 1, classified_by: str = "rules",
+                   needs_review: int = 1) -> int:
+    """A row the company-name arm produced: proposed, never written."""
+    stamp = (datetime.datetime.now() - datetime.timedelta(days=days_ago)
+             ).isoformat(timespec="seconds")
+    row_id = db.add_email_log(con, {
+        "direction": "inbound", "gmail_message_id": message_id,
+        "from_addr": "beispiel-jobs@m.personio.de", "subject": "Absage",
+        "internal_date": stamp, "bewerbung_id": bewerbung_id,
+        "matched_by": "name", "classification": "absage",
+        "classified_by": classified_by, "needs_review": needs_review})
+    con.commit()
+    return row_id
+
+
+async def test_a_rescan_rejudges_the_name_proposals_he_has_not_answered(
+        inbox, con):
+    """The first name rule had put sixteen of his real mails on the wrong
+    application, and nothing could ever move them: a matched row is never
+    re-read. A proposal he has not answered carries nothing of his, so a
+    better rule is allowed to re-place it — here from the look-alike the old
+    prefix chose to the tenant the vendor's address actually names."""
+    lookalike = _form_application(con, firma="Personalfrage Beispiel GmbH")
+    tenant = _form_application(con, firma="Beispiel GmbH")
+    old_row = _name_proposal(con, lookalike, "m-1")
+    inbox.add("m-1", from_header="Recruiting Team <beispiel-jobs@m.personio.de>",
+              body=ABSAGE_BODY)
+
+    result = service.rescan()
+
+    assert result["rejudged"] == 1
+    # marked, not dropped: the pass that lists the message drops the row
+    # right before reading it again — the rescan itself touches neither the
+    # row nor Gmail
+    assert [row["id"] for row in _inbound_rows(con)] == [old_row]
+    assert db.get_setting(con, service.REJUDGE_KEY, "") != ""
+    assert inbox.label_calls == []
+
+    await service.ingest_replies()
+
+    rows = _inbound_rows(con)
+    assert len(rows) == 1 and rows[0]["id"] != old_row
+    assert (rows[0]["bewerbung_id"], rows[0]["matched_by"]) == (tenant, "name")
+    assert rows[0]["bewerbung_id"] != lookalike
+    # its old labels came down before the re-read — all of them, so a message
+    # the re-read then ignores cannot keep saying it is waiting for him
+    assert ("m-1", (), tuple(sorted(f"L_{n}" for n in service.ALL_LABELS))) \
+        in inbox.label_calls
+    assert db.get_setting(con, service.REJUDGE_KEY, "") == ""
+
+
+async def test_a_rescan_keeps_the_name_rows_he_judged_or_that_wrote_a_status(
+        inbox, con):
+    """His hand's work is exactly what a re-judge must never undo."""
+    bewerbung_id = _form_application(con)
+    judged = _name_proposal(con, bewerbung_id, "m-judged",
+                            classified_by="reply_manual", needs_review=0)
+    written = _name_proposal(con, bewerbung_id, "m-written")
+    service.resolve_review(written, "absage", force_status=True)
+    assert any(h["email_log_id"] == written
+               for h in db.list_status_history(con, bewerbung_id))
+    # a status that cites the row, however it was written — no automatic
+    # writer takes the name arm today, and the guard must not depend on that
+    other = _form_application(con, firma="Zweite Beispiel GmbH")
+    cited = _name_proposal(con, other, "m-cited")
+    db.set_status(con, other, "Absage", source="reply_auto",
+                  email_log_id=cited)
+    con.commit()
+    # his dismissal is a verdict too: "x" unlinks the row and settles it,
+    # but leaves `matched_by` saying name — and "Alle ablegen" does that to
+    # a whole view at once
+    dismissed = _name_proposal(con, bewerbung_id, "m-dismissed")
+    service.dismiss_review(dismissed)
+    reopened = _name_proposal(con, bewerbung_id, "m-reopened")
+    service.dismiss_review(reopened)
+    service.reopen_review(reopened)
+    untouched = _name_proposal(con, bewerbung_id, "m-untouched")
+    # every one of them is listed again by the next sync
+    for message_id in ("m-judged", "m-written", "m-cited", "m-dismissed",
+                       "m-reopened", "m-untouched"):
+        inbox.add(message_id, body=ABSAGE_BODY)
+
+    result = service.rescan()
+    assert result["rejudged"] == 1
+
+    await service.ingest_replies()
+
+    ids = {row["id"] for row in _inbound_rows(con)}
+    assert {judged, written, cited, dismissed, reopened} <= ids
+    assert untouched not in ids
+
+
+async def test_a_cut_off_listing_drops_only_what_it_lists(
+        inbox, con, monkeypatch):
+    """A full sync lists the newest messages of the window up to its bound.
+    A row dropped for a message it does not list would be gone for good —
+    body, classification and link — with no message. So the rescan only
+    marks, and the pass drops a row right before it reads the message."""
+    bewerbung_id = _form_application(con)
+    listed = _name_proposal(con, bewerbung_id, "m-listed")
+    unlisted = _name_proposal(con, bewerbung_id, "m-unlisted")
+    inbox.add("m-listed", body=ABSAGE_BODY)
+    monkeypatch.setattr(service, "LIST_AHEAD", 1)   # the bound cut it off
+
+    result = service.rescan()
+    assert result["rejudged"] == 2               # what qualifies: a bound
+
+    await service.ingest_replies()
+
+    ids = {row["id"] for row in _inbound_rows(con)}
+    assert unlisted in ids and listed not in ids
+    assert db.get_email_log(con, unlisted)["bewerbung_id"] == bewerbung_id
+    assert db.get_setting(con, service.REJUDGE_KEY, "") == ""
+
+
+async def test_a_complete_listing_drops_the_proposals_for_mail_that_is_gone(
+        inbox, con):
+    """A listing the bound did not cut off holds every message of the
+    window. A qualifying row it does not hold is for mail that has left the
+    mailbox — on his data 18 of 59 were newsletters he had since deleted —
+    and nothing can ever read it again; it goes too, and no label call is
+    made for a message that is not there."""
+    bewerbung_id = _form_application(con)
+    listed = _name_proposal(con, bewerbung_id, "m-listed")
+    gone = _name_proposal(con, bewerbung_id, "m-gone")
+    inbox.add("m-listed", body=ABSAGE_BODY)      # one message, bound 500
+
+    service.rescan()
+    await service.ingest_replies()
+
+    ids = {row["id"] for row in _inbound_rows(con)}
+    assert gone not in ids and listed not in ids
+    labelled = {call[0] for call in inbox.label_calls}
+    assert "m-listed" in labelled and "m-gone" not in labelled
+
+
+async def test_a_rescan_keeps_a_name_row_outside_the_window(inbox, con):
+    """The window is the one the sync lists; a row dated before it is not a
+    proposal the sync can re-judge."""
+    bewerbung_id = _form_application(con)
+    inside = _name_proposal(con, bewerbung_id, "m-inside", days_ago=10)
+    outside = _name_proposal(con, bewerbung_id, "m-outside", days_ago=100)
+    inbox.add("m-inside", body=ABSAGE_BODY)
+    inbox.add("m-outside", body=ABSAGE_BODY)
+
+    result = service.rescan(lookback_days=30)
+    assert result["rejudged"] == 1
+
+    await service.ingest_replies()
+
+    ids = {row["id"] for row in _inbound_rows(con)}
+    assert outside in ids and inside not in ids
+
+
+async def test_the_rejudge_window_is_the_one_he_just_chose(inbox, con):
+    """The dialog lets him widen the window in the same press; the re-judge
+    has to read the widened value, not the one stored before it."""
+    bewerbung_id = _form_application(con)
+    _name_proposal(con, bewerbung_id, "m-inside", days_ago=10)
+    _name_proposal(con, bewerbung_id, "m-outside", days_ago=100)
+
+    result = service.rescan(lookback_days=200)
+
+    assert result["rejudged"] == 2
+
+
+async def test_the_drain_after_a_rejudge_stays_a_full_sync(
+        inbox, con, monkeypatch):
+    """A pass is bounded; a re-judge with more messages than one pass reads
+    drains over several. When a pass in flight during the rescan had stored
+    its checkpoint, the passes after the first would have gone back to the
+    incremental read and never listed the rest."""
+    bewerbung_id = _form_application(con)
+    _name_proposal(con, bewerbung_id, "m-1")
+    _name_proposal(con, bewerbung_id, "m-2")
+    inbox.add("m-1", body=ABSAGE_BODY)
+    inbox.add("m-2", body=ABSAGE_BODY)
+    monkeypatch.setattr(service, "MAX_MESSAGES_PER_PASS", 1)
+    service.rescan()
+    with db.db() as write:
+        db.set_setting(write, service.HISTORY_KEY, "h-restored")
+    monkeypatch.setattr(
+        gmail, "history_added_messages",
+        lambda *a: pytest.fail("incremental read while draining a re-judge"))
+
+    first = await service.ingest_replies()
+    second = await service.ingest_replies()
+
+    assert (first["seen"], second["seen"]) == (1, 1)
+    assert {row["gmail_message_id"] for row in _inbound_rows(con)} \
+        == {"m-1", "m-2"}
+
+
+async def test_a_pending_rejudge_forces_a_full_sync(inbox, con, monkeypatch):
+    """A rescan racing a pass in flight can see that pass store its
+    checkpoint after the rescan cleared it. The mark outlives that and still
+    makes the next pass a full sync — otherwise the re-judge would wait for
+    the next rescan."""
+    bewerbung_id = _form_application(con)
+    _name_proposal(con, bewerbung_id, "m-1")
+    inbox.add("m-1", body=ABSAGE_BODY)
+    service.rescan()
+    with db.db() as write:
+        db.set_setting(write, service.HISTORY_KEY, "h-restored")
+    monkeypatch.setattr(
+        gmail, "history_added_messages",
+        lambda *a: pytest.fail("incremental read despite a pending re-judge"))
+
+    await service.ingest_replies()
+
+    assert db.get_setting(con, service.REJUDGE_KEY, "") == ""
 
 
 async def test_the_rescan_widens_the_window_the_next_full_sync_uses(inbox, con):

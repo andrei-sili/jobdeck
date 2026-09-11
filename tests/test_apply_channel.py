@@ -228,9 +228,49 @@ def test_a_dot_segment_cannot_smuggle_the_apply_route_past_the_screen(url):
     "xing.com",
     "linkedin.com",
     "persy.jobs",
+    "experteer.de",
+    "hokify.com",
+    "empfehlungsbund.de",
 ])
 def test_a_board_registrable_domain_is_recognised(domain):
     assert ac.is_board_domain(domain)
+
+
+# --------------------------------------------------------------------------
+# is_vendor_domain — a vendor's domain names the vendor, never the employer
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize("domain", [
+    "personio.de", "personio.com",     # pages at jobs.personio.de, mail from m.personio.de
+    "myworkday.com",                   # pages at myworkdayjobs.com
+    "recruitee-inbox.com", "recruitee-mail.com", "recruitee-mailbox.com",
+    "greenhouse-mail.io", "workablemail.com",
+    "join.com", "softgarden.io", "ashbyhq.com", "lever.co",
+    "hrworks.de",
+    "experteer.de", "jooble.org",      # a board counts the same way
+    "PERSONIO.DE", "personio.de.",
+])
+def test_a_vendor_sender_domain_is_recognised(domain):
+    assert ac.is_vendor_domain(domain)
+
+
+@pytest.mark.parametrize("domain", [
+    "firma-beispiel.de",
+    "personio-beispiel.de",   # an employer whose name merely contains a vendor's
+    "",
+    "de",
+])
+def test_an_employer_domain_is_not_a_vendor(domain):
+    assert not ac.is_vendor_domain(domain)
+
+
+def test_every_ats_vendor_has_its_sender_domains_listed():
+    """A page-host entry without its mail domains would let that vendor's
+    mail be read as an employer's again — the two registries move together."""
+    from jobdeck.contact_resolve import registrable_domain
+    assert set(ac._ATS_MAIL) == {vendor for vendor, _host, _path in ac._ATS}
+    for vendor, domains in ac._ATS_MAIL.items():
+        for domain in domains:
+            assert registrable_domain(domain) == domain, (vendor, domain)
 
 
 def test_the_registrable_name_above_a_board_host_counts_as_the_board():

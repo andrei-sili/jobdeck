@@ -733,10 +733,105 @@ def test_a_rejection_that_also_mentions_an_event_stays_a_rejection():
     ("Firma Beispiel GmbH", "hr@ganz-anders.de", False),
     # too short to compare: "IT GmbH" would otherwise reach italia.de
     ("IT GmbH", "kontakt@italia.de", False),
+    # A vendor's domain names the vendor, never the employer. The first
+    # version compared six-character prefixes and read `personio` as an
+    # employer sharing its first six letters and `experteer` the same way
+    # — sixteen of his real mails, two of them rejections, proposed
+    # for applications they had nothing to do with.
+    ("Personalfrage Beispiel GmbH", "beispiel-jobs@m.personio.de", False),
+    ("Expertise Systeme GmbH", "news@email.experteer.de", False),
+    # ...and on an employer's own domain the names compare whole: a shared
+    # first six letters are not a shared name
+    ("Expertise Systeme GmbH", "hr@expertenrunde.de", False),
+    # the employer in the vendor's tenant slot, in the shapes vendors use
+    ("Beispiel GmbH", "beispiel-jobs@m.personio.de", True),
+    ("Beispiel AG", "candidate-ry1@beispiel.dvinci-easy.com", True),
+    ("Beispiel GmbH", "jobs@beispiel.beesite.de", True),
+    ("Musterhaus Softwarebau GmbH",
+     "e+ab12cd34ef56gh.musterhaussoftwarebaugmbh@recruitee-inbox.com", True),
+    # routing words alone name nobody
+    ("Beispiel GmbH", "no-reply@hire.eu.lever.co", False),
+    # a domain label must equal a leading run of the name's WORDS: the real
+    # abbreviations do, a prefix of the letters does not
+    ("FBRZ – Firma Beispiel Rechenwerk", "bewerbung@fbrz.de", True),
+    ("BIL Beispiel Institut für Lebensmittel e.V.", "bewerbung@bil-ev.de", True),
+    ("Beispiel Institut für Software", "hr@beispiel-software.de", True),
+    ("Beispiel GmbH", "hr@jobs-beispiel.de", True),
+    ("Amtconnect GmbH", "post@amt.de", False),
+    ("Musterpace AG", "info@muster.eu", False),
+    # two letters are a prefix of too much to be evidence
+    ("AB Beispiel GmbH", "kontakt@ab.de", False),
+    # a short key compares by equality only
+    ("AQE GmbH", "jobs@aqe.de", True),
+    ("AQE GmbH", "jobs@aqeon.de", False),
 ])
 def test_the_company_name_arm_recognises_only_its_own_sender(
         firma, sender, expected):
     assert replies.company_in_sender(firma, f"HR <{sender}>", sender) is expected
+
+
+def test_a_short_name_is_read_by_equality_where_a_prefix_would_be_noise():
+    """"ZWEI GmbH" has four letters: too short to be a prefix of anything
+    safely — 28 of his 172 open applications are this short — which the first
+    version answered by refusing them all, so a reply to any of them was
+    unmatchable by construction. Equality is exact evidence; a prefix is not."""
+    assert replies.company_in_sender(
+        "ZWEI GmbH", "Recruiting Team <zwei-jobs@m.personio.de>",
+        "zwei-jobs@m.personio.de")
+    assert replies.company_in_sender(
+        "Kern", "Kern <no-reply@ashbyhq.com>", "no-reply@ashbyhq.com")
+    assert not replies.company_in_sender(
+        "Kern", "Kernberg Recruiting <hr@kernberg.de>", "hr@kernberg.de")
+
+
+def test_leading_keys_are_the_forms_a_domain_label_can_take():
+    assert replies.leading_keys("Beispiel Institut für Software") == {
+        "beispiel", "beispielinstitut", "beispielinstitutfuer",
+        "beispielinstitutfuersoftware"}
+    assert replies.leading_keys("Müller & Co. KG") == {"mueller"}
+    assert replies.leading_keys("beispiel-software") == {
+        "beispiel", "beispielsoftware"}
+    assert replies.leading_keys("jobs-beispiel", noise=True) == {"beispiel"}
+    assert replies.leading_keys("AB Beispiel") == {"abbeispiel"}
+
+
+def test_a_sender_is_read_once_and_a_label_has_a_bound():
+    """A sender is compared with every application he has — the reading is
+    computed once per message, and each part is capped: a 24 KB hyphenated
+    label held the ingestion pass for minutes per message before."""
+    import time
+    label = "ab-" * 8000 + "ab"
+    addr = f"x@{label}.de"
+    reading = replies.read_sender(f"HR <{addr}>", addr)
+    assert reading.label_keys == frozenset()          # longer than a DNS label
+    assert len(replies.leading_keys("-".join("abcdefghijkl"))) <= 8
+    assert len(replies.sender_tenant_tokens(
+        "-".join(f"tok{i}" for i in range(40)) + "@m.personio.de")) <= 8
+    started = time.perf_counter()
+    for _ in range(50):
+        replies.company_in_sender("Beispiel GmbH", f"HR <{addr}>", addr)
+    replies.read_sender("x" * 1_000_000 + f" <{addr}>", addr)
+    assert time.perf_counter() - started < 1.0
+    # and reading once is the same answer as reading per call
+    header = "Beispiel GmbH <beispiel-jobs@m.personio.de>"
+    once = replies.read_sender(header, "beispiel-jobs@m.personio.de")
+    assert replies.company_matches("Beispiel GmbH", once)
+    assert not replies.company_matches("Andere Firma GmbH", once)
+
+
+@pytest.mark.parametrize("addr, tokens", [
+    ("beispiel-jobs@m.personio.de", ["beispiel"]),
+    ("e+9x8y7z6w5v4u3t2s.musterdaten@recruitee-inbox.com", ["musterdaten"]),
+    ("candidate-1@beispiel.dvinci-easy.com", ["beispiel"]),
+    ("no-reply-mueller-schulze@concludis.de", ["mueller", "schulze"]),
+    ("no-reply@hire.eu.lever.co", []),
+    ("notifications@app.softgarden.io", []),
+])
+def test_the_tenant_slot_of_a_vendor_sender_is_read_without_its_noise(
+        addr, tokens):
+    """Routing words, sub-domain labels and tracking ids are the vendor's;
+    what is left names the employer."""
+    assert replies.sender_tenant_tokens(addr) == tokens
 
 
 def test_the_display_name_carries_the_employer_when_the_domain_cannot():

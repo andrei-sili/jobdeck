@@ -66,7 +66,7 @@ processes sharing a database.
 | E-mail sending | Gmail OAuth, preview/edit, explicit approval state, test mode, real-send switch, daily cap, and ambiguous-outcome recovery. |
 | Scheduled sending | Approved drafts may be transmitted by the scheduler for search profiles with auto-send enabled. |
 | Form support | JobDeck detects known ATS and form channels, opens the employer page, prepares copy-ready values, and stages a PDF. It records an application after candidate confirmation or after a strongly matched receipt; it does not submit the form. |
-| Reply tracking | Gmail history polling, deterministic and optional Anthropic classification, matching, review, Gmail labels, and status history. |
+| Reply tracking | Gmail history polling, deterministic and optional Anthropic classification, matching, review, Gmail labels, and status history. Matching runs thread, then sender address, then form receipt, then sender domain, then company name. The company-name arm accepts an employer's domain label only when it equals a leading run of the company's words, reads the employer from the tenant slot or the display name when the sender is a job board or an ATS vendor, and only ever proposes; a proposed row does not anchor its Gmail thread, so a follow-up in that thread cannot write a status through the thread arm; a rescan marks its proposals the candidate has not answered, and the next full listing drops and re-reads them. |
 | Application register | Applications, status changes, inbound/outbound message metadata, and selected reply bodies are stored locally. |
 | Backups | Existing databases receive a verified SQLite recovery snapshot before startup migration. Creation failures stop migration and are reported explicitly; snapshots are rotated while retaining the best valid copy. |
 | Application identity | One decision function is consulted by every gate and every screen that explains a refusal. It returns a verdict with its evidence: a republication, a company inside its cooling-off window, or a live reservation. |
@@ -243,3 +243,7 @@ from that environmental failure.
   threshold produces, but the list itself does not move to the new row.
 - The cause of a missing advert text is not retained, so a posting a source
   refused to serve cannot be told from one that genuinely has none.
+- Reply matching by company name refuses a mail that fits more than one
+  open application at the same company; the mail stays unmatched rather than
+  guessed. A domain that abbreviates the company to fewer than three letters,
+  or to something other than its leading words, is not recognised by name.
