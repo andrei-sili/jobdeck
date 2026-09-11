@@ -1306,13 +1306,21 @@ async def test_a_rescan_keeps_the_name_rows_he_judged_or_that_wrote_a_status(
     db.set_status(con, other, "Absage", source="reply_auto",
                   email_log_id=cited)
     con.commit()
+    # his dismissal is a verdict too: "x" unlinks the row and settles it,
+    # but leaves `matched_by` saying name — and "Alle ablegen" does that to
+    # a whole view at once
+    dismissed = _name_proposal(con, bewerbung_id, "m-dismissed")
+    service.dismiss_review(dismissed)
+    reopened = _name_proposal(con, bewerbung_id, "m-reopened")
+    service.dismiss_review(reopened)
+    service.reopen_review(reopened)
     untouched = _name_proposal(con, bewerbung_id, "m-untouched")
 
     result = service.rescan()
 
     assert result["rejudged"] == 1
     kept = {row["id"] for row in _inbound_rows(con)}
-    assert kept == {judged, written, cited}
+    assert kept == {judged, written, cited, dismissed, reopened}
     assert untouched not in kept
 
 
