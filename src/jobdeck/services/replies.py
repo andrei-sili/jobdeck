@@ -388,7 +388,10 @@ def _match(meta: dict, from_addr: str, subject: str) -> dict | None:
         if receipt is not None:
             return receipt
         sender_domain = replies.matchable_domain(from_addr)
-        if sender_domain:
+        # A vendor's domain names the vendor: a JOIN inbox or a Personio
+        # no-reply stored as an application's contact must not make every
+        # mail from that vendor look like that application's.
+        if sender_domain and not apply_channel.is_vendor_domain(sender_domain):
             hits = {int(row["id"]) for row in rows
                     if replies.matchable_domain(str(row["email"] or ""))
                     == sender_domain}

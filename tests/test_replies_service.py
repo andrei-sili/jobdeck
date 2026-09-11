@@ -1165,6 +1165,19 @@ async def test_the_name_arm_prefers_the_application_still_waiting(inbox, con):
     assert row["bewerbung_id"] != settled
 
 
+async def test_a_vendor_domain_never_domain_matches(inbox, con):
+    """A vendor address stored as an application's contact — a JOIN inbox,
+    a Personio no-reply — would make every mail from that vendor look like
+    that application's. The domain names the vendor, not the employer."""
+    _sent_application(con, email_addr="jobs@join.com")
+    inbox.add("m-1", from_header="Andere Firma <no-reply@msg.join.com>",
+              body=ABSAGE_BODY)
+
+    await service.ingest_replies()
+
+    assert _inbound_rows(con) == []
+
+
 async def test_an_exact_address_still_beats_the_company_name(inbox, con):
     """The cascade order has to hold: a resemblance must never outrank an
     address he actually wrote to."""
