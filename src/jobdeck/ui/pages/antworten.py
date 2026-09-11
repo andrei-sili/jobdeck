@@ -445,9 +445,10 @@ async def antworten_page():
                     "Nachrichten werden wieder als ungelesen behandelt und "
                     "beim nächsten Lauf erneut beurteilt.")) \
                     .classes("jd-card-sub")
-                ui.label("Bereits zugeordnete Antworten bleiben, wie sie "
-                         "sind — sie können nicht doppelt eingetragen "
-                         "werden.").classes("jd-card-sub")
+                ui.label("Mails, die du schon beurteilt hast, bleiben, wie "
+                         "sie sind. Was nur über den Firmennamen zugeordnet "
+                         "wurde und noch auf dein Urteil wartet, wird neu "
+                         "zugeordnet.").classes("jd-card-sub")
                 days = ui.number("Wie weit zurück? (Tage)", value=90,
                                  min=1, max=3650, precision=0) \
                     .classes("w-full")
@@ -458,10 +459,18 @@ async def antworten_page():
                         overlay.clear()
                         result = await run.io_bound(
                             reply_service.rescan, chosen)
-                        say(register.plural(
+                        parts = [register.plural(
                             result["forgotten"],
                             "Nachricht wird neu gelesen",
-                            "Nachrichten werden neu gelesen")
+                            "Nachrichten werden neu gelesen")]
+                        if result["rejudged"]:
+                            parts.append(register.plural(
+                                result["rejudged"],
+                                "über den Firmennamen zugeordnete wird neu "
+                                "zugeordnet",
+                                "über den Firmennamen zugeordnete werden neu "
+                                "zugeordnet"))
+                        say(" · ".join(parts)
                             + f" · {result['lookback_days']} Tage zurück. "
                             "Der nächste Lauf beginnt damit.")
                         await refresh(force=True)

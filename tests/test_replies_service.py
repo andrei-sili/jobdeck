@@ -1244,6 +1244,107 @@ async def test_a_rescan_never_files_a_matched_message_twice(inbox, con):
     assert len(absagen) == 1, "the rejection was filed twice"
 
 
+def _name_proposal(con, bewerbung_id: int, message_id: str, *,
+                   days_ago: float = 1, classified_by: str = "rules",
+                   needs_review: int = 1) -> int:
+    """A row the company-name arm produced: proposed, never written."""
+    stamp = (datetime.datetime.now() - datetime.timedelta(days=days_ago)
+             ).isoformat(timespec="seconds")
+    row_id = db.add_email_log(con, {
+        "direction": "inbound", "gmail_message_id": message_id,
+        "from_addr": "beispiel-jobs@m.personio.de", "subject": "Absage",
+        "internal_date": stamp, "bewerbung_id": bewerbung_id,
+        "matched_by": "name", "classification": "absage",
+        "classified_by": classified_by, "needs_review": needs_review})
+    con.commit()
+    return row_id
+
+
+async def test_a_rescan_rejudges_the_name_proposals_he_has_not_answered(
+        inbox, con):
+    """The first name rule had put sixteen of his real mails on the wrong
+    application, and nothing could ever move them: a matched row is never
+    re-read. A proposal he has not answered carries nothing of his, so a
+    better rule is allowed to re-place it — here from the look-alike the old
+    prefix chose to the tenant the vendor's address actually names."""
+    lookalike = _form_application(con, firma="Personalfrage Beispiel GmbH")
+    tenant = _form_application(con, firma="Beispiel GmbH")
+    _name_proposal(con, lookalike, "m-1")
+    inbox.add("m-1", from_header="Recruiting Team <beispiel-jobs@m.personio.de>",
+              body=ABSAGE_BODY)
+
+    result = service.rescan()
+
+    assert result["rejudged"] == 1
+    assert _inbound_rows(con) == []
+    # its labels come down: the re-read applies the right ones, and a message
+    # the re-read then ignores must not keep saying it is waiting for him
+    assert ("m-1", (), tuple(sorted(f"L_{n}" for n in service.ALL_LABELS))) \
+        in inbox.label_calls
+
+    await service.ingest_replies()
+
+    row = _inbound_rows(con)[0]
+    assert (row["bewerbung_id"], row["matched_by"]) == (tenant, "name")
+    assert row["bewerbung_id"] != lookalike
+
+
+async def test_a_rescan_keeps_the_name_rows_he_judged_or_that_wrote_a_status(
+        inbox, con):
+    """His hand's work is exactly what a re-judge must never undo."""
+    bewerbung_id = _form_application(con)
+    judged = _name_proposal(con, bewerbung_id, "m-judged",
+                            classified_by="reply_manual", needs_review=0)
+    written = _name_proposal(con, bewerbung_id, "m-written")
+    service.resolve_review(written, "absage", force_status=True)
+    assert any(h["email_log_id"] == written
+               for h in db.list_status_history(con, bewerbung_id))
+    # a status that cites the row, however it was written — no automatic
+    # writer takes the name arm today, and the guard must not depend on that
+    other = _form_application(con, firma="Zweite Beispiel GmbH")
+    cited = _name_proposal(con, other, "m-cited")
+    db.set_status(con, other, "Absage", source="reply_auto",
+                  email_log_id=cited)
+    con.commit()
+    untouched = _name_proposal(con, bewerbung_id, "m-untouched")
+
+    result = service.rescan()
+
+    assert result["rejudged"] == 1
+    kept = {row["id"] for row in _inbound_rows(con)}
+    assert kept == {judged, written, cited}
+    assert untouched not in kept
+
+
+async def test_a_rescan_keeps_a_name_row_the_next_sync_would_not_list(
+        inbox, con):
+    """A forgotten row outside the lookback window would never be re-read —
+    the mail would simply vanish from the app."""
+    bewerbung_id = _form_application(con)
+    inside = _name_proposal(con, bewerbung_id, "m-inside", days_ago=10)
+    outside = _name_proposal(con, bewerbung_id, "m-outside", days_ago=100)
+
+    result = service.rescan(lookback_days=30)
+
+    assert result["rejudged"] == 1
+    kept = {row["id"] for row in _inbound_rows(con)}
+    assert kept == {outside}
+    assert inside not in kept
+
+
+async def test_the_rejudge_window_is_the_one_he_just_chose(inbox, con):
+    """The dialog lets him widen the window in the same press; the re-judge
+    has to read the widened value, not the one stored before it."""
+    bewerbung_id = _form_application(con)
+    _name_proposal(con, bewerbung_id, "m-inside", days_ago=10)
+    _name_proposal(con, bewerbung_id, "m-outside", days_ago=100)
+
+    result = service.rescan(lookback_days=200)
+
+    assert result["rejudged"] == 2
+    assert _inbound_rows(con) == []
+
+
 async def test_the_rescan_widens_the_window_the_next_full_sync_uses(inbox, con):
     captured = {}
 

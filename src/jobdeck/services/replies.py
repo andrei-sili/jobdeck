@@ -208,7 +208,8 @@ def _lookback_days(con) -> int:
 
 
 def rescan(lookback_days: int | None = None) -> dict:
-    """Re-arm the reader so it examines the mail it once skipped.
+    """Re-arm the reader so it examines the mail it once skipped — and the
+    mail it only guessed at.
 
     A message no application could be found for leaves only its opaque id,
     and that id is what stops the next pass reading it again — so a skipped
@@ -217,21 +218,37 @@ def rescan(lookback_days: int | None = None) -> dict:
     ids and clears the incremental checkpoint, so the next passes do a full
     sync over the lookback window and judge them afresh.
 
-    Messages already tied to an application are untouched: their rows stay,
-    so the duplicate gate still refuses to file them twice. Nothing is read
-    or written here — the passes that follow do the work, at their own bounded
-    rate.
+    The company-name arm's proposals go the same way, as long as he has not
+    answered them: that arm never writes, so such a row carries nothing of
+    his, and a better rule has to be allowed to move it — on his real shelf
+    the first rule had put sixteen mails on the wrong application. A row he
+    judged, or that wrote a status, stays. Every other message already tied
+    to an application is untouched, so the duplicate gate still refuses to
+    file it twice.
+
+    The dropped proposals also lose their JobDeck labels (best effort — a
+    label is hygiene, not a record), because the re-read applies the right
+    ones and a message the re-read then ignores must not keep saying it is
+    waiting for him. Nothing else is read or written here — the passes that
+    follow do the work, at their own bounded rate.
     """
     with db.db() as con:
         if lookback_days is not None:
             db.set_setting(con, LOOKBACK_KEY, str(max(int(lookback_days), 1)))
+        days = _lookback_days(con)
+        since = (datetime.datetime.now() - datetime.timedelta(days=days)
+                 ).isoformat(timespec="seconds")
+        rejudged = db.forget_name_proposals(con, since)
         forgotten = db.forget_ignored_messages(con)
         db.set_setting(con, HISTORY_KEY, "")
         db.set_setting(con, LAST_ERROR_KEY, "")
-        days = _lookback_days(con)
+    for message_id in rejudged:
+        _apply_label(message_id, "", needs_review=False)
     log.info("reply ingestion: re-armed — %d skipped message(s) forgotten, "
-             "lookback %d days", forgotten, days)
-    return {"forgotten": forgotten, "lookback_days": days}
+             "%d name proposal(s) to be re-judged, lookback %d days",
+             forgotten, len(rejudged), days)
+    return {"forgotten": forgotten, "rejudged": len(rejudged),
+            "lookback_days": days}
 
 
 def _new_message_ids() -> tuple[list[str], str, bool]:

@@ -3150,6 +3150,34 @@ def list_inbound_replies(con: sqlite3.Connection, limit: int = 50) -> list[sqlit
     ).fetchall()
 
 
+def forget_name_proposals(con: sqlite3.Connection, since: str) -> list[str]:
+    """Drop the inbound rows the company-name arm tied to an application and
+    nobody has judged since, so the next passes read them afresh.
+
+    The name arm proposes and never writes, so a row it produced carries
+    nothing of his: no verdict (`classified_by` is never 'reply_manual') and
+    no status write (no status_history row points at it). Both facts are
+    checked — belt and braces, since a wrong deletion here would lose his
+    hand's work. Only rows dated inside the window the next full sync will
+    list are dropped: a forgotten row the sync never re-reads would simply
+    vanish from the app. Returns the Gmail ids dropped, so the caller can
+    take their labels down."""
+    rows = con.execute(
+        "SELECT e.id, e.gmail_message_id FROM email_log e "
+        " WHERE e.direction=? AND e.matched_by='name' "
+        "   AND COALESCE(e.classified_by, '') <> 'reply_manual' "
+        "   AND e.internal_date >= ? "
+        "   AND NOT EXISTS (SELECT 1 FROM status_history s "
+        "                    WHERE s.email_log_id = e.id)",
+        (EMAIL_INBOUND, since),
+    ).fetchall()
+    ids = [int(row["id"]) for row in rows]
+    if ids:
+        placeholders = ",".join("?" * len(ids))
+        con.execute(f"DELETE FROM email_log WHERE id IN ({placeholders})", ids)
+    return [str(row["gmail_message_id"] or "") for row in rows]
+
+
 def get_email_log(con: sqlite3.Connection, email_log_id: int) -> sqlite3.Row | None:
     return con.execute(
         "SELECT * FROM email_log WHERE id=?", (email_log_id,)
