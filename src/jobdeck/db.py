@@ -3150,35 +3150,62 @@ def list_inbound_replies(con: sqlite3.Connection, limit: int = 50) -> list[sqlit
     ).fetchall()
 
 
-def forget_name_proposals(con: sqlite3.Connection, since: str) -> list[str]:
-    """Drop the inbound rows the company-name arm tied to an application and
-    nobody has judged since, so the next passes read them afresh.
+# The company-name arm's proposals nobody has answered. The arm proposes and
+# never writes, so such a row carries nothing of his: no verdict
+# (`classified_by` is never 'reply_manual'), no dismissal (his "this mail does
+# not belong there" unlinks the row, so it still says `name` but points at no
+# application) and no status write (no status_history row points at it). All
+# three are checked — belt and braces, since a wrong deletion would lose his
+# hand's work — plus the window the next full sync lists.
+_NAME_PROPOSALS_SQL = (
+    " FROM email_log e "
+    " WHERE e.direction=? AND e.matched_by='name' "
+    "   AND e.bewerbung_id IS NOT NULL "
+    "   AND COALESCE(e.classified_by, '') <> 'reply_manual' "
+    "   AND e.internal_date >= ? "
+    "   AND NOT EXISTS (SELECT 1 FROM status_history s "
+    "                    WHERE s.email_log_id = e.id)"
+)
 
-    The name arm proposes and never writes, so a row it produced carries
-    nothing of his: no verdict (`classified_by` is never 'reply_manual'), no
-    dismissal (his "this mail does not belong there" unlinks the row, so it
-    still says `name` but points at no application) and no status write (no
-    status_history row points at it). All three are checked — belt and
-    braces, since a wrong deletion here would lose his hand's work. Only
-    rows dated inside the window the next full sync will list are dropped:
-    a forgotten row the sync never re-reads would simply vanish from the
-    app. Returns the Gmail ids dropped, so the caller can take their labels
-    down."""
-    rows = con.execute(
-        "SELECT e.id, e.gmail_message_id FROM email_log e "
-        " WHERE e.direction=? AND e.matched_by='name' "
-        "   AND e.bewerbung_id IS NOT NULL "
-        "   AND COALESCE(e.classified_by, '') <> 'reply_manual' "
-        "   AND e.internal_date >= ? "
-        "   AND NOT EXISTS (SELECT 1 FROM status_history s "
-        "                    WHERE s.email_log_id = e.id)",
-        (EMAIL_INBOUND, since),
-    ).fetchall()
-    ids = [int(row["id"]) for row in rows]
-    if ids:
-        placeholders = ",".join("?" * len(ids))
-        con.execute(f"DELETE FROM email_log WHERE id IN ({placeholders})", ids)
-    return [str(row["gmail_message_id"] or "") for row in rows]
+
+def count_name_proposals(con: sqlite3.Connection, since: str) -> int:
+    """How many name proposals a re-judge may drop — the number the rescan
+    dialog reports. An upper bound: the pass drops only what it lists."""
+    return con.execute(
+        "SELECT COUNT(*)" + _NAME_PROPOSALS_SQL, (EMAIL_INBOUND, since)
+    ).fetchone()[0]
+
+
+def forget_name_proposals(
+    con: sqlite3.Connection, since: str, message_ids: list[str]
+) -> list[str]:
+    """Drop the name proposals AMONG these Gmail ids, so the pass that listed
+    them reads them afresh.
+
+    Only among the listed ids, never the whole window: a full sync lists the
+    newest messages up to its bound, and a row dropped for a message the sync
+    does not list would be gone for good — body, classification and link,
+    with no message. Returns the Gmail ids dropped, so the caller can take
+    their labels down."""
+    dropped: list[str] = []
+    ids = [message_id for message_id in message_ids if message_id]
+    for offset in range(0, len(ids), 400):
+        chunk = ids[offset:offset + 400]
+        placeholders = ",".join("?" * len(chunk))
+        rows = con.execute(
+            "SELECT e.id, e.gmail_message_id" + _NAME_PROPOSALS_SQL
+            + f" AND e.gmail_message_id IN ({placeholders})",
+            (EMAIL_INBOUND, since, *chunk),
+        ).fetchall()
+        if not rows:
+            continue
+        row_ids = [int(row["id"]) for row in rows]
+        con.execute(
+            f"DELETE FROM email_log WHERE id IN ({','.join('?' * len(row_ids))})",
+            row_ids,
+        )
+        dropped.extend(str(row["gmail_message_id"]) for row in rows)
+    return dropped
 
 
 def get_email_log(con: sqlite3.Connection, email_log_id: int) -> sqlite3.Row | None:

@@ -1269,24 +1269,31 @@ async def test_a_rescan_rejudges_the_name_proposals_he_has_not_answered(
     prefix chose to the tenant the vendor's address actually names."""
     lookalike = _form_application(con, firma="Personalfrage Beispiel GmbH")
     tenant = _form_application(con, firma="Beispiel GmbH")
-    _name_proposal(con, lookalike, "m-1")
+    old_row = _name_proposal(con, lookalike, "m-1")
     inbox.add("m-1", from_header="Recruiting Team <beispiel-jobs@m.personio.de>",
               body=ABSAGE_BODY)
 
     result = service.rescan()
 
     assert result["rejudged"] == 1
-    assert _inbound_rows(con) == []
-    # its labels come down: the re-read applies the right ones, and a message
-    # the re-read then ignores must not keep saying it is waiting for him
-    assert ("m-1", (), tuple(sorted(f"L_{n}" for n in service.ALL_LABELS))) \
-        in inbox.label_calls
+    # marked, not dropped: the pass that lists the message drops the row
+    # right before reading it again — the rescan itself touches neither the
+    # row nor Gmail
+    assert [row["id"] for row in _inbound_rows(con)] == [old_row]
+    assert db.get_setting(con, service.REJUDGE_KEY, "") != ""
+    assert inbox.label_calls == []
 
     await service.ingest_replies()
 
-    row = _inbound_rows(con)[0]
-    assert (row["bewerbung_id"], row["matched_by"]) == (tenant, "name")
-    assert row["bewerbung_id"] != lookalike
+    rows = _inbound_rows(con)
+    assert len(rows) == 1 and rows[0]["id"] != old_row
+    assert (rows[0]["bewerbung_id"], rows[0]["matched_by"]) == (tenant, "name")
+    assert rows[0]["bewerbung_id"] != lookalike
+    # its old labels came down before the re-read — all of them, so a message
+    # the re-read then ignores cannot keep saying it is waiting for him
+    assert ("m-1", (), tuple(sorted(f"L_{n}" for n in service.ALL_LABELS))) \
+        in inbox.label_calls
+    assert db.get_setting(con, service.REJUDGE_KEY, "") == ""
 
 
 async def test_a_rescan_keeps_the_name_rows_he_judged_or_that_wrote_a_status(
@@ -1315,29 +1322,58 @@ async def test_a_rescan_keeps_the_name_rows_he_judged_or_that_wrote_a_status(
     service.dismiss_review(reopened)
     service.reopen_review(reopened)
     untouched = _name_proposal(con, bewerbung_id, "m-untouched")
+    # every one of them is listed again by the next sync
+    for message_id in ("m-judged", "m-written", "m-cited", "m-dismissed",
+                       "m-reopened", "m-untouched"):
+        inbox.add(message_id, body=ABSAGE_BODY)
 
     result = service.rescan()
-
     assert result["rejudged"] == 1
-    kept = {row["id"] for row in _inbound_rows(con)}
-    assert kept == {judged, written, cited, dismissed, reopened}
-    assert untouched not in kept
+
+    await service.ingest_replies()
+
+    ids = {row["id"] for row in _inbound_rows(con)}
+    assert {judged, written, cited, dismissed, reopened} <= ids
+    assert untouched not in ids
 
 
-async def test_a_rescan_keeps_a_name_row_the_next_sync_would_not_list(
-        inbox, con):
-    """A forgotten row outside the lookback window would never be re-read —
-    the mail would simply vanish from the app."""
+async def test_a_rescan_drops_only_what_the_next_sync_lists(inbox, con):
+    """A full sync lists the newest messages of the window up to its bound.
+    A row dropped for a message it does not list would be gone for good —
+    body, classification and link — with no message. So the rescan only
+    marks, and the pass drops a row right before it reads the message."""
+    bewerbung_id = _form_application(con)
+    listed = _name_proposal(con, bewerbung_id, "m-listed")
+    unlisted = _name_proposal(con, bewerbung_id, "m-unlisted")
+    inbox.add("m-listed", body=ABSAGE_BODY)     # the sync lists only this one
+
+    result = service.rescan()
+    assert result["rejudged"] == 2               # what qualifies: a bound
+
+    await service.ingest_replies()
+
+    ids = {row["id"] for row in _inbound_rows(con)}
+    assert unlisted in ids and listed not in ids
+    assert db.get_email_log(con, unlisted)["bewerbung_id"] == bewerbung_id
+    assert db.get_setting(con, service.REJUDGE_KEY, "") == ""
+
+
+async def test_a_rescan_keeps_a_name_row_outside_the_window(inbox, con):
+    """The window is the one the sync lists; a row dated before it is not a
+    proposal the sync can re-judge."""
     bewerbung_id = _form_application(con)
     inside = _name_proposal(con, bewerbung_id, "m-inside", days_ago=10)
     outside = _name_proposal(con, bewerbung_id, "m-outside", days_ago=100)
+    inbox.add("m-inside", body=ABSAGE_BODY)
+    inbox.add("m-outside", body=ABSAGE_BODY)
 
     result = service.rescan(lookback_days=30)
-
     assert result["rejudged"] == 1
-    kept = {row["id"] for row in _inbound_rows(con)}
-    assert kept == {outside}
-    assert inside not in kept
+
+    await service.ingest_replies()
+
+    ids = {row["id"] for row in _inbound_rows(con)}
+    assert outside in ids and inside not in ids
 
 
 async def test_the_rejudge_window_is_the_one_he_just_chose(inbox, con):
@@ -1350,7 +1386,26 @@ async def test_the_rejudge_window_is_the_one_he_just_chose(inbox, con):
     result = service.rescan(lookback_days=200)
 
     assert result["rejudged"] == 2
-    assert _inbound_rows(con) == []
+
+
+async def test_a_pending_rejudge_forces_a_full_sync(inbox, con, monkeypatch):
+    """A rescan racing a pass in flight can see that pass store its
+    checkpoint after the rescan cleared it. The mark outlives that and still
+    makes the next pass a full sync — otherwise the re-judge would wait for
+    the next rescan."""
+    bewerbung_id = _form_application(con)
+    _name_proposal(con, bewerbung_id, "m-1")
+    inbox.add("m-1", body=ABSAGE_BODY)
+    service.rescan()
+    with db.db() as write:
+        db.set_setting(write, service.HISTORY_KEY, "h-restored")
+    monkeypatch.setattr(
+        gmail, "history_added_messages",
+        lambda *a: pytest.fail("incremental read despite a pending re-judge"))
+
+    await service.ingest_replies()
+
+    assert db.get_setting(con, service.REJUDGE_KEY, "") == ""
 
 
 async def test_the_rescan_widens_the_window_the_next_full_sync_uses(inbox, con):

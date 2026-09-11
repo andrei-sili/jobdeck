@@ -254,7 +254,7 @@ async def test_the_page_offers_to_re_read_what_it_skipped(
     # name arm's proposals he has not answered are re-placed, his verdicts
     # are not
     user.find("Alle Nachrichten neu prüfen").click()
-    await user.should_see("noch auf dein Urteil wartet, wird neu zugeordnet")
+    await user.should_see("wartet, wird beim nächsten Lauf neu zugeordnet")
     await user.should_see("Mails, die du schon beurteilt hast, bleiben")
 
 

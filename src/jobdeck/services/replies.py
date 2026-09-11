@@ -99,6 +99,9 @@ AI_TOGGLE_KEY = "reply_ai_classify"
 # because widening it is the only way to reach mail that arrived before
 # JobDeck could read the mailbox at all.
 LOOKBACK_KEY = "reply_lookback_days"
+# The window of a re-judge waiting for the next full sync ('' when none):
+# a rescan records it, the pass that lists the mail acts on it.
+REJUDGE_KEY = "replies_rejudge_since"
 
 # Skip-style single-flight (the liveness/apply_resolve pattern): the manual
 # button must learn "a pass is already running", not queue a second one.
@@ -143,8 +146,20 @@ def _ingest() -> dict:
         _note(LAST_ERROR_KEY, str(exc))
         return {**counters, "error": str(exc)}
 
+    dropped: list[str] = []
     with db.db() as con:
+        pending = db.get_setting(con, REJUDGE_KEY, "")
+        if pending and not from_history:
+            # The re-judge a rescan recorded, done here on purpose: only a
+            # row whose message THIS listing holds is dropped, right before
+            # it is read again, so nothing is dropped and never re-read.
+            dropped = db.forget_name_proposals(con, pending, message_ids)
+            db.set_setting(con, REJUDGE_KEY, "")
         known = db.known_gmail_ids(con, message_ids)
+    if dropped:
+        _strip_labels(dropped)
+        log.info("reply ingestion: %d name proposal(s) dropped for re-judging",
+                 len(dropped))
     # OLDEST first. `messages.list` answers newest-first, and processing in
     # that order lets an older mail be read after a newer one — which, with
     # statuses, means an old invitation landing on top of a fresh rejection.
@@ -218,19 +233,21 @@ def rescan(lookback_days: int | None = None) -> dict:
     ids and clears the incremental checkpoint, so the next passes do a full
     sync over the lookback window and judge them afresh.
 
-    The company-name arm's proposals go the same way, as long as he has not
-    answered them: that arm never writes, so such a row carries nothing of
-    his, and a better rule has to be allowed to move it — on his real shelf
-    the first rule had put sixteen mails on the wrong application. A row he
-    judged, or that wrote a status, stays. Every other message already tied
-    to an application is untouched, so the duplicate gate still refuses to
-    file it twice.
+    The company-name arm's proposals he has not answered go the same way, but
+    LAZILY. That arm never writes, so such a row carries nothing of his — a
+    row he judged, dismissed, or that a status cites is not a proposal any
+    more — and a better rule has to be allowed to move it: on his real shelf
+    the first rule had put sixteen mails on the wrong application. Dropping
+    them here would lose any the next sync cannot list (it lists the newest
+    messages up to its bound), so this only records the window, and the pass
+    that lists a message drops its row right before reading it again. The
+    mark also forces that pass to be a full sync, whatever checkpoint a pass
+    in flight may store meanwhile. Every other message already tied to an
+    application is untouched, so the duplicate gate still refuses to file it
+    twice. Nothing is read or written on Gmail here.
 
-    The dropped proposals also lose their JobDeck labels (best effort — a
-    label is hygiene, not a record), because the re-read applies the right
-    ones and a message the re-read then ignores must not keep saying it is
-    waiting for him. Nothing else is read or written here — the passes that
-    follow do the work, at their own bounded rate.
+    Returns the skipped ids forgotten, the proposals that qualify — an upper
+    bound for what the pass will drop — and the window in days.
     """
     with db.db() as con:
         if lookback_days is not None:
@@ -238,16 +255,15 @@ def rescan(lookback_days: int | None = None) -> dict:
         days = _lookback_days(con)
         since = (datetime.datetime.now() - datetime.timedelta(days=days)
                  ).isoformat(timespec="seconds")
-        rejudged = db.forget_name_proposals(con, since)
+        rejudged = db.count_name_proposals(con, since)
+        db.set_setting(con, REJUDGE_KEY, since if rejudged else "")
         forgotten = db.forget_ignored_messages(con)
         db.set_setting(con, HISTORY_KEY, "")
         db.set_setting(con, LAST_ERROR_KEY, "")
-    for message_id in rejudged:
-        _apply_label(message_id, "", needs_review=False)
     log.info("reply ingestion: re-armed — %d skipped message(s) forgotten, "
-             "%d name proposal(s) to be re-judged, lookback %d days",
-             forgotten, len(rejudged), days)
-    return {"forgotten": forgotten, "rejudged": len(rejudged),
+             "up to %d name proposal(s) to be re-judged, lookback %d days",
+             forgotten, rejudged, days)
+    return {"forgotten": forgotten, "rejudged": rejudged,
             "lookback_days": days}
 
 
@@ -258,7 +274,10 @@ def _new_message_ids() -> tuple[list[str], str, bool]:
     records are chronological, a search answers newest-first."""
     with db.db() as con:
         stored = db.get_setting(con, HISTORY_KEY, "")
-    if stored:
+        pending = db.get_setting(con, REJUDGE_KEY, "")
+    # A pending re-judge needs the full listing, whatever checkpoint a pass
+    # that was in flight during the rescan has stored since.
+    if stored and not pending:
         try:
             ids, checkpoint = gmail.history_added_messages(stored, LIST_AHEAD)
             return ids, checkpoint, True
@@ -829,6 +848,25 @@ def _apply_label(message_id: str, classification: str,
     except (gmail.GmailError, KeyError) as exc:
         log.warning("reply ingestion: could not label %s: %s",
                     message_id, exc)
+
+
+def _strip_labels(message_ids: list[str]) -> None:
+    """Take every JobDeck label off these messages: the re-read applies the
+    right ones, and a message it then ignores must not keep saying it is
+    waiting for him. The label ids are resolved once for the batch; a failure
+    on one message is logged and the rest go on."""
+    try:
+        resolved = gmail.ensure_labels([LABEL_PARENT, *ALL_LABELS])
+        drop = [resolved[name] for name in ALL_LABELS]
+    except (gmail.GmailError, KeyError) as exc:
+        log.warning("reply ingestion: could not resolve labels: %s", exc)
+        return
+    for message_id in message_ids:
+        try:
+            gmail.set_labels(message_id, [], drop)
+        except gmail.GmailError as exc:
+            log.warning("reply ingestion: could not unlabel %s: %s",
+                        message_id, exc)
 
 
 # --------------------------------------------------------------------------

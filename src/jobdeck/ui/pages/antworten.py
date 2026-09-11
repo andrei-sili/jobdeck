@@ -447,8 +447,8 @@ async def antworten_page():
                     .classes("jd-card-sub")
                 ui.label("Mails, die du schon beurteilt hast, bleiben, wie "
                          "sie sind. Was nur über den Firmennamen zugeordnet "
-                         "wurde und noch auf dein Urteil wartet, wird neu "
-                         "zugeordnet.").classes("jd-card-sub")
+                         "wurde und noch auf dein Urteil wartet, wird beim "
+                         "nächsten Lauf neu zugeordnet.").classes("jd-card-sub")
                 days = ui.number("Wie weit zurück? (Tage)", value=90,
                                  min=1, max=3650, precision=0) \
                     .classes("w-full")
@@ -464,7 +464,7 @@ async def antworten_page():
                             "Nachricht wird neu gelesen",
                             "Nachrichten werden neu gelesen")]
                         if result["rejudged"]:
-                            parts.append(register.plural(
+                            parts.append("bis zu " + register.plural(
                                 result["rejudged"],
                                 "über den Firmennamen zugeordnete wird neu "
                                 "zugeordnet",
