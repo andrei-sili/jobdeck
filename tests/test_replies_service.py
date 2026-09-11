@@ -1448,6 +1448,33 @@ async def test_the_rejudge_window_is_the_one_he_just_chose(inbox, con):
     assert result["rejudged"] == 2
 
 
+async def test_the_drain_after_a_rejudge_stays_a_full_sync(
+        inbox, con, monkeypatch):
+    """A pass is bounded; a re-judge with more messages than one pass reads
+    drains over several. When a pass in flight during the rescan had stored
+    its checkpoint, the passes after the first would have gone back to the
+    incremental read and never listed the rest."""
+    bewerbung_id = _form_application(con)
+    _name_proposal(con, bewerbung_id, "m-1")
+    _name_proposal(con, bewerbung_id, "m-2")
+    inbox.add("m-1", body=ABSAGE_BODY)
+    inbox.add("m-2", body=ABSAGE_BODY)
+    monkeypatch.setattr(service, "MAX_MESSAGES_PER_PASS", 1)
+    service.rescan()
+    with db.db() as write:
+        db.set_setting(write, service.HISTORY_KEY, "h-restored")
+    monkeypatch.setattr(
+        gmail, "history_added_messages",
+        lambda *a: pytest.fail("incremental read while draining a re-judge"))
+
+    first = await service.ingest_replies()
+    second = await service.ingest_replies()
+
+    assert (first["seen"], second["seen"]) == (1, 1)
+    assert {row["gmail_message_id"] for row in _inbound_rows(con)} \
+        == {"m-1", "m-2"}
+
+
 async def test_a_pending_rejudge_forces_a_full_sync(inbox, con, monkeypatch):
     """A rescan racing a pass in flight can see that pass store its
     checkpoint after the rescan cleared it. The mark outlives that and still

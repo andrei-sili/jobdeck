@@ -170,6 +170,12 @@ def _ingest() -> dict:
             dropped = db.forget_name_proposals(
                 con, floor, message_ids, everything_listed=complete)
             db.set_setting(con, REJUDGE_KEY, "")
+            # A pass in flight during the rescan may have stored its
+            # checkpoint after the rescan cleared it. The mark carried this
+            # pass over that; the passes that drain the rest of the listing
+            # have no mark, so the checkpoint goes now and comes back only
+            # once the listing is drained.
+            db.set_setting(con, HISTORY_KEY, "")
         known = db.known_gmail_ids(con, message_ids)
     if dropped:
         listed = set(message_ids)
