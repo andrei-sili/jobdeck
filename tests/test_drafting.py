@@ -198,7 +198,7 @@ def test_build_betreff_collapses_smuggled_whitespace():
 
 
 def test_clean_title_strips_board_noise_but_keeps_the_role():
-    # the exact Stretta-style title that leaked junk into a real Betreff
+    # the exact board-mangled title shape that leaked junk into a real Betreff
     assert ai_drafting.clean_title(
         "Ab sofort: Fullstack-Entwickler Python/Django mit Frontend-Fokus "
         "(m/w/d)Vollzeit"

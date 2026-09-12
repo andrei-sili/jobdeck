@@ -16,16 +16,16 @@ from jobdeck.ui.pages import settings
 _JOB = {
     "id": 7,
     "title": "Ab sofort: Fullstack-Entwickler Python/Django (m/w/d)Vollzeit",
-    "company": "Sigtronic GmbH",
+    "company": "Beispiel GmbH",
     "refnr": "10001-1003387672-S",
     "source": "arbeitsagentur",
-    "ansprechpartner": "Frau Georg",
+    "ansprechpartner": "Frau Weber",
 }
 _DRAFT = {
     "status": "ready",
     "betreff": "Bewerbung als Fullstack-Entwickler Python/Django (m/w/d), "
                "10001-1003387672-S – Andrei Sili",
-    "anschreiben_body": "Sehr geehrte Frau Georg,\n\n" + "Absatz. " * 40,
+    "anschreiben_body": "Sehr geehrte Frau Weber,\n\n" + "Absatz. " * 40,
     "pdf_path": "/home/x/.local/share/jobdeck/output/job_7/Bewerbung.pdf",
 }
 _SETTINGS = {
@@ -89,7 +89,7 @@ def test_the_posting_answers_come_from_the_posting_not_from_prose():
         "Fullstack-Entwickler Python/Django (m/w/d)"
     # an id is either exact or wrong: passed through untouched
     assert rows["Referenznummer"].value == "10001-1003387672-S"
-    assert rows["Ansprechpartner"].value == "Frau Georg"
+    assert rows["Ansprechpartner"].value == "Frau Weber"
     assert rows["Gefunden über"].value.startswith("Bundesagentur für Arbeit")
     assert rows["Anschreiben"].value == _DRAFT["anschreiben_body"].strip()
     assert rows["Anschreiben"].multiline is True

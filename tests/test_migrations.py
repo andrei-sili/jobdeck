@@ -38,7 +38,7 @@ def make_legacy_db(path, rows):
 
 
 LEGACY_ROWS = [
-    ("2026-06-10", "Py-T GmbH", "Max Muster", "Weg 1", "12345 Musterstadt",
+    ("2026-06-10", "Beispiel GmbH", "Max Muster", "Weg 1", "12345 Musterstadt",
      "E-Mail", "Gesendet", "", "2026-06-10T10:00:00"),
     ("2026-06-11", "ACME AG", "", "", "", "Online-Portal", "Absage", "",
      "2026-06-11T10:00:00"),
@@ -60,7 +60,7 @@ def test_migrate_legacy_db_preserves_rows_and_adds_tables(tmp_path):
 
     rows = con.execute("SELECT * FROM bewerbungen ORDER BY id").fetchall()
     assert len(rows) == len(LEGACY_ROWS)
-    assert rows[0]["firma"] == "Py-T GmbH"
+    assert rows[0]["firma"] == "Beispiel GmbH"
     # additive columns added by migration
     assert rows[0]["email"] is None and rows[0]["dokument"] is None
     assert {"search_profiles", "jobs", "drafts", "email_log",

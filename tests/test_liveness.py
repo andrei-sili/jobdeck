@@ -37,8 +37,8 @@ async def _probe(job, handler):
 
 
 async def test_the_ba_api_404_is_what_makes_a_posting_gone():
-    # job 18 (Stretta, score 87) had a draft and a 2.1 MB Mappe built for a
-    # posting the API had been answering 404 for 40 days
+    # a posting scored 87 had a draft and a 2.1 MB Mappe built for an ad the
+    # API had been answering 404 for 40 days
     assert await _probe(_BA_JOB, _status(404)) == liveness.LIVENESS_GONE
     assert await _probe(_BA_JOB, _status(200)) == liveness.LIVENESS_ALIVE
 

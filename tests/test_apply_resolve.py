@@ -152,17 +152,17 @@ async def test_an_unresolvable_host_falls_back_to_the_original_url(monkeypatch):
 
 
 async def test_a_company_site_page_with_vendor_markers_upgrades_to_ats():
-    # jobs.hoermann.de is a rexx portal behind a CNAME — the landing host says
+    # jobs.firma-beispiel.de is a rexx portal behind a CNAME — the landing host says
     # company_site, but the page's form action betrays the vendor
     def handler(request):
         assert request.method == "GET"
         return httpx.Response(200, text=(
-            '<form action="https://hoermann.rexx-systems.com/apply/1"></form>'))
+            '<form action="https://firma-beispiel.rexx-systems.com/apply/1"></form>'))
 
     async with _client(handler) as client:
         final, ch = await apply_resolve.resolve(
-            _job("https://jobs.hoermann.de/stelle-42"), client)
-    assert final == "https://jobs.hoermann.de/stelle-42"  # URL stays the page
+            _job("https://jobs.firma-beispiel.de/stelle-42"), client)
+    assert final == "https://jobs.firma-beispiel.de/stelle-42"  # URL stays the page
     assert ch.channel == ac.CHANNEL_ATS and ch.vendor == "rexx systems"
 
 
@@ -200,7 +200,7 @@ async def test_an_ats_or_board_landing_is_never_page_fetched():
     assert calls == []  # the classification was decisive without any network
 
 
-_AN_JOB = "https://www.arbeitnow.com/jobs/companies/raisin/engineering-lead-81517"
+_AN_JOB = "https://www.arbeitnow.com/jobs/companies/acme/engineering-lead-81517"
 _AN_APPLY = _AN_JOB + "/apply"
 
 
@@ -222,7 +222,7 @@ async def test_arbeitnow_external_variant_stores_the_apply_deep_link():
     assert calls == [_AN_JOB]
 
 
-_AN_UK_JOB = "https://www.arbeitnow.co.uk/jobs/companies/carbonchain/junior-data-engineer-1"
+_AN_UK_JOB = "https://www.arbeitnow.co.uk/jobs/companies/acme/junior-data-engineer-1"
 _AN_UK_APPLY = _AN_UK_JOB + "/apply"
 
 
