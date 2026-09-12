@@ -641,7 +641,12 @@ async def test_a_receipt_for_an_application_that_now_exists_files_itself(
     row = db.get_email_log(con, row_id)
     assert (row["needs_review"], row["bewerbung_id"], row["matched_by"]) \
         == (0, bewerbung_id, service.MATCHED_ATTACHED)
-    assert db.get_bewerbung(con, bewerbung_id)["status"] == "In Bearbeitung"
+    # the register is NOT touched: this pass has no sender verdict to write
+    # from, so the status stays his and the arm with the headers keeps it
+    assert db.get_bewerbung(con, bewerbung_id)["status"] == "Gesendet"
+    assert db.list_status_history(con, bewerbung_id) == [] or [
+        str(h["source"]) for h in db.list_status_history(con, bewerbung_id)
+    ] == ["user"]
     # and it says so in Gmail, without the waiting label
     assert inbox.label_calls[-1][:2] == ("shelf-1", ("L_JobDeck/Offen",))
 
@@ -662,7 +667,11 @@ async def test_a_receipt_already_tied_to_its_application_only_loses_the_shelf(
     assert outcome["attached"] == 0          # nothing new was attached
     row = db.get_email_log(con, row_id)
     assert (row["needs_review"], row["matched_by"]) == (0, "name")
-    assert db.get_bewerbung(con, bewerbung_id)["status"] == "In Bearbeitung"
+    assert db.get_bewerbung(con, bewerbung_id)["status"] == "Gesendet"
+    # AND the guess is still re-judgeable. What keeps it so is "no status
+    # cites this row", not `matched_by` — a status write would have cemented
+    # the very guesses the name arm was rewritten to correct.
+    assert db.count_name_proposals(con, "2026-01-01T00:00:00") == 1
 
 
 async def test_a_receipt_for_a_settled_application_is_filed_without_a_status(
@@ -679,8 +688,7 @@ async def test_a_receipt_for_a_settled_application_is_filed_without_a_status(
 
     assert db.get_email_log(con, row_id)["needs_review"] == 0
     assert db.get_bewerbung(con, bewerbung_id)["status"] == "Absage"
-    # the register's only history is the row `add_bewerbung` wrote itself —
-    # the pass added none
+    # the register's only history is the row `add_bewerbung` wrote itself
     assert [str(h["source"]) for h in db.list_status_history(con, bewerbung_id)] \
         == ["user"]
 
@@ -730,6 +738,39 @@ async def test_a_new_attachment_has_to_name_the_employer(inbox, con):
     assert db.get_bewerbung(con, bewerbung_id)["status"] == "Gesendet"
 
 
+async def test_a_forged_display_name_cannot_move_the_register(inbox, con):
+    """The security review's reproduction, kept as a test.
+
+    `matchable_domain` refuses freemail, so a gmail.com sender gets no tenant
+    tokens and no label keys — but `read_sender` computes `display_key` from
+    the From header whatever the domain, so the company-name arm binds on the
+    display name alone. That arm is documented as "a similarity, not an
+    identification" and is not in the tier that may write; nothing on it ever
+    asked about DMARC, because it never used to write. When the pass wrote
+    statuses from the shelf, this mail moved his register."""
+    bewerbung_id = db.add_bewerbung(con, {
+        "firma": "Firma Beispiel GmbH", "kanal": "Online-Portal",
+        "status": "Gesendet", "gesendet_am": "2026-08-01"})
+    con.commit()
+    inbox.add("m-1", from_header="Firma Beispiel GmbH <angreifer@gmail.com>",
+              subject="Ihre Bewerbung",
+              body="vielen Dank, Ihre Bewerbung ist bei uns eingegangen.",
+              auth=("mx.google.com; spf=pass smtp.mailfrom=gmail.com; "
+                    "dmarc=pass header.from=gmail.com"))
+
+    await service.ingest_replies()
+
+    # the arm really did bind it — otherwise this test would pass for the
+    # wrong reason, on a mail that matched nothing at all
+    row = _inbound_rows(con)[0]
+    assert (row["matched_by"], row["bewerbung_id"]) == ("name", bewerbung_id)
+    assert row["classification"] == "eingang"
+    # and the register did not move
+    assert db.get_bewerbung(con, bewerbung_id)["status"] == "Gesendet"
+    assert [str(h["source"])
+            for h in db.list_status_history(con, bewerbung_id)] == ["user"]
+
+
 async def test_a_row_he_has_answered_is_never_reopened_by_the_pass(inbox, con):
     """`reply_manual` is his verdict and a status that cites the row is a
     decision already made. Both are left exactly as they stand."""
@@ -748,6 +789,55 @@ async def test_a_row_he_has_answered_is_never_reopened_by_the_pass(inbox, con):
 
     assert db.get_email_log(con, answered)["needs_review"] == 1
     assert db.get_email_log(con, cited)["needs_review"] == 1
+
+
+async def test_a_receipt_contradicting_a_silence_closure_stays_on_the_shelf(
+        inbox, con):
+    """„Keine Antwort" says nothing came back. This mail is something that came
+    back, so the closure may well be wrong — the rank refuses to move it, and
+    filing the mail anyway would take the evidence against it off the shelf
+    while the register kept the closure. Found by the security review."""
+    bewerbung_id = db.add_bewerbung(con, {
+        "firma": "Firma Beispiel GmbH", "kanal": "E-Mail",
+        "status": "Keine Antwort", "gesendet_am": "2026-06-01"})
+    row_id = _shelf_receipt(con, bewerbung_id=bewerbung_id)
+
+    await service.ingest_replies()
+
+    assert db.get_email_log(con, row_id)["needs_review"] == 1
+    assert db.get_bewerbung(con, bewerbung_id)["status"] == "Keine Antwort"
+
+
+async def test_a_receipt_he_took_back_is_never_filed_again(inbox, con):
+    """His strongest no. `undo_receipt` restores the row as a plain receipt
+    proposal, which is indistinguishable from one never judged — so the pass
+    filed it again the moment the application existed, which after an undo is
+    exactly when he records it himself. Found by the security review."""
+    job_id = _strip_job(con)
+    inbox.add("m-1", from_header="Firma <karriere@firma-beispiel.de>",
+              subject="Ihre Bewerbung ist eingegangen",
+              body="Vielen Dank, Ihre Bewerbung ist eingegangen.")
+    con.execute("UPDATE jobs SET apply_url=? WHERE id=?",
+                ("https://bewerbung.firma-beispiel.de/7", job_id))
+    con.commit()
+    await service.ingest_replies()          # records the application
+    row = _inbound_rows(con)[0]
+    assert service.undo_receipt(int(row["id"])) is True
+    assert db.get_email_log(con, int(row["id"]))["needs_review"] == 1
+
+    # he records it himself afterwards, which is the whole point of the undo
+    bewerbung_id = db.add_bewerbung(con, {
+        "firma": "Firma Beispiel GmbH", "kanal": "Online-Portal",
+        "status": "Gesendet", "gesendet_am": "2026-09-01"})
+    con.execute("UPDATE jobs SET bewerbung_id=? WHERE id=?",
+                (bewerbung_id, job_id))
+    con.commit()
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["attached"] == 0
+    again = db.get_email_log(con, int(row["id"]))
+    assert (again["needs_review"], again["bewerbung_id"]) == (1, None)
 
 
 async def test_the_shelf_is_filed_after_the_messages_of_the_same_pass(

@@ -38,6 +38,7 @@ from jobdeck.constants import (
     FORM_OPENED_UNKNOWN,
     LIVENESS_GONE,
     OFFENE_STATUS,
+    STATUS_NO_ANSWER,
     STATUS_RANK,
 )
 from jobdeck.dedupe import norm
@@ -3253,6 +3254,15 @@ def get_email_log(con: sqlite3.Connection, email_log_id: int) -> sqlite3.Row | N
 #
 # A row he has answered, or that a status already cites, is not waiting for
 # anything and is left alone — the same two exclusions the name proposals use.
+# A receipt he TOOK BACK is his strongest "no" and is remembered by its own
+# `matched_by`: without that, `undo_receipt` restores a row indistinguishable
+# from a fresh proposal and the next pass files it again.
+#
+# An application the SILENCE rule closed is left out entirely, and that is the
+# opposite of leaving it alone: "Keine Antwort" says nothing came back, and
+# this mail is something that came back. The closure may well be wrong, so the
+# evidence against it has to stay where he can see it rather than leave the
+# shelf while the register keeps the closure.
 _SHELF_RECEIPTS_SQL = (
     " FROM email_log e "
     " LEFT JOIN jobs j ON j.id = e.job_id "
@@ -3260,11 +3270,16 @@ _SHELF_RECEIPTS_SQL = (
     " WHERE e.direction=? AND e.needs_review=1 "
     "   AND e.classification='eingang' "
     "   AND COALESCE(e.classified_by, '') <> 'reply_manual' "
+    "   AND COALESCE(e.matched_by, '') <> ? "
+    "   AND COALESCE(b.status, '') <> ? "
     "   AND NOT EXISTS (SELECT 1 FROM status_history s "
     "                    WHERE s.email_log_id = e.id) "
     "   AND COALESCE(e.internal_date, '') <> '' "
     "   AND (b.gesendet_am = '' OR e.internal_date >= b.gesendet_am)"
 )
+# `matched_by` of a receipt he took back. Lives here rather than in the
+# service so the query that must exclude it cannot drift from the writer.
+MATCHED_UNDONE = "receipt_undone"
 
 
 def shelf_receipts(con: sqlite3.Connection) -> list[sqlite3.Row]:
@@ -3281,7 +3296,7 @@ def shelf_receipts(con: sqlite3.Connection) -> list[sqlite3.Row]:
         "       COALESCE(j.company, b.firma) AS company, b.status"
         + _SHELF_RECEIPTS_SQL
         + " ORDER BY e.internal_date, e.id",
-        (EMAIL_INBOUND,),
+        (EMAIL_INBOUND, MATCHED_UNDONE, STATUS_NO_ANSWER),
     ).fetchall()
 
 

@@ -90,6 +90,10 @@ ALL_LABELS = sorted({*LABELS.values(), LABEL_REVIEW})
 # is even offered: only a row this app CREATED may be taken back out.
 MATCHED_RECEIPT = "receipt"
 MATCHED_ATTACHED = "receipt_known"
+# A receipt he took back. `db` owns the value because the query that must
+# exclude such a row from filing itself again cannot be allowed to drift from
+# the writer that sets it.
+MATCHED_UNDONE = db.MATCHED_UNDONE
 
 HISTORY_KEY = "replies_history_id"
 LAST_POLL_KEY = "replies_last_poll_at"
@@ -898,13 +902,26 @@ def _attach_receipts(counters: dict) -> None:
     times and answered zero times is not a question worth asking; it is the
     shelf answering it.
 
-    This is `adopt_receipt`'s own "it was recorded meanwhile" branch, pressed
-    by the pass instead of by him — the same three writes, with an automatic
-    source so that `set_status`'s anti-downgrade rank decides rather than his
-    exemption from it. Eleven of his receipts hang off applications already
-    settled: those leave the shelf and the register is left alone, which is the
-    honest outcome, because a receipt for an application that has since been
-    answered holds no decision.
+    IT WRITES NO STATUS, and that is the whole design. The first version did,
+    and the security review reproduced what it cost: the shelf is reached by
+    the two arms this module's own contract says may "only ever propose" — a
+    company-name guess and a sender domain — and by the model's verdicts, so
+    writing from the shelf handed all three the one thing they are denied. A
+    stranger from a freemail address with the employer's name in his DISPLAY
+    NAME moved a status: `read_sender` computes `display_key` whatever the
+    domain, so the name arm binds, and nothing on that path ever asked about
+    DMARC because that arm never used to write.
+
+    It cost something subtler too. What keeps a name guess re-judgeable by a
+    rescan is not `matched_by` — it is `_NAME_PROPOSALS_SQL`'s "no status cites
+    this row". A status write creates exactly that row, so the pass would have
+    cemented the very guesses PR #56 exists to correct: 16 of 94 name matches
+    on his corpus were false.
+
+    So the pass answers the smaller question it can answer honestly — THIS
+    MAIL BELONGS TO THAT APPLICATION, filed — and leaves the register's word to
+    the arm that has the headers. He keeps the register unchanged and gets the
+    shelf back; the mail is under „Eingeordnet" with the application named.
 
     Two guards decide whether a receipt is THIS application's, and on his
     corpus they refuse exactly the seven mails that are not one — five JOIN
@@ -927,15 +944,20 @@ def _attach_receipts(counters: dict) -> None:
     """
     with db.db() as con:
         rows = db.shelf_receipts(con)
+    filed = 0
     for row in rows:
         email_log_id = int(row["id"])
         target = int(row["target_id"])
         fresh = row["bewerbung_id"] is None
         if fresh and not _names_employer_from_row(row):
             continue
-        note = (f"Eingangsbestätigung ({row['matched_note'] or 'zugeordnet'})"
-                f" · Gmail {row['gmail_message_id']}")
         with db.db() as con:
+            # Re-read inside the write transaction. The shelf was read on
+            # another connection, and a verdict or a dismissal he pressed in
+            # between must not be overwritten by a decision taken before it.
+            current = db.get_email_log(con, email_log_id)
+            if current is None or not _still_waiting(current):
+                continue
             if fresh:
                 db.link_reply_bewerbung(con, email_log_id, target)
                 # Not MATCHED_RECEIPT: this app did not create the ledger row,
@@ -943,13 +965,22 @@ def _attach_receipts(counters: dict) -> None:
                 db.set_reply_matched_by(con, email_log_id, MATCHED_ATTACHED)
                 counters["attached"] += 1
             db.settle_reply_review(con, email_log_id)
-            if db.set_status(con, target, "In Bearbeitung", source="reply_auto",
-                             email_log_id=email_log_id, note=note):
-                counters["auto_status"] += 1
+            filed += 1
         _apply_label(str(row["gmail_message_id"] or ""), "eingang")
-    if rows:
-        log.info("reply ingestion: %d receipt(s) on the shelf reconsidered",
-                 len(rows))
+    if filed:
+        log.info("reply ingestion: %d receipt(s) filed against an application "
+                 "already in the register, %d of them newly attached",
+                 filed, counters["attached"])
+
+
+def _still_waiting(row) -> bool:
+    """Is this row STILL the untouched receipt proposal the shelf read?
+
+    Read again inside the write, so the answer is about the row as it stands
+    now and not as it stood when the shelf was listed."""
+    return (int(row["needs_review"] or 0) == 1
+            and str(row["classification"] or "") == "eingang"
+            and str(row["classified_by"] or "") != "reply_manual")
 
 
 def _names_employer_from_row(row) -> bool:
@@ -1211,6 +1242,12 @@ def undo_receipt(email_log_id: int) -> bool:
     with db.db() as con:
         # apply_record.undo cleared email_log.bewerbung_id already
         db.classify_reply_row(con, email_log_id, "eingang", "rules", 1)
+        # And remember that he took it back. Restored as a plain `receipt`
+        # proposal the row is indistinguishable from one that has never been
+        # judged, so the pass that files receipts against an application
+        # already in the register would file this one the moment he recorded
+        # that application himself — overriding the strongest no he can give.
+        db.set_reply_matched_by(con, email_log_id, MATCHED_UNDONE)
     # The mail really is waiting again, so Gmail has to say so again —
     # otherwise his phone shows a settled mail while the shelf shows one
     # asking for him.
