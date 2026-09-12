@@ -66,7 +66,7 @@ processes sharing a database.
 | E-mail sending | Gmail OAuth, preview/edit, explicit approval state, test mode, real-send switch, daily cap, and ambiguous-outcome recovery. |
 | Scheduled sending | Approved drafts may be transmitted by the scheduler for search profiles with auto-send enabled. |
 | Form support | JobDeck detects known ATS and form channels, opens the employer page, prepares copy-ready values, and stages a PDF. It records an application after candidate confirmation or after a strongly matched receipt; it does not submit the form. |
-| Reply tracking | Gmail history polling, deterministic and optional Anthropic classification, matching, review, Gmail labels, and status history. Matching runs thread, then sender address, then form receipt, then sender domain, then company name. The company-name arm accepts an employer's domain label only when it equals a leading run of the company's words, reads the employer from the tenant slot or the display name when the sender is a job board or an ATS vendor, and only ever proposes; a proposed row does not anchor its Gmail thread, so a follow-up in that thread cannot write a status through the thread arm; a rescan marks its proposals the candidate has not answered, and the next full listing drops and re-reads them. |
+| Reply tracking | Gmail history polling, deterministic and optional Anthropic classification, matching, review, Gmail labels, and status history. Matching runs thread, then sender address, then form receipt, then sender domain, then company name. The company-name arm accepts an employer's domain label only when it equals a leading run of the company's words, reads the employer from the tenant slot or the display name when the sender is a job board or an ATS vendor, and only ever proposes; a proposed row does not anchor its Gmail thread, so a follow-up in that thread cannot write a status through the thread arm; a rescan marks its proposals the candidate has not answered, and the next full listing drops and re-reads them. A multi-tenant ATS domain cannot authorize a receipt on its own: the employer must be named in the sender's tenant slot, its display name, or the mail's own words, read as whole-word runs. After each pass, a receipt still awaiting review whose application already exists is attached and its status raised to in-progress, provided the mail does not predate the application and — for a new attachment — names the employer; a receipt for an application already answered is filed and the register is left unchanged. |
 | Application register | Applications, status changes, inbound/outbound message metadata, and selected reply bodies are stored locally. |
 | Backups | Existing databases receive a verified SQLite recovery snapshot before startup migration. Creation failures stop migration and are reported explicitly; snapshots are rotated while retaining the best valid copy. |
 | Application identity | One decision function is consulted by every gate and every screen that explains a refusal. It returns a verdict with its evidence: a republication, a company inside its cooling-off window, or a live reservation. |
@@ -255,3 +255,10 @@ from that environmental failure.
   open application at the same company; the mail stays unmatched rather than
   guessed. A domain that abbreviates the company to fewer than three letters,
   or to something other than its leading words, is not recognised by name.
+- Receipt proposals a vendor domain produced before that domain stopped
+  authorizing on its own remain attributed to the posting it aligned with.
+  Only a rescan can re-read a message, and a rescan re-judges name proposals
+  only, so such a row waits for the candidate rather than correcting itself.
+- The sender's display name is not stored, so a receipt the pass reconsiders
+  is judged on its address and its words alone. A vendor mail that named the
+  employer only in its display name is left for the candidate.
