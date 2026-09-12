@@ -840,6 +840,33 @@ async def test_a_receipt_he_took_back_is_never_filed_again(inbox, con):
     assert (again["needs_review"], again["bewerbung_id"]) == (1, None)
 
 
+async def test_a_dismissal_he_pressed_while_the_shelf_was_walked_stands(
+        inbox, con, monkeypatch):
+    """The shelf is listed on one connection and acted on row by row on
+    another, so a press of his can land in between. Without re-reading the row
+    inside the write, the pass would attach a mail he had just pushed away —
+    deciding from a snapshot that his press had already overtaken."""
+    job_id = _strip_job(con)
+    bewerbung_id = db.add_bewerbung(con, {
+        "firma": "Firma Beispiel GmbH", "kanal": "Online-Portal",
+        "status": "Gesendet", "gesendet_am": "2026-09-01"})
+    con.execute("UPDATE jobs SET bewerbung_id=? WHERE id=?",
+                (bewerbung_id, job_id))
+    row_id = _shelf_receipt(con, job_id=job_id,
+                            subject="Ihre Bewerbung bei Firma Beispiel GmbH")
+    stale = db.shelf_receipts(con)
+    assert len(stale) == 1                      # the snapshot the pass reads
+    monkeypatch.setattr(db, "shelf_receipts", lambda _con: stale)
+
+    service.dismiss_review(row_id)               # his press, inside the window
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["attached"] == 0
+    row = db.get_email_log(con, row_id)
+    assert (row["bewerbung_id"], row["classification"]) == (None, "")
+
+
 async def test_the_shelf_is_filed_after_the_messages_of_the_same_pass(
         inbox, con):
     """A receipt this pass proposes is filed by this pass when the application
