@@ -171,6 +171,38 @@ async def test_a_receipt_the_pass_attached_offers_a_correction_not_an_undo(
     await user.should_see("Keiner Bewerbung zuordnen")
 
 
+def test_a_receipt_he_took_back_can_still_be_adopted_in_one_press():
+    """`undo_receipt` promises the mail "returns to the review pile where it can
+    be re-adopted or dismissed", and remembering his undo in `matched_by` took
+    that promise away: the shelf reads the same field to decide whether to offer
+    „Als Bewerbung eintragen". Found by the security review's second pass."""
+    undone = {"matched_by": replies_service.MATCHED_UNDONE, "job_id": 7,
+              "bewerbung_id": None}
+    assert antworten.is_receipt_proposal(undone)
+    # and the two halves of the predicate still carry their weight
+    assert not antworten.is_receipt_proposal({**undone, "job_id": None})
+    assert not antworten.is_receipt_proposal({**undone, "bewerbung_id": 3})
+    assert not antworten.is_receipt_proposal({**undone, "matched_by": "name"})
+
+
+async def test_a_name_guess_the_pass_settled_can_also_be_unlinked(
+        user: User, con):
+    """The pass settles rows the company-name arm guessed, not only the ones it
+    attached — and that arm is "eine Ähnlichkeit, keine Identifikation", 16 of
+    94 false on his corpus. „Korrigieren" keeps the link and writes a status, so
+    on a wrong guess the only press available made it worse. Found by the
+    security review's second pass."""
+    bewerbung_id = _application(con)
+    _inbound(con, "m-guess", bewerbung_id=bewerbung_id, needs_review=0,
+             classification="eingang", classified_by="rules",
+             matched_by="name")
+    await user.open("/antworten")
+    await _open_view(user, "eingeordnet")
+
+    await user.should_see("automatisch")       # he confirmed nothing
+    await user.should_see("Keiner Bewerbung zuordnen")
+
+
 async def test_a_row_he_confirmed_himself_offers_no_unlink(user: User, con):
     """The unlink is for the one row he never confirmed. A reply he judged is
     his own verdict, and the shelf is where a mail is unlinked."""

@@ -560,12 +560,18 @@ async def test_a_vendor_receipt_naming_another_employer_is_not_this_postings_mai
 
 async def test_a_vendor_receipt_that_names_this_employer_still_records(
         inbox, con):
-    """The other half of the guard, and the reason it is not a blanket
-    refusal: measured over his corpus the one receipt this branch should
-    keep — a softgarden confirmation — names its employer in the subject."""
+    """The other half of the guard, and the reason it is not a blanket refusal.
+
+    The employer has to be named where the VENDOR writes it — its display name
+    here, its tenant slot on a Personio-style address — because that is the
+    part of the envelope a sender cannot fake by being itself. The mail's own
+    words are not enough: a company key is its name without the legal form, so a
+    one-word name keys to an ordinary word, and a genuine receipt for a
+    different employer recorded an application at a company it never
+    mentioned."""
     job_id = _strip_job(con, apply_url="https://join.com/companies/x/jobs/7")
-    inbox.add("m-1", from_header="JOIN <noreply@join.com>",
-              subject="Deine Bewerbung bei der Firma Beispiel GmbH",
+    inbox.add("m-1", from_header="Firma Beispiel GmbH <noreply@join.com>",
+              subject="Deine Bewerbung",
               body="Ihre Bewerbung ist eingegangen.", auth=VENDOR_AUTH)
 
     outcome = await service.ingest_replies()
@@ -575,6 +581,27 @@ async def test_a_vendor_receipt_that_names_this_employer_still_records(
     assert job["bewerbung_id"] is not None
     assert db.get_bewerbung(con, job["bewerbung_id"])["status"] \
         == "In Bearbeitung"
+
+
+async def test_a_vendor_receipt_naming_the_employer_only_in_its_words_proposes(
+        inbox, con):
+    """The security review's second reproduction. A genuine vendor receipt for
+    ANOTHER employer, whose text happens to contain this posting's company as a
+    word, recorded an application at a company the mail never wrote about — a
+    key is a name without its legal form, so a one-word company name keys to an
+    ordinary word of the language. A length floor cannot tell a name from a
+    word, so the authorizing gate stopped reading the mail's words at all."""
+    job_id = _strip_job(con, company="Leuchte GmbH",
+                        apply_url="https://join.com/companies/x/jobs/7")
+    inbox.add("m-1", from_header="JOIN <noreply@join.com>",
+              subject="Deine Bewerbung bei Anders Software GmbH",
+              body="Vielen Dank, deine Bewerbung ist eingegangen. Unsere "
+                   "Leuchte im Posteingang blinkt schon.", auth=VENDOR_AUTH)
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 0
+    assert db.get_job(con, job_id)["bewerbung_id"] is None
 
 
 async def test_a_refused_vendor_receipt_reaches_the_application_it_names(
@@ -714,6 +741,38 @@ async def test_a_receipt_older_than_its_application_stays_on_the_shelf(
     row = db.get_email_log(con, row_id)
     assert (row["needs_review"], row["bewerbung_id"]) == (1, None)
     assert db.get_bewerbung(con, bewerbung_id)["status"] == "Gesendet"
+
+
+async def test_an_application_without_a_send_date_is_never_attached_to(
+        inbox, con):
+    """The one direction of harm in this pass that was not conservative, found
+    by the security review on its second pass.
+
+    The register's form accepts an application with no date, and
+    `identity.holds_company` then holds that company FOR EVER — "no usable date
+    means the window cannot be proven to have passed". Attaching a mail to it
+    gives `LAST_CONTACT_SQL` a usable date, so the cooling-off hold released and
+    `services/send` stopped refusing a second application to a company he had
+    already written to."""
+    job_id = _strip_job(con)
+    bewerbung_id = db.add_bewerbung(con, {
+        "firma": "Firma Beispiel GmbH", "kanal": "Online-Portal",
+        "status": "Gesendet", "gesendet_am": ""})
+    con.execute("UPDATE jobs SET bewerbung_id=? WHERE id=?",
+                (bewerbung_id, job_id))
+    row_id = _shelf_receipt(con, job_id=job_id,
+                            from_addr="hr@firma-beispiel.de",
+                            subject="Ihre Bewerbung bei Firma Beispiel GmbH",
+                            internal_date="2019-01-02T09:00:00")
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["attached"] == 0
+    row = db.get_email_log(con, row_id)
+    assert (row["needs_review"], row["bewerbung_id"]) == (1, None)
+    # and the anchor the cooling-off gate reads has not moved
+    held = [b for b in db.list_bewerbungen(con) if b["id"] == bewerbung_id][0]
+    assert str(held["last_contact"] or "") == ""
 
 
 async def test_a_new_attachment_has_to_name_the_employer(inbox, con):

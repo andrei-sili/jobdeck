@@ -3250,7 +3250,16 @@ def get_email_log(con: sqlite3.Connection, email_log_id: int) -> sqlite3.Row | N
 # `internal_date` a local naive stamp, so a mail from the day it was sent
 # compares greater and is kept — 19 of his 27 unattached receipts arrived that
 # same day. A mail Gmail gives no date for cannot be shown to follow anything
-# and fails closed, the same rule `_follows_the_opening` applies to a form.
+# and fails closed, the same rule `_follows_the_opening` applies to a form —
+# AND SO DOES A LEDGER ROW WITHOUT ONE. The first version read an empty
+# `gesendet_am` as "no constraint" and accepted any mail date against it, which
+# inverted the rule for the one side that matters most: the register's form
+# accepts an application with no date, `identity.holds_company` then holds that
+# company FOR EVER ("no usable date means the window cannot be proven to have
+# passed"), and attaching an old mail to it gives `LAST_CONTACT_SQL` a usable
+# date far in the past — so the cooling-off hold released and `services/send`
+# stopped refusing a second application to a company he had already written to.
+# The one direction of harm in this pass that was not conservative.
 #
 # A row he has answered, or that a status already cites, is not waiting for
 # anything and is left alone — the same two exclusions the name proposals use.
@@ -3275,7 +3284,8 @@ _SHELF_RECEIPTS_SQL = (
     "   AND NOT EXISTS (SELECT 1 FROM status_history s "
     "                    WHERE s.email_log_id = e.id) "
     "   AND COALESCE(e.internal_date, '') <> '' "
-    "   AND (b.gesendet_am = '' OR e.internal_date >= b.gesendet_am)"
+    "   AND COALESCE(b.gesendet_am, '') <> '' "
+    "   AND e.internal_date >= b.gesendet_am"
 )
 # `matched_by` of a receipt he took back. Lives here rather than in the
 # service so the query that must exclude it cannot drift from the writer.

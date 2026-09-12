@@ -499,16 +499,14 @@ def _receipt_match(con, meta: dict, from_addr: str, subject: str) -> dict | None
     # lines where ATS mail states the reference.
     text_window = f"{subject}\n{meta['snippet']}"
     from_header = str(meta["headers"].get("from", ""))
-    # Both readings are of the MESSAGE, not of a candidate, so they are taken
-    # once and compared with each — the bound `read_sender` exists for.
+    # A reading of the MESSAGE, not of a candidate, so it is taken once and
+    # compared with each — the bound `read_sender` exists for.
     reading = replies.read_sender(from_header, from_addr)
-    run_keys = replies.text_run_keys(text_window)
     identified: list[tuple[dict, str, bool]] = []
     weak: list[dict] = []
     for job in candidates:
         evidence, authorizing = _receipt_evidence(job, sender_domain,
-                                                  text_window, reading,
-                                                  run_keys)
+                                                  text_window, reading)
         if evidence:
             identified.append((dict(job), evidence, authorizing))
         elif _company_named(job, from_addr, meta["headers"].get("from", "")):
@@ -561,8 +559,7 @@ def _follows_the_opening(job, meta: dict) -> bool:
 
 
 def _receipt_evidence(job, sender_domain: str, text: str,
-                      reading: replies.SenderReading,
-                      run_keys: frozenset[str]) -> tuple[str, bool]:
+                      reading: replies.SenderReading) -> tuple[str, bool]:
     """(what identified this posting, may it AUTHORIZE a ledger write).
 
     Only the sender's own domain can authorize. A Referenznummer is printed
@@ -583,10 +580,11 @@ def _receipt_evidence(job, sender_domain: str, text: str,
     plainly in its own subject, were all identified as ONE posting at a
     sixteenth company, and only the guard that a receipt cannot predate its
     form kept them from writing that posting's status.
-    So on a vendor domain the employer has to be named somewhere a vendor
-    cannot fake by being itself: its tenant slot, its display name, or the
-    mail's own words. Measured over his corpus, 16 of the 18 receipts this
-    branch authorized named nobody at all, and the 2 that did keep it.
+    So on a vendor domain the employer has to be named where a vendor cannot
+    fake it by being itself: its tenant slot or its display name. The mail's
+    own words were accepted here at first and the security review showed why
+    they must not be — see `_names_employer`. Measured over his corpus, 16 of
+    the 18 receipts this branch authorized named nobody at all.
 
     Refusing rather than proposing is deliberate: the receipt arm runs
     before the name arm, so a mail this arm declines gets its chance at the
@@ -616,7 +614,7 @@ def _receipt_evidence(job, sender_domain: str, text: str,
         # a mail is about, and still only ever proposes. Refusing outright
         # here took that proposal away from a board mail quoting the number.
         may_authorize = (not apply_channel.is_vendor_domain(sender_domain)
-                         or _names_employer(job, reading, run_keys))
+                         or _names_employer(job, reading))
         if may_authorize and sender_domain in targets:
             evidence = f"Absender {sender_domain}"
             return (f"{evidence} · Refnr {refnr}" if by_refnr else evidence), True
@@ -633,19 +631,27 @@ def _receipt_evidence(job, sender_domain: str, text: str,
     return "", False
 
 
-def _names_employer(job, reading: replies.SenderReading,
-                    run_keys: frozenset[str]) -> bool:
-    """Is THIS posting's employer named anywhere a vendor cannot fake?
+def _names_employer(job, reading: replies.SenderReading) -> bool:
+    """Is THIS posting's employer named where a vendor cannot fake it?
 
-    Both readings are computed once per message: the sender's, and the run
-    keys of its text. `company_matches` covers the tenant slot a vendor puts
-    in front of its own domain ("beispiel-jobs@m.personio.de") and its
-    display name; `company_named_in_text` covers the mail saying it in
-    words, which is how JOIN and softgarden write.
+    THE SENDER ONLY — the tenant slot a vendor puts in front of its own domain
+    ("beispiel-jobs@m.personio.de") or its display name. Both are parts of the
+    envelope the vendor itself writes, which is the whole point: this gate
+    decides whether a ledger row may be RECORDED.
+
+    The mail's own words were allowed here at first and the security review
+    showed why they must not be. A company key is its name with the legal form
+    removed, so a one-word employer name keys to an ordinary word of the
+    language — and a genuine Personio receipt for a DIFFERENT employer, DMARC
+    and all, recorded an application at a company it never mentioned. A length
+    floor cannot fix that: it tests how long a word is, not whether it is a
+    name.
+
+    The prose arm still serves `_names_employer_from_row`, which only ever
+    ATTACHES a mail to an application that already exists — no ledger row, no
+    status, and undoable from the filed view.
     """
-    firma = str(job["company"] or "")
-    return (replies.company_matches(firma, reading)
-            or replies.company_named_in_text(firma, run_keys))
+    return replies.company_matches(str(job["company"] or ""), reading)
 
 
 def _company_named(job, from_addr: str, from_header: str) -> bool:
@@ -957,6 +963,10 @@ def _attach_receipts(counters: dict) -> None:
             # between must not be overwritten by a decision taken before it.
             current = db.get_email_log(con, email_log_id)
             if current is None or not _still_waiting(current):
+                continue
+            if fresh and current["bewerbung_id"] is not None:
+                # The snapshot said unattached and it is not any more, so the
+                # link this pass would write would overwrite one it never read.
                 continue
             if fresh:
                 db.link_reply_bewerbung(con, email_log_id, target)

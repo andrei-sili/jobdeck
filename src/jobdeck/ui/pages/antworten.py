@@ -248,7 +248,8 @@ def reader_notes(group: dict) -> list[tuple[str, str]]:
 
 
 def is_receipt_proposal(row: dict) -> bool:
-    return (row.get("matched_by") == reply_service.MATCHED_RECEIPT
+    return (row.get("matched_by") in (reply_service.MATCHED_RECEIPT,
+                                     reply_service.MATCHED_UNDONE)
             and row.get("job_id") is not None
             and row.get("bewerbung_id") is None)
 
@@ -771,14 +772,17 @@ async def antworten_page():
                     ui.button("Korrigieren",
                               on_click=lambda _=None, r=dict(row):
                                   correct(r)).props("flat dense no-caps")
-                    if row.get("matched_by") == reply_service.MATCHED_ATTACHED:
-                        # The one row here he never confirmed: the pass tied it
-                        # to an application by itself. „Korrigieren" can only
-                        # relabel, so without this the only way to undo a wrong
-                        # attachment was to write a verdict that is also false
-                        # — while the mail kept counting as this application's
-                        # last contact, which is what the silence rule and the
-                        # cooling-off window measure from.
+                    if row.get("classified_by") != "reply_manual":
+                        # Every row here he never confirmed, not only the ones
+                        # the pass ATTACHED. It also settles rows the company-
+                        # name arm guessed — the class PR #56 exists for, 16 of
+                        # 94 false on his corpus — and „Korrigieren" keeps the
+                        # link and writes a status, so on a wrong guess the one
+                        # press available made it worse. Meanwhile the mail
+                        # counts as that application's last contact, which is
+                        # what the silence rule and the cooling-off window
+                        # measure from. A reply he judged is his own verdict and
+                        # is unlinked where he judged it.
                         ui.button("Keiner Bewerbung zuordnen",
                                   on_click=lambda _=None, r=row["id"]:
                                       unlink(r)).props("flat dense no-caps")
