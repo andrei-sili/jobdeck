@@ -962,6 +962,12 @@ def _attach_receipts(counters: dict) -> None:
     could be read: the labels have to follow the shelf, and a shelf that waits
     for the next pass loses nothing.
     """
+    # The counters this function owns, so a caller cannot create a state where a
+    # missing key raises INSIDE the per-row containment and every row then reads
+    # as a failure. That happened once, to a measurement script, and the log said
+    # eleven mails had failed when nothing had.
+    counters.setdefault("filed", 0)
+    counters.setdefault("attached", 0)
     with db.db() as con:
         rows = db.shelf_receipts(con)
     for row in rows:
