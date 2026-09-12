@@ -199,6 +199,8 @@ uv run --no-project python scripts/scan_secrets.py
 ```
 
 Tests must use their temporary data fixtures. Do not point tests, experiments,
-or migrations at the active candidate data directory. CI additionally builds
+or migrations at the active candidate data directory. The one exception is the
+personal-data gate, which opens the active database read-only to read company
+names, writes nothing, and skips when there is no data directory. CI additionally builds
 and installs the wheel on every declared Python version and audits the locked
 runtime dependencies.

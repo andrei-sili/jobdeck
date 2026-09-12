@@ -214,6 +214,14 @@ jobs validate canonical-document metadata and relative links, scan tracked
 files for high-confidence credential signatures, and audit locked runtime
 dependencies. No type checker is currently configured.
 
+A personal-data gate in the suite fails when a forbidden value appears in a
+tracked file. It has two halves. The denylist half compares SHA-256 digests
+from a checked-in list, holds no clear text, and runs everywhere including CI.
+The register half reads company names out of the candidate's own register at
+run time, read-only, and covers names the list does not; it is skipped wherever
+there is no data directory, which includes CI. A company the candidate applies
+to after this list was written is therefore caught locally and not on CI.
+
 The test suite covers substantial domain, database, source, Gmail, PDF, SSRF,
 and NiceGUI behavior. It does not provide a real browser end-to-end workflow or
 live provider contract gate. Live external behavior cannot be inferred from
