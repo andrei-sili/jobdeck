@@ -61,6 +61,7 @@ MATCHED_BY = {
     "name": "über den Firmennamen zugeordnet",
     reply_service.MATCHED_RECEIPT: "Eingangsbestätigung zu einem Formular",
     reply_service.MATCHED_ATTACHED: "Eingangsbestätigung zu einem Formular",
+    reply_service.MATCHED_UNDONE: "Eingangsbestätigung, von dir zurückgenommen",
 }
 # The row is one nowrap line with an ellipsis, so the origin has to be a word
 # rather than a sentence; the sentence stays in the reader.
@@ -71,6 +72,7 @@ MATCHED_SHORT = {
     "name": "Firmenname",
     reply_service.MATCHED_RECEIPT: "Eingangsbestätigung",
     reply_service.MATCHED_ATTACHED: "Eingangsbestätigung",
+    reply_service.MATCHED_UNDONE: "zurückgenommen",
 }
 
 
@@ -574,23 +576,23 @@ async def antworten_page():
             register belong here for exactly that reason: fifty of his waiting
             mails leave this shelf without a press, and a shelf that shrinks
             unexplained is the thing he asks about."""
-            # „abgeschlossen“, never „beantwortet“: the kept set includes
-            # „Keine Antwort“, and Einstellungen tells him in as many words
-            # that nobody answered there („kein «Absage», denn abgesagt hat
-            # niemand“) — `BEANTWORTET_STATUS` leaves it out for the same
-            # reason. Calling it answered here would promise him the raise
-            # this rank refuses. `is_closed` above is the same set.
+            # The second sentence is about ZUORDNEN and says so: the pass
+            # that files receipts against an application already in the
+            # register writes no status at all, because the shelf is reached
+            # by arms that may only propose. An earlier draft of this
+            # paragraph promised „setzt den Stand auf «In Bearbeitung»" —
+            # a screen that names automatic writes must not name one that
+            # does not happen.
             ui.label("Eindeutige Absagen und Einladungen im Mail-Verlauf "
                      "einer Bewerbung trägt JobDeck selbst ein, ebenso "
                      "Eingangsbestätigungen, deren Absender zweifelsfrei zur "
                      "Anzeige gehört. Steht die Bewerbung schon im Register, "
                      "ordnet JobDeck ihr eine Eingangsbestätigung von selbst "
-                     "zu und setzt den Stand auf „In Bearbeitung“. Ist die "
-                     "Bewerbung schon abgeschlossen, bleibt der Stand, wie er "
-                     "ist; die Mail wird nur eingeordnet. Jede Zeile unter "
-                     "„Eingeordnet“ sagt, ob sie automatisch kam, und ein "
-                     "Klick korrigiert sie. Alles andere wartet hier auf "
-                     "dich.").classes("jd-card-sub")
+                     "zu und lässt den Stand stehen; die Mail wartet dann "
+                     "nicht mehr auf dich. Jede Zeile unter „Eingeordnet“ "
+                     "sagt, ob sie automatisch kam, und ein Klick korrigiert "
+                     "sie. Alles andere wartet hier auf dich.") \
+                .classes("jd-card-sub")
 
         def _render_group(group: dict) -> None:
             lead = group["lead"]
@@ -769,9 +771,26 @@ async def antworten_page():
                     ui.button("Korrigieren",
                               on_click=lambda _=None, r=dict(row):
                                   correct(r)).props("flat dense no-caps")
+                    if row.get("matched_by") == reply_service.MATCHED_ATTACHED:
+                        # The one row here he never confirmed: the pass tied it
+                        # to an application by itself. „Korrigieren" can only
+                        # relabel, so without this the only way to undo a wrong
+                        # attachment was to write a verdict that is also false
+                        # — while the mail kept counting as this application's
+                        # last contact, which is what the silence rule and the
+                        # cooling-off window measure from.
+                        ui.button("Keiner Bewerbung zuordnen",
+                                  on_click=lambda _=None, r=row["id"]:
+                                      unlink(r)).props("flat dense no-caps")
                 ui.button("Ganze Mail",
                           on_click=lambda _=None, r=dict(row): show_mail(r)) \
                     .props("flat dense no-caps")
+
+        async def unlink(email_log_id: int) -> None:
+            """Take back an attachment the pass made on its own."""
+            await run.io_bound(reply_service.dismiss_review, email_log_id)
+            say("Zuordnung aufgehoben")
+            await refresh(force=True)
 
         def correct(row: dict) -> None:
             current = str(row.get("classification") or "")

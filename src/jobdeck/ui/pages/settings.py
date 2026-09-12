@@ -788,7 +788,9 @@ async def settings_page():
                         return
                     ui.notify(
                         f"Read {r['seen']}: {r['auto_status']} filed, "
-                        f"{r['receipts']} receipts, {r['review']} to review",
+                        f"{r['receipts']} receipts, "
+                        f"{r.get('attached', 0)} attached, "
+                        f"{r['review']} to review",
                         type="positive",
                     )
 

@@ -94,10 +94,10 @@ async def test_the_page_states_what_is_automatic(user: User, con,
     # the receipts that file themselves are the newest thing that writes a
     # status, so the note that names what is automatic has to name them too
     await user.should_see("Steht die Bewerbung schon im Register")
-    await user.should_see("Stand auf „In Bearbeitung“")
-    # including the half that writes nothing, named with the screen's own word
-    await user.should_see("Ist die Bewerbung schon abgeschlossen")
-    await user.should_see("bleibt der Stand, wie er ist")
+    # and says what that does NOT do. The pass writes no status, so a note
+    # that names automatic writes must not name one.
+    await user.should_see("lässt den Stand stehen")
+    await user.should_see("wartet dann nicht mehr auf dich")
 
 
 def test_one_note_names_everything_that_files_itself():
@@ -134,7 +134,9 @@ def test_one_note_names_everything_that_files_itself():
                      if isinstance(node, ast.Constant)
                      and isinstance(node.value, str))
     assert "beantwortet" not in shown
-    assert "Ist die Bewerbung schon abgeschlossen" in shown
+    # it must not claim a status write: the pass files, it does not judge
+    assert "In Bearbeitung" not in shown
+    assert "lässt den Stand stehen" in shown
     assert set(constants.BEANTWORTET_STATUS) < set(
         s for s in constants.STATUS_RANK if constants.STATUS_RANK[s] >= 2)
 
@@ -162,6 +164,25 @@ async def test_a_receipt_the_pass_attached_offers_a_correction_not_an_undo(
     await user.should_see("automatisch")       # not "bestätigt" — he did not
     await user.should_see("Korrigieren")
     await user.should_not_see("Rückgängig")
+    # and there IS a way back. „Korrigieren" can only relabel, so without this
+    # the only way to undo an attachment the pass made on its own was to write
+    # a verdict that is also false — while the mail kept counting as this
+    # application's last contact.
+    await user.should_see("Keiner Bewerbung zuordnen")
+
+
+async def test_a_row_he_confirmed_himself_offers_no_unlink(user: User, con):
+    """The unlink is for the one row he never confirmed. A reply he judged is
+    his own verdict, and the shelf is where a mail is unlinked."""
+    bewerbung_id = _application(con)
+    _inbound(con, "m-his", bewerbung_id=bewerbung_id, needs_review=0,
+             classification="eingang", classified_by="reply_manual",
+             matched_by="thread")
+    await user.open("/antworten")
+    await _open_view(user, "eingeordnet")
+
+    await user.should_see("bestätigt")
+    await user.should_not_see("Keiner Bewerbung zuordnen")
 
 
 # --------------------------------------------------------------------------
