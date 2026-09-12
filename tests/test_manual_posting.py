@@ -68,13 +68,13 @@ async def test_a_bundesagentur_link_fetches_the_text_itself(client, monkeypatch)
     monkeypatch.setattr(mp.arbeitsagentur, "ArbeitsagenturSource",
                         lambda c: _Detail(_detail_payload()))
     posting, refusal = await mp.build(
-        url="https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1003535918-S",
+        url="https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1000000003-S",
         text="", company="", title="", location="", client=client)
     assert refusal == ""
     # the source is the source the ad IS on — calling it 'manual' would cost
     # the row its liveness probe and its detail refresh
     assert posting.source == "arbeitsagentur"
-    assert posting.external_id == "10001-1003535918-S"
+    assert posting.external_id == "10001-1000000003-S"
     assert posting.company == "Beispiel GmbH"
     assert len(posting.description) > 500
 
@@ -95,7 +95,7 @@ async def test_a_bare_link_needs_nothing_typed_at_all(monkeypatch):
 
     transport = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     posting, refusal = await mp.build(
-        url="https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1003535918-S",
+        url="https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1000000003-S",
         text="", company="", title="", location="", client=transport)
     assert refusal == ""
     assert posting.title == payload["stellenangebotsTitel"]
@@ -116,7 +116,7 @@ async def test_the_board_is_authoritative_and_typing_only_fills_gaps(
     monkeypatch.setattr(mp.arbeitsagentur, "ArbeitsagenturSource",
                         lambda c: _Detail(_detail_payload()))
     posting, _ = await mp.build(
-        url="https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1003535918-S",
+        url="https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1000000003-S",
         text="", company="Andere GmbH", title="Anderer Titel",
         location="Kiel", client=client)
     assert posting.company == "Beispiel GmbH"          # the board's, not his
@@ -130,7 +130,7 @@ async def test_typing_fills_only_what_the_board_left_empty(client, monkeypatch):
         mp.arbeitsagentur, "ArbeitsagenturSource",
         lambda c: _Detail(_detail_payload(firma="", stellenangebotsTitel="")))
     posting, refusal = await mp.build(
-        url="https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1003535918-S",
+        url="https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1000000003-S",
         text="", company="Beispiel GmbH", title="Junior Backend",
         location="Kiel", client=client)
     assert refusal == ""
@@ -145,7 +145,7 @@ async def test_a_pasted_text_never_replaces_the_boards_own(client, monkeypatch):
     monkeypatch.setattr(mp.arbeitsagentur, "ArbeitsagenturSource",
                         lambda c: _Detail(_detail_payload()))
     posting, _ = await mp.build(
-        url="https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1003535918-S",
+        url="https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1000000003-S",
         text="Etwas ganz anderes.", company="", title="", location="",
         client=client)
     assert posting.description.startswith("Wir suchen eine Junior-Entwicklerin")
@@ -157,7 +157,7 @@ async def test_a_paste_supplies_the_text_a_partner_listing_lacks(
         mp.arbeitsagentur, "ArbeitsagenturSource",
         lambda c: _Detail(_detail_payload(stellenangebotsBeschreibung="")))
     posting, _ = await mp.build(
-        url="https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1003535918-S",
+        url="https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1000000003-S",
         text="Der Text von der Arbeitgeberseite.", company="", title="",
         location="", client=client)
     assert posting.description == "Der Text von der Arbeitgeberseite."
@@ -174,15 +174,15 @@ async def test_a_withdrawn_advert_keeps_its_identity_as_a_ba_posting(
     monkeypatch.setattr(mp.arbeitsagentur, "ArbeitsagenturSource",
                         lambda c: _Detail(None))
     posting, refusal = await mp.build(
-        url="https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1003535918-S",
+        url="https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1000000003-S",
         text="Der Anzeigentext, von Hand kopiert.",
         company="Beispiel GmbH", title="Junior Backend", location="",
         client=client)
     assert refusal == ""
     assert posting.source == "arbeitsagentur"
-    assert posting.external_id == "10001-1003535918-S"
+    assert posting.external_id == "10001-1000000003-S"
     assert posting.description == "Der Anzeigentext, von Hand kopiert."
-    assert posting.url.endswith("/10001-1003535918-S")
+    assert posting.url.endswith("/10001-1000000003-S")
 
 
 @pytest.mark.parametrize("url", [
@@ -363,9 +363,9 @@ async def test_a_fetched_posting_is_stored_with_its_own_link(client, monkeypatch
     monkeypatch.setattr(mp.arbeitsagentur, "ArbeitsagenturSource",
                         lambda c: _Detail(_detail_payload()))
     posting, _ = await mp.build(
-        url="https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1003535918-S",
+        url="https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1000000003-S",
         text="", company="", title="", location="", client=client)
-    assert posting.url.endswith("/10001-1003535918-S")
+    assert posting.url.endswith("/10001-1000000003-S")
 
 
 async def test_a_crashing_fetch_does_not_take_the_page_with_it(
@@ -382,7 +382,7 @@ async def test_a_crashing_fetch_does_not_take_the_page_with_it(
     monkeypatch.setattr(mp.arbeitsagentur, "ArbeitsagenturSource",
                         lambda c: _Boom())
     posting, refusal = await mp.build(
-        url="https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1003535918-S",
+        url="https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1000000003-S",
         text="Von Hand kopiert.", company="Firma", title="Titel",
         location="", client=client)
     assert refusal == ""
@@ -399,7 +399,7 @@ async def test_the_text_cap_applies_on_the_fetched_branch_too(
         mp.arbeitsagentur, "ArbeitsagenturSource",
         lambda c: _Detail(_detail_payload(stellenangebotsBeschreibung="")))
     posting, _ = await mp.build(
-        url="https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1003535918-S",
+        url="https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1000000003-S",
         text="x" * 40_000, company="F", title="T", location="", client=client)
     assert len(posting.description) == mp.MAX_TEXT
 

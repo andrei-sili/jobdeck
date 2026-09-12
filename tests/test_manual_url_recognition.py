@@ -12,22 +12,22 @@ from jobdeck.sources import arbeitsagentur as ag
 
 
 @pytest.mark.parametrize("url, refnr", [
-    ("https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1003535918-S",
-     "10001-1003535918-S"),
+    ("https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1000000003-S",
+     "10001-1000000003-S"),
     # no scheme — what a paste out of the address bar can look like
-    ("www.arbeitsagentur.de/jobsuche/jobdetail/10001-1003535918-S",
-     "10001-1003535918-S"),
-    ("https://arbeitsagentur.de/jobsuche/jobdetail/19301-952981419-S",
-     "19301-952981419-S"),
+    ("www.arbeitsagentur.de/jobsuche/jobdetail/10001-1000000003-S",
+     "10001-1000000003-S"),
+    ("https://arbeitsagentur.de/jobsuche/jobdetail/19301-900000001-S",
+     "19301-900000001-S"),
     # a copied link routinely ends in a slash, or carries tracking
-    ("https://www.arbeitsagentur.de/jobsuche/jobdetail/13644-265788-S/",
-     "13644-265788-S"),
-    ("https://www.arbeitsagentur.de/jobsuche/jobdetail/13644-265788-S?x=1",
-     "13644-265788-S"),
-    ("https://www.arbeitsagentur.de/jobsuche/jobdetail/13644-265788-S#top",
-     "13644-265788-S"),
-    ("  https://www.arbeitsagentur.de/jobsuche/jobdetail/13644-265788-S  ",
-     "13644-265788-S"),
+    ("https://www.arbeitsagentur.de/jobsuche/jobdetail/13644-200001-S/",
+     "13644-200001-S"),
+    ("https://www.arbeitsagentur.de/jobsuche/jobdetail/13644-200001-S?x=1",
+     "13644-200001-S"),
+    ("https://www.arbeitsagentur.de/jobsuche/jobdetail/13644-200001-S#top",
+     "13644-200001-S"),
+    ("  https://www.arbeitsagentur.de/jobsuche/jobdetail/13644-200001-S  ",
+     "13644-200001-S"),
 ])
 def test_a_posting_url_yields_its_referenznummer(url, refnr):
     assert ag.refnr_from_url(url) == refnr
@@ -69,7 +69,7 @@ def test_the_recognizer_is_the_inverse_of_the_link_search_really_stores():
     source = inspect.getsource(ag.ArbeitsagenturSource.search)
     assert 'url=f"https://www.arbeitsagentur.de/jobsuche/jobdetail/{refnr}"' \
         in source, "search() no longer builds the URL this recogniser inverts"
-    refnr = "10001-1003535918-S"
+    refnr = "10001-1000000003-S"
     assert ag.refnr_from_url(
         f"https://www.arbeitsagentur.de/jobsuche/jobdetail/{refnr}") == refnr
 
@@ -89,5 +89,5 @@ def test_only_http_urls_can_name_a_posting(url):
 def test_a_percent_encoded_referenznummer_is_decoded():
     # detail_url re-encodes it, so a round trip must land on the raw id
     assert ag.refnr_from_url(
-        "https://www.arbeitsagentur.de/jobsuche/jobdetail/10001%2D1003535918%2DS"
-    ) == "10001-1003535918-S"
+        "https://www.arbeitsagentur.de/jobsuche/jobdetail/10001%2D1000000003%2DS"
+    ) == "10001-1000000003-S"

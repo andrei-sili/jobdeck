@@ -32,7 +32,7 @@ def test_known_ats_hosts_are_named(url, vendor):
 
 
 @pytest.mark.parametrize("url, label", [
-    ("https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1003292975-S", "Arbeitsagentur"),
+    ("https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1000000002-S", "Arbeitsagentur"),
     ("https://de.jooble.org/away/12345", "Jooble"),
     ("https://www.arbeitnow.com/jobs/companies/x/y", "Arbeitnow"),
     # the board's UK market — same site, second TLD

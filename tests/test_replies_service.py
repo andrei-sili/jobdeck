@@ -824,7 +824,7 @@ async def test_a_job_boards_own_newsletter_cannot_confirm_an_application(
     board_apply posting that URL is the BOARD's, not the employer's — and
     moved a real application to 'In Bearbeitung'."""
     job_id = _strip_job(
-        con, apply_url="https://de.jooble.org/away/4086168173421673246",
+        con, apply_url="https://de.jooble.org/away/1234567890123456789",
         apply_channel="board_apply")
     inbox.add("m-1", from_header="Jooble <subscribe@de.jooble.org>",
               subject="IT-Systemadministrator (w/m/d) bei Beispiel GmbH",
@@ -905,7 +905,7 @@ async def test_the_board_domain_alone_cannot_authorize_a_receipt(inbox, con):
     header, so the ONLY thing that could authorize this write is the
     apply_url domain — which on a board_apply posting belongs to the board."""
     job_id = _strip_job(
-        con, apply_url="https://de.jooble.org/away/4086168173421673246",
+        con, apply_url="https://de.jooble.org/away/1234567890123456789",
         apply_channel="board_apply")
     inbox.add("m-1", from_header="Jooble <no-reply@de.jooble.org>",
               subject="Eingangsbestätigung",

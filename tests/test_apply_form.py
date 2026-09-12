@@ -17,14 +17,14 @@ _JOB = {
     "id": 7,
     "title": "Ab sofort: Fullstack-Entwickler Python/Django (m/w/d)Vollzeit",
     "company": "Beispiel GmbH",
-    "refnr": "10001-1003387672-S",
+    "refnr": "10001-1000000001-S",
     "source": "arbeitsagentur",
     "ansprechpartner": "Frau Weber",
 }
 _DRAFT = {
     "status": "ready",
     "betreff": "Bewerbung als Fullstack-Entwickler Python/Django (m/w/d), "
-               "10001-1003387672-S – Andrei Sili",
+               "10001-1000000001-S – Andrei Sili",
     "anschreiben_body": "Sehr geehrte Frau Weber,\n\n" + "Absatz. " * 40,
     "pdf_path": "/home/x/.local/share/jobdeck/output/job_7/Bewerbung.pdf",
 }
@@ -88,7 +88,7 @@ def test_the_posting_answers_come_from_the_posting_not_from_prose():
     assert rows["Stellenbezeichnung"].value == \
         "Fullstack-Entwickler Python/Django (m/w/d)"
     # an id is either exact or wrong: passed through untouched
-    assert rows["Referenznummer"].value == "10001-1003387672-S"
+    assert rows["Referenznummer"].value == "10001-1000000001-S"
     assert rows["Ansprechpartner"].value == "Frau Weber"
     assert rows["Gefunden über"].value.startswith("Bundesagentur für Arbeit")
     assert rows["Anschreiben"].value == _DRAFT["anschreiben_body"].strip()
@@ -161,8 +161,8 @@ def test_only_a_usable_draft_answers_the_form(status, offered):
 
 
 @pytest.mark.parametrize("job, expected, why", [
-    ({"source": "arbeitsagentur", "external_id": "10001-1003292975-S", "refnr": ""},
-     "10001-1003292975-S",
+    ({"source": "arbeitsagentur", "external_id": "10001-1000000002-S", "refnr": ""},
+     "10001-1000000002-S",
      "186 of his 209 Arbeitsagentur postings have an EMPTY refnr column, and the "
      "external_id IS the Referenznummer — reading the column raw would say "
      "'none stated' while the Betreff row two lines down prints it"),
@@ -234,7 +234,7 @@ def test_the_form_answers_never_offer_a_letter_he_threw_away():
 def test_a_shortened_label_never_shortens_what_is_copied():
     """A truncated Referenznummer in someone's form is worse than none at all:
     an id is either exact or wrong."""
-    long_value = "10001-1003387672-S-und-noch-viel-mehr-text-" + "x" * 80
+    long_value = "10001-1000000001-S-und-noch-viel-mehr-text-" + "x" * 80
     assert jobs_page._short(long_value).endswith("…")
     assert len(jobs_page._short(long_value)) <= 60
     # the value itself is untouched — only the label is shortened
