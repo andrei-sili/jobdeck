@@ -62,6 +62,7 @@ MATCHED_BY = {
     reply_service.MATCHED_RECEIPT: "Eingangsbestätigung zu einem Formular",
     reply_service.MATCHED_ATTACHED: "Eingangsbestätigung zu einem Formular",
     reply_service.MATCHED_UNDONE: "Eingangsbestätigung, von dir zurückgenommen",
+    reply_service.MATCHED_FILED: "Eingangsbestätigung zu einer schon eingetragenen Bewerbung",
 }
 # The row is one nowrap line with an ellipsis, so the origin has to be a word
 # rather than a sentence; the sentence stays in the reader.
@@ -73,6 +74,7 @@ MATCHED_SHORT = {
     reply_service.MATCHED_RECEIPT: "Eingangsbestätigung",
     reply_service.MATCHED_ATTACHED: "Eingangsbestätigung",
     reply_service.MATCHED_UNDONE: "zurückgenommen",
+    reply_service.MATCHED_FILED: "Eingangsbestätigung",
 }
 
 
@@ -772,7 +774,8 @@ async def antworten_page():
                     ui.button("Korrigieren",
                               on_click=lambda _=None, r=dict(row):
                                   correct(r)).props("flat dense no-caps")
-                    if row.get("classified_by") != "reply_manual":
+                    if (row.get("classified_by") != "reply_manual"
+                            and not row.get("cited_by_status")):
                         # Every row here he never confirmed, not only the ones
                         # the pass ATTACHED. It also settles rows the company-
                         # name arm guessed — the class PR #56 exists for, 16 of
@@ -783,6 +786,18 @@ async def antworten_page():
                         # what the silence rule and the cooling-off window
                         # measure from. A reply he judged is his own verdict and
                         # is unlinked where he judged it.
+                        #
+                        # NOT a row a status cites. Widening this to every
+                        # unconfirmed row reached the rows the WRITING tiers
+                        # matched, and unlinking one of those left the status
+                        # standing beside an audit row pointing at nothing and
+                        # moved the anchor BACKWARDS — 80 days in the security
+                        # review's reproduction, flipping a company's
+                        # cooling-off verdict from held to allowed, which is a
+                        # send gate. The same exclusion `_SHELF_RECEIPTS_SQL`
+                        # and `_NAME_PROPOSALS_SQL` already use; a name guess is
+                        # in the allowed set by construction, since that arm
+                        # never writes.
                         ui.button("Keiner Bewerbung zuordnen",
                                   on_click=lambda _=None, r=row["id"]:
                                       unlink(r)).props("flat dense no-caps")

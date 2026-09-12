@@ -66,7 +66,7 @@ processes sharing a database.
 | E-mail sending | Gmail OAuth, preview/edit, explicit approval state, test mode, real-send switch, daily cap, and ambiguous-outcome recovery. |
 | Scheduled sending | Approved drafts may be transmitted by the scheduler for search profiles with auto-send enabled. |
 | Form support | JobDeck detects known ATS and form channels, opens the employer page, prepares copy-ready values, and stages a PDF. It records an application after candidate confirmation or after a strongly matched receipt; it does not submit the form. |
-| Reply tracking | Gmail history polling, deterministic and optional Anthropic classification, matching, review, Gmail labels, and status history. Matching runs thread, then sender address, then form receipt, then sender domain, then company name. The company-name arm accepts an employer's domain label only when it equals a leading run of the company's words, reads the employer from the tenant slot or the display name when the sender is a job board or an ATS vendor, and only ever proposes; a proposed row does not anchor its Gmail thread, so a follow-up in that thread cannot write a status through the thread arm; a rescan marks its proposals the candidate has not answered, and the next full listing drops and re-reads them. A multi-tenant ATS domain cannot authorize a receipt on its own: the employer must be named in the sender's tenant slot or its display name, never in the mail's own words, because a company key is its name without the legal form and can therefore be an ordinary word of the language. After each pass, a receipt still awaiting review whose application already exists is attached to it and taken off the review shelf; no status is written, because the shelf is reached by the arms that may only propose. It is skipped when the application carries no send date at all, when the mail predates the application, when a new attachment cannot name the employer in the sender or in the mail's words, when the candidate took that receipt back, and when the application was closed by the silence rule, which the mail contradicts. An attachment the candidate never confirmed can be undone from the filed view. |
+| Reply tracking | Gmail history polling, deterministic and optional Anthropic classification, matching, review, Gmail labels, and status history. Matching runs thread, then sender address, then form receipt, then sender domain, then company name. The company-name arm accepts an employer's domain label only when it equals a leading run of the company's words, reads the employer from the tenant slot or the display name when the sender is a job board or an ATS vendor, and only ever proposes; only a row a writing tier matched, a row the candidate judged, or an outbound message anchors a Gmail thread, so a follow-up in a thread a proposal or an automatic filing touched cannot write a status through the thread arm; a rescan marks its proposals the candidate has not answered, and the next full listing drops and re-reads them. A multi-tenant ATS domain cannot authorize a receipt on its own: the employer must be named in the sender's tenant slot or its display name, never in the mail's own words, because a company key is its name without the legal form and can therefore be an ordinary word of the language. After each pass, a receipt still awaiting review whose application already exists is attached to it and taken off the review shelf; no status is written, because the shelf is reached by the arms that may only propose. A filed receipt carries its own provenance, distinct from a receipt attached on strong evidence, and never anchors its Gmail thread. It is skipped when the application carries no send date at all, when the mail predates the application, when a new attachment cannot name the employer — in the sender, or in the mail's own words and then only from a board or vendor domain — when the candidate took that receipt back, and when the application was closed by the silence rule, which the mail contradicts. An attachment the candidate never confirmed, and that no status cites, can be undone from the filed view. |
 | Application register | Applications, status changes, inbound/outbound message metadata, and selected reply bodies are stored locally. |
 | Backups | Existing databases receive a verified SQLite recovery snapshot before startup migration. Creation failures stop migration and are reported explicitly; snapshots are rotated while retaining the best valid copy. |
 | Application identity | One decision function is consulted by every gate and every screen that explains a refusal. It returns a verdict with its evidence: a republication, a company inside its cooling-off window, or a live reservation. |
@@ -271,10 +271,18 @@ from that environmental failure.
   closure is delayed and a company stays held — and the attachment can be undone
   from the filed view, which restores the anchor exactly.
 - A new attachment may be justified by the employer's name appearing in the
-  mail's own words, which the sender writes. Requiring the sender to belong to
-  the posting's stored apply channel instead was measured and rejected: on a
-  form application the stored channel is the board the posting was found
-  through, not the applicant-tracking system the employer answers from, so the
-  rule would have refused 15 of 18 genuine receipts. The attachment writes no
-  status, records no application, moves the anchor only forward, and is
-  reversible, so the residual is accepted.
+  mail's own words, which the sender writes — but only when that sender is a
+  board or vendor domain, never an arbitrary mailbox. Requiring instead that the
+  sender belong to the posting's stored apply channel was measured and rejected:
+  on a form application the stored channel is the board the posting was found
+  through, not the applicant-tracking system the employer answers from, so that
+  rule would have refused 15 of 18 genuine receipts. Dropping the prose arm
+  altogether was also measured and rejected: it would have cost 10 of 18,
+  because the two largest applicant-tracking systems in the corpus put nothing
+  identifying in their sender. The board-or-vendor condition costs one.
+- A receipt whose posting has no application yet and whose only claim is a
+  vendor domain is left unmatched, so it never reaches the review shelf at all.
+  Proposing instead was rejected: a vendor domain aligns with every posting
+  applied for through it, so one vendor's notification would be offered against
+  an unrelated posting — the state the vendor guard exists to end. A rescan
+  forgets such a message, so a later rule can still reach it.

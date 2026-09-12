@@ -89,7 +89,14 @@ ALL_LABELS = sorted({*LABELS.values(), LABEL_REVIEW})
 # How a receipt reached the ledger. The distinction decides whether an undo
 # is even offered: only a row this app CREATED may be taken back out.
 MATCHED_RECEIPT = "receipt"
-MATCHED_ATTACHED = "receipt_known"
+MATCHED_ATTACHED = db.MATCHED_ATTACHED
+# What the shelf pass writes. A THIRD value, not `receipt_known`, because that
+# one may anchor a Gmail thread and this one may not: the strong ingestion arm
+# and his own press carry an aligned, authenticated sender, while the pass files
+# on evidence whose own tier may only propose. Sharing one value let a mail the
+# app itself had annotated "Absender gehört nicht zur Anzeige" turn its thread
+# into a status-writing channel.
+MATCHED_FILED = db.MATCHED_FILED
 # A receipt he took back. `db` owns the value because the query that must
 # exclude such a row from filing itself again cannot be allowed to drift from
 # the writer that sets it.
@@ -586,9 +593,15 @@ def _receipt_evidence(job, sender_domain: str, text: str,
     they must not be — see `_names_employer`. Measured over his corpus, 16 of
     the 18 receipts this branch authorized named nobody at all.
 
-    Refusing rather than proposing is deliberate: the receipt arm runs
-    before the name arm, so a mail this arm declines gets its chance at the
-    application it really belongs to.
+    Refusing rather than proposing is deliberate: the receipt arm runs before
+    the name arm, so a mail this arm declines gets its chance at the application
+    it really belongs to — WHEN there is one to find. When there is not, the mail
+    is left unmatched and only its opaque id is kept, so it never reaches him at
+    all. That is the accepted cost, and the alternative was measured: a vendor
+    domain aligns with EVERY posting applied for through it, so proposing
+    instead would have put fifteen JOIN receipts for other employers back on one
+    posting's shelf, which is the state this guard exists to end. A rescan
+    forgets those ids, so a better rule reaches the mail later.
     """
     refnr = resolve_refnr(job)
     by_refnr = replies.refnr_in_text(refnr, text, "")
@@ -967,12 +980,21 @@ def _attach_receipts(counters: dict) -> None:
             if fresh and current["bewerbung_id"] is not None:
                 # The snapshot said unattached and it is not any more, so the
                 # link this pass would write would overwrite one it never read.
+                #
+                # DEFENCE IN DEPTH, and deliberately not pinned by a test: the
+                # only other writers of this column are `dismiss_review` (which
+                # writes NULL) and `adopt_receipt`, and both set
+                # `classified_by='reply_manual'` in the same transaction, so
+                # `_still_waiting` already refuses them. No reachable state
+                # reaches this line, which means no honest test can either —
+                # the same reading `_is_robots_disallowed` carries.
                 continue
             if fresh:
                 db.link_reply_bewerbung(con, email_log_id, target)
                 # Not MATCHED_RECEIPT: this app did not create the ledger row,
-                # so `undo_receipt` must never offer to delete it.
-                db.set_reply_matched_by(con, email_log_id, MATCHED_ATTACHED)
+                # so `undo_receipt` must never offer to delete it. And not
+                # MATCHED_ATTACHED either: that value may anchor a thread.
+                db.set_reply_matched_by(con, email_log_id, MATCHED_FILED)
                 counters["attached"] += 1
             db.settle_reply_review(con, email_log_id)
             filed += 1
@@ -996,17 +1018,30 @@ def _still_waiting(row) -> bool:
 def _names_employer_from_row(row) -> bool:
     """Does a STORED receipt name the employer of the posting it sits on?
 
-    The same question `_names_employer` asks at ingestion, from what the row
-    kept: the sender's address and the mail's own words, the body included —
-    more text than the match-time window had. The display name is NOT stored,
-    so a vendor mail that named the employer only there is refused here and
-    waits for him. Fail-closed, and it costs one mail on his shelf.
+    Two ways, and the second is narrower than it looks.
+
+    The SENDER, as at ingestion — a vendor's tenant slot or an employer's own
+    domain label. The display name is not stored, so a vendor mail that named
+    the employer only there is refused here and waits for him. Measured on his
+    corpus: this arm alone justifies 8 of the 18 attachments.
+
+    Otherwise the mail's own WORDS, but only when the sender is a domain
+    receipts legitimately arrive through — a board or an ATS vendor. That
+    condition is the security review's doing: the words are written by whoever
+    sent the mail, so on their own they let a stranger's mailbox attach itself to
+    an application by naming the company. Measured both ways on his corpus:
+    dropping the prose arm entirely would cost 10 of 18 genuine receipts (JOIN
+    and softgarden put nothing in their tenant slot), while requiring a channel
+    sender costs exactly ONE and refuses every attack sender the review
+    constructed, none of which has a matchable domain at all.
     """
     firma = str(row["company"] or "")
     from_addr = str(row["from_addr"] or "")
-    reading = replies.read_sender("", from_addr)
-    if replies.company_matches(firma, reading):
+    if replies.company_matches(firma, replies.read_sender("", from_addr)):
         return True
+    domain = replies.matchable_domain(from_addr)
+    if not domain or not apply_channel.is_vendor_domain(domain):
+        return False
     text = f"{row['subject'] or ''}\n{row['body_text'] or ''}"
     return replies.company_named_in_text(firma, replies.text_run_keys(text))
 
@@ -1221,6 +1256,12 @@ def adopt_receipt(email_log_id: int) -> dict:
         return outcome
     with db.db() as con:
         db.link_reply_bewerbung(con, email_log_id, outcome["bewerbung_id"])
+        # THIS app just created the ledger row, so the row has to say so or the
+        # undo it earns is not offered. It did not need saying while `receipt`
+        # was the only value that could arrive here; a receipt he had taken back
+        # and then adopted kept `receipt_undone`, so „Rückgängig" vanished and
+        # the row's own line told him it was taken back.
+        db.set_reply_matched_by(con, email_log_id, MATCHED_RECEIPT)
         db.classify_reply_row(con, email_log_id, "eingang", "reply_manual", 0)
         db.set_status(con, outcome["bewerbung_id"], "In Bearbeitung",
                       source="reply_manual", email_log_id=email_log_id)

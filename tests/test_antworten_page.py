@@ -203,6 +203,26 @@ async def test_a_name_guess_the_pass_settled_can_also_be_unlinked(
     await user.should_see("Keiner Bewerbung zuordnen")
 
 
+async def test_a_row_a_status_cites_offers_no_unlink(user: User, con):
+    """Widening the unlink to every unconfirmed row reached the rows the WRITING
+    tiers matched, and unlinking one of those leaves the status standing beside
+    an audit row pointing at nothing — and moves the application's last-contact
+    anchor BACKWARDS, which flipped a company's cooling-off verdict from held to
+    allowed in the security review's reproduction. That is a send gate."""
+    bewerbung_id = _application(con)
+    row_id = _inbound(con, "m-cited", bewerbung_id=bewerbung_id, needs_review=0,
+                      classification="eingang", classified_by="rules",
+                      matched_by="thread")
+    db.add_status_history(con, bewerbung_id, "Gesendet", "In Bearbeitung",
+                          "reply_auto", row_id, "")
+    con.commit()
+    await user.open("/antworten")
+    await _open_view(user, "eingeordnet")
+
+    await user.should_see("automatisch")
+    await user.should_not_see("Keiner Bewerbung zuordnen")
+
+
 async def test_a_row_he_confirmed_himself_offers_no_unlink(user: User, con):
     """The unlink is for the one row he never confirmed. A reply he judged is
     his own verdict, and the shelf is where a mail is unlinked."""

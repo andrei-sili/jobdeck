@@ -3008,6 +3008,22 @@ def known_gmail_ids(con: sqlite3.Connection, ids: list[str]) -> set[str]:
     return {row[0] for row in rows}
 
 
+# How an inbound row reached its application. `db` owns these three because the
+# queries that must tell them apart live here — a value defined in the service
+# and read by a query here is exactly how one of them slipped past an exclusion
+# list unnoticed.
+#
+# Attached to an application that was already there on STRONG evidence: the
+# ingestion arm with an aligned, authenticated sender, or his own press. May
+# anchor a Gmail thread.
+MATCHED_ATTACHED = "receipt_known"
+# Filed by the PASS against an application already in the register, on evidence
+# that may only propose. Must NEVER anchor a thread and never writes a status.
+MATCHED_FILED = "receipt_filed"
+# A receipt he took back. The shelf query must not offer it again.
+MATCHED_UNDONE = "receipt_undone"
+
+
 def find_bewerbung_by_thread(con: sqlite3.Connection, thread_id: str) -> int | None:
     """The application a Gmail thread belongs to, if this app sent into it.
 
@@ -3030,13 +3046,22 @@ def find_bewerbung_by_thread(con: sqlite3.Connection, thread_id: str) -> int | N
     # would have made the next mail of its thread write that application's
     # status automatically. Only rows he judged, or that a writing tier
     # matched, carry a thread.
+    #
+    # AN ALLOWLIST, not a list of the arms that must not anchor. It was the
+    # other way round and a new `matched_by` value walked straight through it:
+    # the pass that files receipts against an application already in the
+    # register writes its own value, which no blocklist could have known about,
+    # and the security review then closed an application through the thread arm
+    # with a mail whose own evidence line read "Absender gehört nicht zur
+    # Anzeige". Written as an allowlist, the next value fails closed instead.
     row = con.execute(
         "SELECT bewerbung_id FROM email_log "
         " WHERE gmail_thread_id=? AND bewerbung_id IS NOT NULL "
-        "   AND NOT (direction=? AND matched_by IN ('name', 'domain') "
-        "            AND COALESCE(classified_by, '') <> 'reply_manual') "
+        "   AND (direction <> ? "                       # this app sent into it
+        "        OR COALESCE(classified_by, '') = 'reply_manual' "   # he judged
+        "        OR matched_by IN ('thread', 'address', 'receipt', ?)) "
         " ORDER BY id DESC LIMIT 1",
-        (thread_id, EMAIL_INBOUND),
+        (thread_id, EMAIL_INBOUND, MATCHED_ATTACHED),
     ).fetchone()
     if row is not None:
         return int(row[0])
@@ -3146,10 +3171,19 @@ def pending_review_replies(con: sqlite3.Connection) -> list[sqlite3.Row]:
 
 
 def list_inbound_replies(con: sqlite3.Connection, limit: int = 50) -> list[sqlite3.Row]:
-    """The settled ledger: inbound mail already classified or filed."""
+    """The settled ledger: inbound mail already classified or filed.
+
+    `cited_by_status` says whether a status_history row points at this mail. The
+    screen needs it to decide whether unlinking is still a harmless correction:
+    a mail a status cites is the evidence FOR that status, and taking its link
+    away leaves the status standing with an audit row pointing at nothing — and
+    moves the application's last-contact anchor BACKWARDS, which is what the
+    cooling-off gate measures from."""
     return con.execute(
         "SELECT e.*, b.firma AS bewerbung_firma, b.status AS bewerbung_status, "
-        "       j.company AS job_company, j.title AS job_title "
+        "       j.company AS job_company, j.title AS job_title, "
+        "       EXISTS (SELECT 1 FROM status_history s "
+        "                WHERE s.email_log_id = e.id) AS cited_by_status "
         "  FROM email_log e "
         "  LEFT JOIN bewerbungen b ON b.id = e.bewerbung_id "
         "  LEFT JOIN jobs j ON j.id = e.job_id "
@@ -3287,9 +3321,6 @@ _SHELF_RECEIPTS_SQL = (
     "   AND COALESCE(b.gesendet_am, '') <> '' "
     "   AND e.internal_date >= b.gesendet_am"
 )
-# `matched_by` of a receipt he took back. Lives here rather than in the
-# service so the query that must exclude it cannot drift from the writer.
-MATCHED_UNDONE = "receipt_undone"
 
 
 def shelf_receipts(con: sqlite3.Connection) -> list[sqlite3.Row]:
