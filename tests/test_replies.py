@@ -844,6 +844,50 @@ def test_the_display_name_carries_the_employer_when_the_domain_cannot():
         "no-reply@ats-anbieter.com")
 
 
+def test_a_mails_own_words_name_an_employer_by_word_and_not_by_substring():
+    """The guard that lets a multi-tenant ATS domain authorize at all.
+
+    A run of WORDS, because the letters of a company key turn up inside
+    unrelated words, and the WHOLE name, because prose writes a company out
+    while a domain label abbreviates it. Both halves are load-bearing: the
+    first keeps "aqex" out of "Paraqexil", the second keeps the ordinary word
+    "global" from naming "Global Beispiel Systeme".
+    """
+    keys = replies.text_run_keys(
+        "Danke für Deine Bewerbung bei der Aqex GmbH als Softwaretester")
+    assert replies.company_named_in_text("Aqex GmbH", keys)
+    assert replies.company_named_in_text("Aqex", keys)
+    assert not replies.company_named_in_text("Zylo GmbH & Co. KG", keys)
+
+    # the letters, but not the word
+    assert not replies.company_named_in_text(
+        "Aqex GmbH", replies.text_run_keys("Paraqexil Software"))
+    # a leading word is not the name
+    partial = replies.text_run_keys("our global team will get back to you")
+    assert not replies.company_named_in_text(
+        "Global Beispiel Systeme", partial)
+    assert replies.company_named_in_text(
+        "Global Beispiel Systeme",
+        replies.text_run_keys("Ihre Bewerbung bei Global Beispiel "
+                              "Systeme GmbH ist eingegangen"))
+    # the legal form drops out on BOTH sides, so the two spellings meet
+    assert replies.company_named_in_text(
+        "Müller & Co. KG", replies.text_run_keys("Bewerbung bei Mueller"))
+
+
+def test_reading_a_mails_words_has_a_bound():
+    """The 24 KB From header taught this: any text a stranger writes is work
+    somebody else chose for this pass. Words and characters are both capped,
+    so the cost cannot be driven by the length of a body."""
+    import time
+    started = time.perf_counter()
+    keys = replies.text_run_keys("wort " * 200_000)
+    assert time.perf_counter() - started < 1.0
+    # one repeated word cannot produce more than its own runs
+    assert keys == {"wort" * n for n in range(1, 9)}
+    assert not replies.company_named_in_text("Beispiel GmbH", keys)
+
+
 def test_the_company_key_survives_the_spellings_a_domain_forces():
     """A domain has no umlauts and no ampersands, so the key has to meet it
     where a German registrar puts it."""

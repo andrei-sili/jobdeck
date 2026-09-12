@@ -484,11 +484,17 @@ def _receipt_match(con, meta: dict, from_addr: str, subject: str) -> dict | None
     # judged on the subject plus Gmail's snippet, which carries the opening
     # lines where ATS mail states the reference.
     text_window = f"{subject}\n{meta['snippet']}"
+    from_header = str(meta["headers"].get("from", ""))
+    # Both readings are of the MESSAGE, not of a candidate, so they are taken
+    # once and compared with each — the bound `read_sender` exists for.
+    reading = replies.read_sender(from_header, from_addr)
+    run_keys = replies.text_run_keys(text_window)
     identified: list[tuple[dict, str, bool]] = []
     weak: list[dict] = []
     for job in candidates:
         evidence, authorizing = _receipt_evidence(job, sender_domain,
-                                                  text_window)
+                                                  text_window, reading,
+                                                  run_keys)
         if evidence:
             identified.append((dict(job), evidence, authorizing))
         elif _company_named(job, from_addr, meta["headers"].get("from", "")):
@@ -540,7 +546,9 @@ def _follows_the_opening(job, meta: dict) -> bool:
     return bool(arrived) and arrived >= opened
 
 
-def _receipt_evidence(job, sender_domain: str, text: str) -> tuple[str, bool]:
+def _receipt_evidence(job, sender_domain: str, text: str,
+                      reading: replies.SenderReading,
+                      run_keys: frozenset[str]) -> tuple[str, bool]:
     """(what identified this posting, may it AUTHORIZE a ledger write).
 
     Only the sender's own domain can authorize. A Referenznummer is printed
@@ -554,6 +562,21 @@ def _receipt_evidence(job, sender_domain: str, text: str) -> tuple[str, bool]:
     link on any posting found through one. A board writes to everybody who
     ever touched it, so letting one authorize would let a newsletter or a
     notification record an application at an employer that never wrote.
+
+    AND A MULTI-TENANT ATS DOMAIN NAMES NOBODY. `join.com` is the apply_url
+    of every posting applied to through JOIN, so the domain aligned with all
+    of them at once: fifteen JOIN receipts, each naming its own employer
+    plainly in its own subject, were all identified as ONE posting at a
+    sixteenth company, and only the guard that a receipt cannot predate its
+    form kept them from writing that posting's status.
+    So on a vendor domain the employer has to be named somewhere a vendor
+    cannot fake by being itself: its tenant slot, its display name, or the
+    mail's own words. Measured over his corpus, 16 of the 18 receipts this
+    branch authorized named nobody at all, and the 2 that did keep it.
+
+    Refusing rather than proposing is deliberate: the receipt arm runs
+    before the name arm, so a mail this arm declines gets its chance at the
+    application it really belongs to.
     """
     refnr = resolve_refnr(job)
     by_refnr = replies.refnr_in_text(refnr, text, "")
@@ -574,11 +597,17 @@ def _receipt_evidence(job, sender_domain: str, text: str) -> tuple[str, bool]:
             )
             if domain and not apply_channel.is_board_domain(domain)
         }
-        if sender_domain in targets:
+        # A vendor that names nobody loses the two AUTHORIZING branches, not
+        # the Refnr below: a quoted reference still identifies which posting
+        # a mail is about, and still only ever proposes. Refusing outright
+        # here took that proposal away from a board mail quoting the number.
+        may_authorize = (not apply_channel.is_vendor_domain(sender_domain)
+                         or _names_employer(job, reading, run_keys))
+        if may_authorize and sender_domain in targets:
             evidence = f"Absender {sender_domain}"
             return (f"{evidence} · Refnr {refnr}" if by_refnr else evidence), True
         vendor = str(job["ats_vendor"] or "")
-        if vendor:
+        if may_authorize and vendor:
             sender_channel = apply_channel.classify(f"https://{sender_domain}/")
             if (sender_channel.channel == apply_channel.CHANNEL_ATS
                     and sender_channel.vendor == vendor):
@@ -588,6 +617,21 @@ def _receipt_evidence(job, sender_domain: str, text: str) -> tuple[str, bool]:
     if by_refnr:
         return f"Refnr {refnr}", False
     return "", False
+
+
+def _names_employer(job, reading: replies.SenderReading,
+                    run_keys: frozenset[str]) -> bool:
+    """Is THIS posting's employer named anywhere a vendor cannot fake?
+
+    Both readings are computed once per message: the sender's, and the run
+    keys of its text. `company_matches` covers the tenant slot a vendor puts
+    in front of its own domain ("beispiel-jobs@m.personio.de") and its
+    display name; `company_named_in_text` covers the mail saying it in
+    words, which is how JOIN and softgarden write.
+    """
+    firma = str(job["company"] or "")
+    return (replies.company_matches(firma, reading)
+            or replies.company_named_in_text(firma, run_keys))
 
 
 def _company_named(job, from_addr: str, from_header: str) -> bool:

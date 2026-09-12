@@ -529,6 +529,76 @@ async def test_a_company_named_receipt_only_proposes(inbox, con):
     assert (row["needs_review"], row["job_id"]) == (1, job_id)
 
 
+# a multi-tenant ATS domain names nobody
+VENDOR_AUTH = ("mx.google.com; spf=pass smtp.mailfrom=join.com; "
+               "dmarc=pass header.from=join.com")
+
+
+async def test_a_vendor_receipt_naming_another_employer_is_not_this_postings_mail(
+        inbox, con):
+    """`join.com` is the apply_url of EVERY posting applied to through JOIN,
+    so the domain aligned with all of them at once. On his mailbox fifteen
+    JOIN receipts — each naming its own employer in its own subject — were
+    identified as one posting at a sixteenth company, and only the guard
+    that a receipt cannot predate its form kept them from writing a status.
+
+    Refused outright rather than proposed: the receipt arm runs before the
+    name arm, so declining here is what gives the mail its chance at the
+    application it really belongs to."""
+    job_id = _strip_job(con, apply_url="https://join.com/companies/x/jobs/7")
+    inbox.add("m-1", from_header="JOIN <noreply@join.com>",
+              subject="Deine Bewerbung bei Anders Software",
+              body="Wir haben deine Bewerbung erhalten.", auth=VENDOR_AUTH)
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 0
+    assert db.get_job(con, job_id)["bewerbung_id"] is None
+    # not even a proposal: nothing here is about this posting
+    assert _inbound_rows(con) == []
+
+
+async def test_a_vendor_receipt_that_names_this_employer_still_records(
+        inbox, con):
+    """The other half of the guard, and the reason it is not a blanket
+    refusal: measured over his corpus the one receipt this branch should
+    keep — a softgarden confirmation — names its employer in the subject."""
+    job_id = _strip_job(con, apply_url="https://join.com/companies/x/jobs/7")
+    inbox.add("m-1", from_header="JOIN <noreply@join.com>",
+              subject="Deine Bewerbung bei der Firma Beispiel GmbH",
+              body="Ihre Bewerbung ist eingegangen.", auth=VENDOR_AUTH)
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 1
+    job = db.get_job(con, job_id)
+    assert job["bewerbung_id"] is not None
+    assert db.get_bewerbung(con, job["bewerbung_id"])["status"] \
+        == "In Bearbeitung"
+
+
+async def test_a_refused_vendor_receipt_reaches_the_application_it_names(
+        inbox, con):
+    """Why refusing beats proposing. The same mail, with an application at
+    the employer it actually names: the arm below finds it, and the posting
+    the vendor domain happened to align with is left alone."""
+    job_id = _strip_job(con, apply_url="https://join.com/companies/x/jobs/7")
+    other = db.add_bewerbung(con, {"firma": "Anders Software GmbH",
+                                   "kanal": "Online-Portal",
+                                   "status": "Gesendet"})
+    con.commit()
+    inbox.add("m-1",
+              from_header="Anders Software GmbH via JOIN <noreply@join.com>",
+              subject="Deine Bewerbung bei Anders Software",
+              body="Wir haben deine Bewerbung erhalten.", auth=VENDOR_AUTH)
+
+    await service.ingest_replies()
+
+    row = _inbound_rows(con)[0]
+    assert (row["bewerbung_id"], row["matched_by"]) == (other, "name")
+    assert db.get_job(con, job_id)["bewerbung_id"] is None
+
+
 # --------------------------------------------------------------------------
 # review actions
 # --------------------------------------------------------------------------
