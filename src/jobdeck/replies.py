@@ -790,6 +790,13 @@ def company_named_in_text(firma: str, run_keys: frozenset[str]) -> bool:
     Recruiting-Team … (no reply)"), three-letter keys matched three real
     employer names at once. A domain LABEL is a name by construction and can be
     short; a word in prose is not, so this arm asks for room.
+
+    Two names it cannot recognise, both fail-closed and both deliberate. An
+    `e.V.` or `e.K.` employer, because `_LEGAL_FORM` matches those across a
+    space: keying the joined run drops the form while keying the run word by
+    word does not, so the two sides never meet. And a name of `_MAX_LEADING_WORDS`
+    words or more, which no run reaches. Either one costs its receipt a proposal
+    instead of an attachment, which is the safe direction.
     """
     key = company_key(firma)
     return len(key) >= _MIN_COMPANY_KEY and key in run_keys

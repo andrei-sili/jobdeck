@@ -3171,19 +3171,10 @@ def pending_review_replies(con: sqlite3.Connection) -> list[sqlite3.Row]:
 
 
 def list_inbound_replies(con: sqlite3.Connection, limit: int = 50) -> list[sqlite3.Row]:
-    """The settled ledger: inbound mail already classified or filed.
-
-    `cited_by_status` says whether a status_history row points at this mail. The
-    screen needs it to decide whether unlinking is still a harmless correction:
-    a mail a status cites is the evidence FOR that status, and taking its link
-    away leaves the status standing with an audit row pointing at nothing — and
-    moves the application's last-contact anchor BACKWARDS, which is what the
-    cooling-off gate measures from."""
+    """The settled ledger: inbound mail already classified or filed."""
     return con.execute(
         "SELECT e.*, b.firma AS bewerbung_firma, b.status AS bewerbung_status, "
-        "       j.company AS job_company, j.title AS job_title, "
-        "       EXISTS (SELECT 1 FROM status_history s "
-        "                WHERE s.email_log_id = e.id) AS cited_by_status "
+        "       j.company AS job_company, j.title AS job_title "
         "  FROM email_log e "
         "  LEFT JOIN bewerbungen b ON b.id = e.bewerbung_id "
         "  LEFT JOIN jobs j ON j.id = e.job_id "
@@ -3284,7 +3275,9 @@ def get_email_log(con: sqlite3.Connection, email_log_id: int) -> sqlite3.Row | N
 # `internal_date` a local naive stamp, so a mail from the day it was sent
 # compares greater and is kept — 19 of his 27 unattached receipts arrived that
 # same day. A mail Gmail gives no date for cannot be shown to follow anything
-# and fails closed, the same rule `_follows_the_opening` applies to a form —
+# and fails closed — the empty string sorts below every ISO stamp, so the
+# comparison itself refuses it and a separate emptiness test would be a second
+# guard for one rule. The same reading `_follows_the_opening` applies to a form —
 # AND SO DOES A LEDGER ROW WITHOUT ONE. The first version read an empty
 # `gesendet_am` as "no constraint" and accepted any mail date against it, which
 # inverted the rule for the one side that matters most: the register's form
@@ -3317,9 +3310,8 @@ _SHELF_RECEIPTS_SQL = (
     "   AND COALESCE(b.status, '') <> ? "
     "   AND NOT EXISTS (SELECT 1 FROM status_history s "
     "                    WHERE s.email_log_id = e.id) "
-    "   AND COALESCE(e.internal_date, '') <> '' "
     "   AND COALESCE(b.gesendet_am, '') <> '' "
-    "   AND e.internal_date >= b.gesendet_am"
+    "   AND COALESCE(e.internal_date, '') >= b.gesendet_am"
 )
 
 

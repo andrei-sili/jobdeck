@@ -604,6 +604,77 @@ async def test_a_vendor_receipt_naming_the_employer_only_in_its_words_proposes(
     assert db.get_job(con, job_id)["bewerbung_id"] is None
 
 
+async def test_the_ats_arm_also_refuses_a_vendor_naming_another_employer(
+        inbox, con):
+    """The SECOND authorizing branch of `_receipt_evidence`, which the review
+    panel found untested and removable: every other vendor test uses a domain
+    whose bare root classifies as `company_site` with no vendor, so
+    `sender_channel.vendor == vendor` was never true and the guard on that
+    branch carried no weight. This is the first test in the suite to set
+    `ats_vendor`."""
+    job_id = _strip_job(con, ats_vendor="Lever",
+                        apply_url="https://karriere.firma-beispiel.de/jobs/7")
+    inbox.add("m-1", from_header="Anders Software GmbH <no-reply@lever.co>",
+              subject="Deine Bewerbung bei Anders Software",
+              body="Wir haben deine Bewerbung erhalten.",
+              auth=("mx.google.com; spf=pass smtp.mailfrom=lever.co; "
+                    "dmarc=pass header.from=lever.co"))
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 0
+    assert db.get_job(con, job_id)["bewerbung_id"] is None
+
+
+async def test_the_ats_arm_still_records_when_the_vendor_names_this_employer(
+        inbox, con):
+    """The other side of that branch, so the guard is not a blanket refusal."""
+    job_id = _strip_job(con, ats_vendor="Lever",
+                        apply_url="https://karriere.firma-beispiel.de/jobs/7")
+    inbox.add("m-1", from_header="Firma Beispiel GmbH <no-reply@lever.co>",
+              subject="Deine Bewerbung", body="Ihre Bewerbung ist eingegangen.",
+              auth=("mx.google.com; spf=pass smtp.mailfrom=lever.co; "
+                    "dmarc=pass header.from=lever.co"))
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["receipts"] == 1
+    assert db.get_job(con, job_id)["bewerbung_id"] is not None
+
+
+async def test_filing_a_receipt_moves_the_anchor_the_send_gate_measures_from(
+        inbox, con):
+    """What the pass actually CHANGES, asserted in the positive.
+
+    The slice's own live measurement was "the register is byte-identical", and
+    the completeness critic named that as the one observation which cannot see
+    this change: `db.LAST_CONTACT_SQL` is derived, so it moves without any row in
+    `bewerbungen` changing. The silence rule and the company cooling-off window
+    both measure from it, and `services/send` refuses on cooling_off — so this is
+    the effect that reaches a send gate, and it was asserted only in the refusal
+    case."""
+    job_id = _strip_job(con)
+    bewerbung_id = db.add_bewerbung(con, {
+        "firma": "Firma Beispiel GmbH", "kanal": "Online-Portal",
+        "status": "Gesendet", "gesendet_am": "2026-06-01"})
+    con.execute("UPDATE jobs SET bewerbung_id=? WHERE id=?",
+                (bewerbung_id, job_id))
+    _shelf_receipt(con, job_id=job_id, message_id="shelf-anchor",
+                   from_addr="karriere@firma-beispiel.de",
+                   subject="Ihre Bewerbung ist eingegangen",
+                   internal_date="2026-08-20T09:00:00")
+    before = [b for b in db.list_bewerbungen(con) if b["id"] == bewerbung_id][0]
+    assert str(before["last_contact"]) == "2026-06-01"
+
+    await service.ingest_replies()
+
+    after = [b for b in db.list_bewerbungen(con) if b["id"] == bewerbung_id][0]
+    assert str(after["last_contact"]) == "2026-08-20T09:00:00"
+    # forward only: an older mail can never pull it back, which is the ground
+    # the accepted residual rests on
+    assert str(after["last_contact"]) > str(before["last_contact"])
+
+
 async def test_a_refused_vendor_receipt_reaches_the_application_it_names(
         inbox, con):
     """Why refusing beats proposing. The same mail, with an application at
@@ -944,17 +1015,24 @@ async def test_prose_alone_cannot_attach_a_strangers_mail(inbox, con):
         "status": "Gesendet", "gesendet_am": "2026-09-01"})
     con.execute("UPDATE jobs SET bewerbung_id=? WHERE id=?",
                 (bewerbung_id, job_id))
-    stranger = _shelf_receipt(
-        con, job_id=job_id, message_id="shelf-stranger",
-        from_addr="angreifer@gmail.com",
+    # BOTH shapes, because they take different arms of the guard: freemail has
+    # no matchable domain at all, and only the second reaches `is_vendor_domain`
+    # — the half the review panel showed was removable with the suite green.
+    rows = [_shelf_receipt(
+        con, job_id=job_id, message_id=f"shelf-stranger-{i}",
+        from_addr=sender,
         subject="Ihre Bewerbung bei der Firma Beispiel GmbH",
         body="Vielen Dank, Ihre Bewerbung ist eingegangen.")
+        for i, sender in enumerate(["angreifer@gmail.com",
+                                    "hr@angreifer-mail.com"])]
+    assert replies.matchable_domain("hr@angreifer-mail.com") != ""
 
     outcome = await service.ingest_replies()
 
     assert outcome["attached"] == 0
-    row = db.get_email_log(con, stranger)
-    assert (row["needs_review"], row["bewerbung_id"]) == (1, None)
+    for row_id in rows:
+        row = db.get_email_log(con, row_id)
+        assert (row["needs_review"], row["bewerbung_id"]) == (1, None)
 
 
 async def test_prose_from_a_vendor_domain_still_attaches(inbox, con):
@@ -1076,6 +1154,125 @@ async def test_a_dismissal_he_pressed_while_the_shelf_was_walked_stands(
     assert outcome["attached"] == 0
     row = db.get_email_log(con, row_id)
     assert (row["bewerbung_id"], row["classification"]) == (None, "")
+
+
+@pytest.mark.parametrize("column, value", [
+    ("needs_review", 0),            # already settled
+    ("classification", "absage"),   # no longer the receipt the shelf read
+    ("classification", ""),         # dismissed in the window
+    ("classified_by", "reply_manual"),   # his own verdict
+])
+async def test_each_condition_of_the_write_time_reread_carries_weight(
+        inbox, con, column, value):
+    """`_still_waiting` re-asks, inside the write, what the shelf listing
+    assumed. Every one of its three conditions has to be load-bearing or the
+    re-read is decoration — the review panel found them individually removable
+    with the suite green."""
+    job_id = _strip_job(con)
+    bewerbung_id = db.add_bewerbung(con, {
+        "firma": "Firma Beispiel GmbH", "kanal": "Online-Portal",
+        "status": "Gesendet", "gesendet_am": "2026-09-01"})
+    con.execute("UPDATE jobs SET bewerbung_id=? WHERE id=?",
+                (bewerbung_id, job_id))
+    row_id = _shelf_receipt(con, job_id=job_id,
+                            from_addr="karriere@firma-beispiel.de",
+                            subject="Ihre Bewerbung bei Firma Beispiel GmbH")
+    stale = db.shelf_receipts(con)
+    assert len(stale) == 1
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(db, "shelf_receipts", lambda _con: stale)
+    con.execute(f"UPDATE email_log SET {column}=? WHERE id=?", (value, row_id))
+    con.commit()
+    try:
+        outcome = await service.ingest_replies()
+    finally:
+        monkeypatch.undo()
+
+    assert outcome["attached"] == 0
+    assert db.get_email_log(con, row_id)["bewerbung_id"] is None
+
+
+async def test_one_failing_row_does_not_cost_the_rest_of_the_shelf(
+        inbox, con, monkeypatch):
+    """A 48-row walk must not be abandoned because of its first row. A target
+    deleted between the listing and the write raises on the link, and without a
+    per-row except every remaining receipt would wait for the next pass."""
+    ids = []
+    for i in range(3):
+        job_id = _strip_job(con, external_id=f"j-{i}",
+                            company=f"Firma Beispiel {i} GmbH")
+        bewerbung_id = db.add_bewerbung(con, {
+            "firma": f"Firma Beispiel {i} GmbH", "kanal": "Online-Portal",
+            "status": "Gesendet", "gesendet_am": "2026-09-01"})
+        con.execute("UPDATE jobs SET bewerbung_id=? WHERE id=?",
+                    (bewerbung_id, job_id))
+        ids.append(_shelf_receipt(
+            con, job_id=job_id, message_id=f"shelf-many-{i}",
+            from_addr=f"karriere@firma-beispiel-{i}.de",
+            subject=f"Ihre Bewerbung bei Firma Beispiel {i} GmbH"))
+    con.commit()
+
+    first = True
+    real = service._names_employer_from_row
+
+    def explode(row):
+        nonlocal first
+        if first:
+            first = False
+            raise RuntimeError("the target went away")
+        return real(row)
+
+    monkeypatch.setattr(service, "_names_employer_from_row", explode)
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["filed"] == 2                 # the other two still landed
+    settled = [db.get_email_log(con, i)["needs_review"] for i in ids]
+    assert settled.count(0) == 2 and settled.count(1) == 1
+
+
+def test_settling_a_row_restates_nothing_about_what_it_says(con):
+    """`settle_reply_review` is deliberately narrower than
+    `classify_reply_row`: the classification and WHO read it are facts about the
+    mail that answering it does not change, and rewriting `classified_by` would
+    claim the rules read what the model did."""
+    row_id = db.add_email_log(con, {
+        "direction": "inbound", "gmail_message_id": "m-llm",
+        "classification": "eingang", "classified_by": "llm",
+        "matched_by": "name", "needs_review": 1, "subject": "x"})
+    con.commit()
+
+    db.settle_reply_review(con, row_id)
+    con.commit()
+
+    row = db.get_email_log(con, row_id)
+    assert (row["needs_review"], row["classification"], row["classified_by"]) \
+        == (0, "eingang", "llm")
+
+
+async def test_the_attach_gate_reads_the_mail_and_not_the_register(inbox, con):
+    """WHICH inputs justify an attachment, pinned. Every other shelf fixture
+    makes subject and body, and the posting's company and the application's
+    firma, indistinguishable — so nothing said where the gate looks. It reads
+    the MAIL against the POSTING's company."""
+    job_id = _strip_job(con, company="Zylotan Systeme GmbH")
+    bewerbung_id = db.add_bewerbung(con, {
+        "firma": "Aqexol GmbH",          # deliberately NOT the posting's name
+        "kanal": "Online-Portal", "status": "Gesendet",
+        "gesendet_am": "2026-09-01"})
+    con.execute("UPDATE jobs SET bewerbung_id=? WHERE id=?",
+                (bewerbung_id, job_id))
+    # the BODY names the posting's company; the subject names neither
+    row_id = _shelf_receipt(con, job_id=job_id, message_id="shelf-inputs",
+                            from_addr="no-reply@msg.join.com",
+                            subject="Deine Bewerbung",
+                            body="Wir haben deine Bewerbung bei der Zylotan "
+                                 "Systeme GmbH erhalten.")
+
+    outcome = await service.ingest_replies()
+
+    assert outcome["attached"] == 1
+    assert db.get_email_log(con, row_id)["bewerbung_id"] == bewerbung_id
 
 
 async def test_the_shelf_is_filed_after_the_messages_of_the_same_pass(

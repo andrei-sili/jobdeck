@@ -145,7 +145,8 @@ async def ingest_replies() -> dict:
 
 def _ingest() -> dict:
     counters = {"seen": 0, "matched": 0, "auto_status": 0, "review": 0,
-                "receipts": 0, "attached": 0, "ignored": 0, "errors": 0}
+                "receipts": 0, "attached": 0, "filed": 0, "ignored": 0,
+                "errors": 0}
     if not gmail.can_read():
         _note(LAST_ERROR_KEY, "Gmail ohne Lese-Berechtigung — in den "
                               "Einstellungen neu verbinden")
@@ -963,47 +964,62 @@ def _attach_receipts(counters: dict) -> None:
     """
     with db.db() as con:
         rows = db.shelf_receipts(con)
-    filed = 0
     for row in rows:
-        email_log_id = int(row["id"])
-        target = int(row["target_id"])
-        fresh = row["bewerbung_id"] is None
-        if fresh and not _names_employer_from_row(row):
-            continue
-        with db.db() as con:
-            # Re-read inside the write transaction. The shelf was read on
-            # another connection, and a verdict or a dismissal he pressed in
-            # between must not be overwritten by a decision taken before it.
-            current = db.get_email_log(con, email_log_id)
-            if current is None or not _still_waiting(current):
-                continue
-            if fresh and current["bewerbung_id"] is not None:
-                # The snapshot said unattached and it is not any more, so the
-                # link this pass would write would overwrite one it never read.
-                #
-                # DEFENCE IN DEPTH, and deliberately not pinned by a test: the
-                # only other writers of this column are `dismiss_review` (which
-                # writes NULL) and `adopt_receipt`, and both set
-                # `classified_by='reply_manual'` in the same transaction, so
-                # `_still_waiting` already refuses them. No reachable state
-                # reaches this line, which means no honest test can either —
-                # the same reading `_is_robots_disallowed` carries.
-                continue
-            if fresh:
-                db.link_reply_bewerbung(con, email_log_id, target)
-                # Not MATCHED_RECEIPT: this app did not create the ledger row,
-                # so `undo_receipt` must never offer to delete it. And not
-                # MATCHED_ATTACHED either: that value may anchor a thread.
-                db.set_reply_matched_by(con, email_log_id, MATCHED_FILED)
-                counters["attached"] += 1
-            db.settle_reply_review(con, email_log_id)
-            filed += 1
-        _apply_label(str(row["gmail_message_id"] or ""), "eingang")
-    if filed:
+        try:
+            _file_one(row, counters)
+        except Exception as exc:  # noqa: BLE001 — the rule one message follows
+            # ONE row must never cost the rest of the shelf. A target deleted
+            # between the listing and the write raises on the link, and without
+            # this the remaining rows of a 48-row walk would all wait for the
+            # next pass because of it.
+            log.warning("reply ingestion: filing mail %s failed: %s",
+                        row["id"], exc)
+    if counters["filed"]:
         log.info("reply ingestion: %d receipt(s) filed against an application "
                  "already in the register, %d of them newly attached",
-                 filed, counters["attached"])
+                 counters["filed"], counters["attached"])
 
+
+def _file_one(row, counters: dict) -> None:
+    """File ONE shelf receipt, or leave it where it is.
+
+    Its own function so the walk can contain a failure per row: the guards
+    return early here rather than `continue` in a loop that a single raising row
+    would otherwise abandon."""
+    email_log_id = int(row["id"])
+    target = int(row["target_id"])
+    fresh = row["bewerbung_id"] is None
+    if fresh and not _names_employer_from_row(row):
+        return
+    with db.db() as con:
+        # Re-read inside the write transaction. The shelf was read on another
+        # connection, and a verdict or a dismissal he pressed in between must
+        # not be overwritten by a decision taken before it.
+        current = db.get_email_log(con, email_log_id)
+        if current is None or not _still_waiting(current):
+            return
+        if fresh and current["bewerbung_id"] is not None:
+            # The snapshot said unattached and it is not any more, so the link
+            # this pass would write would overwrite one it never read.
+            #
+            # DEFENCE IN DEPTH, and deliberately not pinned by a test: the only
+            # other writers of this column are `dismiss_review` (which writes
+            # NULL) and `adopt_receipt`, and both set
+            # `classified_by='reply_manual'` in the same transaction, so
+            # `_still_waiting` already refuses them. No reachable state reaches
+            # this line, which means no honest test can either — the same
+            # reading `_is_robots_disallowed` carries.
+            return
+        if fresh:
+            db.link_reply_bewerbung(con, email_log_id, target)
+            # Not MATCHED_RECEIPT: this app did not create the ledger row, so
+            # `undo_receipt` must never offer to delete it. And not
+            # MATCHED_ATTACHED either: that value may anchor a thread.
+            db.set_reply_matched_by(con, email_log_id, MATCHED_FILED)
+            counters["attached"] += 1
+        db.settle_reply_review(con, email_log_id)
+    counters["filed"] += 1
+    _apply_label(str(row["gmail_message_id"] or ""), "eingang")
 
 def _still_waiting(row) -> bool:
     """Is this row STILL the untouched receipt proposal the shelf read?

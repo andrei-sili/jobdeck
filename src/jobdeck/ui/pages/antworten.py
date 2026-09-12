@@ -249,6 +249,14 @@ def reader_notes(group: dict) -> list[tuple[str, str]]:
     return notes
 
 
+# The two arms whose match may be wrong without anything else noticing, and the
+# only two a one-press unlink may reach: a company-name resemblance, which the
+# module itself calls "eine Ähnlichkeit, keine Identifikation", and the pass's
+# own filing. Every other arm is authenticated evidence — its mail belongs on
+# the shelf, not behind a button that moves the cooling-off anchor backwards.
+_UNLINKABLE = ("name", reply_service.MATCHED_FILED)
+
+
 def is_receipt_proposal(row: dict) -> bool:
     return (row.get("matched_by") in (reply_service.MATCHED_RECEIPT,
                                      reply_service.MATCHED_UNDONE)
@@ -755,8 +763,20 @@ async def antworten_page():
                              CLASS_LABELS.get(classification, classification))
                 ui.label("" if dismissed else
                          "bestätigt" if row.get("classified_by")
-                         == "reply_manual" else "automatisch") \
+                         == "reply_manual" else
+                         " · ".join(filter(None, (
+                             "automatisch",
+                             MATCHED_SHORT.get(row.get("matched_by") or "", ""),
+                         )))) \
                     .classes("jd-meta")
+                if row.get("matched_by") == "name" and not dismissed:
+                    # The caution the shelf gives this arm follows it here. The
+                    # row leaves the shelf without him seeing it, so the filed
+                    # view is the only place the resemblance can still be
+                    # questioned — and the unlink beside it needs a reason to
+                    # be pressed.
+                    ui.label("Ähnlichkeit, keine Identifikation") \
+                        .classes("jd-note warn")
                 ui.space()
                 if dismissed:
                     # `dismiss_review` keeps the row, so putting it back on the
@@ -775,7 +795,7 @@ async def antworten_page():
                               on_click=lambda _=None, r=dict(row):
                                   correct(r)).props("flat dense no-caps")
                     if (row.get("classified_by") != "reply_manual"
-                            and not row.get("cited_by_status")):
+                            and row.get("matched_by") in _UNLINKABLE):
                         # Every row here he never confirmed, not only the ones
                         # the pass ATTACHED. It also settles rows the company-
                         # name arm guessed — the class PR #56 exists for, 16 of
@@ -787,17 +807,25 @@ async def antworten_page():
                         # measure from. A reply he judged is his own verdict and
                         # is unlinked where he judged it.
                         #
-                        # NOT a row a status cites. Widening this to every
-                        # unconfirmed row reached the rows the WRITING tiers
-                        # matched, and unlinking one of those left the status
-                        # standing beside an audit row pointing at nothing and
-                        # moved the anchor BACKWARDS — 80 days in the security
-                        # review's reproduction, flipping a company's
-                        # cooling-off verdict from held to allowed, which is a
-                        # send gate. The same exclusion `_SHELF_RECEIPTS_SQL`
-                        # and `_NAME_PROPOSALS_SQL` already use; a name guess is
-                        # in the allowed set by construction, since that arm
-                        # never writes.
+                        # THE TIER, not an audit trail. Widening this to
+                        # every unconfirmed row reached the rows the WRITING
+                        # tiers matched, and unlinking one of those clears the
+                        # two columns `LAST_CONTACT_SQL` reads, so the anchor
+                        # falls back to the send date — BACKWARDS, 80 days in
+                        # the reproduction, flipping a company's cooling-off
+                        # verdict from held to released, which is a send gate.
+                        #
+                        # The first attempt asked "does a status cite this row",
+                        # and the review panel showed that is the wrong
+                        # question: `set_status` writes an audit row only when
+                        # it CHANGES something, so a writing tier whose write
+                        # was a no-op (the status was already that) or refused
+                        # by the rank guard leaves none — the common case, since
+                        # 23 of 42 waiting mails hang off applications already
+                        # at Absage. Asking WHICH ARM matched it is the question
+                        # with an answer: exactly two never write, and for those
+                        # two "this mail does not belong here" is a plausible
+                        # correction and the anchor moving back is the truth.
                         ui.button("Keiner Bewerbung zuordnen",
                                   on_click=lambda _=None, r=row["id"]:
                                       unlink(r)).props("flat dense no-caps")

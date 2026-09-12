@@ -787,9 +787,10 @@ async def settings_page():
                                   multi_line=True)
                         return
                     ui.notify(
-                        f"Read {r['seen']}: {r['auto_status']} filed, "
+                        f"Read {r['seen']}: {r['auto_status']} statuses, "
                         f"{r['receipts']} receipts, "
-                        f"{r.get('attached', 0)} attached, "
+                        f"{r.get('filed', 0)} filed from the shelf "
+                        f"({r.get('attached', 0)} newly attached), "
                         f"{r['review']} to review",
                         type="positive",
                     )

@@ -141,34 +141,67 @@ def test_one_note_names_everything_that_files_itself():
         s for s in constants.STATUS_RANK if constants.STATUS_RANK[s] >= 2)
 
 
-async def test_a_receipt_the_pass_attached_offers_a_correction_not_an_undo(
+async def test_a_receipt_the_pass_filed_offers_a_correction_not_an_undo(
         user: User, con):
     """The safety property of the receipt that files itself.
 
     `Rückgängig` DELETES the application a receipt recorded, and a receipt the
-    pass merely ATTACHED did not record one — it was already there, put there
-    by him or by an earlier pass. Offering the undo on such a row is how an
-    application he entered by hand gets deleted by one press, which is why
-    `matched_by` says `receipt_known` and not `receipt`. This is the screen
-    half of that guarantee; the service half is in test_replies_service.
+    pass merely FILED did not record one — it was already there, put there by
+    him or by an earlier pass. Offering the undo on such a row is how an
+    application he entered by hand gets deleted by one press, which is why the
+    pass writes `receipt_filed` and not `receipt`. This is the screen half of
+    that guarantee; the service half is in test_replies_service.
+
+    It seeds the value the PASS writes. It used to seed `receipt_known`, which
+    the pass has never written since that value became the strong arm's — and
+    the review panel found the critical defect that mislabelling hid.
     """
     bewerbung_id = _application(con)
-    _inbound(con, "m-attached", bewerbung_id=bewerbung_id, needs_review=0,
+    _inbound(con, "m-filed", bewerbung_id=bewerbung_id, needs_review=0,
              classification="eingang", classified_by="rules",
              subject="Ihre Bewerbung ist eingegangen",
-             matched_by=replies_service.MATCHED_ATTACHED)
+             matched_by=replies_service.MATCHED_FILED)
     await user.open("/antworten")
     await _open_view(user, "eingeordnet")
 
     await user.should_see("Eingang")
-    await user.should_see("automatisch")       # not "bestätigt" — he did not
+    await user.should_see("automatisch")       # he confirmed nothing
     await user.should_see("Korrigieren")
     await user.should_not_see("Rückgängig")
     # and there IS a way back. „Korrigieren" can only relabel, so without this
-    # the only way to undo an attachment the pass made on its own was to write
-    # a verdict that is also false — while the mail kept counting as this
+    # the only way to undo a filing the pass made on its own was to write a
+    # verdict that is also false — while the mail kept counting as this
     # application's last contact.
     await user.should_see("Keiner Bewerbung zuordnen")
+
+
+async def test_an_authenticated_receipt_is_not_unlinkable(user: User, con):
+    """The review panel's CRITICAL, kept as a test.
+
+    The unlink was gated on "no status cites this row", and `set_status` writes
+    an audit row only when it CHANGES something: a write that was a no-op, or
+    one the rank guard refused, leaves none. So the strong receipt arm's own
+    rows — authenticated, aligned, and the reason the thread allowlist grants
+    them an anchor — were offered a one-press unlink, and unlinking clears the
+    two columns `LAST_CONTACT_SQL` reads, so the anchor falls BACK to the send
+    date. 80 days in the reproduction, which flipped a company's cooling-off
+    verdict from held to released — and that is a send gate.
+
+    Gated on the ARM instead: exactly two never write, and only those two.
+    """
+    bewerbung_id = _application(con)
+    for i, matched_by in enumerate(["thread", "address", "domain",
+                                    replies_service.MATCHED_ATTACHED,
+                                    replies_service.MATCHED_RECEIPT]):
+        _inbound(con, f"m-auth-{i}", bewerbung_id=bewerbung_id, needs_review=0,
+                 classification="eingang", classified_by="rules",
+                 matched_by=matched_by)
+    await user.open("/antworten")
+    await _open_view(user, "eingeordnet")
+
+    await user.should_see("automatisch")
+    # not one of the five, and none of them has a status citing it
+    await user.should_not_see("Keiner Bewerbung zuordnen")
 
 
 def test_a_receipt_he_took_back_can_still_be_adopted_in_one_press():
@@ -203,24 +236,27 @@ async def test_a_name_guess_the_pass_settled_can_also_be_unlinked(
     await user.should_see("Keiner Bewerbung zuordnen")
 
 
-async def test_a_row_a_status_cites_offers_no_unlink(user: User, con):
-    """Widening the unlink to every unconfirmed row reached the rows the WRITING
-    tiers matched, and unlinking one of those leaves the status standing beside
-    an audit row pointing at nothing — and moves the application's last-contact
-    anchor BACKWARDS, which flipped a company's cooling-off verdict from held to
-    allowed in the security review's reproduction. That is a send gate."""
+async def test_the_unlink_really_unlinks_and_says_which_arm_matched(
+        user: User, con):
+    """The handler, executed — it was rendered by three tests and pressed by
+    none, so it could have called the wrong service with the suite green. And
+    the row names the arm beside it: the pass settles a company-name guess
+    without him ever seeing it on the shelf, so the filed view is the only place
+    that resemblance can still be questioned, and a button needs a reason."""
     bewerbung_id = _application(con)
-    row_id = _inbound(con, "m-cited", bewerbung_id=bewerbung_id, needs_review=0,
-                      classification="eingang", classified_by="rules",
-                      matched_by="thread")
-    db.add_status_history(con, bewerbung_id, "Gesendet", "In Bearbeitung",
-                          "reply_auto", row_id, "")
-    con.commit()
+    row_id = _inbound(con, "m-guessed", bewerbung_id=bewerbung_id,
+                      needs_review=0, classification="eingang",
+                      classified_by="rules", matched_by="name")
     await user.open("/antworten")
     await _open_view(user, "eingeordnet")
+    await user.should_see("Firmenname")
+    await user.should_see("Ähnlichkeit, keine Identifikation")
 
-    await user.should_see("automatisch")
-    await user.should_not_see("Keiner Bewerbung zuordnen")
+    user.find("Keiner Bewerbung zuordnen").click()
+    await asyncio.sleep(0.4)
+
+    row = db.get_email_log(con, row_id)
+    assert (row["bewerbung_id"], row["classification"]) == (None, "")
 
 
 async def test_a_row_he_confirmed_himself_offers_no_unlink(user: User, con):

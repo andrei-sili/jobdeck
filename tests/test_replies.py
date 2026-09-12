@@ -891,6 +891,15 @@ def test_reading_a_mails_words_has_a_bound():
     # one repeated word cannot produce more than its own runs
     assert keys == {"wort" * n for n in range(1, 9)}
     assert not replies.company_named_in_text("Beispiel GmbH", keys)
+    # DISTINCT words, so each cap is visible on its own: one repeated word
+    # yields the same eight keys whichever bound is in force, so that fixture
+    # alone left both removable (found by the review panel). A word past either
+    # bound must not be read.
+    many = replies.text_run_keys(
+        " ".join(f"wort{n}" for n in range(1000)) + " endeteil")
+    assert "endeteil" not in many                      # past the word cap
+    long_text = "x" * 4000 + " endeteil"
+    assert "endeteil" not in replies.text_run_keys(long_text)   # past the chars
 
 
 def test_the_company_key_survives_the_spellings_a_domain_forces():
