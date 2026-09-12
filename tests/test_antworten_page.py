@@ -122,6 +122,31 @@ def test_one_note_names_everything_that_files_itself():
     assert len(calls) == 3
 
 
+async def test_a_receipt_the_pass_attached_offers_a_correction_not_an_undo(
+        user: User, con):
+    """The safety property of the receipt that files itself.
+
+    `Rückgängig` DELETES the application a receipt recorded, and a receipt the
+    pass merely ATTACHED did not record one — it was already there, put there
+    by him or by an earlier pass. Offering the undo on such a row is how an
+    application he entered by hand gets deleted by one press, which is why
+    `matched_by` says `receipt_known` and not `receipt`. This is the screen
+    half of that guarantee; the service half is in test_replies_service.
+    """
+    bewerbung_id = _application(con)
+    _inbound(con, "m-attached", bewerbung_id=bewerbung_id, needs_review=0,
+             classification="eingang", classified_by="rules",
+             subject="Ihre Bewerbung ist eingegangen",
+             matched_by=replies_service.MATCHED_ATTACHED)
+    await user.open("/antworten")
+    await _open_view(user, "eingeordnet")
+
+    await user.should_see("Eingang")
+    await user.should_see("automatisch")       # not "bestätigt" — he did not
+    await user.should_see("Korrigieren")
+    await user.should_not_see("Rückgängig")
+
+
 # --------------------------------------------------------------------------
 # the piles
 # --------------------------------------------------------------------------
