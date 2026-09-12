@@ -122,7 +122,7 @@ async def test_arbeitsagentur_search_defensive():
         return httpx.Response(200, json=BA_SEARCH)
 
     source = ArbeitsagenturSource(make_client(handler))
-    postings = await source.search(SearchQuery(keywords="Python", location="Aachen",
+    postings = await source.search(SearchQuery(keywords="Python", location="Musterstadt",
                                                radius_km=50))
     assert len(postings) == 2  # malformed item skipped
     assert postings[0].external_id == "10001-123"
@@ -619,8 +619,8 @@ async def test_arbeitnow_location_filter_allows_remote():
         return httpx.Response(200, json=ARBEITNOW if page == 1 else {"data": []})
 
     source = ArbeitnowSource(make_client(handler))
-    # remote job in Hamburg matches an Aachen-located profile because remote=True
-    postings = await source.search(SearchQuery(keywords="python", location="Aachen"))
+    # remote job in Hamburg matches a Musterstadt-located profile because remote=True
+    postings = await source.search(SearchQuery(keywords="python", location="Musterstadt"))
     assert [p.external_id for p in postings] == ["python-dev-hamburg"]
 
 
@@ -720,9 +720,9 @@ def test_posting_facts_reads_the_street_level_work_address():
 
 def test_posting_facts_survives_a_half_stated_address():
     facts = arbeitsagentur.posting_facts({
-        "stellenlokationen": [{"adresse": {"ort": "Aachen"}}]})
+        "stellenlokationen": [{"adresse": {"ort": "Musterstadt"}}]})
     assert facts["work_strasse"] == ""
-    assert facts["work_plz_ort"] == "Aachen"
+    assert facts["work_plz_ort"] == "Musterstadt"
 
 
 def test_posting_facts_reads_the_pay_range_and_what_it_means():

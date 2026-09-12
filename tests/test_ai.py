@@ -183,7 +183,7 @@ def test_score_job_returns_only_nonempty_contacts(monkeypatch):
             text='{"score": 70, "reason": "Passt.",'
                  ' "ansprechpartner": " Frau Weber ", "contact_email": "",'
                  ' "contact_phone": "", "contact_strasse": "Weg 1",'
-                 ' "contact_plz_ort": "52062 Aachen", "refnr": "K-17"}',
+                 ' "contact_plz_ort": "12345 Musterstadt", "refnr": "K-17"}',
             model="m", input_tokens=1, output_tokens=1, cost_usd=0.0,
         )
 
@@ -191,7 +191,7 @@ def test_score_job_returns_only_nonempty_contacts(monkeypatch):
     _, _, contacts, _, _ = scoring.score_job(_job(), "profile text")
     assert contacts == {
         "ansprechpartner": "Frau Weber", "contact_strasse": "Weg 1",
-        "contact_plz_ort": "52062 Aachen", "refnr": "K-17",
+        "contact_plz_ort": "12345 Musterstadt", "refnr": "K-17",
     }
 
 

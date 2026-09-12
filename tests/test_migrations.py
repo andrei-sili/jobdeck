@@ -38,7 +38,7 @@ def make_legacy_db(path, rows):
 
 
 LEGACY_ROWS = [
-    ("2026-06-10", "Py-T GmbH", "Max Muster", "Weg 1", "52062 Aachen",
+    ("2026-06-10", "Py-T GmbH", "Max Muster", "Weg 1", "12345 Musterstadt",
      "E-Mail", "Gesendet", "", "2026-06-10T10:00:00"),
     ("2026-06-11", "ACME AG", "", "", "", "Online-Portal", "Absage", "",
      "2026-06-11T10:00:00"),
