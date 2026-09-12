@@ -91,6 +91,35 @@ async def test_the_page_states_what_is_automatic(user: User, con,
     monkeypatch.setattr(gmail, "can_read", lambda: True)
     await user.open("/antworten")
     await user.should_see("trägt JobDeck selbst ein")
+    # the receipts that file themselves are the newest thing that writes a
+    # status, so the note that names what is automatic has to name them too
+    await user.should_see("Steht die Bewerbung schon im Register")
+    await user.should_see("Stand auf „In Bearbeitung“")
+    # including the half that writes nothing
+    await user.should_see("bleibt der Stand, wie er ist")
+
+
+def test_one_note_names_everything_that_files_itself():
+    """Structural, because the note is rendered on three surfaces and a
+    second copy of it is how one of them starts lying. Exactly one function
+    holds the sentence, and every surface calls that function."""
+    source = pathlib.Path(antworten.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    holders = [node.name for node in ast.walk(tree)
+               if isinstance(node, ast.FunctionDef)
+               and "trägt JobDeck selbst ein" in ast.get_source_segment(
+                   source, node)
+               and not any(isinstance(child, ast.FunctionDef)
+                           and child is not node
+                           and "trägt JobDeck selbst ein"
+                           in ast.get_source_segment(source, child)
+                           for child in node.body)]
+    assert holders == ["_automation_note"]
+    assert source.count("trägt JobDeck selbst ein") == 1
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Name)
+             and node.func.id == "_automation_note"]
+    assert len(calls) == 3
 
 
 # --------------------------------------------------------------------------

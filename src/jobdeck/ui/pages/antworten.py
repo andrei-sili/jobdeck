@@ -566,13 +566,24 @@ async def antworten_page():
             """What files itself, said out loud. The tiering decision
             supersedes the earlier blanket rule that "nothing
             changes a status without you", and a screen that writes statuses
-            has to name which ones."""
+            has to name which ones.
+
+            The ONE place that names them, rendered on three surfaces — so a
+            new thing that files itself is stated everywhere or nowhere. The
+            receipts that file themselves once the application is in the
+            register belong here for exactly that reason: fifty of his waiting
+            mails leave this shelf without a press, and a shelf that shrinks
+            unexplained is the thing he asks about."""
             ui.label("Eindeutige Absagen und Einladungen im Mail-Verlauf "
                      "einer Bewerbung trägt JobDeck selbst ein, ebenso "
-                     "Eingangsbestätigungen aus der Domain der Anzeige. Jede "
-                     "Zeile unter „Eingeordnet“ sagt, ob sie automatisch kam, "
-                     "und ein Klick korrigiert sie. Alles andere wartet hier "
-                     "auf dich.").classes("jd-card-sub")
+                     "Eingangsbestätigungen aus der Domain der Anzeige. Steht "
+                     "die Bewerbung schon im Register, ordnet JobDeck eine "
+                     "Eingangsbestätigung auch ohne dich zu und setzt den "
+                     "Stand auf „In Bearbeitung“ — bei einer schon "
+                     "beantworteten Bewerbung bleibt der Stand, wie er ist. "
+                     "Jede Zeile unter „Eingeordnet“ sagt, ob sie automatisch "
+                     "kam, und ein Klick korrigiert sie. Alles andere wartet "
+                     "hier auf dich.").classes("jd-card-sub")
 
         def _render_group(group: dict) -> None:
             lead = group["lead"]
