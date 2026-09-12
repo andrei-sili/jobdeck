@@ -3240,6 +3240,62 @@ def get_email_log(con: sqlite3.Connection, email_log_id: int) -> sqlite3.Row | N
     ).fetchone()
 
 
+# Receipts still waiting on the review shelf whose application is knowable:
+# the mail already carries one, or the POSTING it belongs to does. The join is
+# what makes "knowable" concrete — no application, no row.
+#
+# The time guard sits HERE because it is a property of the pair: a receipt
+# cannot predate the application it confirms. `gesendet_am` is a date and
+# `internal_date` a local naive stamp, so a mail from the day it was sent
+# compares greater and is kept — 19 of his 27 unattached receipts arrived that
+# same day. A mail Gmail gives no date for cannot be shown to follow anything
+# and fails closed, the same rule `_follows_the_opening` applies to a form.
+#
+# A row he has answered, or that a status already cites, is not waiting for
+# anything and is left alone — the same two exclusions the name proposals use.
+_SHELF_RECEIPTS_SQL = (
+    " FROM email_log e "
+    " LEFT JOIN jobs j ON j.id = e.job_id "
+    " JOIN bewerbungen b ON b.id = COALESCE(e.bewerbung_id, j.bewerbung_id) "
+    " WHERE e.direction=? AND e.needs_review=1 "
+    "   AND e.classification='eingang' "
+    "   AND COALESCE(e.classified_by, '') <> 'reply_manual' "
+    "   AND NOT EXISTS (SELECT 1 FROM status_history s "
+    "                    WHERE s.email_log_id = e.id) "
+    "   AND COALESCE(e.internal_date, '') <> '' "
+    "   AND (b.gesendet_am = '' OR e.internal_date >= b.gesendet_am)"
+)
+
+
+def shelf_receipts(con: sqlite3.Connection) -> list[sqlite3.Row]:
+    """The receipts a pass may file by itself, oldest first.
+
+    `bewerbung_id` NULL says the attachment would be NEW — the caller has to
+    justify it — while a row that already carries one was tied to its
+    application by the reply cascade and is only waiting for its status."""
+    return con.execute(
+        "SELECT e.id, e.gmail_message_id, e.from_addr, e.subject, "
+        "       COALESCE(e.body_text, '') AS body_text, e.bewerbung_id, "
+        "       e.matched_note, "
+        "       COALESCE(e.bewerbung_id, j.bewerbung_id) AS target_id, "
+        "       COALESCE(j.company, b.firma) AS company, b.status"
+        + _SHELF_RECEIPTS_SQL
+        + " ORDER BY e.internal_date, e.id",
+        (EMAIL_INBOUND,),
+    ).fetchall()
+
+
+def settle_reply_review(con: sqlite3.Connection, email_log_id: int) -> None:
+    """Take a row off the review shelf without restating what it says.
+
+    Deliberately narrower than `classify_reply_row`: the classification and
+    WHO read it (rules or the model) are facts about the mail that answering
+    it does not change, and overwriting `classified_by` would claim the rules
+    read something the model did."""
+    con.execute("UPDATE email_log SET needs_review=0 WHERE id=?",
+                (email_log_id,))
+
+
 def classify_reply_row(
     con: sqlite3.Connection,
     email_log_id: int,

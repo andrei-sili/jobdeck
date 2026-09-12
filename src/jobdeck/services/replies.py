@@ -134,7 +134,7 @@ async def ingest_replies() -> dict:
 
 def _ingest() -> dict:
     counters = {"seen": 0, "matched": 0, "auto_status": 0, "review": 0,
-                "receipts": 0, "ignored": 0, "errors": 0}
+                "receipts": 0, "attached": 0, "ignored": 0, "errors": 0}
     if not gmail.can_read():
         _note(LAST_ERROR_KEY, "Gmail ohne Lese-Berechtigung — in den "
                               "Einstellungen neu verbinden")
@@ -211,6 +211,16 @@ def _ingest() -> dict:
                         message_id, exc)
             counters["errors"] += 1
             drained = False
+
+    try:
+        _attach_receipts(counters)
+    except Exception as exc:  # noqa: BLE001 — the same rule as one message
+        # Filing the shelf must never cost the pass its checkpoint: the
+        # messages are already read and recorded, and a shelf that waits for
+        # the next pass loses nothing. Deliberately NOT counted among the
+        # message errors — that counter writes "a message could not be read",
+        # which would be a false statement about somebody's mail.
+        log.warning("reply ingestion: filing the shelf failed: %s", exc)
 
     with db.db() as con:
         if drained and checkpoint:
@@ -876,6 +886,88 @@ def _handle_receipt(match: dict, meta: dict, from_addr: str, subject: str,
                            f"Gmail {meta['id']}")
     counters["receipts"] += 1
     _apply_label(meta["id"], "eingang")
+
+
+def _attach_receipts(counters: dict) -> None:
+    """A receipt whose application is already in the register files itself.
+
+    Measured on his shelf: ALL 57 Eingangsbestätigungen waiting there were for
+    applications that already existed — 30 already tied to one, 27 whose
+    POSTING carried one. So every press he never made would have said the same
+    thing, and he had made none of them in weeks. A question asked fifty-seven
+    times and answered zero times is not a question worth asking; it is the
+    shelf answering it.
+
+    This is `adopt_receipt`'s own "it was recorded meanwhile" branch, pressed
+    by the pass instead of by him — the same three writes, with an automatic
+    source so that `set_status`'s anti-downgrade rank decides rather than his
+    exemption from it. Eleven of his receipts hang off applications already
+    settled: those leave the shelf and the register is left alone, which is the
+    honest outcome, because a receipt for an application that has since been
+    answered holds no decision.
+
+    Two guards decide whether a receipt is THIS application's, and on his
+    corpus they refuse exactly the seven mails that are not one — five JOIN
+    confirmations for other employers, and two asking him to FINISH an
+    application ("Bewerbung abschließen", "Deine Bewerbung ist noch nicht
+    vollständig"):
+
+      * a receipt cannot predate the application it confirms, in SQL, because
+        that is a property of the pair (`db.shelf_receipts`);
+      * a NEW attachment has to name the employer, in the sender or in the
+        mail's own words. An attachment the reply cascade already made is not
+        re-litigated here — re-judging a guess is what a rescan is for, and
+        doing it here would quietly undo the one thing that keeps a name
+        proposal re-judgeable.
+
+    Runs after the message loop, so a receipt proposed by THIS pass is filed
+    by it when the application is already there, and only when the mailbox
+    could be read: the labels have to follow the shelf, and a shelf that waits
+    for the next pass loses nothing.
+    """
+    with db.db() as con:
+        rows = db.shelf_receipts(con)
+    for row in rows:
+        email_log_id = int(row["id"])
+        target = int(row["target_id"])
+        fresh = row["bewerbung_id"] is None
+        if fresh and not _names_employer_from_row(row):
+            continue
+        note = (f"Eingangsbestätigung ({row['matched_note'] or 'zugeordnet'})"
+                f" · Gmail {row['gmail_message_id']}")
+        with db.db() as con:
+            if fresh:
+                db.link_reply_bewerbung(con, email_log_id, target)
+                # Not MATCHED_RECEIPT: this app did not create the ledger row,
+                # so `undo_receipt` must never offer to delete it.
+                db.set_reply_matched_by(con, email_log_id, MATCHED_ATTACHED)
+                counters["attached"] += 1
+            db.settle_reply_review(con, email_log_id)
+            if db.set_status(con, target, "In Bearbeitung", source="reply_auto",
+                             email_log_id=email_log_id, note=note):
+                counters["auto_status"] += 1
+        _apply_label(str(row["gmail_message_id"] or ""), "eingang")
+    if rows:
+        log.info("reply ingestion: %d receipt(s) on the shelf reconsidered",
+                 len(rows))
+
+
+def _names_employer_from_row(row) -> bool:
+    """Does a STORED receipt name the employer of the posting it sits on?
+
+    The same question `_names_employer` asks at ingestion, from what the row
+    kept: the sender's address and the mail's own words, the body included —
+    more text than the match-time window had. The display name is NOT stored,
+    so a vendor mail that named the employer only there is refused here and
+    waits for him. Fail-closed, and it costs one mail on his shelf.
+    """
+    firma = str(row["company"] or "")
+    from_addr = str(row["from_addr"] or "")
+    reading = replies.read_sender("", from_addr)
+    if replies.company_matches(firma, reading):
+        return True
+    text = f"{row['subject'] or ''}\n{row['body_text'] or ''}"
+    return replies.company_named_in_text(firma, replies.text_run_keys(text))
 
 
 # --------------------------------------------------------------------------
