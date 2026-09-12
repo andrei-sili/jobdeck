@@ -3170,6 +3170,36 @@ def pending_review_replies(con: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def list_unconfirmed_attachments(
+    con: sqlite3.Connection, arms: list[str], limit: int = 50
+) -> list[sqlite3.Row]:
+    """Settled inbound mail JobDeck tied to an application by itself, newest
+    first — the rows a one-press unlink may still take back.
+
+    Its own query because the settled ledger is chronological by id and a receipt
+    the filing pass settles KEEPS the id its message got when it was first read.
+    The shelf is old mail by definition, so those rows land below the ledger's
+    newest-N window and the correction the screen offers cannot be reached for
+    the very population it exists for. `arms` comes from the screen, which owns
+    the rule about which arms are correctable."""
+    if not arms:
+        return []
+    placeholders = ",".join("?" * len(arms))
+    return con.execute(
+        "SELECT e.*, b.firma AS bewerbung_firma, b.status AS bewerbung_status, "
+        "       j.company AS job_company, j.title AS job_title "
+        "  FROM email_log e "
+        "  LEFT JOIN bewerbungen b ON b.id = e.bewerbung_id "
+        "  LEFT JOIN jobs j ON j.id = e.job_id "
+        " WHERE e.direction=? AND e.needs_review=0 "
+        "   AND e.bewerbung_id IS NOT NULL "
+        "   AND COALESCE(e.classified_by, '') <> 'reply_manual' "
+        f"   AND e.matched_by IN ({placeholders}) "
+        " ORDER BY e.id DESC LIMIT ?",
+        (EMAIL_INBOUND, *arms, limit),
+    ).fetchall()
+
+
 def list_inbound_replies(con: sqlite3.Connection, limit: int = 50) -> list[sqlite3.Row]:
     """The settled ledger: inbound mail already classified or filed."""
     return con.execute(

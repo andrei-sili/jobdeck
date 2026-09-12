@@ -74,7 +74,7 @@ MATCHED_SHORT = {
     reply_service.MATCHED_RECEIPT: "Eingangsbestätigung",
     reply_service.MATCHED_ATTACHED: "Eingangsbestätigung",
     reply_service.MATCHED_UNDONE: "zurückgenommen",
-    reply_service.MATCHED_FILED: "Eingangsbestätigung",
+    reply_service.MATCHED_FILED: "von JobDeck zugeordnet",
 }
 
 
@@ -249,12 +249,22 @@ def reader_notes(group: dict) -> list[tuple[str, str]]:
     return notes
 
 
-# The two arms whose match may be wrong without anything else noticing, and the
-# only two a one-press unlink may reach: a company-name resemblance, which the
-# module itself calls "eine Ähnlichkeit, keine Identifikation", and the pass's
-# own filing. Every other arm is authenticated evidence — its mail belongs on
-# the shelf, not behind a button that moves the cooling-off anchor backwards.
-_UNLINKABLE = ("name", reply_service.MATCHED_FILED)
+# The arms whose match may be wrong without anything else noticing, and the only
+# ones a one-press unlink may reach: a company-name resemblance, which the module
+# itself calls "eine Ähnlichkeit, keine Identifikation"; a sender-DOMAIN match,
+# which asks no more than "one application answers to this domain" and never
+# consults Gmail's verdict on the sender; and the pass's own filing.
+#
+# `domain` was left out at first on the premise that everything else is
+# authenticated evidence, and that premise is false — `_match`'s domain arm never
+# calls `sender_authenticated`. A forged From at a contact's domain was therefore
+# filed away unseen with no way back, where before this slice it had waited on the
+# shelf. Membership here is decided by ONE question: can this arm write a status?
+# `_handle_reply` writes only for `thread` and `address`, `_handle_receipt` only
+# for `receipt`/`receipt_known`, and the manual paths stamp `reply_manual`, which
+# the caller already excludes. These three write nothing, so for them "this mail
+# does not belong here" is a correction and the anchor moving back is the truth.
+_UNLINKABLE = ("name", "domain", reply_service.MATCHED_FILED)
 
 
 def is_receipt_proposal(row: dict) -> bool:
@@ -297,6 +307,9 @@ def _load() -> dict:
             "groups": vorgaenge(pending),
             "settled": [dict(row)
                         for row in db.list_inbound_replies(con, LEDGER_LIMIT)],
+            "unconfirmed": [
+                dict(row) for row in db.list_unconfirmed_attachments(
+                    con, list(_UNLINKABLE), LEDGER_LIMIT)],
             "last_poll": db.get_setting(con, reply_service.LAST_POLL_KEY, ""),
             "last_error": db.get_setting(con, reply_service.LAST_ERROR_KEY, ""),
             "ai_on": (
@@ -565,7 +578,7 @@ async def antworten_page():
             reader.clear()
             with reader:
                 if state["view"] == "eingeordnet":
-                    _render_settled(view["settled"])
+                    _render_settled(view)
                     return
                 group = shown.get(state["selected"])
                 if group is None:
@@ -729,7 +742,8 @@ async def antworten_page():
         # ------------------------------------------------------------------
         # Eingeordnet — the same panes, a different source
         # ------------------------------------------------------------------
-        def _render_settled(settled: list[dict]) -> None:
+        def _render_settled(view: dict) -> None:
+            settled = view.get("settled") or []
             with ui.column().classes("w-full gap-0 p-6"):
                 ui.label("Eingeordnet").classes("text-xl jd-serif")
                 if not settled:
@@ -745,7 +759,36 @@ async def antworten_page():
                 ui.label(line).classes("jd-meta mt-2")
                 with ui.column().classes("mt-3 max-w-prose"):
                     _automation_note()
+                _render_unconfirmed(view.get("unconfirmed") or [])
                 for row in settled:
+                    _settled_row(row)
+
+        def _render_unconfirmed(rows: list[dict]) -> None:
+            """The rows JobDeck tied to an application by itself, listed where he
+            can still take them back.
+
+            They would otherwise be unreachable exactly where it matters. The
+            ledger below is chronological by `id`, and a receipt the pass files
+            KEEPS the id it got when the mail was first read — the shelf is old
+            mail by definition, so the newest-sixty window shows the rows he has
+            already seen and hides the ones just filed. Measured: of five filed
+            receipts behind sixty newer settled rows, the unlink rendered for
+            none. So this section is not a convenience; without it the correction
+            the screen promises does not exist for its own population."""
+            if not rows:
+                return
+            with ui.column().classes("w-full gap-0 mt-6"):
+                ui.label("Von JobDeck zugeordnet").classes("jd-sec-name")
+                ui.label(register.plural(
+                    len(rows),
+                    "Mail wartet nicht mehr auf dich, ist aber von dir nie "
+                    "bestätigt worden — ein Klick hebt die Zuordnung auf.",
+                    "Mails warten nicht mehr auf dich, sind aber von dir nie "
+                    "bestätigt worden — ein Klick hebt die Zuordnung auf.")) \
+                    .classes("jd-meta")
+                if len(rows) >= LEDGER_LIMIT:
+                    ui.label(f"Die neuesten {LEDGER_LIMIT}.").classes("jd-meta")
+                for row in rows:
                     _settled_row(row)
 
         def _settled_row(row: dict) -> None:
@@ -1071,6 +1114,11 @@ async def antworten_page():
                     if group else (),
                     group["status"] if group else "",
                     tuple(_mail_fingerprint(r) for r in view["settled"])
+                    if state["view"] == "eingeordnet" else (),
+                    # the section above the ledger moves on its own: a pass
+                    # files rows into it without him touching the page
+                    tuple(_mail_fingerprint(r)
+                          for r in (view.get("unconfirmed") or []))
                     if state["view"] == "eingeordnet" else ())
 
         def draw_strip(view: dict, groups: list[dict]) -> None:

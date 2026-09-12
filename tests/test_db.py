@@ -1046,3 +1046,36 @@ def test_recent_letters_leave_out_the_postings_own_earlier_letter(con):
     con.commit()
     assert db.recent_letter_bodies(con) == ["Brief B", "Brief A"]
     assert db.recent_letter_bodies(con, exclude_job_id=a) == ["Brief B"]
+
+
+def test_the_rows_jobdeck_attached_itself_exclude_his_own_verdicts(con):
+    """The list behind „Von JobDeck zugeordnet" says JobDeck did the tying. A row
+    he answered himself carries `reply_manual`, and putting it there would state
+    the opposite of what happened — on the one section whose whole claim is
+    provenance."""
+    bewerbung_id = db.add_bewerbung(con, {"firma": "Firma Beispiel GmbH",
+                                         "status": "Gesendet"})
+    mine = db.add_email_log(con, {
+        "direction": "inbound", "gmail_message_id": "m-his",
+        "bewerbung_id": bewerbung_id, "matched_by": "name",
+        "classification": "eingang", "classified_by": "reply_manual",
+        "needs_review": 0})
+    theirs = db.add_email_log(con, {
+        "direction": "inbound", "gmail_message_id": "m-auto",
+        "bewerbung_id": bewerbung_id, "matched_by": "name",
+        "classification": "eingang", "classified_by": "rules",
+        "needs_review": 0})
+    unlinked = db.add_email_log(con, {
+        "direction": "inbound", "gmail_message_id": "m-loose",
+        "matched_by": "name", "classification": "", "classified_by": "",
+        "needs_review": 0})
+    con.commit()
+
+    rows = db.list_unconfirmed_attachments(con, ["name", "domain"], 50)
+
+    ids = [int(r["id"]) for r in rows]
+    assert ids == [theirs]
+    assert mine not in ids and unlinked not in ids
+    # and an arm nobody passed is not listed either
+    assert db.list_unconfirmed_attachments(con, ["domain"], 50) == []
+    assert db.list_unconfirmed_attachments(con, [], 50) == []

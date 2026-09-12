@@ -1231,6 +1231,58 @@ async def test_one_failing_row_does_not_cost_the_rest_of_the_shelf(
     assert settled.count(0) == 2 and settled.count(1) == 1
 
 
+async def test_the_pass_supplies_the_counters_it_increments(inbox, con):
+    """A caller that omits a counter must not make every row read as a failure:
+    the increment raises inside the per-row containment, the database writes are
+    already committed, and the log then says mails failed when none did. Found by
+    my own re-measurement, and unpinned until now."""
+    job_id = _strip_job(con)
+    bewerbung_id = db.add_bewerbung(con, {
+        "firma": "Firma Beispiel GmbH", "kanal": "Online-Portal",
+        "status": "Gesendet", "gesendet_am": "2026-09-01"})
+    con.execute("UPDATE jobs SET bewerbung_id=? WHERE id=?",
+                (bewerbung_id, job_id))
+    row_id = _shelf_receipt(con, job_id=job_id,
+                            from_addr="karriere@firma-beispiel.de",
+                            subject="Ihre Bewerbung bei Firma Beispiel GmbH")
+
+    counters: dict = {}
+    service._attach_receipts(counters)
+
+    assert (counters["filed"], counters["attached"]) == (1, 1)
+    assert db.get_email_log(con, row_id)["needs_review"] == 0
+
+
+async def test_the_reread_and_the_writes_are_one_transaction(inbox, con,
+                                                            monkeypatch):
+    """The comment says "inside the write transaction", and a bare SELECT at
+    sqlite's default isolation opens none — so the read and the writes were two
+    moments and the guard narrowed the window instead of closing it. Asserted on
+    the invariant itself: the connection is already in a transaction when the
+    re-read happens."""
+    job_id = _strip_job(con)
+    bewerbung_id = db.add_bewerbung(con, {
+        "firma": "Firma Beispiel GmbH", "kanal": "Online-Portal",
+        "status": "Gesendet", "gesendet_am": "2026-09-01"})
+    con.execute("UPDATE jobs SET bewerbung_id=? WHERE id=?",
+                (bewerbung_id, job_id))
+    _shelf_receipt(con, job_id=job_id, from_addr="karriere@firma-beispiel.de",
+                   subject="Ihre Bewerbung bei Firma Beispiel GmbH")
+
+    seen: list[bool] = []
+    real = db.get_email_log
+
+    def watched(connection, row_id):
+        seen.append(bool(connection.in_transaction))
+        return real(connection, row_id)
+
+    monkeypatch.setattr(db, "get_email_log", watched)
+
+    service._attach_receipts({})
+
+    assert seen and all(seen), "the re-read ran outside the write transaction"
+
+
 def test_settling_a_row_restates_nothing_about_what_it_says(con):
     """`settle_reply_review` is deliberately narrower than
     `classify_reply_row`: the classification and WHO read it are facts about the

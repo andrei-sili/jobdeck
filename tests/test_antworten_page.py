@@ -190,7 +190,13 @@ async def test_an_authenticated_receipt_is_not_unlinkable(user: User, con):
     Gated on the ARM instead: exactly two never write, and only those two.
     """
     bewerbung_id = _application(con)
-    for i, matched_by in enumerate(["thread", "address", "domain",
+    # the arms that CAN write a status, so their mail is evidence and stays
+    # linked. `domain` is deliberately NOT here: it never calls
+    # `sender_authenticated` and never writes, so it is correctable — the
+    # premise that everything but name and the pass's filing is authenticated
+    # was false, and a forged From at a contact's domain was filed away with no
+    # way back (found by the fourth security pass).
+    for i, matched_by in enumerate(["thread", "address",
                                     replies_service.MATCHED_ATTACHED,
                                     replies_service.MATCHED_RECEIPT]):
         _inbound(con, f"m-auth-{i}", bewerbung_id=bewerbung_id, needs_review=0,
@@ -200,8 +206,67 @@ async def test_an_authenticated_receipt_is_not_unlinkable(user: User, con):
     await _open_view(user, "eingeordnet")
 
     await user.should_see("automatisch")
-    # not one of the five, and none of them has a status citing it
+    # not one of the four, and none of them has a status citing it
     await user.should_not_see("Keiner Bewerbung zuordnen")
+
+
+async def test_a_domain_match_is_correctable_because_nothing_vouched_for_it(
+        user: User, con):
+    """The fourth security pass's must-fix. `_match`'s domain arm asks only "one
+    application answers to this domain" and never consults Gmail's verdict on
+    the sender, and it never writes a status — so it belongs with the name guess,
+    not with the authenticated arms. A forged From at a contact's domain used to
+    wait on the shelf; the filing pass settles it, so without this it was filed
+    away unseen with „Korrigieren" — which keeps the link and writes a status —
+    as the only button."""
+    bewerbung_id = _application(con)
+    row_id = _inbound(con, "m-domain", bewerbung_id=bewerbung_id, needs_review=0,
+                      classification="eingang", classified_by="rules",
+                      matched_by="domain")
+    await user.open("/antworten")
+    await _open_view(user, "eingeordnet")
+    await user.should_see("Absender-Domain")
+
+    user.find("Keiner Bewerbung zuordnen").click()
+    await asyncio.sleep(0.4)
+
+    row = db.get_email_log(con, row_id)
+    assert (row["bewerbung_id"], row["classification"]) == (None, "")
+
+
+async def test_the_rows_jobdeck_attached_itself_are_listed_above_the_ledger(
+        user: User, con):
+    """They would otherwise be unreachable exactly where it matters.
+
+    The ledger is chronological by id and a receipt the pass settles KEEPS the id
+    its message got when it was first read — the shelf is old mail by definition,
+    so the newest-N window shows what he has already seen and hides what was just
+    filed. Measured by the fourth security pass: of five filed receipts behind
+    sixty newer settled rows, the unlink rendered for none."""
+    bewerbung_id = _application(con)
+    old_row = _inbound(con, "m-old", bewerbung_id=bewerbung_id, needs_review=0,
+                       classification="eingang", classified_by="rules",
+                       matched_by=replies_service.MATCHED_FILED,
+                       subject="Die alte Eingangsbestätigung")
+    for i in range(antworten.LEDGER_LIMIT + 5):
+        _inbound(con, f"m-new-{i}", bewerbung_id=bewerbung_id, needs_review=0,
+                 classification="absage", classified_by="reply_manual",
+                 matched_by="thread", subject=f"Neuere Antwort {i}")
+    await user.open("/antworten")
+    await _open_view(user, "eingeordnet")
+
+    # the ledger's window cannot hold it any more
+    settled = db.list_inbound_replies(con, antworten.LEDGER_LIMIT)
+    assert old_row not in [int(r["id"]) for r in settled]
+    # its own list still reaches it
+    reachable = db.list_unconfirmed_attachments(
+        con, list(antworten._UNLINKABLE), antworten.LEDGER_LIMIT)
+    assert [int(r["id"]) for r in reachable] == [old_row]
+    # and it is on the screen anyway, with its way back — the ledger's own
+    # sixty rows are all his own verdicts, so neither the section heading nor
+    # the button could come from them
+    await user.should_see("Von JobDeck zugeordnet")
+    await user.should_see("Keiner Bewerbung zuordnen")
 
 
 def test_a_receipt_he_took_back_can_still_be_adopted_in_one_press():

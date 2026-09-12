@@ -961,6 +961,16 @@ def _attach_receipts(counters: dict) -> None:
     by it when the application is already there, and only when the mailbox
     could be read: the labels have to follow the shelf, and a shelf that waits
     for the next pass loses nothing.
+
+    Two consequences worth stating, both noticed by the fourth security pass and
+    both conservative. Filing a receipt sets `email_log.bewerbung_id`, which takes
+    its posting out of `db.receipt_candidates` — so a genuinely strong receipt
+    arriving later for that posting can no longer take the strong arm and write
+    its status. One fewer automatic write, which is the safe direction. And a row
+    the pass files with `matched_by='name'` still matches `_NAME_PROPOSALS_SQL`,
+    which does not test `needs_review` — so a rescan drops it and the anchor goes
+    back until the forced full listing re-reads it. That is PR #56's re-judge
+    design working as intended on a row this pass happened to settle first.
     """
     # The counters this function owns, so a caller cannot create a state where a
     # missing key raises INSIDE the per-row containment and every row then reads
@@ -998,9 +1008,13 @@ def _file_one(row, counters: dict) -> None:
     if fresh and not _names_employer_from_row(row):
         return
     with db.db() as con:
-        # Re-read inside the write transaction. The shelf was read on another
-        # connection, and a verdict or a dismissal he pressed in between must
-        # not be overwritten by a decision taken before it.
+        # Re-read inside the write transaction, and BEGIN IMMEDIATE is what makes
+        # that sentence true: a bare SELECT at sqlite's default isolation opens
+        # no transaction, so the read and the writes below were two moments, not
+        # one. The duplicate gate already takes the lock this way. The shelf was
+        # listed on another connection, and a verdict or a dismissal he pressed
+        # in between must not be overwritten by a decision taken before it.
+        con.execute("BEGIN IMMEDIATE")
         current = db.get_email_log(con, email_log_id)
         if current is None or not _still_waiting(current):
             return
