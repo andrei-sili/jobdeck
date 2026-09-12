@@ -17,7 +17,7 @@ import pytest
 from nicegui import background_tasks, ui
 from nicegui.testing import User
 
-from jobdeck import config, db, gmail
+from jobdeck import config, constants, db, gmail
 from jobdeck.services import replies as replies_service
 from jobdeck.ui.pages import antworten
 
@@ -95,7 +95,8 @@ async def test_the_page_states_what_is_automatic(user: User, con,
     # status, so the note that names what is automatic has to name them too
     await user.should_see("Steht die Bewerbung schon im Register")
     await user.should_see("Stand auf „In Bearbeitung“")
-    # including the half that writes nothing
+    # including the half that writes nothing, named with the screen's own word
+    await user.should_see("Ist die Bewerbung schon abgeschlossen")
     await user.should_see("bleibt der Stand, wie er ist")
 
 
@@ -120,6 +121,22 @@ def test_one_note_names_everything_that_files_itself():
              and isinstance(node.func, ast.Name)
              and node.func.id == "_automation_note"]
     assert len(calls) == 3
+    # and it never calls a closed application an ANSWERED one. The statuses
+    # whose rank refuses the receipt's write include "Keine Antwort", which
+    # `BEANTWORTET_STATUS` deliberately excludes and which Einstellungen
+    # explains to him as nobody having answered. Saying "beantwortet" here
+    # promised him a status change the rank refuses.
+    func = next(node for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef)
+                and node.name == "_automation_note")
+    # what he READS, not the comments around it
+    shown = " ".join(node.value for node in ast.walk(func)
+                     if isinstance(node, ast.Constant)
+                     and isinstance(node.value, str))
+    assert "beantwortet" not in shown
+    assert "Ist die Bewerbung schon abgeschlossen" in shown
+    assert set(constants.BEANTWORTET_STATUS) < set(
+        s for s in constants.STATUS_RANK if constants.STATUS_RANK[s] >= 2)
 
 
 async def test_a_receipt_the_pass_attached_offers_a_correction_not_an_undo(

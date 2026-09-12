@@ -574,16 +574,23 @@ async def antworten_page():
             register belong here for exactly that reason: fifty of his waiting
             mails leave this shelf without a press, and a shelf that shrinks
             unexplained is the thing he asks about."""
+            # „abgeschlossen“, never „beantwortet“: the kept set includes
+            # „Keine Antwort“, and Einstellungen tells him in as many words
+            # that nobody answered there („kein «Absage», denn abgesagt hat
+            # niemand“) — `BEANTWORTET_STATUS` leaves it out for the same
+            # reason. Calling it answered here would promise him the raise
+            # this rank refuses. `is_closed` above is the same set.
             ui.label("Eindeutige Absagen und Einladungen im Mail-Verlauf "
                      "einer Bewerbung trägt JobDeck selbst ein, ebenso "
-                     "Eingangsbestätigungen aus der Domain der Anzeige. Steht "
-                     "die Bewerbung schon im Register, ordnet JobDeck eine "
-                     "Eingangsbestätigung auch ohne dich zu und setzt den "
-                     "Stand auf „In Bearbeitung“ — bei einer schon "
-                     "beantworteten Bewerbung bleibt der Stand, wie er ist. "
-                     "Jede Zeile unter „Eingeordnet“ sagt, ob sie automatisch "
-                     "kam, und ein Klick korrigiert sie. Alles andere wartet "
-                     "hier auf dich.").classes("jd-card-sub")
+                     "Eingangsbestätigungen, deren Absender zweifelsfrei zur "
+                     "Anzeige gehört. Steht die Bewerbung schon im Register, "
+                     "ordnet JobDeck ihr eine Eingangsbestätigung von selbst "
+                     "zu und setzt den Stand auf „In Bearbeitung“. Ist die "
+                     "Bewerbung schon abgeschlossen, bleibt der Stand, wie er "
+                     "ist; die Mail wird nur eingeordnet. Jede Zeile unter "
+                     "„Eingeordnet“ sagt, ob sie automatisch kam, und ein "
+                     "Klick korrigiert sie. Alles andere wartet hier auf "
+                     "dich.").classes("jd-card-sub")
 
         def _render_group(group: dict) -> None:
             lead = group["lead"]
