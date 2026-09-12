@@ -270,6 +270,12 @@ from that environmental failure.
 - Filing a receipt takes its posting out of the receipt-candidate window, so a
   genuinely strong receipt arriving later for that posting can no longer take the
   authorizing arm and write its status. One fewer automatic write.
+- The section listing correctable attachments carries the same row limit as the
+  ledger, and its population only grows: a row leaves it when the candidate
+  corrects or unlinks it. Past the limit the oldest correctable rows are
+  unreachable again. The direction is conservative — an attachment left standing
+  keeps the last-contact anchor forward, which holds the company longer and keeps
+  the silence rule from closing the application.
 - A filed row the company-name arm matched is still in a rescan's re-judge set,
   so a rescan drops it and the last-contact anchor goes back until the forced full
   listing reads the message again.

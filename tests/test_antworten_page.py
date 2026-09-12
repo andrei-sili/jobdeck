@@ -324,6 +324,99 @@ async def test_the_unlink_really_unlinks_and_says_which_arm_matched(
     assert (row["bewerbung_id"], row["classification"]) == (None, "")
 
 
+async def test_a_correctable_row_is_drawn_once_not_twice(user: User, con):
+    """The section's query is a strict subset of the ledger's, so a row inside the
+    ledger's window would be drawn by both — two unlink buttons and two counts
+    that read against each other on the one screen whose contract is that its
+    numbers must not disagree out loud. 37 of 45 rows on the real corpus."""
+    bewerbung_id = _application(con)
+    _inbound(con, "m-once", bewerbung_id=bewerbung_id, needs_review=0,
+             classification="eingang", classified_by="rules",
+             matched_by=replies_service.MATCHED_FILED)
+    await user.open("/antworten")
+    await _open_view(user, "eingeordnet")
+
+    await user.should_see("Von JobDeck zugeordnet")
+    labels = [e for e in user.find("Keiner Bewerbung zuordnen").elements]
+    assert len(labels) == 1
+
+
+async def test_a_verdict_he_wrote_from_a_name_guess_offers_no_unlink(
+        user: User, con):
+    """The clause the fifth security pass found unpinned, on the send-gate path.
+    The section's loader excludes his own verdicts, but the LEDGER below does not
+    and draws through the same row renderer — and «Korrigieren» on a name guess
+    keeps `matched_by='name'`, stamps `reply_manual` and writes a status through
+    the manual rank exemption. Unlinking that row would move the last-contact
+    anchor 82 days backwards with the status it wrote left standing."""
+    bewerbung_id = _application(con)
+    row_id = _inbound(con, "m-judged", bewerbung_id=bewerbung_id, needs_review=1,
+                      classification="eingang", classified_by="rules",
+                      matched_by="name")
+    replies_service.resolve_review(row_id, "absage", force_status=True)
+    row = db.get_email_log(con, row_id)
+    assert (row["matched_by"], row["classified_by"]) == ("name", "reply_manual")
+
+    await user.open("/antworten")
+    await _open_view(user, "eingeordnet")
+
+    await user.should_see("bestätigt")
+    await user.should_not_see("Keiner Bewerbung zuordnen")
+
+
+def test_the_section_is_the_only_thing_a_filing_pass_changes(con):
+    """Why the redraw fingerprint needs its own term for the section.
+
+    A background pass files rows into it while he is on the page. When the ledger
+    is at its window and the filed row's id is below it — the shelf is old mail,
+    so that is the normal case — NOTHING ELSE the page compares moves: the view
+    is fixed, nothing is selected in this view, and the ledger's own tuple is
+    byte-identical. So the section's term is the only thing that can tell the
+    watcher to redraw. Asserted here rather than through the browser because the
+    watcher's interval is a default argument frozen at import, so a test cannot
+    shorten it.
+    """
+    bewerbung_id = _application(con)
+    job_id = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "j-tick", "company": "Beispiel GmbH",
+        "title": "Entwickler", "url": "https://x.example/j-tick"})
+    # the receipt comes FIRST, so it carries the lowest id
+    row_id = _inbound(con, "m-below", needs_review=1, classification="eingang",
+                      classified_by="rules", matched_by="receipt")
+    con.execute("UPDATE email_log SET job_id=? WHERE id=?", (job_id, row_id))
+    for i in range(antworten.LEDGER_LIMIT):
+        _inbound(con, f"m-fill-{i}", bewerbung_id=bewerbung_id, needs_review=0,
+                 classification="absage", classified_by="reply_manual",
+                 matched_by="thread")
+    con.commit()
+    before = antworten._load()
+    assert before["unconfirmed"] == []
+
+    # the pass's own three writers, in its own order
+    with db.db() as writing:
+        db.link_reply_bewerbung(writing, row_id, bewerbung_id)
+        db.set_reply_matched_by(writing, row_id, replies_service.MATCHED_FILED)
+        db.settle_reply_review(writing, row_id)
+    after = antworten._load()
+
+    # the ledger cannot see it — the row's id is below its window
+    assert [r["id"] for r in before["settled"]] \
+        == [r["id"] for r in after["settled"]]
+    # and the section is the one thing that moved
+    assert [r["id"] for r in after["unconfirmed"]] == [row_id]
+
+
+def test_the_redraw_fingerprint_reads_the_section(con):
+    """Structural, because the term above is invisible when it is missing: the
+    page simply never redraws, which looks like nothing happening."""
+    source = pathlib.Path(antworten.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    state = next(node for node in ast.walk(tree)
+                 if isinstance(node, ast.FunctionDef)
+                 and node.name == "_reader_state")
+    assert "unconfirmed" in ast.get_source_segment(source, state)
+
+
 async def test_a_row_he_confirmed_himself_offers_no_unlink(user: User, con):
     """The unlink is for the one row he never confirmed. A reply he judged is
     his own verdict, and the shelf is where a mail is unlinked."""

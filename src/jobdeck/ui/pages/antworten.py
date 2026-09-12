@@ -752,6 +752,9 @@ async def antworten_page():
                     return
                 line = register.plural(len(settled), "Antwort ist eingeordnet",
                                        "Antworten sind eingeordnet")
+                # the whole ledger, including the rows the section above lists —
+                # otherwise the two numbers on one screen count different things
+                # and neither says which
                 if len(settled) >= LEDGER_LIMIT:
                     # It shows the newest N. Saying so is the difference
                     # between a ledger and a ledger that quietly ends.
@@ -759,9 +762,17 @@ async def antworten_page():
                 ui.label(line).classes("jd-meta mt-2")
                 with ui.column().classes("mt-3 max-w-prose"):
                     _automation_note()
-                _render_unconfirmed(view.get("unconfirmed") or [])
+                unconfirmed = view.get("unconfirmed") or []
+                _render_unconfirmed(unconfirmed)
+                # ONCE each. The section's query is a strict subset of the
+                # ledger's, so every correctable row whose id is still inside the
+                # ledger's window would otherwise be drawn twice — with two
+                # „Keiner Bewerbung zuordnen" buttons and two counts that read
+                # against each other. On the owner's corpus that is 37 of 45.
+                drawn = {int(r["id"]) for r in unconfirmed}
                 for row in settled:
-                    _settled_row(row)
+                    if int(row["id"]) not in drawn:
+                        _settled_row(row)
 
         def _render_unconfirmed(rows: list[dict]) -> None:
             """The rows JobDeck tied to an application by itself, listed where he
