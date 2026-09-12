@@ -782,9 +782,17 @@ def company_named_in_text(firma: str, run_keys: frozenset[str]) -> bool:
     in full, so its first word — an ordinary word of the language — is evidence
     of nothing on its own. That confusion had put eleven newsletters on one
     application before the name arm was rewritten.
+
+    A HIGHER FLOOR than the equality arm, and the security review is why. Legal
+    forms drop out of a key, so a company can key to a single ordinary word —
+    and an ordinary word turns up in any German HR mail's sign-off. Measured on
+    the text of one unremarkable confirmation ("vielen Dank … Ihr
+    Recruiting-Team … (no reply)"), three-letter keys matched three real
+    employer names at once. A domain LABEL is a name by construction and can be
+    short; a word in prose is not, so this arm asks for room.
     """
     key = company_key(firma)
-    return len(key) >= _MIN_EXACT_KEY and key in run_keys
+    return len(key) >= _MIN_COMPANY_KEY and key in run_keys
 
 
 def sender_tenant_tokens(from_addr: str, registrable: str = "") -> list[str]:

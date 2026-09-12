@@ -850,18 +850,23 @@ def test_a_mails_own_words_name_an_employer_by_word_and_not_by_substring():
     A run of WORDS, because the letters of a company key turn up inside
     unrelated words, and the WHOLE name, because prose writes a company out
     while a domain label abbreviates it. Both halves are load-bearing: the
-    first keeps "aqex" out of "Paraqexil", the second keeps the ordinary word
-    "global" from naming "Global Beispiel Systeme".
+    first keeps "aqexol" out of "Paraqexoline", the second keeps the ordinary
+    word "global" from naming "Global Beispiel Systeme". A key shorter than
+    six characters is refused outright here: an ordinary word of the language
+    is not evidence that a mail names a company.
     """
     keys = replies.text_run_keys(
-        "Danke für Deine Bewerbung bei der Aqex GmbH als Softwaretester")
-    assert replies.company_named_in_text("Aqex GmbH", keys)
-    assert replies.company_named_in_text("Aqex", keys)
-    assert not replies.company_named_in_text("Zylo GmbH & Co. KG", keys)
+        "Danke für Deine Bewerbung bei der Aqexol GmbH als Softwaretester")
+    assert replies.company_named_in_text("Aqexol GmbH", keys)
+    assert replies.company_named_in_text("Aqexol", keys)
+    assert not replies.company_named_in_text("Zylotan GmbH & Co. KG", keys)
 
     # the letters, but not the word
     assert not replies.company_named_in_text(
-        "Aqex GmbH", replies.text_run_keys("Paraqexil Software"))
+        "Aqexol GmbH", replies.text_run_keys("Paraqexoline Software"))
+    # and a key too short to be anything but a word is refused outright
+    assert not replies.company_named_in_text(
+        "Kern GmbH", replies.text_run_keys("Viele Grüße, dein Kern-Team"))
     # a leading word is not the name
     partial = replies.text_run_keys("our global team will get back to you")
     assert not replies.company_named_in_text(
