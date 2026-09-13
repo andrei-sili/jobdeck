@@ -553,7 +553,7 @@ def strip_letter_closing(body: str, applicant_name: str = "") -> str:
     """The Anschreiben body without a closing formula the template will add.
 
     Only a TRAILING one is removed, together with the name line under it: a
-    "Grüße aus Stolberg" inside a paragraph is prose, not a sign-off. Anything
+    "Grüße aus Musterstadt" inside a paragraph is prose, not a sign-off. Anything
     that is not a closing is left exactly as written — this must never eat a
     sentence of his letter."""
     lines = (body or "").rstrip().splitlines()

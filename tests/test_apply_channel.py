@@ -16,10 +16,10 @@ def test_a_known_e_mail_wins_over_everything():
     ("https://acme.jobs.personio.de/job/42", "Personio"),
     ("https://karriere.career.softgarden.de/x", "softgarden"),
     ("https://api.softgarden.io/apply/9", "softgarden"),
-    ("https://nobix-portal.rexx-systems.com/stellenangebote.html", "rexx systems"),
+    ("https://acme-portal.rexx-systems.com/stellenangebote.html", "rexx systems"),
     ("https://acme.dvinci-hr.com/de/jobs", "d.vinci"),
-    ("https://noz.onlyfy.jobs/job/7", "onlyfy"),
-    ("https://join.com/companies/mondaai/16443254-staff-engineer", "JOIN"),
+    ("https://acme.onlyfy.jobs/job/7", "onlyfy"),
+    ("https://join.com/companies/acme/16443254-staff-engineer", "JOIN"),
     ("https://bewerbermanagement.net/de/jobposting/abc/apply", "BITE"),
     ("https://acme.wd3.myworkdayjobs.com/de/careers/job/1", "Workday"),
     ("https://boards.greenhouse.io/acme/jobs/1", "Greenhouse"),
@@ -32,12 +32,12 @@ def test_known_ats_hosts_are_named(url, vendor):
 
 
 @pytest.mark.parametrize("url, label", [
-    ("https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1003292975-S", "Arbeitsagentur"),
+    ("https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1000000002-S", "Arbeitsagentur"),
     ("https://de.jooble.org/away/12345", "Jooble"),
     ("https://www.arbeitnow.com/jobs/companies/x/y", "Arbeitnow"),
     # the board's UK market — same site, second TLD
     ("https://www.arbeitnow.co.uk/jobs/companies/x/y", "Arbeitnow"),
-    ("https://www.xing.com/jobs/osnabrueck-ki-154887444", "XING"),
+    ("https://www.xing.com/jobs/musterstadt-dev-12345678", "XING"),
     ("https://jobs.ams.at/public/emps/jobs/abc", "AMS"),
     ("https://www.get-in-it.de/jobsuche/p12345", "get in IT"),
     ("https://germantechjobs.de/jobs/python-developer-berlin", "GermanTechJobs"),
@@ -70,16 +70,16 @@ def test_join_requires_the_companies_or_jobs_path():
 
 
 def test_employer_own_site_is_company_site():
-    r = ac.classify("https://mg-systems.de/bewerbung/")
+    r = ac.classify("https://firma-beispiel.de/bewerbung/")
     assert r.channel == ac.CHANNEL_COMPANY_SITE
     assert r.vendor == ""
 
 
 def test_cname_custom_domain_falls_through_to_company_site():
-    # jobs.hoermann.de is a rexx portal behind a custom domain — the host alone
+    # jobs.firma-beispiel.de is a rexx portal behind a custom domain — the host alone
     # cannot reveal the vendor, so it must NOT be mislabelled; it degrades to the
     # generic company-site bucket (the form-action inspection is a later slice)
-    assert ac.classify("https://jobs.hoermann.de/x-de-f4796.html").channel \
+    assert ac.classify("https://jobs.firma-beispiel.de/x-de-f4796.html").channel \
         == ac.CHANNEL_COMPANY_SITE
 
 
@@ -105,7 +105,7 @@ def test_page_markers_reveal_the_ats_behind_a_custom_domain():
     # the CNAME'd rexx portal from above: the landing host hides the vendor,
     # but the apply form posts to the vendor's domain
     html = """<html><body>
-      <form action="https://hoermann.rexx-systems.com/apply/123" method="post">
+      <form action="https://firma-beispiel.rexx-systems.com/apply/123" method="post">
       </form></body></html>"""
     r = ac.detect_ats_from_page(html)
     assert r is not None

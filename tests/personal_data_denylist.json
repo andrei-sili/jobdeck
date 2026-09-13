@@ -1,0 +1,186 @@
+{
+  "_comment": [
+    "SHA-256 of values that must never appear in the tracked tree, normalised",
+    "by tests/test_no_personal_data.py (casefold, every non-word run collapsed",
+    "to one space). Never add a value in clear text here.",
+    "This list is a tripwire, not a secret store: a short, low-entropy value",
+    "such as a town or a postcode is recoverable from a gazetteer by anyone",
+    "who wants to, and the names it covers are in this repository's history",
+    "anyway. What it buys is that the value is not readable, greppable or",
+    "indexable at the tip, and that it cannot come back unnoticed.",
+    "'tokens' is how many normalised tokens the value has; the scanner reads",
+    "the largest one to know how wide a window it must hash."
+  ],
+  "entries": [
+    {
+      "kind": "employer",
+      "tokens": 1,
+      "sha256": "08598b9adb8a0256f992e8b8ed2d8ddaab23fe4f36351b8c6875e8aad7bff0da"
+    },
+    {
+      "kind": "employer",
+      "tokens": 1,
+      "sha256": "2539194e88474ceed8dac8097717765081fddb2ce95b516e0cbba37b406c0e20"
+    },
+    {
+      "kind": "employer",
+      "tokens": 2,
+      "sha256": "57da427d782d38580ed4000c14a8f0c4773821c891ead6f747691bd66ed27c5b"
+    },
+    {
+      "kind": "employer",
+      "tokens": 1,
+      "sha256": "6d645b29babfa196697b58c2addc9f4253f68fae79628a75e98729d46635a328"
+    },
+    {
+      "kind": "employer",
+      "tokens": 2,
+      "sha256": "7dc41287a543f02e63a857be2858d885152f04188cd533bc9be5c3dd895cad90"
+    },
+    {
+      "kind": "employer",
+      "tokens": 1,
+      "sha256": "8441f68738a0fa1900c02fc8c0fdc7337b1aa0597687f406f6580f8d448ff410"
+    },
+    {
+      "kind": "employer",
+      "tokens": 1,
+      "sha256": "8f8867b4cf6b63ee71b6d14552fc571061b156be82233fe7321ff10324ac8cee"
+    },
+    {
+      "kind": "employer",
+      "tokens": 1,
+      "sha256": "91ec9aeb4ab1a376bf7b89ed713237f97a9ed33e64606c44ecf2ad1aa99ccab4"
+    },
+    {
+      "kind": "employer",
+      "tokens": 1,
+      "sha256": "a3f9c47d367e4f5f9e36f17213dd62b9c2786a056a67c212746755d8eeac41ed"
+    },
+    {
+      "kind": "employer",
+      "tokens": 3,
+      "sha256": "ba6c14afc64cadd9181186deb80d7d1bd69e6be09093e001e2f70d5d36e92911"
+    },
+    {
+      "kind": "employer",
+      "tokens": 2,
+      "sha256": "c43699f2ac531e208a627cf2c2a78457b4f9290ccf98df9779d4ba3a2adb1d17"
+    },
+    {
+      "kind": "employer",
+      "tokens": 1,
+      "sha256": "ca060454edaf29adc10046531fb2bbdd785f2c1abbef935cb95b2610f96a04e1"
+    },
+    {
+      "kind": "employer",
+      "tokens": 1,
+      "sha256": "d8558adab3fd4512aa08e49a2cc9f96f21524fcfa9908d05c8fed6bb2176d229"
+    },
+    {
+      "kind": "employer",
+      "tokens": 1,
+      "sha256": "e0c7a1f00375a34999329672f6ecdfa2b1852b4c47f34d46045e13869be7adfa"
+    },
+    {
+      "kind": "employer",
+      "tokens": 1,
+      "sha256": "e85279c6670e65024069ebc74e94378161b88e05f0588b4db957d9922ac44357"
+    },
+    {
+      "kind": "employer",
+      "tokens": 2,
+      "sha256": "fb13d4830f988bbc44bbe25f96dbffa0341becbe7a1dd6ceb653906c838a2166"
+    },
+    {
+      "kind": "home postcode",
+      "tokens": 1,
+      "sha256": "abb0d452303d34e951b6796503ac781d4a652007989f341312f2833ca6293002"
+    },
+    {
+      "kind": "home street",
+      "tokens": 1,
+      "sha256": "8d8ad3257c95213574f8ab7b3a0967800ca5828f1d3fd09ecc46e54c89e32b06"
+    },
+    {
+      "kind": "home street",
+      "tokens": 1,
+      "sha256": "9f1cb33d0978cc6ab2199197394c615ed2486f5f7a863b80aa412a3e61664083"
+    },
+    {
+      "kind": "home town",
+      "tokens": 1,
+      "sha256": "d420e36cb81a706447de470d789f83b94db645b5a6ea115d7a6bbeb42c32802b"
+    },
+    {
+      "kind": "posting id",
+      "tokens": 1,
+      "sha256": "0f12e44a8ea7bdf8d6b45b36864c927d132dc073abe923e9b038de7fa28d3f84"
+    },
+    {
+      "kind": "posting id",
+      "tokens": 3,
+      "sha256": "0fd1c010cf518c14d80a23bf472e5d312deb513c86eb668841ac44457ab1f119"
+    },
+    {
+      "kind": "posting id",
+      "tokens": 3,
+      "sha256": "1999edb4d9d36a42ade3f6a52665bee9d678427249d6707aa099eb1948f8c6fc"
+    },
+    {
+      "kind": "posting id",
+      "tokens": 3,
+      "sha256": "97d80bde9cc7a7abc690d3f8dec1f88635b0e11f53e0e0ef1d37cb86e281d4e8"
+    },
+    {
+      "kind": "posting id",
+      "tokens": 3,
+      "sha256": "a6299a33a816e942e25fd91e44b5166c629c0d42b69df47cd148bcd8ed03f8bd"
+    },
+    {
+      "kind": "posting id",
+      "tokens": 3,
+      "sha256": "aad401006d3c355ed55b2d0d865b2239b9dde92a3605a886d795be8be722e5eb"
+    },
+    {
+      "kind": "private mailbox",
+      "tokens": 4,
+      "sha256": "21d4ab93eaba8ba2d715032bc655c7e698a26bcf2a5345c8db3a8031f793c5fa"
+    },
+    {
+      "kind": "private mailbox",
+      "tokens": 4,
+      "sha256": "2ded7c3d7594c5c7f0f7b83335947191607797d01129b28c84092d858648bfba"
+    },
+    {
+      "kind": "private mailbox",
+      "tokens": 1,
+      "sha256": "44a1953828e65deb296fb748c691ced9c2513c75de8138801e957a53b3777fe8"
+    },
+    {
+      "kind": "private phone",
+      "tokens": 2,
+      "sha256": "442ad644eb81aba04abce6d5141ee5334618afaa98fce4a699f327da3f657f98"
+    },
+    {
+      "kind": "private phone",
+      "tokens": 3,
+      "sha256": "484e41d1f7a0f778a146d4b00b4148d50e7777131119d11f33fe2dd3b0247469"
+    },
+    {
+      "kind": "private phone",
+      "tokens": 1,
+      "sha256": "8571bb9165ccfdf4504c2acfd8667a6026d9a47af118af0cd716660493d49323"
+    },
+    {
+      "kind": "private phone",
+      "tokens": 1,
+      "sha256": "8e47bfda1fe3319c3ac2bea07fe296f670476476924ac6084bd6bd4a88dfc8d5"
+    },
+    {
+      "kind": "private phone",
+      "tokens": 2,
+      "sha256": "cfb559edc29d16c53a0e01ed3174eee7a065721fba5ee28b03aca05f23db7797"
+    }
+  ]
+}

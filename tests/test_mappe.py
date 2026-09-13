@@ -35,7 +35,7 @@ def _setup(con, data_dir, with_anlagen=True, **setting_overrides):
     })
     db.set_job_contacts(con, job_id, {
         "ansprechpartner": "Frau Weber", "contact_strasse": "Weg 1",
-        "contact_plz_ort": "52062 Aachen", "refnr": "K-17",
+        "contact_plz_ort": "12345 Musterstadt", "refnr": "K-17",
     })
     db.upsert_draft(con, job_id, {
         "status": "ready", "recipient": "jobs@mueller.de",

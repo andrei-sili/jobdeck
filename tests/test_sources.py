@@ -28,7 +28,7 @@ BA_SEARCH = {
             "referenznummer": "10001-123",
             "stellenangebotsTitel": "Python Entwickler (m/w/d)",
             "hauptberuf": "Softwareentwickler/in",  # BERUFENET label, NOT a title
-            "firma": "Eurogard GmbH",
+            "firma": "Firma Beispiel GmbH",
             "stellenlokationen": [
                 {"adresse": {"ort": "Herzogenrath", "land": "DEUTSCHLAND"}}
             ],
@@ -41,7 +41,7 @@ BA_SEARCH = {
         {
             "referenznummer": "10001-456",
             "stellenangebotsTitel": "Fachinformatiker Anwendungsentwicklung",
-            "firma": "ncsolution GmbH",
+            "firma": "Zweite GmbH",
             "stellenlokationen": None,
         },
     ]
@@ -49,8 +49,9 @@ BA_SEARCH = {
 
 BA_DETAILS = {
     # real key observed live (July 2026, still current on the v4 detail route)
-    "stellenangebotsBeschreibung": "Wir suchen... Bewerbung an hr@eurogard.de. Remote möglich.",
-    "firma": "Eurogard GmbH",
+    "stellenangebotsBeschreibung": ("Wir suchen... Bewerbung an "
+                                    "hr@firma-beispiel.de. Remote möglich."),
+    "firma": "Firma Beispiel GmbH",
     # the EMPLOYER's title, as the detail payload states it — the manual path
     # builds a posting from a Referenznummer alone and has no other source
     "stellenangebotsTitel": "Python Entwickler (m/w/d)",
@@ -122,11 +123,11 @@ async def test_arbeitsagentur_search_defensive():
         return httpx.Response(200, json=BA_SEARCH)
 
     source = ArbeitsagenturSource(make_client(handler))
-    postings = await source.search(SearchQuery(keywords="Python", location="Aachen",
+    postings = await source.search(SearchQuery(keywords="Python", location="Musterstadt",
                                                radius_km=50))
     assert len(postings) == 2  # malformed item skipped
     assert postings[0].external_id == "10001-123"
-    assert postings[0].company == "Eurogard GmbH"
+    assert postings[0].company == "Firma Beispiel GmbH"
     assert "jobdetail/10001-123" in postings[0].url
     assert postings[1].title == "Fachinformatiker Anwendungsentwicklung"
     assert postings[1].location == ""  # stellenlokationen None must not raise
@@ -166,7 +167,7 @@ async def test_arbeitsagentur_details_enrich():
     source = ArbeitsagenturSource(make_client(handler))
     postings = await source.search(SearchQuery(keywords="Python"))
     enriched = await source.fetch_details(postings[0])
-    assert enriched.contact_email == "hr@eurogard.de"
+    assert enriched.contact_email == "hr@firma-beispiel.de"
     assert enriched.remote is True  # "Remote möglich" in description
 
 
@@ -619,8 +620,8 @@ async def test_arbeitnow_location_filter_allows_remote():
         return httpx.Response(200, json=ARBEITNOW if page == 1 else {"data": []})
 
     source = ArbeitnowSource(make_client(handler))
-    # remote job in Hamburg matches an Aachen-located profile because remote=True
-    postings = await source.search(SearchQuery(keywords="python", location="Aachen"))
+    # remote job in Hamburg matches a Musterstadt-located profile because remote=True
+    postings = await source.search(SearchQuery(keywords="python", location="Musterstadt"))
     assert [p.external_id for p in postings] == ["python-dev-hamburg"]
 
 
@@ -720,9 +721,9 @@ def test_posting_facts_reads_the_street_level_work_address():
 
 def test_posting_facts_survives_a_half_stated_address():
     facts = arbeitsagentur.posting_facts({
-        "stellenlokationen": [{"adresse": {"ort": "Aachen"}}]})
+        "stellenlokationen": [{"adresse": {"ort": "Musterstadt"}}]})
     assert facts["work_strasse"] == ""
-    assert facts["work_plz_ort"] == "Aachen"
+    assert facts["work_plz_ort"] == "Musterstadt"
 
 
 def test_posting_facts_reads_the_pay_range_and_what_it_means():

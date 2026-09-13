@@ -473,9 +473,9 @@ def _company_job(con, ext, company, score, published_on=""):
 def test_a_company_takes_one_row_and_its_best_posting_represents_it(con, data_dir):
     # 36 companies held 83 of his 237 no-email postings, and only one
     # application per company is possible — 47 rows could never become one
-    best = _company_job(con, "a1", "Sigtronic GmbH", 88)
-    _company_job(con, "a2", "sigtronic gmbh ", 70)   # same company, spelled loosely
-    _company_job(con, "a3", "SIGTRONIC GMBH", 60)
+    best = _company_job(con, "a1", "Beispiel GmbH", 88)
+    _company_job(con, "a2", "beispiel gmbh ", 70)   # same company, spelled loosely
+    _company_job(con, "a3", "BEISPIEL GMBH", 60)
     other = _company_job(con, "b1", "Andere AG", 75)
     con.commit()
 

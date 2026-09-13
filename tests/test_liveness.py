@@ -10,8 +10,8 @@ import httpx
 from jobdeck import db
 from jobdeck.services import liveness
 
-_BA_JOB = {"source": "arbeitsagentur", "external_id": "10001-1003292975-S",
-           "url": "https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1003292975-S"}
+_BA_JOB = {"source": "arbeitsagentur", "external_id": "10001-1000000002-S",
+           "url": "https://www.arbeitsagentur.de/jobsuche/jobdetail/10001-1000000002-S"}
 _AN_JOB = {"source": "arbeitnow", "external_id": "acme-dev-1",
            "url": "https://www.arbeitnow.com/jobs/companies/acme/dev-1"}
 _UK_JOB = {"source": "arbeitnow", "external_id": "acme-dev-2",
@@ -37,8 +37,8 @@ async def _probe(job, handler):
 
 
 async def test_the_ba_api_404_is_what_makes_a_posting_gone():
-    # job 18 (Stretta, score 87) had a draft and a 2.1 MB Mappe built for a
-    # posting the API had been answering 404 for 40 days
+    # a posting scored 87 had a draft and a 2.1 MB Mappe built for an ad the
+    # API had been answering 404 for 40 days
     assert await _probe(_BA_JOB, _status(404)) == liveness.LIVENESS_GONE
     assert await _probe(_BA_JOB, _status(200)) == liveness.LIVENESS_ALIVE
 
@@ -55,7 +55,7 @@ async def test_the_ba_probe_asks_the_detail_route_with_the_api_key():
     # one builder for the base64 detail route, shared with fetch_details
     assert url == (
         "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service/pc/v4/"
-        "jobdetails/MTAwMDEtMTAwMzI5Mjk3NS1T"
+        "jobdetails/MTAwMDEtMTAwMDAwMDAwMi1T"
     )
     assert key == "jobboerse-jobsuche"
 

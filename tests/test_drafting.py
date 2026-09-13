@@ -198,7 +198,7 @@ def test_build_betreff_collapses_smuggled_whitespace():
 
 
 def test_clean_title_strips_board_noise_but_keeps_the_role():
-    # the exact Stretta-style title that leaked junk into a real Betreff
+    # the exact board-mangled title shape that leaked junk into a real Betreff
     assert ai_drafting.clean_title(
         "Ab sofort: Fullstack-Entwickler Python/Django mit Frontend-Fokus "
         "(m/w/d)Vollzeit"
@@ -866,8 +866,8 @@ def test_a_truncation_is_typed_not_matched_on_its_message():
     ("Text.\n\nMit freundlichen Grüßen\n\nMax Muster", "Text.",
      "a blank line between closing and name"),
     ("Text.", "Text.", "nothing to strip"),
-    ("Viele Grüße aus Aachen erreichten mich.\n\nDer Rest.",
-     "Viele Grüße aus Aachen erreichten mich.\n\nDer Rest.",
+    ("Viele Grüße aus Musterstadt erreichten mich.\n\nDer Rest.",
+     "Viele Grüße aus Musterstadt erreichten mich.\n\nDer Rest.",
      "a greeting INSIDE prose is not a sign-off and must survive"),
     ("Sehr geehrter Herr Muster,\n\nMax Muster hat mir von Ihnen erzählt.",
      "Sehr geehrter Herr Muster,\n\nMax Muster hat mir von Ihnen erzählt.",

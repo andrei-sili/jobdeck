@@ -18,7 +18,7 @@ def _add_job(con, **over):
         "external_id": over.pop("external_id", "REF-1"),
         "title": "Python Entwickler (m/w/d)",
         "company": "Neue Firma GmbH",
-        "location": "Aachen",
+        "location": "Musterstadt",
         "url": "https://example.org/job/1",
         "contact_email": "hr@neuefirma.de",
     }
