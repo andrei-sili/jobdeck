@@ -61,6 +61,8 @@ MATCHED_BY = {
     "name": "über den Firmennamen zugeordnet",
     reply_service.MATCHED_RECEIPT: "Eingangsbestätigung zu einem Formular",
     reply_service.MATCHED_ATTACHED: "Eingangsbestätigung zu einem Formular",
+    reply_service.MATCHED_UNDONE: "Eingangsbestätigung, von dir zurückgenommen",
+    reply_service.MATCHED_FILED: "Eingangsbestätigung zu einer schon eingetragenen Bewerbung",
 }
 # The row is one nowrap line with an ellipsis, so the origin has to be a word
 # rather than a sentence; the sentence stays in the reader.
@@ -71,6 +73,8 @@ MATCHED_SHORT = {
     "name": "Firmenname",
     reply_service.MATCHED_RECEIPT: "Eingangsbestätigung",
     reply_service.MATCHED_ATTACHED: "Eingangsbestätigung",
+    reply_service.MATCHED_UNDONE: "zurückgenommen",
+    reply_service.MATCHED_FILED: "von JobDeck zugeordnet",
 }
 
 
@@ -245,8 +249,27 @@ def reader_notes(group: dict) -> list[tuple[str, str]]:
     return notes
 
 
+# The arms whose match may be wrong without anything else noticing, and the only
+# ones a one-press unlink may reach: a company-name resemblance, which the module
+# itself calls "eine Ähnlichkeit, keine Identifikation"; a sender-DOMAIN match,
+# which asks no more than "one application answers to this domain" and never
+# consults Gmail's verdict on the sender; and the pass's own filing.
+#
+# `domain` was left out at first on the premise that everything else is
+# authenticated evidence, and that premise is false — `_match`'s domain arm never
+# calls `sender_authenticated`. A forged From at a contact's domain was therefore
+# filed away unseen with no way back, where before this slice it had waited on the
+# shelf. Membership here is decided by ONE question: can this arm write a status?
+# `_handle_reply` writes only for `thread` and `address`, `_handle_receipt` only
+# for `receipt`/`receipt_known`, and the manual paths stamp `reply_manual`, which
+# the caller already excludes. These three write nothing, so for them "this mail
+# does not belong here" is a correction and the anchor moving back is the truth.
+_UNLINKABLE = ("name", "domain", reply_service.MATCHED_FILED)
+
+
 def is_receipt_proposal(row: dict) -> bool:
-    return (row.get("matched_by") == reply_service.MATCHED_RECEIPT
+    return (row.get("matched_by") in (reply_service.MATCHED_RECEIPT,
+                                     reply_service.MATCHED_UNDONE)
             and row.get("job_id") is not None
             and row.get("bewerbung_id") is None)
 
@@ -284,6 +307,9 @@ def _load() -> dict:
             "groups": vorgaenge(pending),
             "settled": [dict(row)
                         for row in db.list_inbound_replies(con, LEDGER_LIMIT)],
+            "unconfirmed": [
+                dict(row) for row in db.list_unconfirmed_attachments(
+                    con, list(_UNLINKABLE), LEDGER_LIMIT)],
             "last_poll": db.get_setting(con, reply_service.LAST_POLL_KEY, ""),
             "last_error": db.get_setting(con, reply_service.LAST_ERROR_KEY, ""),
             "ai_on": (
@@ -552,7 +578,7 @@ async def antworten_page():
             reader.clear()
             with reader:
                 if state["view"] == "eingeordnet":
-                    _render_settled(view["settled"])
+                    _render_settled(view)
                     return
                 group = shown.get(state["selected"])
                 if group is None:
@@ -566,13 +592,31 @@ async def antworten_page():
             """What files itself, said out loud. The tiering decision
             supersedes the earlier blanket rule that "nothing
             changes a status without you", and a screen that writes statuses
-            has to name which ones."""
+            has to name which ones.
+
+            The ONE place that names them, rendered on three surfaces — so a
+            new thing that files itself is stated everywhere or nowhere. The
+            receipts that file themselves once the application is in the
+            register belong here for exactly that reason: fifty of his waiting
+            mails leave this shelf without a press, and a shelf that shrinks
+            unexplained is the thing he asks about."""
+            # The second sentence is about ZUORDNEN and says so: the pass
+            # that files receipts against an application already in the
+            # register writes no status at all, because the shelf is reached
+            # by arms that may only propose. An earlier draft of this
+            # paragraph promised „setzt den Stand auf «In Bearbeitung»" —
+            # a screen that names automatic writes must not name one that
+            # does not happen.
             ui.label("Eindeutige Absagen und Einladungen im Mail-Verlauf "
                      "einer Bewerbung trägt JobDeck selbst ein, ebenso "
-                     "Eingangsbestätigungen aus der Domain der Anzeige. Jede "
-                     "Zeile unter „Eingeordnet“ sagt, ob sie automatisch kam, "
-                     "und ein Klick korrigiert sie. Alles andere wartet hier "
-                     "auf dich.").classes("jd-card-sub")
+                     "Eingangsbestätigungen, deren Absender zweifelsfrei zur "
+                     "Anzeige gehört. Steht die Bewerbung schon im Register, "
+                     "ordnet JobDeck ihr eine Eingangsbestätigung von selbst "
+                     "zu und lässt den Stand stehen; die Mail wartet dann "
+                     "nicht mehr auf dich. Jede Zeile unter „Eingeordnet“ "
+                     "sagt, ob sie automatisch kam, und ein Klick korrigiert "
+                     "sie. Alles andere wartet hier auf dich.") \
+                .classes("jd-card-sub")
 
         def _render_group(group: dict) -> None:
             lead = group["lead"]
@@ -698,7 +742,8 @@ async def antworten_page():
         # ------------------------------------------------------------------
         # Eingeordnet — the same panes, a different source
         # ------------------------------------------------------------------
-        def _render_settled(settled: list[dict]) -> None:
+        def _render_settled(view: dict) -> None:
+            settled = view.get("settled") or []
             with ui.column().classes("w-full gap-0 p-6"):
                 ui.label("Eingeordnet").classes("text-xl jd-serif")
                 if not settled:
@@ -707,6 +752,9 @@ async def antworten_page():
                     return
                 line = register.plural(len(settled), "Antwort ist eingeordnet",
                                        "Antworten sind eingeordnet")
+                # the whole ledger, including the rows the section above lists —
+                # otherwise the two numbers on one screen count different things
+                # and neither says which
                 if len(settled) >= LEDGER_LIMIT:
                     # It shows the newest N. Saying so is the difference
                     # between a ledger and a ledger that quietly ends.
@@ -714,7 +762,44 @@ async def antworten_page():
                 ui.label(line).classes("jd-meta mt-2")
                 with ui.column().classes("mt-3 max-w-prose"):
                     _automation_note()
+                unconfirmed = view.get("unconfirmed") or []
+                _render_unconfirmed(unconfirmed)
+                # ONCE each. The section's query is a strict subset of the
+                # ledger's, so every correctable row whose id is still inside the
+                # ledger's window would otherwise be drawn twice — with two
+                # „Keiner Bewerbung zuordnen" buttons and two counts that read
+                # against each other. On the owner's corpus that is 37 of 45.
+                drawn = {int(r["id"]) for r in unconfirmed}
                 for row in settled:
+                    if int(row["id"]) not in drawn:
+                        _settled_row(row)
+
+        def _render_unconfirmed(rows: list[dict]) -> None:
+            """The rows JobDeck tied to an application by itself, listed where he
+            can still take them back.
+
+            They would otherwise be unreachable exactly where it matters. The
+            ledger below is chronological by `id`, and a receipt the pass files
+            KEEPS the id it got when the mail was first read — the shelf is old
+            mail by definition, so the newest-sixty window shows the rows he has
+            already seen and hides the ones just filed. Measured: of five filed
+            receipts behind sixty newer settled rows, the unlink rendered for
+            none. So this section is not a convenience; without it the correction
+            the screen promises does not exist for its own population."""
+            if not rows:
+                return
+            with ui.column().classes("w-full gap-0 mt-6"):
+                ui.label("Von JobDeck zugeordnet").classes("jd-sec-name")
+                ui.label(register.plural(
+                    len(rows),
+                    "Mail wartet nicht mehr auf dich, ist aber von dir nie "
+                    "bestätigt worden — ein Klick hebt die Zuordnung auf.",
+                    "Mails warten nicht mehr auf dich, sind aber von dir nie "
+                    "bestätigt worden — ein Klick hebt die Zuordnung auf.")) \
+                    .classes("jd-meta")
+                if len(rows) >= LEDGER_LIMIT:
+                    ui.label(f"Die neuesten {LEDGER_LIMIT}.").classes("jd-meta")
+                for row in rows:
                     _settled_row(row)
 
         def _settled_row(row: dict) -> None:
@@ -732,8 +817,20 @@ async def antworten_page():
                              CLASS_LABELS.get(classification, classification))
                 ui.label("" if dismissed else
                          "bestätigt" if row.get("classified_by")
-                         == "reply_manual" else "automatisch") \
+                         == "reply_manual" else
+                         " · ".join(filter(None, (
+                             "automatisch",
+                             MATCHED_SHORT.get(row.get("matched_by") or "", ""),
+                         )))) \
                     .classes("jd-meta")
+                if row.get("matched_by") == "name" and not dismissed:
+                    # The caution the shelf gives this arm follows it here. The
+                    # row leaves the shelf without him seeing it, so the filed
+                    # view is the only place the resemblance can still be
+                    # questioned — and the unlink beside it needs a reason to
+                    # be pressed.
+                    ui.label("Ähnlichkeit, keine Identifikation") \
+                        .classes("jd-note warn")
                 ui.space()
                 if dismissed:
                     # `dismiss_review` keeps the row, so putting it back on the
@@ -751,9 +848,50 @@ async def antworten_page():
                     ui.button("Korrigieren",
                               on_click=lambda _=None, r=dict(row):
                                   correct(r)).props("flat dense no-caps")
+                    if (row.get("classified_by") != "reply_manual"
+                            and row.get("matched_by") in _UNLINKABLE):
+                        # Every row here he never confirmed, not only the ones
+                        # the pass ATTACHED. It also settles rows the company-
+                        # name arm guessed — the class PR #56 exists for, 16 of
+                        # 94 false on his corpus — and „Korrigieren" keeps the
+                        # link and writes a status, so on a wrong guess the one
+                        # press available made it worse. Meanwhile the mail
+                        # counts as that application's last contact, which is
+                        # what the silence rule and the cooling-off window
+                        # measure from. A reply he judged is his own verdict and
+                        # is unlinked where he judged it.
+                        #
+                        # THE TIER, not an audit trail. Widening this to
+                        # every unconfirmed row reached the rows the WRITING
+                        # tiers matched, and unlinking one of those clears the
+                        # two columns `LAST_CONTACT_SQL` reads, so the anchor
+                        # falls back to the send date — BACKWARDS, 80 days in
+                        # the reproduction, flipping a company's cooling-off
+                        # verdict from held to released, which is a send gate.
+                        #
+                        # The first attempt asked "does a status cite this row",
+                        # and the review panel showed that is the wrong
+                        # question: `set_status` writes an audit row only when
+                        # it CHANGES something, so a writing tier whose write
+                        # was a no-op (the status was already that) or refused
+                        # by the rank guard leaves none — the common case, since
+                        # 23 of 42 waiting mails hang off applications already
+                        # at Absage. Asking WHICH ARM matched it is the question
+                        # with an answer: exactly two never write, and for those
+                        # two "this mail does not belong here" is a plausible
+                        # correction and the anchor moving back is the truth.
+                        ui.button("Keiner Bewerbung zuordnen",
+                                  on_click=lambda _=None, r=row["id"]:
+                                      unlink(r)).props("flat dense no-caps")
                 ui.button("Ganze Mail",
                           on_click=lambda _=None, r=dict(row): show_mail(r)) \
                     .props("flat dense no-caps")
+
+        async def unlink(email_log_id: int) -> None:
+            """Take back an attachment the pass made on its own."""
+            await run.io_bound(reply_service.dismiss_review, email_log_id)
+            say("Zuordnung aufgehoben")
+            await refresh(force=True)
 
         def correct(row: dict) -> None:
             current = str(row.get("classification") or "")
@@ -987,6 +1125,11 @@ async def antworten_page():
                     if group else (),
                     group["status"] if group else "",
                     tuple(_mail_fingerprint(r) for r in view["settled"])
+                    if state["view"] == "eingeordnet" else (),
+                    # the section above the ledger moves on its own: a pass
+                    # files rows into it without him touching the page
+                    tuple(_mail_fingerprint(r)
+                          for r in (view.get("unconfirmed") or []))
                     if state["view"] == "eingeordnet" else ())
 
         def draw_strip(view: dict, groups: list[dict]) -> None:

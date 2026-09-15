@@ -17,7 +17,7 @@ import pytest
 from nicegui import background_tasks, ui
 from nicegui.testing import User
 
-from jobdeck import config, db, gmail
+from jobdeck import config, constants, db, gmail
 from jobdeck.services import replies as replies_service
 from jobdeck.ui.pages import antworten
 
@@ -91,6 +91,344 @@ async def test_the_page_states_what_is_automatic(user: User, con,
     monkeypatch.setattr(gmail, "can_read", lambda: True)
     await user.open("/antworten")
     await user.should_see("trägt JobDeck selbst ein")
+    # the receipts that file themselves are the newest thing that writes a
+    # status, so the note that names what is automatic has to name them too
+    await user.should_see("Steht die Bewerbung schon im Register")
+    # and says what that does NOT do. The pass writes no status, so a note
+    # that names automatic writes must not name one.
+    await user.should_see("lässt den Stand stehen")
+    await user.should_see("wartet dann nicht mehr auf dich")
+
+
+def test_one_note_names_everything_that_files_itself():
+    """Structural, because the note is rendered on three surfaces and a
+    second copy of it is how one of them starts lying. Exactly one function
+    holds the sentence, and every surface calls that function."""
+    source = pathlib.Path(antworten.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    holders = [node.name for node in ast.walk(tree)
+               if isinstance(node, ast.FunctionDef)
+               and "trägt JobDeck selbst ein" in ast.get_source_segment(
+                   source, node)
+               and not any(isinstance(child, ast.FunctionDef)
+                           and child is not node
+                           and "trägt JobDeck selbst ein"
+                           in ast.get_source_segment(source, child)
+                           for child in node.body)]
+    assert holders == ["_automation_note"]
+    assert source.count("trägt JobDeck selbst ein") == 1
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Name)
+             and node.func.id == "_automation_note"]
+    assert len(calls) == 3
+    # and it never calls a closed application an ANSWERED one. The statuses
+    # whose rank refuses the receipt's write include "Keine Antwort", which
+    # `BEANTWORTET_STATUS` deliberately excludes and which Einstellungen
+    # explains to him as nobody having answered. Saying "beantwortet" here
+    # promised him a status change the rank refuses.
+    func = next(node for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef)
+                and node.name == "_automation_note")
+    # what he READS, not the comments around it
+    shown = " ".join(node.value for node in ast.walk(func)
+                     if isinstance(node, ast.Constant)
+                     and isinstance(node.value, str))
+    assert "beantwortet" not in shown
+    # it must not claim a status write: the pass files, it does not judge
+    assert "In Bearbeitung" not in shown
+    assert "lässt den Stand stehen" in shown
+    assert set(constants.BEANTWORTET_STATUS) < set(
+        s for s in constants.STATUS_RANK if constants.STATUS_RANK[s] >= 2)
+
+
+async def test_a_receipt_the_pass_filed_offers_a_correction_not_an_undo(
+        user: User, con):
+    """The safety property of the receipt that files itself.
+
+    `Rückgängig` DELETES the application a receipt recorded, and a receipt the
+    pass merely FILED did not record one — it was already there, put there by
+    him or by an earlier pass. Offering the undo on such a row is how an
+    application he entered by hand gets deleted by one press, which is why the
+    pass writes `receipt_filed` and not `receipt`. This is the screen half of
+    that guarantee; the service half is in test_replies_service.
+
+    It seeds the value the PASS writes. It used to seed `receipt_known`, which
+    the pass has never written since that value became the strong arm's — and
+    the review panel found the critical defect that mislabelling hid.
+    """
+    bewerbung_id = _application(con)
+    _inbound(con, "m-filed", bewerbung_id=bewerbung_id, needs_review=0,
+             classification="eingang", classified_by="rules",
+             subject="Ihre Bewerbung ist eingegangen",
+             matched_by=replies_service.MATCHED_FILED)
+    await user.open("/antworten")
+    await _open_view(user, "eingeordnet")
+
+    await user.should_see("Eingang")
+    await user.should_see("automatisch")       # he confirmed nothing
+    await user.should_see("Korrigieren")
+    await user.should_not_see("Rückgängig")
+    # and there IS a way back. „Korrigieren" can only relabel, so without this
+    # the only way to undo a filing the pass made on its own was to write a
+    # verdict that is also false — while the mail kept counting as this
+    # application's last contact.
+    await user.should_see("Keiner Bewerbung zuordnen")
+
+
+async def test_an_authenticated_receipt_is_not_unlinkable(user: User, con):
+    """The review panel's CRITICAL, kept as a test.
+
+    The unlink was gated on "no status cites this row", and `set_status` writes
+    an audit row only when it CHANGES something: a write that was a no-op, or
+    one the rank guard refused, leaves none. So the strong receipt arm's own
+    rows — authenticated, aligned, and the reason the thread allowlist grants
+    them an anchor — were offered a one-press unlink, and unlinking clears the
+    two columns `LAST_CONTACT_SQL` reads, so the anchor falls BACK to the send
+    date. 80 days in the reproduction, which flipped a company's cooling-off
+    verdict from held to released — and that is a send gate.
+
+    Gated on the ARM instead: exactly two never write, and only those two.
+    """
+    bewerbung_id = _application(con)
+    # the arms that CAN write a status, so their mail is evidence and stays
+    # linked. `domain` is deliberately NOT here: it never calls
+    # `sender_authenticated` and never writes, so it is correctable — the
+    # premise that everything but name and the pass's filing is authenticated
+    # was false, and a forged From at a contact's domain was filed away with no
+    # way back (found by the fourth security pass).
+    for i, matched_by in enumerate(["thread", "address",
+                                    replies_service.MATCHED_ATTACHED,
+                                    replies_service.MATCHED_RECEIPT]):
+        _inbound(con, f"m-auth-{i}", bewerbung_id=bewerbung_id, needs_review=0,
+                 classification="eingang", classified_by="rules",
+                 matched_by=matched_by)
+    await user.open("/antworten")
+    await _open_view(user, "eingeordnet")
+
+    await user.should_see("automatisch")
+    # not one of the four, and none of them has a status citing it
+    await user.should_not_see("Keiner Bewerbung zuordnen")
+
+
+async def test_a_domain_match_is_correctable_because_nothing_vouched_for_it(
+        user: User, con):
+    """The fourth security pass's must-fix. `_match`'s domain arm asks only "one
+    application answers to this domain" and never consults Gmail's verdict on
+    the sender, and it never writes a status — so it belongs with the name guess,
+    not with the authenticated arms. A forged From at a contact's domain used to
+    wait on the shelf; the filing pass settles it, so without this it was filed
+    away unseen with „Korrigieren" — which keeps the link and writes a status —
+    as the only button."""
+    bewerbung_id = _application(con)
+    row_id = _inbound(con, "m-domain", bewerbung_id=bewerbung_id, needs_review=0,
+                      classification="eingang", classified_by="rules",
+                      matched_by="domain")
+    await user.open("/antworten")
+    await _open_view(user, "eingeordnet")
+    await user.should_see("Absender-Domain")
+
+    user.find("Keiner Bewerbung zuordnen").click()
+    await asyncio.sleep(0.4)
+
+    row = db.get_email_log(con, row_id)
+    assert (row["bewerbung_id"], row["classification"]) == (None, "")
+
+
+async def test_the_rows_jobdeck_attached_itself_are_listed_above_the_ledger(
+        user: User, con):
+    """They would otherwise be unreachable exactly where it matters.
+
+    The ledger is chronological by id and a receipt the pass settles KEEPS the id
+    its message got when it was first read — the shelf is old mail by definition,
+    so the newest-N window shows what he has already seen and hides what was just
+    filed. Measured by the fourth security pass: of five filed receipts behind
+    sixty newer settled rows, the unlink rendered for none."""
+    bewerbung_id = _application(con)
+    old_row = _inbound(con, "m-old", bewerbung_id=bewerbung_id, needs_review=0,
+                       classification="eingang", classified_by="rules",
+                       matched_by=replies_service.MATCHED_FILED,
+                       subject="Die alte Eingangsbestätigung")
+    for i in range(antworten.LEDGER_LIMIT + 5):
+        _inbound(con, f"m-new-{i}", bewerbung_id=bewerbung_id, needs_review=0,
+                 classification="absage", classified_by="reply_manual",
+                 matched_by="thread", subject=f"Neuere Antwort {i}")
+    await user.open("/antworten")
+    await _open_view(user, "eingeordnet")
+
+    # the ledger's window cannot hold it any more
+    settled = db.list_inbound_replies(con, antworten.LEDGER_LIMIT)
+    assert old_row not in [int(r["id"]) for r in settled]
+    # its own list still reaches it
+    reachable = db.list_unconfirmed_attachments(
+        con, list(antworten._UNLINKABLE), antworten.LEDGER_LIMIT)
+    assert [int(r["id"]) for r in reachable] == [old_row]
+    # and it is on the screen anyway, with its way back — the ledger's own
+    # sixty rows are all his own verdicts, so neither the section heading nor
+    # the button could come from them
+    await user.should_see("Von JobDeck zugeordnet")
+    await user.should_see("Keiner Bewerbung zuordnen")
+
+
+def test_a_receipt_he_took_back_can_still_be_adopted_in_one_press():
+    """`undo_receipt` promises the mail "returns to the review pile where it can
+    be re-adopted or dismissed", and remembering his undo in `matched_by` took
+    that promise away: the shelf reads the same field to decide whether to offer
+    „Als Bewerbung eintragen". Found by the security review's second pass."""
+    undone = {"matched_by": replies_service.MATCHED_UNDONE, "job_id": 7,
+              "bewerbung_id": None}
+    assert antworten.is_receipt_proposal(undone)
+    # and the two halves of the predicate still carry their weight
+    assert not antworten.is_receipt_proposal({**undone, "job_id": None})
+    assert not antworten.is_receipt_proposal({**undone, "bewerbung_id": 3})
+    assert not antworten.is_receipt_proposal({**undone, "matched_by": "name"})
+
+
+async def test_a_name_guess_the_pass_settled_can_also_be_unlinked(
+        user: User, con):
+    """The pass settles rows the company-name arm guessed, not only the ones it
+    attached — and that arm is "eine Ähnlichkeit, keine Identifikation", 16 of
+    94 false on his corpus. „Korrigieren" keeps the link and writes a status, so
+    on a wrong guess the only press available made it worse. Found by the
+    security review's second pass."""
+    bewerbung_id = _application(con)
+    _inbound(con, "m-guess", bewerbung_id=bewerbung_id, needs_review=0,
+             classification="eingang", classified_by="rules",
+             matched_by="name")
+    await user.open("/antworten")
+    await _open_view(user, "eingeordnet")
+
+    await user.should_see("automatisch")       # he confirmed nothing
+    await user.should_see("Keiner Bewerbung zuordnen")
+
+
+async def test_the_unlink_really_unlinks_and_says_which_arm_matched(
+        user: User, con):
+    """The handler, executed — it was rendered by three tests and pressed by
+    none, so it could have called the wrong service with the suite green. And
+    the row names the arm beside it: the pass settles a company-name guess
+    without him ever seeing it on the shelf, so the filed view is the only place
+    that resemblance can still be questioned, and a button needs a reason."""
+    bewerbung_id = _application(con)
+    row_id = _inbound(con, "m-guessed", bewerbung_id=bewerbung_id,
+                      needs_review=0, classification="eingang",
+                      classified_by="rules", matched_by="name")
+    await user.open("/antworten")
+    await _open_view(user, "eingeordnet")
+    await user.should_see("Firmenname")
+    await user.should_see("Ähnlichkeit, keine Identifikation")
+
+    user.find("Keiner Bewerbung zuordnen").click()
+    await asyncio.sleep(0.4)
+
+    row = db.get_email_log(con, row_id)
+    assert (row["bewerbung_id"], row["classification"]) == (None, "")
+
+
+async def test_a_correctable_row_is_drawn_once_not_twice(user: User, con):
+    """The section's query is a strict subset of the ledger's, so a row inside the
+    ledger's window would be drawn by both — two unlink buttons and two counts
+    that read against each other on the one screen whose contract is that its
+    numbers must not disagree out loud. 37 of 45 rows on the real corpus."""
+    bewerbung_id = _application(con)
+    _inbound(con, "m-once", bewerbung_id=bewerbung_id, needs_review=0,
+             classification="eingang", classified_by="rules",
+             matched_by=replies_service.MATCHED_FILED)
+    await user.open("/antworten")
+    await _open_view(user, "eingeordnet")
+
+    await user.should_see("Von JobDeck zugeordnet")
+    labels = [e for e in user.find("Keiner Bewerbung zuordnen").elements]
+    assert len(labels) == 1
+
+
+async def test_a_verdict_he_wrote_from_a_name_guess_offers_no_unlink(
+        user: User, con):
+    """The clause the fifth security pass found unpinned, on the send-gate path.
+    The section's loader excludes his own verdicts, but the LEDGER below does not
+    and draws through the same row renderer — and «Korrigieren» on a name guess
+    keeps `matched_by='name'`, stamps `reply_manual` and writes a status through
+    the manual rank exemption. Unlinking that row would move the last-contact
+    anchor 82 days backwards with the status it wrote left standing."""
+    bewerbung_id = _application(con)
+    row_id = _inbound(con, "m-judged", bewerbung_id=bewerbung_id, needs_review=1,
+                      classification="eingang", classified_by="rules",
+                      matched_by="name")
+    replies_service.resolve_review(row_id, "absage", force_status=True)
+    row = db.get_email_log(con, row_id)
+    assert (row["matched_by"], row["classified_by"]) == ("name", "reply_manual")
+
+    await user.open("/antworten")
+    await _open_view(user, "eingeordnet")
+
+    await user.should_see("bestätigt")
+    await user.should_not_see("Keiner Bewerbung zuordnen")
+
+
+def test_the_section_is_the_only_thing_a_filing_pass_changes(con):
+    """Why the redraw fingerprint needs its own term for the section.
+
+    A background pass files rows into it while he is on the page. When the ledger
+    is at its window and the filed row's id is below it — the shelf is old mail,
+    so that is the normal case — NOTHING ELSE the page compares moves: the view
+    is fixed, nothing is selected in this view, and the ledger's own tuple is
+    byte-identical. So the section's term is the only thing that can tell the
+    watcher to redraw. Asserted here rather than through the browser because the
+    watcher's interval is a default argument frozen at import, so a test cannot
+    shorten it.
+    """
+    bewerbung_id = _application(con)
+    job_id = db.insert_job_if_new(con, {
+        "source": "stub", "external_id": "j-tick", "company": "Beispiel GmbH",
+        "title": "Entwickler", "url": "https://x.example/j-tick"})
+    # the receipt comes FIRST, so it carries the lowest id
+    row_id = _inbound(con, "m-below", needs_review=1, classification="eingang",
+                      classified_by="rules", matched_by="receipt")
+    con.execute("UPDATE email_log SET job_id=? WHERE id=?", (job_id, row_id))
+    for i in range(antworten.LEDGER_LIMIT):
+        _inbound(con, f"m-fill-{i}", bewerbung_id=bewerbung_id, needs_review=0,
+                 classification="absage", classified_by="reply_manual",
+                 matched_by="thread")
+    con.commit()
+    before = antworten._load()
+    assert before["unconfirmed"] == []
+
+    # the pass's own three writers, in its own order
+    with db.db() as writing:
+        db.link_reply_bewerbung(writing, row_id, bewerbung_id)
+        db.set_reply_matched_by(writing, row_id, replies_service.MATCHED_FILED)
+        db.settle_reply_review(writing, row_id)
+    after = antworten._load()
+
+    # the ledger cannot see it — the row's id is below its window
+    assert [r["id"] for r in before["settled"]] \
+        == [r["id"] for r in after["settled"]]
+    # and the section is the one thing that moved
+    assert [r["id"] for r in after["unconfirmed"]] == [row_id]
+
+
+def test_the_redraw_fingerprint_reads_the_section(con):
+    """Structural, because the term above is invisible when it is missing: the
+    page simply never redraws, which looks like nothing happening."""
+    source = pathlib.Path(antworten.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    state = next(node for node in ast.walk(tree)
+                 if isinstance(node, ast.FunctionDef)
+                 and node.name == "_reader_state")
+    assert "unconfirmed" in ast.get_source_segment(source, state)
+
+
+async def test_a_row_he_confirmed_himself_offers_no_unlink(user: User, con):
+    """The unlink is for the one row he never confirmed. A reply he judged is
+    his own verdict, and the shelf is where a mail is unlinked."""
+    bewerbung_id = _application(con)
+    _inbound(con, "m-his", bewerbung_id=bewerbung_id, needs_review=0,
+             classification="eingang", classified_by="reply_manual",
+             matched_by="thread")
+    await user.open("/antworten")
+    await _open_view(user, "eingeordnet")
+
+    await user.should_see("bestätigt")
+    await user.should_not_see("Keiner Bewerbung zuordnen")
 
 
 # --------------------------------------------------------------------------

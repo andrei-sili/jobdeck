@@ -743,6 +743,65 @@ def leading_keys(name: str, *, noise: bool = False) -> frozenset[str]:
     return frozenset(keys)
 
 
+# How much of a mail's own text is read when looking for an employer's name.
+# A receipt names the employer in its opening, so the bound costs nothing real
+# — and it is what keeps a crafted body from turning this into work, the same
+# lesson a 24 KB From header taught the sender reading.
+_MAX_TEXT_CHARS = 4000
+_MAX_TEXT_WORDS = 400
+
+
+def text_run_keys(text: str) -> frozenset[str]:
+    """Every run of consecutive words in a text, keyed like a company name.
+
+    Read ONCE per message — the `read_sender` pattern — because the reading
+    does not depend on which application it is compared with.
+
+    Runs, never substrings: "aqex" has to be a WORD of the mail and not four
+    letters inside one. Keying a run the way a company name is keyed is what
+    lets "Aqex GmbH" in the posting meet "der Aqex GmbH" in the mail, since
+    the legal form drops out on both sides.
+    """
+    words = [word for word in _WORD_SPLIT.split((text or "")[:_MAX_TEXT_CHARS])
+             if word][:_MAX_TEXT_WORDS]
+    keys: set[str] = set()
+    for start in range(len(words)):
+        for end in range(start + 1,
+                         min(start + _MAX_LEADING_WORDS, len(words)) + 1):
+            key = company_key(" ".join(words[start:end]))
+            if len(key) >= _MIN_EXACT_KEY:
+                keys.add(key)
+    return frozenset(keys)
+
+
+def company_named_in_text(firma: str, run_keys: frozenset[str]) -> bool:
+    """Whether a mail's own text names THIS company.
+
+    The whole name, never a leading run of it: a domain label abbreviates
+    because it must, prose does not. A three-word name therefore has to stand
+    in full, so its first word — an ordinary word of the language — is evidence
+    of nothing on its own. That confusion had put eleven newsletters on one
+    application before the name arm was rewritten.
+
+    A HIGHER FLOOR than the equality arm, and the security review is why. Legal
+    forms drop out of a key, so a company can key to a single ordinary word —
+    and an ordinary word turns up in any German HR mail's sign-off. Measured on
+    the text of one unremarkable confirmation ("vielen Dank … Ihr
+    Recruiting-Team … (no reply)"), three-letter keys matched three real
+    employer names at once. A domain LABEL is a name by construction and can be
+    short; a word in prose is not, so this arm asks for room.
+
+    Two names it cannot recognise, both fail-closed and both deliberate. An
+    `e.V.` or `e.K.` employer, because `_LEGAL_FORM` matches those across a
+    space: keying the joined run drops the form while keying the run word by
+    word does not, so the two sides never meet. And a name of `_MAX_LEADING_WORDS`
+    words or more, which no run reaches. Either one costs its receipt a proposal
+    instead of an attachment, which is the safe direction.
+    """
+    key = company_key(firma)
+    return len(key) >= _MIN_COMPANY_KEY and key in run_keys
+
+
 def sender_tenant_tokens(from_addr: str, registrable: str = "") -> list[str]:
     """The pieces of a vendor sender that can name the employer.
 

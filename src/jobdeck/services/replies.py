@@ -89,7 +89,18 @@ ALL_LABELS = sorted({*LABELS.values(), LABEL_REVIEW})
 # How a receipt reached the ledger. The distinction decides whether an undo
 # is even offered: only a row this app CREATED may be taken back out.
 MATCHED_RECEIPT = "receipt"
-MATCHED_ATTACHED = "receipt_known"
+MATCHED_ATTACHED = db.MATCHED_ATTACHED
+# What the shelf pass writes. A THIRD value, not `receipt_known`, because that
+# one may anchor a Gmail thread and this one may not: the strong ingestion arm
+# and his own press carry an aligned, authenticated sender, while the pass files
+# on evidence whose own tier may only propose. Sharing one value let a mail the
+# app itself had annotated "Absender gehört nicht zur Anzeige" turn its thread
+# into a status-writing channel.
+MATCHED_FILED = db.MATCHED_FILED
+# A receipt he took back. `db` owns the value because the query that must
+# exclude such a row from filing itself again cannot be allowed to drift from
+# the writer that sets it.
+MATCHED_UNDONE = db.MATCHED_UNDONE
 
 HISTORY_KEY = "replies_history_id"
 LAST_POLL_KEY = "replies_last_poll_at"
@@ -134,7 +145,8 @@ async def ingest_replies() -> dict:
 
 def _ingest() -> dict:
     counters = {"seen": 0, "matched": 0, "auto_status": 0, "review": 0,
-                "receipts": 0, "ignored": 0, "errors": 0}
+                "receipts": 0, "attached": 0, "filed": 0, "ignored": 0,
+                "errors": 0}
     if not gmail.can_read():
         _note(LAST_ERROR_KEY, "Gmail ohne Lese-Berechtigung — in den "
                               "Einstellungen neu verbinden")
@@ -211,6 +223,16 @@ def _ingest() -> dict:
                         message_id, exc)
             counters["errors"] += 1
             drained = False
+
+    try:
+        _attach_receipts(counters)
+    except Exception as exc:  # noqa: BLE001 — the same rule as one message
+        # Filing the shelf must never cost the pass its checkpoint: the
+        # messages are already read and recorded, and a shelf that waits for
+        # the next pass loses nothing. Deliberately NOT counted among the
+        # message errors — that counter writes "a message could not be read",
+        # which would be a false statement about somebody's mail.
+        log.warning("reply ingestion: filing the shelf failed: %s", exc)
 
     with db.db() as con:
         if drained and checkpoint:
@@ -484,11 +506,15 @@ def _receipt_match(con, meta: dict, from_addr: str, subject: str) -> dict | None
     # judged on the subject plus Gmail's snippet, which carries the opening
     # lines where ATS mail states the reference.
     text_window = f"{subject}\n{meta['snippet']}"
+    from_header = str(meta["headers"].get("from", ""))
+    # A reading of the MESSAGE, not of a candidate, so it is taken once and
+    # compared with each — the bound `read_sender` exists for.
+    reading = replies.read_sender(from_header, from_addr)
     identified: list[tuple[dict, str, bool]] = []
     weak: list[dict] = []
     for job in candidates:
         evidence, authorizing = _receipt_evidence(job, sender_domain,
-                                                  text_window)
+                                                  text_window, reading)
         if evidence:
             identified.append((dict(job), evidence, authorizing))
         elif _company_named(job, from_addr, meta["headers"].get("from", "")):
@@ -540,7 +566,8 @@ def _follows_the_opening(job, meta: dict) -> bool:
     return bool(arrived) and arrived >= opened
 
 
-def _receipt_evidence(job, sender_domain: str, text: str) -> tuple[str, bool]:
+def _receipt_evidence(job, sender_domain: str, text: str,
+                      reading: replies.SenderReading) -> tuple[str, bool]:
     """(what identified this posting, may it AUTHORIZE a ledger write).
 
     Only the sender's own domain can authorize. A Referenznummer is printed
@@ -554,6 +581,28 @@ def _receipt_evidence(job, sender_domain: str, text: str) -> tuple[str, bool]:
     link on any posting found through one. A board writes to everybody who
     ever touched it, so letting one authorize would let a newsletter or a
     notification record an application at an employer that never wrote.
+
+    AND A MULTI-TENANT ATS DOMAIN NAMES NOBODY. `join.com` is the apply_url
+    of every posting applied to through JOIN, so the domain aligned with all
+    of them at once: fifteen JOIN receipts, each naming its own employer
+    plainly in its own subject, were all identified as ONE posting at a
+    sixteenth company, and only the guard that a receipt cannot predate its
+    form kept them from writing that posting's status.
+    So on a vendor domain the employer has to be named where a vendor cannot
+    fake it by being itself: its tenant slot or its display name. The mail's
+    own words were accepted here at first and the security review showed why
+    they must not be — see `_names_employer`. Measured over his corpus, 16 of
+    the 18 receipts this branch authorized named nobody at all.
+
+    Refusing rather than proposing is deliberate: the receipt arm runs before
+    the name arm, so a mail this arm declines gets its chance at the application
+    it really belongs to — WHEN there is one to find. When there is not, the mail
+    is left unmatched and only its opaque id is kept, so it never reaches him at
+    all. That is the accepted cost, and the alternative was measured: a vendor
+    domain aligns with EVERY posting applied for through it, so proposing
+    instead would have put fifteen JOIN receipts for other employers back on one
+    posting's shelf, which is the state this guard exists to end. A rescan
+    forgets those ids, so a better rule reaches the mail later.
     """
     refnr = resolve_refnr(job)
     by_refnr = replies.refnr_in_text(refnr, text, "")
@@ -574,11 +623,17 @@ def _receipt_evidence(job, sender_domain: str, text: str) -> tuple[str, bool]:
             )
             if domain and not apply_channel.is_board_domain(domain)
         }
-        if sender_domain in targets:
+        # A vendor that names nobody loses the two AUTHORIZING branches, not
+        # the Refnr below: a quoted reference still identifies which posting
+        # a mail is about, and still only ever proposes. Refusing outright
+        # here took that proposal away from a board mail quoting the number.
+        may_authorize = (not apply_channel.is_vendor_domain(sender_domain)
+                         or _names_employer(job, reading))
+        if may_authorize and sender_domain in targets:
             evidence = f"Absender {sender_domain}"
             return (f"{evidence} · Refnr {refnr}" if by_refnr else evidence), True
         vendor = str(job["ats_vendor"] or "")
-        if vendor:
+        if may_authorize and vendor:
             sender_channel = apply_channel.classify(f"https://{sender_domain}/")
             if (sender_channel.channel == apply_channel.CHANNEL_ATS
                     and sender_channel.vendor == vendor):
@@ -588,6 +643,29 @@ def _receipt_evidence(job, sender_domain: str, text: str) -> tuple[str, bool]:
     if by_refnr:
         return f"Refnr {refnr}", False
     return "", False
+
+
+def _names_employer(job, reading: replies.SenderReading) -> bool:
+    """Is THIS posting's employer named where a vendor cannot fake it?
+
+    THE SENDER ONLY — the tenant slot a vendor puts in front of its own domain
+    ("beispiel-jobs@m.personio.de") or its display name. Both are parts of the
+    envelope the vendor itself writes, which is the whole point: this gate
+    decides whether a ledger row may be RECORDED.
+
+    The mail's own words were allowed here at first and the security review
+    showed why they must not be. A company key is its name with the legal form
+    removed, so a one-word employer name keys to an ordinary word of the
+    language — and a genuine Personio receipt for a DIFFERENT employer, DMARC
+    and all, recorded an application at a company it never mentioned. A length
+    floor cannot fix that: it tests how long a word is, not whether it is a
+    name.
+
+    The prose arm still serves `_names_employer_from_row`, which only ever
+    ATTACHES a mail to an application that already exists — no ledger row, no
+    status, and undoable from the filed view.
+    """
+    return replies.company_matches(str(job["company"] or ""), reading)
 
 
 def _company_named(job, from_addr: str, from_header: str) -> bool:
@@ -834,6 +912,176 @@ def _handle_receipt(match: dict, meta: dict, from_addr: str, subject: str,
     _apply_label(meta["id"], "eingang")
 
 
+def _attach_receipts(counters: dict) -> None:
+    """A receipt whose application is already in the register files itself.
+
+    Measured on his shelf: ALL 57 Eingangsbestätigungen waiting there were for
+    applications that already existed — 30 already tied to one, 27 whose
+    POSTING carried one. So every press he never made would have said the same
+    thing, and he had made none of them in weeks. A question asked fifty-seven
+    times and answered zero times is not a question worth asking; it is the
+    shelf answering it.
+
+    IT WRITES NO STATUS, and that is the whole design. The first version did,
+    and the security review reproduced what it cost: the shelf is reached by
+    the two arms this module's own contract says may "only ever propose" — a
+    company-name guess and a sender domain — and by the model's verdicts, so
+    writing from the shelf handed all three the one thing they are denied. A
+    stranger from a freemail address with the employer's name in his DISPLAY
+    NAME moved a status: `read_sender` computes `display_key` whatever the
+    domain, so the name arm binds, and nothing on that path ever asked about
+    DMARC because that arm never used to write.
+
+    It cost something subtler too. What keeps a name guess re-judgeable by a
+    rescan is not `matched_by` — it is `_NAME_PROPOSALS_SQL`'s "no status cites
+    this row". A status write creates exactly that row, so the pass would have
+    cemented the very guesses PR #56 exists to correct: 16 of 94 name matches
+    on his corpus were false.
+
+    So the pass answers the smaller question it can answer honestly — THIS
+    MAIL BELONGS TO THAT APPLICATION, filed — and leaves the register's word to
+    the arm that has the headers. He keeps the register unchanged and gets the
+    shelf back; the mail is under „Eingeordnet" with the application named.
+
+    Two guards decide whether a receipt is THIS application's, and on his
+    corpus they refuse exactly the seven mails that are not one — five JOIN
+    confirmations for other employers, and two asking him to FINISH an
+    application ("Bewerbung abschließen", "Deine Bewerbung ist noch nicht
+    vollständig"):
+
+      * a receipt cannot predate the application it confirms, in SQL, because
+        that is a property of the pair (`db.shelf_receipts`);
+      * a NEW attachment has to name the employer, in the sender or in the
+        mail's own words. An attachment the reply cascade already made is not
+        re-litigated here — re-judging a guess is what a rescan is for, and
+        doing it here would quietly undo the one thing that keeps a name
+        proposal re-judgeable.
+
+    Runs after the message loop, so a receipt proposed by THIS pass is filed
+    by it when the application is already there, and only when the mailbox
+    could be read: the labels have to follow the shelf, and a shelf that waits
+    for the next pass loses nothing.
+
+    Two consequences worth stating, both noticed by the fourth security pass and
+    both conservative. Filing a receipt sets `email_log.bewerbung_id`, which takes
+    its posting out of `db.receipt_candidates` — so a genuinely strong receipt
+    arriving later for that posting can no longer take the strong arm and write
+    its status. One fewer automatic write, which is the safe direction. And a row
+    the pass files with `matched_by='name'` still matches `_NAME_PROPOSALS_SQL`,
+    which does not test `needs_review` — so a rescan drops it and the anchor goes
+    back until the forced full listing re-reads it. That is PR #56's re-judge
+    design working as intended on a row this pass happened to settle first.
+    """
+    # The counters this function owns, so a caller cannot create a state where a
+    # missing key raises INSIDE the per-row containment and every row then reads
+    # as a failure. That happened once, to a measurement script, and the log said
+    # eleven mails had failed when nothing had.
+    counters.setdefault("filed", 0)
+    counters.setdefault("attached", 0)
+    with db.db() as con:
+        rows = db.shelf_receipts(con)
+    for row in rows:
+        try:
+            _file_one(row, counters)
+        except Exception as exc:  # noqa: BLE001 — the rule one message follows
+            # ONE row must never cost the rest of the shelf. A target deleted
+            # between the listing and the write raises on the link, and without
+            # this the remaining rows of a 48-row walk would all wait for the
+            # next pass because of it.
+            log.warning("reply ingestion: filing mail %s failed: %s",
+                        row["id"], exc)
+    if counters["filed"]:
+        log.info("reply ingestion: %d receipt(s) filed against an application "
+                 "already in the register, %d of them newly attached",
+                 counters["filed"], counters["attached"])
+
+
+def _file_one(row, counters: dict) -> None:
+    """File ONE shelf receipt, or leave it where it is.
+
+    Its own function so the walk can contain a failure per row: the guards
+    return early here rather than `continue` in a loop that a single raising row
+    would otherwise abandon."""
+    email_log_id = int(row["id"])
+    target = int(row["target_id"])
+    fresh = row["bewerbung_id"] is None
+    if fresh and not _names_employer_from_row(row):
+        return
+    with db.db() as con:
+        # Re-read inside the write transaction, and BEGIN IMMEDIATE is what makes
+        # that sentence true: a bare SELECT at sqlite's default isolation opens
+        # no transaction, so the read and the writes below were two moments, not
+        # one. The duplicate gate already takes the lock this way. The shelf was
+        # listed on another connection, and a verdict or a dismissal he pressed
+        # in between must not be overwritten by a decision taken before it.
+        con.execute("BEGIN IMMEDIATE")
+        current = db.get_email_log(con, email_log_id)
+        if current is None or not _still_waiting(current):
+            return
+        if fresh and current["bewerbung_id"] is not None:
+            # The snapshot said unattached and it is not any more, so the link
+            # this pass would write would overwrite one it never read.
+            #
+            # DEFENCE IN DEPTH, and deliberately not pinned by a test: the only
+            # other writers of this column are `dismiss_review` (which writes
+            # NULL) and `adopt_receipt`, and both set
+            # `classified_by='reply_manual'` in the same transaction, so
+            # `_still_waiting` already refuses them. No reachable state reaches
+            # this line, which means no honest test can either — the same
+            # reading `_is_robots_disallowed` carries.
+            return
+        if fresh:
+            db.link_reply_bewerbung(con, email_log_id, target)
+            # Not MATCHED_RECEIPT: this app did not create the ledger row, so
+            # `undo_receipt` must never offer to delete it. And not
+            # MATCHED_ATTACHED either: that value may anchor a thread.
+            db.set_reply_matched_by(con, email_log_id, MATCHED_FILED)
+            counters["attached"] += 1
+        db.settle_reply_review(con, email_log_id)
+    counters["filed"] += 1
+    _apply_label(str(row["gmail_message_id"] or ""), "eingang")
+
+def _still_waiting(row) -> bool:
+    """Is this row STILL the untouched receipt proposal the shelf read?
+
+    Read again inside the write, so the answer is about the row as it stands
+    now and not as it stood when the shelf was listed."""
+    return (int(row["needs_review"] or 0) == 1
+            and str(row["classification"] or "") == "eingang"
+            and str(row["classified_by"] or "") != "reply_manual")
+
+
+def _names_employer_from_row(row) -> bool:
+    """Does a STORED receipt name the employer of the posting it sits on?
+
+    Two ways, and the second is narrower than it looks.
+
+    The SENDER, as at ingestion — a vendor's tenant slot or an employer's own
+    domain label. The display name is not stored, so a vendor mail that named
+    the employer only there is refused here and waits for him. Measured on his
+    corpus: this arm alone justifies 8 of the 18 attachments.
+
+    Otherwise the mail's own WORDS, but only when the sender is a domain
+    receipts legitimately arrive through — a board or an ATS vendor. That
+    condition is the security review's doing: the words are written by whoever
+    sent the mail, so on their own they let a stranger's mailbox attach itself to
+    an application by naming the company. Measured both ways on his corpus:
+    dropping the prose arm entirely would cost 10 of 18 genuine receipts (JOIN
+    and softgarden put nothing in their tenant slot), while requiring a channel
+    sender costs exactly ONE and refuses every attack sender the review
+    constructed, none of which has a matchable domain at all.
+    """
+    firma = str(row["company"] or "")
+    from_addr = str(row["from_addr"] or "")
+    if replies.company_matches(firma, replies.read_sender("", from_addr)):
+        return True
+    domain = replies.matchable_domain(from_addr)
+    if not domain or not apply_channel.is_vendor_domain(domain):
+        return False
+    text = f"{row['subject'] or ''}\n{row['body_text'] or ''}"
+    return replies.company_named_in_text(firma, replies.text_run_keys(text))
+
+
 # --------------------------------------------------------------------------
 # Labels — best effort, never the pass's problem
 # --------------------------------------------------------------------------
@@ -1044,6 +1292,12 @@ def adopt_receipt(email_log_id: int) -> dict:
         return outcome
     with db.db() as con:
         db.link_reply_bewerbung(con, email_log_id, outcome["bewerbung_id"])
+        # THIS app just created the ledger row, so the row has to say so or the
+        # undo it earns is not offered. It did not need saying while `receipt`
+        # was the only value that could arrive here; a receipt he had taken back
+        # and then adopted kept `receipt_undone`, so „Rückgängig" vanished and
+        # the row's own line told him it was taken back.
+        db.set_reply_matched_by(con, email_log_id, MATCHED_RECEIPT)
         db.classify_reply_row(con, email_log_id, "eingang", "reply_manual", 0)
         db.set_status(con, outcome["bewerbung_id"], "In Bearbeitung",
                       source="reply_manual", email_log_id=email_log_id)
@@ -1075,6 +1329,12 @@ def undo_receipt(email_log_id: int) -> bool:
     with db.db() as con:
         # apply_record.undo cleared email_log.bewerbung_id already
         db.classify_reply_row(con, email_log_id, "eingang", "rules", 1)
+        # And remember that he took it back. Restored as a plain `receipt`
+        # proposal the row is indistinguishable from one that has never been
+        # judged, so the pass that files receipts against an application
+        # already in the register would file this one the moment he recorded
+        # that application himself — overriding the strongest no he can give.
+        db.set_reply_matched_by(con, email_log_id, MATCHED_UNDONE)
     # The mail really is waiting again, so Gmail has to say so again —
     # otherwise his phone shows a settled mail while the shelf shows one
     # asking for him.

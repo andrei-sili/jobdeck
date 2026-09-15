@@ -38,6 +38,7 @@ from jobdeck.constants import (
     FORM_OPENED_UNKNOWN,
     LIVENESS_GONE,
     OFFENE_STATUS,
+    STATUS_NO_ANSWER,
     STATUS_RANK,
 )
 from jobdeck.dedupe import norm
@@ -3007,6 +3008,22 @@ def known_gmail_ids(con: sqlite3.Connection, ids: list[str]) -> set[str]:
     return {row[0] for row in rows}
 
 
+# How an inbound row reached its application. `db` owns these three because the
+# queries that must tell them apart live here — a value defined in the service
+# and read by a query here is exactly how one of them slipped past an exclusion
+# list unnoticed.
+#
+# Attached to an application that was already there on STRONG evidence: the
+# ingestion arm with an aligned, authenticated sender, or his own press. May
+# anchor a Gmail thread.
+MATCHED_ATTACHED = "receipt_known"
+# Filed by the PASS against an application already in the register, on evidence
+# that may only propose. Must NEVER anchor a thread and never writes a status.
+MATCHED_FILED = "receipt_filed"
+# A receipt he took back. The shelf query must not offer it again.
+MATCHED_UNDONE = "receipt_undone"
+
+
 def find_bewerbung_by_thread(con: sqlite3.Connection, thread_id: str) -> int | None:
     """The application a Gmail thread belongs to, if this app sent into it.
 
@@ -3029,13 +3046,22 @@ def find_bewerbung_by_thread(con: sqlite3.Connection, thread_id: str) -> int | N
     # would have made the next mail of its thread write that application's
     # status automatically. Only rows he judged, or that a writing tier
     # matched, carry a thread.
+    #
+    # AN ALLOWLIST, not a list of the arms that must not anchor. It was the
+    # other way round and a new `matched_by` value walked straight through it:
+    # the pass that files receipts against an application already in the
+    # register writes its own value, which no blocklist could have known about,
+    # and the security review then closed an application through the thread arm
+    # with a mail whose own evidence line read "Absender gehört nicht zur
+    # Anzeige". Written as an allowlist, the next value fails closed instead.
     row = con.execute(
         "SELECT bewerbung_id FROM email_log "
         " WHERE gmail_thread_id=? AND bewerbung_id IS NOT NULL "
-        "   AND NOT (direction=? AND matched_by IN ('name', 'domain') "
-        "            AND COALESCE(classified_by, '') <> 'reply_manual') "
+        "   AND (direction <> ? "                       # this app sent into it
+        "        OR COALESCE(classified_by, '') = 'reply_manual' "   # he judged
+        "        OR matched_by IN ('thread', 'address', 'receipt', ?)) "
         " ORDER BY id DESC LIMIT 1",
-        (thread_id, EMAIL_INBOUND),
+        (thread_id, EMAIL_INBOUND, MATCHED_ATTACHED),
     ).fetchone()
     if row is not None:
         return int(row[0])
@@ -3144,6 +3170,36 @@ def pending_review_replies(con: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def list_unconfirmed_attachments(
+    con: sqlite3.Connection, arms: list[str], limit: int = 50
+) -> list[sqlite3.Row]:
+    """Settled inbound mail JobDeck tied to an application by itself, newest
+    first — the rows a one-press unlink may still take back.
+
+    Its own query because the settled ledger is chronological by id and a receipt
+    the filing pass settles KEEPS the id its message got when it was first read.
+    The shelf is old mail by definition, so those rows land below the ledger's
+    newest-N window and the correction the screen offers cannot be reached for
+    the very population it exists for. `arms` comes from the screen, which owns
+    the rule about which arms are correctable."""
+    if not arms:
+        return []
+    placeholders = ",".join("?" * len(arms))
+    return con.execute(
+        "SELECT e.*, b.firma AS bewerbung_firma, b.status AS bewerbung_status, "
+        "       j.company AS job_company, j.title AS job_title "
+        "  FROM email_log e "
+        "  LEFT JOIN bewerbungen b ON b.id = e.bewerbung_id "
+        "  LEFT JOIN jobs j ON j.id = e.job_id "
+        " WHERE e.direction=? AND e.needs_review=0 "
+        "   AND e.bewerbung_id IS NOT NULL "
+        "   AND COALESCE(e.classified_by, '') <> 'reply_manual' "
+        f"   AND e.matched_by IN ({placeholders}) "
+        " ORDER BY e.id DESC LIMIT ?",
+        (EMAIL_INBOUND, *arms, limit),
+    ).fetchall()
+
+
 def list_inbound_replies(con: sqlite3.Connection, limit: int = 50) -> list[sqlite3.Row]:
     """The settled ledger: inbound mail already classified or filed."""
     return con.execute(
@@ -3238,6 +3294,84 @@ def get_email_log(con: sqlite3.Connection, email_log_id: int) -> sqlite3.Row | N
     return con.execute(
         "SELECT * FROM email_log WHERE id=?", (email_log_id,)
     ).fetchone()
+
+
+# Receipts still waiting on the review shelf whose application is knowable:
+# the mail already carries one, or the POSTING it belongs to does. The join is
+# what makes "knowable" concrete — no application, no row.
+#
+# The time guard sits HERE because it is a property of the pair: a receipt
+# cannot predate the application it confirms. `gesendet_am` is a date and
+# `internal_date` a local naive stamp, so a mail from the day it was sent
+# compares greater and is kept — 19 of his 27 unattached receipts arrived that
+# same day. A mail Gmail gives no date for cannot be shown to follow anything
+# and fails closed — the empty string sorts below every ISO stamp, so the
+# comparison itself refuses it and a separate emptiness test would be a second
+# guard for one rule. The same reading `_follows_the_opening` applies to a form —
+# AND SO DOES A LEDGER ROW WITHOUT ONE. The first version read an empty
+# `gesendet_am` as "no constraint" and accepted any mail date against it, which
+# inverted the rule for the one side that matters most: the register's form
+# accepts an application with no date, `identity.holds_company` then holds that
+# company FOR EVER ("no usable date means the window cannot be proven to have
+# passed"), and attaching an old mail to it gives `LAST_CONTACT_SQL` a usable
+# date far in the past — so the cooling-off hold released and `services/send`
+# stopped refusing a second application to a company he had already written to.
+# The one direction of harm in this pass that was not conservative.
+#
+# A row he has answered, or that a status already cites, is not waiting for
+# anything and is left alone — the same two exclusions the name proposals use.
+# A receipt he TOOK BACK is his strongest "no" and is remembered by its own
+# `matched_by`: without that, `undo_receipt` restores a row indistinguishable
+# from a fresh proposal and the next pass files it again.
+#
+# An application the SILENCE rule closed is left out entirely, and that is the
+# opposite of leaving it alone: "Keine Antwort" says nothing came back, and
+# this mail is something that came back. The closure may well be wrong, so the
+# evidence against it has to stay where he can see it rather than leave the
+# shelf while the register keeps the closure.
+_SHELF_RECEIPTS_SQL = (
+    " FROM email_log e "
+    " LEFT JOIN jobs j ON j.id = e.job_id "
+    " JOIN bewerbungen b ON b.id = COALESCE(e.bewerbung_id, j.bewerbung_id) "
+    " WHERE e.direction=? AND e.needs_review=1 "
+    "   AND e.classification='eingang' "
+    "   AND COALESCE(e.classified_by, '') <> 'reply_manual' "
+    "   AND COALESCE(e.matched_by, '') <> ? "
+    "   AND COALESCE(b.status, '') <> ? "
+    "   AND NOT EXISTS (SELECT 1 FROM status_history s "
+    "                    WHERE s.email_log_id = e.id) "
+    "   AND COALESCE(b.gesendet_am, '') <> '' "
+    "   AND COALESCE(e.internal_date, '') >= b.gesendet_am"
+)
+
+
+def shelf_receipts(con: sqlite3.Connection) -> list[sqlite3.Row]:
+    """The receipts a pass may file by itself, oldest first.
+
+    `bewerbung_id` NULL says the attachment would be NEW — the caller has to
+    justify it — while a row that already carries one was tied to its
+    application by the reply cascade and is only waiting for its status."""
+    return con.execute(
+        "SELECT e.id, e.gmail_message_id, e.from_addr, e.subject, "
+        "       COALESCE(e.body_text, '') AS body_text, e.bewerbung_id, "
+        "       e.matched_note, "
+        "       COALESCE(e.bewerbung_id, j.bewerbung_id) AS target_id, "
+        "       COALESCE(j.company, b.firma) AS company, b.status"
+        + _SHELF_RECEIPTS_SQL
+        + " ORDER BY e.internal_date, e.id",
+        (EMAIL_INBOUND, MATCHED_UNDONE, STATUS_NO_ANSWER),
+    ).fetchall()
+
+
+def settle_reply_review(con: sqlite3.Connection, email_log_id: int) -> None:
+    """Take a row off the review shelf without restating what it says.
+
+    Deliberately narrower than `classify_reply_row`: the classification and
+    WHO read it (rules or the model) are facts about the mail that answering
+    it does not change, and overwriting `classified_by` would claim the rules
+    read something the model did."""
+    con.execute("UPDATE email_log SET needs_review=0 WHERE id=?",
+                (email_log_id,))
 
 
 def classify_reply_row(

@@ -844,6 +844,64 @@ def test_the_display_name_carries_the_employer_when_the_domain_cannot():
         "no-reply@ats-anbieter.com")
 
 
+def test_a_mails_own_words_name_an_employer_by_word_and_not_by_substring():
+    """The guard that lets a multi-tenant ATS domain authorize at all.
+
+    A run of WORDS, because the letters of a company key turn up inside
+    unrelated words, and the WHOLE name, because prose writes a company out
+    while a domain label abbreviates it. Both halves are load-bearing: the
+    first keeps "aqexol" out of "Paraqexoline", the second keeps the ordinary
+    word "global" from naming "Global Beispiel Systeme". A key shorter than
+    six characters is refused outright here: an ordinary word of the language
+    is not evidence that a mail names a company.
+    """
+    keys = replies.text_run_keys(
+        "Danke für Deine Bewerbung bei der Aqexol GmbH als Softwaretester")
+    assert replies.company_named_in_text("Aqexol GmbH", keys)
+    assert replies.company_named_in_text("Aqexol", keys)
+    assert not replies.company_named_in_text("Zylotan GmbH & Co. KG", keys)
+
+    # the letters, but not the word
+    assert not replies.company_named_in_text(
+        "Aqexol GmbH", replies.text_run_keys("Paraqexoline Software"))
+    # and a key too short to be anything but a word is refused outright
+    assert not replies.company_named_in_text(
+        "Kern GmbH", replies.text_run_keys("Viele Grüße, dein Kern-Team"))
+    # a leading word is not the name
+    partial = replies.text_run_keys("our global team will get back to you")
+    assert not replies.company_named_in_text(
+        "Global Beispiel Systeme", partial)
+    assert replies.company_named_in_text(
+        "Global Beispiel Systeme",
+        replies.text_run_keys("Ihre Bewerbung bei Global Beispiel "
+                              "Systeme GmbH ist eingegangen"))
+    # the legal form drops out on BOTH sides, so the two spellings meet
+    assert replies.company_named_in_text(
+        "Müller & Co. KG", replies.text_run_keys("Bewerbung bei Mueller"))
+
+
+def test_reading_a_mails_words_has_a_bound():
+    """The 24 KB From header taught this: any text a stranger writes is work
+    somebody else chose for this pass. Words and characters are both capped,
+    so the cost cannot be driven by the length of a body."""
+    import time
+    started = time.perf_counter()
+    keys = replies.text_run_keys("wort " * 200_000)
+    assert time.perf_counter() - started < 1.0
+    # one repeated word cannot produce more than its own runs
+    assert keys == {"wort" * n for n in range(1, 9)}
+    assert not replies.company_named_in_text("Beispiel GmbH", keys)
+    # DISTINCT words, so each cap is visible on its own: one repeated word
+    # yields the same eight keys whichever bound is in force, so that fixture
+    # alone left both removable (found by the review panel). A word past either
+    # bound must not be read.
+    many = replies.text_run_keys(
+        " ".join(f"wort{n}" for n in range(1000)) + " endeteil")
+    assert "endeteil" not in many                      # past the word cap
+    long_text = "x" * 4000 + " endeteil"
+    assert "endeteil" not in replies.text_run_keys(long_text)   # past the chars
+
+
 def test_the_company_key_survives_the_spellings_a_domain_forces():
     """A domain has no umlauts and no ampersands, so the key has to meet it
     where a German registrar puts it."""
